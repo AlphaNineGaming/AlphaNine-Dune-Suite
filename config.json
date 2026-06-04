@@ -1,0 +1,10 @@
+{
+  "host": "127.0.0.1",
+  "port": 8810,
+  "vmName": "dune-awakening",
+  "sshUser": "dune",
+  "sshKey": "",
+  "panelTitle": "AlphaNine Dune Suite",
+  "panelSubtitle": "Unified local tools for your self-hosted server",
+  "serverInstallPath": "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server"
+}

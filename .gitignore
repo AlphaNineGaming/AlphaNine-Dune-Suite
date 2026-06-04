@@ -1,0 +1,8 @@
+node_modules/
+*.log
+*.tmp
+*.zip
+dist/
+installer-output/
+manager/*.pyc
+manager/__pycache__/

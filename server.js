@@ -94,8 +94,19 @@ function envNumber(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-const GIVE_ITEM_TRANSPORT = envFlag("DUNE_ADMIN_GIVE_ITEM_TRANSPORT").toLowerCase();
-const GIVE_ITEM_TIMEOUT = envNumber("DUNE_ADMIN_GIVE_ITEM_TIMEOUT_MS", 15000);
+const LIVE_GIVE_ENV = {
+  transport: envFlag("DUNE_ADMIN_GIVE_ITEM_TRANSPORT").toLowerCase(),
+  httpUrl: envFlag("DUNE_ADMIN_GIVE_ITEM_URL"),
+  httpHealthUrl: envFlag("DUNE_ADMIN_GIVE_ITEM_HEALTH_URL"),
+  httpToken: envFlag("DUNE_ADMIN_GIVE_ITEM_TOKEN"),
+  rabbitPublishUrl: envFlag("DUNE_ADMIN_RABBITMQ_PUBLISH_URL"),
+  rabbitHealthUrl: envFlag("DUNE_ADMIN_RABBITMQ_HEALTH_URL"),
+  rabbitUser: envFlag("DUNE_ADMIN_RABBITMQ_USER"),
+  rabbitPassword: envFlag("DUNE_ADMIN_RABBITMQ_PASSWORD"),
+  rabbitRoutingKey: envFlag("DUNE_ADMIN_RABBITMQ_ROUTING_KEY"),
+  rabbitMessageTemplate: envFlag("DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE"),
+  timeoutMs: envNumber("DUNE_ADMIN_GIVE_ITEM_TIMEOUT_MS", 15000)
+};
 
 function run(command, args, options = {}) {
   return new Promise((resolve) => {
@@ -323,7 +334,7 @@ function httpRequestJson(urlValue, options = {}) {
         ...(body ? { "Content-Type": "application/json", "Content-Length": body.length } : {}),
         ...(options.headers || {})
       },
-      timeout: options.timeout || GIVE_ITEM_TIMEOUT
+      timeout: options.timeout || LIVE_GIVE_ENV.timeoutMs
     }, (res) => {
       let text = "";
       res.setEncoding("utf8");
@@ -378,26 +389,26 @@ function validateGiveItemPayload(payload) {
 }
 
 function giveTransportConfig() {
-  if (!GIVE_ITEM_TRANSPORT || GIVE_ITEM_TRANSPORT === "dry-run" || GIVE_ITEM_TRANSPORT === "disabled") {
+  if (!LIVE_GIVE_ENV.transport || LIVE_GIVE_ENV.transport === "dry-run" || LIVE_GIVE_ENV.transport === "disabled") {
     return { mode: "dry-run", configured: false, reason: "Set DUNE_ADMIN_GIVE_ITEM_TRANSPORT to http-json or rabbitmq-http to enable live item grants." };
   }
-  if (GIVE_ITEM_TRANSPORT === "http-json") {
-    const url = envFlag("DUNE_ADMIN_GIVE_ITEM_URL");
+  if (LIVE_GIVE_ENV.transport === "http-json") {
+    const url = LIVE_GIVE_ENV.httpUrl;
     if (!url) return { mode: "http-json", configured: false, reason: "DUNE_ADMIN_GIVE_ITEM_URL is required for http-json transport." };
     return {
       mode: "http-json",
       configured: true,
       url,
-      healthUrl: envFlag("DUNE_ADMIN_GIVE_ITEM_HEALTH_URL", url),
-      token: envFlag("DUNE_ADMIN_GIVE_ITEM_TOKEN")
+      healthUrl: LIVE_GIVE_ENV.httpHealthUrl || url,
+      token: LIVE_GIVE_ENV.httpToken
     };
   }
-  if (GIVE_ITEM_TRANSPORT === "rabbitmq-http") {
-    const url = envFlag("DUNE_ADMIN_RABBITMQ_PUBLISH_URL");
-    const user = envFlag("DUNE_ADMIN_RABBITMQ_USER");
-    const password = envFlag("DUNE_ADMIN_RABBITMQ_PASSWORD");
-    const routingKey = envFlag("DUNE_ADMIN_RABBITMQ_ROUTING_KEY");
-    const messageTemplate = envFlag("DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE");
+  if (LIVE_GIVE_ENV.transport === "rabbitmq-http") {
+    const url = LIVE_GIVE_ENV.rabbitPublishUrl;
+    const user = LIVE_GIVE_ENV.rabbitUser;
+    const password = LIVE_GIVE_ENV.rabbitPassword;
+    const routingKey = LIVE_GIVE_ENV.rabbitRoutingKey;
+    const messageTemplate = LIVE_GIVE_ENV.rabbitMessageTemplate;
     const missing = [];
     if (!url) missing.push("DUNE_ADMIN_RABBITMQ_PUBLISH_URL");
     if (!user) missing.push("DUNE_ADMIN_RABBITMQ_USER");
@@ -405,7 +416,7 @@ function giveTransportConfig() {
     if (!routingKey) missing.push("DUNE_ADMIN_RABBITMQ_ROUTING_KEY");
     if (!messageTemplate) missing.push("DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE");
     if (missing.length) return { mode: "rabbitmq-http", configured: false, reason: `${missing.join(", ")} required for rabbitmq-http transport.` };
-    let overviewUrl = envFlag("DUNE_ADMIN_RABBITMQ_HEALTH_URL");
+    let overviewUrl = LIVE_GIVE_ENV.rabbitHealthUrl;
     if (!overviewUrl) {
       try {
         const parsed = new URL(url);
@@ -418,7 +429,7 @@ function giveTransportConfig() {
     }
     return { mode: "rabbitmq-http", configured: true, url, user, password, routingKey, messageTemplate, overviewUrl };
   }
-  return { mode: GIVE_ITEM_TRANSPORT, configured: false, reason: `Unsupported DUNE_ADMIN_GIVE_ITEM_TRANSPORT '${GIVE_ITEM_TRANSPORT}'. Use http-json, rabbitmq-http, dry-run, or disabled.` };
+  return { mode: LIVE_GIVE_ENV.transport, configured: false, reason: `Unsupported DUNE_ADMIN_GIVE_ITEM_TRANSPORT '${LIVE_GIVE_ENV.transport}'. Use http-json, rabbitmq-http, dry-run, or disabled.` };
 }
 
 async function checkGiveTransport() {
@@ -427,14 +438,14 @@ async function checkGiveTransport() {
   try {
     if (config.mode === "http-json") {
       const headers = config.token ? { Authorization: `Bearer ${config.token}` } : {};
-      const response = await httpRequestJson(config.healthUrl, { method: "GET", headers, timeout: GIVE_ITEM_TIMEOUT });
+      const response = await httpRequestJson(config.healthUrl, { method: "GET", headers, timeout: LIVE_GIVE_ENV.timeoutMs });
       return { ...config, reachable: response.statusCode >= 200 && response.statusCode < 500, statusCode: response.statusCode };
     }
     if (config.mode === "rabbitmq-http") {
       const response = await httpRequestJson(config.overviewUrl, {
         method: "GET",
         headers: { Authorization: basicAuthHeader(config.user, config.password) },
-        timeout: GIVE_ITEM_TIMEOUT
+        timeout: LIVE_GIVE_ENV.timeoutMs
       });
       return { ...config, reachable: response.ok, statusCode: response.statusCode };
     }
@@ -466,7 +477,7 @@ async function sendLiveGiveItem(command) {
         quality: command.quality,
         requestId: command.requestId
       },
-      timeout: GIVE_ITEM_TIMEOUT
+      timeout: LIVE_GIVE_ENV.timeoutMs
     });
     if (!response.ok) throw new Error(`Give-item HTTP transport returned ${response.statusCode}: ${response.text || "no response body"}`);
     return { ok: true, dryRun: false, transport: "http-json", command, response: response.data };
@@ -484,7 +495,7 @@ async function sendLiveGiveItem(command) {
         payload,
         payload_encoding: "string"
       },
-      timeout: GIVE_ITEM_TIMEOUT
+      timeout: LIVE_GIVE_ENV.timeoutMs
     });
     if (!response.ok || response.data?.routed === false) {
       throw new Error(`RabbitMQ publish failed${response.statusCode ? ` (${response.statusCode})` : ""}: ${response.text || "message was not routed"}`);

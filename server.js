@@ -1086,6 +1086,7 @@ function appPage() {
     .detail-list { display:grid; gap:8px; margin-top:12px; }
     .detail-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:8px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); }
     .warning { border:1px solid rgba(234,191,98,.38); color:#f4d99c; background:rgba(234,191,98,.08); border-radius:6px; padding:10px; font-size:13px; line-height:1.4; }
+    .warning.hidden { display:none; }
     .activity { display:grid; gap:8px; max-height:380px; overflow:auto; }
     .activity-item { border-left:2px solid var(--line-blue); padding:8px 10px; background:rgba(255,255,255,.035); border-radius:0 6px 6px 0; }
     .activity-time { color:var(--muted); font-size:12px; margin-bottom:3px; }
@@ -1197,8 +1198,8 @@ function appPage() {
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
             <label>Item Template Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
             <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
-            <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0"></label>
-            <div class="warning">Quality/grade is unsupported by the live RabbitMQ grant path. Keep quality at 0 for live grants.</div>
+            <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0" oninput="syncQualityWarning()"></label>
+            <div id="qualityWarning" class="warning hidden">Quality/grade is unsupported by the live RabbitMQ grant path. Set quality back to 0 before sending a live grant.</div>
             <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Prepare Give Item</button>
             <button onclick="refreshAdmin()">Refresh Admin Data</button>
           </div>
@@ -1345,10 +1346,11 @@ function jumpToGive(){setView("give");renderPlayerSelect();}
 function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td><span class="badge '+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</span></td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
 function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,90);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<div class="avatar">IT</div>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join(""):'<div class="empty">No matching item templates.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
+function syncQualityWarning(){const warning=document.getElementById("qualityWarning");if(!warning)return;const quality=Number(document.getElementById("adminQuality")?.value||0);warning.classList.toggle("hidden",!(quality>0));}
 async function giveAdminItem(){const log=document.getElementById("adminLog");if(!selectedAdminItem){log.textContent="Choose an item first.";addActivity("warning","Give item blocked","No item selected.");return;}const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};if(!payload.playerId){log.textContent="Choose a player first.";addActivity("warning","Give item blocked","No player selected.");return;}log.textContent=adminLiveGiveAvailable?"Giving item...":"Preparing dry-run item grant...";addActivity("grant",adminLiveGiveAvailable?"Sending live item grant":"Preparing dry-run",payload.template+" x"+payload.qty);try{const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});const status=data.dryRun?"Dry run only.":"Live item grant sent.";log.textContent=status+"\\n"+(data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);}}
 function showToolFrame(src){document.getElementById("toolFrame").src=src;}
 function refreshAll(){refresh();refreshMaps();refreshAdmin();}
-renderActivity();refreshAll();setInterval(refresh,30000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();refreshAll();setInterval(refresh,30000);setInterval(refreshMaps,30000);
 </script>
 </body>
 </html>`;

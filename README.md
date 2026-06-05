@@ -9,14 +9,19 @@ If AlphaNine Dune Suite helps your Dune Awakening server, you can support develo
 - After installtion you need to find .env.local in C:\Users\"yourname"\AppData\Roaming\AlphaNine Dune Suite and change the settings to suits your server settings
 
 DUNE_RECEIVER_SSH_HOST=Your VM-IP
+
 DUNE_RECEIVER_SSH_USER=
 
 - Also If you want live Item give add the following
 
 DUNE_ADMIN_GIVE_ITEM_TRANSPORT=http-json
+
 DUNE_ADMIN_GIVE_ITEM_TIMEOUT_MS=15000
+
 DUNE_ADMIN_GIVE_ITEM_URL=http://127.0.0.1:5055/api/give-item
+
 DUNE_ADMIN_GIVE_ITEM_HEALTH_URL=http://127.0.0.1:5055/health
+
 DUNE_ADMIN_GIVE_ITEM_TOKEN=test-token
 
 This will be fixed in the coming releases to make it more friendly user

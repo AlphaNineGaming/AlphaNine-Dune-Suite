@@ -621,6 +621,36 @@ async function adminProbe() {
   };
 }
 
+function adminProbeUnavailable(error) {
+  const transport = giveTransportConfig();
+  const checked = {
+    ...transport,
+    reachable: false,
+    error: error?.message || transport.reason || "Admin probe failed."
+  };
+  const reason = dryRunReason(checked);
+  return {
+    ok: false,
+    transport: transportDisplayName(checked.mode),
+    configured: Boolean(checked.configured),
+    reachable: false,
+    missingEnv: checked.missingEnv || [],
+    liveGiveAvailable: false,
+    dryRunReason: reason,
+    giveTransport: {
+      mode: checked.mode,
+      configured: Boolean(checked.configured),
+      reachable: false,
+      statusCode: checked.statusCode || null,
+      target: checked.url ? redactUrl(checked.url) : "",
+      missingEnv: checked.missingEnv || [],
+      reason: checked.reason || checked.error || "",
+      dryRunReason: reason
+    },
+    error: checked.error
+  };
+}
+
 async function adminPlayers() {
   const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
   const metaSql = `
@@ -1069,7 +1099,7 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/admin/probe" && req.method === "GET") {
     try { await json(res, await adminProbe()); }
-    catch (error) { await json(res, { ok: false, liveGiveAvailable: false, error: error.message }, 500); }
+    catch (error) { await json(res, adminProbeUnavailable(error), 500); }
     return;
   }
   if (url.pathname === "/api/admin/players" && req.method === "GET") {

@@ -1,0 +1,5 @@
+{
+  "scripts": {
+    "test:admin": "node scripts/test-admin-endpoints.js"
+  }
+}

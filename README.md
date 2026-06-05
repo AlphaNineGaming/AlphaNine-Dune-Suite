@@ -39,18 +39,18 @@ Accept the Administrator prompt so the suite can read Hyper-V.
 - Keep the suite window open while using the tool.
 - Run as Administrator for Hyper-V status and VM controls.
 
-## Live Give-Item Transport
+## Enable Live Give Item
 
-Admin Tools stays in dry-run mode unless a live transport is configured with environment variables. Do not commit secrets.
+Admin Tools stays in dry-run mode unless a live transport is configured with environment variables. Start with `.env.example`, and do not commit real secrets.
 
-Common:
+Dry-run mode:
 
 ```text
-DUNE_ADMIN_GIVE_ITEM_TRANSPORT=dry-run | http-json | rabbitmq-http
+DUNE_ADMIN_GIVE_ITEM_TRANSPORT=dry-run
 DUNE_ADMIN_GIVE_ITEM_TIMEOUT_MS=15000
 ```
 
-`http-json` posts a give-item JSON payload to your own backend:
+HTTP JSON transport posts a give-item JSON payload to your own backend:
 
 ```text
 DUNE_ADMIN_GIVE_ITEM_TRANSPORT=http-json
@@ -59,7 +59,7 @@ DUNE_ADMIN_GIVE_ITEM_HEALTH_URL=http://127.0.0.1:8080/health
 DUNE_ADMIN_GIVE_ITEM_TOKEN=optional_bearer_token
 ```
 
-`rabbitmq-http` publishes a configured command envelope through RabbitMQ Management HTTP API:
+RabbitMQ HTTP transport publishes your configured command envelope through RabbitMQ Management HTTP API:
 
 ```text
 DUNE_ADMIN_GIVE_ITEM_TRANSPORT=rabbitmq-http
@@ -72,6 +72,12 @@ DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE={"playerId":"{{playerId}}","template":"{{t
 ```
 
 Live grants become available only when the transport is configured and reachable. If anything is missing, the button remains in dry-run mode with a clear message.
+
+Test the local Admin Tools endpoints while the suite is running:
+
+```text
+npm run test:admin
+```
 
 ## Notes
 

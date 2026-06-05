@@ -108,6 +108,11 @@ const LIVE_GIVE_ENV = {
   timeoutMs: envNumber("DUNE_ADMIN_GIVE_ITEM_TIMEOUT_MS", 15000)
 };
 
+const LIVE_GIVE_SECRET_ENV_NAMES = new Set([
+  "DUNE_ADMIN_GIVE_ITEM_TOKEN",
+  "DUNE_ADMIN_RABBITMQ_PASSWORD"
+]);
+
 function run(command, args, options = {}) {
   return new Promise((resolve) => {
     execFile(command, args, {
@@ -367,6 +372,49 @@ function renderGiveItemTemplate(template, command) {
   });
 }
 
+function liveGiveRequiredEnv(mode = LIVE_GIVE_ENV.transport) {
+  if (mode === "http-json") {
+    return ["DUNE_ADMIN_GIVE_ITEM_URL"];
+  }
+  if (mode === "rabbitmq-http") {
+    return [
+      "DUNE_ADMIN_RABBITMQ_PUBLISH_URL",
+      "DUNE_ADMIN_RABBITMQ_USER",
+      "DUNE_ADMIN_RABBITMQ_PASSWORD",
+      "DUNE_ADMIN_RABBITMQ_ROUTING_KEY",
+      "DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE"
+    ];
+  }
+  return [];
+}
+
+function liveGiveMissingEnv(mode = LIVE_GIVE_ENV.transport) {
+  const values = {
+    DUNE_ADMIN_GIVE_ITEM_URL: LIVE_GIVE_ENV.httpUrl,
+    DUNE_ADMIN_RABBITMQ_PUBLISH_URL: LIVE_GIVE_ENV.rabbitPublishUrl,
+    DUNE_ADMIN_RABBITMQ_USER: LIVE_GIVE_ENV.rabbitUser,
+    DUNE_ADMIN_RABBITMQ_PASSWORD: LIVE_GIVE_ENV.rabbitPassword,
+    DUNE_ADMIN_RABBITMQ_ROUTING_KEY: LIVE_GIVE_ENV.rabbitRoutingKey,
+    DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE: LIVE_GIVE_ENV.rabbitMessageTemplate
+  };
+  return liveGiveRequiredEnv(mode).filter((name) => !values[name]);
+}
+
+function transportDisplayName(mode) {
+  return mode || "dry-run";
+}
+
+function dryRunReason(transport) {
+  if (!transport.configured) {
+    if (transport.missingEnv?.length) return `Missing required env vars: ${transport.missingEnv.join(", ")}.`;
+    return transport.reason || "Live give-item transport is not configured.";
+  }
+  if (!transport.reachable) {
+    return transport.error ? `Transport is not reachable: ${transport.error}` : "Transport is configured but not reachable.";
+  }
+  return "";
+}
+
 function validateGiveItemPayload(payload) {
   const playerId = String(payload.playerId || "").trim();
   const template = String(payload.template || "").trim();
@@ -390,14 +438,21 @@ function validateGiveItemPayload(payload) {
 
 function giveTransportConfig() {
   if (!LIVE_GIVE_ENV.transport || LIVE_GIVE_ENV.transport === "dry-run" || LIVE_GIVE_ENV.transport === "disabled") {
-    return { mode: "dry-run", configured: false, reason: "Set DUNE_ADMIN_GIVE_ITEM_TRANSPORT to http-json or rabbitmq-http to enable live item grants." };
+    return {
+      mode: "dry-run",
+      configured: false,
+      missingEnv: ["DUNE_ADMIN_GIVE_ITEM_TRANSPORT"],
+      reason: "Set DUNE_ADMIN_GIVE_ITEM_TRANSPORT to http-json or rabbitmq-http to enable live item grants."
+    };
   }
   if (LIVE_GIVE_ENV.transport === "http-json") {
     const url = LIVE_GIVE_ENV.httpUrl;
-    if (!url) return { mode: "http-json", configured: false, reason: "DUNE_ADMIN_GIVE_ITEM_URL is required for http-json transport." };
+    const missingEnv = liveGiveMissingEnv("http-json");
+    if (missingEnv.length) return { mode: "http-json", configured: false, missingEnv, reason: `${missingEnv.join(", ")} required for http-json transport.` };
     return {
       mode: "http-json",
       configured: true,
+      missingEnv: [],
       url,
       healthUrl: LIVE_GIVE_ENV.httpHealthUrl || url,
       token: LIVE_GIVE_ENV.httpToken
@@ -409,13 +464,8 @@ function giveTransportConfig() {
     const password = LIVE_GIVE_ENV.rabbitPassword;
     const routingKey = LIVE_GIVE_ENV.rabbitRoutingKey;
     const messageTemplate = LIVE_GIVE_ENV.rabbitMessageTemplate;
-    const missing = [];
-    if (!url) missing.push("DUNE_ADMIN_RABBITMQ_PUBLISH_URL");
-    if (!user) missing.push("DUNE_ADMIN_RABBITMQ_USER");
-    if (!password) missing.push("DUNE_ADMIN_RABBITMQ_PASSWORD");
-    if (!routingKey) missing.push("DUNE_ADMIN_RABBITMQ_ROUTING_KEY");
-    if (!messageTemplate) missing.push("DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE");
-    if (missing.length) return { mode: "rabbitmq-http", configured: false, reason: `${missing.join(", ")} required for rabbitmq-http transport.` };
+    const missing = liveGiveMissingEnv("rabbitmq-http");
+    if (missing.length) return { mode: "rabbitmq-http", configured: false, missingEnv: missing, reason: `${missing.join(", ")} required for rabbitmq-http transport.` };
     let overviewUrl = LIVE_GIVE_ENV.rabbitHealthUrl;
     if (!overviewUrl) {
       try {
@@ -427,19 +477,25 @@ function giveTransportConfig() {
         overviewUrl = "";
       }
     }
-    return { mode: "rabbitmq-http", configured: true, url, user, password, routingKey, messageTemplate, overviewUrl };
+    return { mode: "rabbitmq-http", configured: true, missingEnv: [], url, user, password, routingKey, messageTemplate, overviewUrl };
   }
-  return { mode: LIVE_GIVE_ENV.transport, configured: false, reason: `Unsupported DUNE_ADMIN_GIVE_ITEM_TRANSPORT '${LIVE_GIVE_ENV.transport}'. Use http-json, rabbitmq-http, dry-run, or disabled.` };
+  return {
+    mode: LIVE_GIVE_ENV.transport,
+    configured: false,
+    missingEnv: [],
+    reason: `Unsupported DUNE_ADMIN_GIVE_ITEM_TRANSPORT '${LIVE_GIVE_ENV.transport}'. Use http-json, rabbitmq-http, dry-run, or disabled.`
+  };
 }
 
 async function checkGiveTransport() {
   const config = giveTransportConfig();
-  if (!config.configured) return { ...config, reachable: false };
+  if (!config.configured) return { ...config, reachable: false, dryRunReason: dryRunReason({ ...config, reachable: false }) };
   try {
     if (config.mode === "http-json") {
       const headers = config.token ? { Authorization: `Bearer ${config.token}` } : {};
       const response = await httpRequestJson(config.healthUrl, { method: "GET", headers, timeout: LIVE_GIVE_ENV.timeoutMs });
-      return { ...config, reachable: response.statusCode >= 200 && response.statusCode < 500, statusCode: response.statusCode };
+      const checked = { ...config, reachable: response.statusCode >= 200 && response.statusCode < 500, statusCode: response.statusCode };
+      return { ...checked, dryRunReason: dryRunReason(checked) };
     }
     if (config.mode === "rabbitmq-http") {
       const response = await httpRequestJson(config.overviewUrl, {
@@ -447,21 +503,38 @@ async function checkGiveTransport() {
         headers: { Authorization: basicAuthHeader(config.user, config.password) },
         timeout: LIVE_GIVE_ENV.timeoutMs
       });
-      return { ...config, reachable: response.ok, statusCode: response.statusCode };
+      const checked = { ...config, reachable: response.ok, statusCode: response.statusCode };
+      return { ...checked, dryRunReason: dryRunReason(checked) };
     }
   } catch (error) {
-    return { ...config, reachable: false, error: error.message };
+    const checked = { ...config, reachable: false, error: error.message };
+    return { ...checked, dryRunReason: dryRunReason(checked) };
   }
-  return { ...config, reachable: false, error: "Transport reachability check is not implemented." };
+  const checked = { ...config, reachable: false, error: "Transport reachability check is not implemented." };
+  return { ...checked, dryRunReason: dryRunReason(checked) };
 }
 
 async function sendLiveGiveItem(command) {
   const config = await checkGiveTransport();
   if (!config.configured) {
-    return { ok: false, dryRun: true, command, error: `Live give-item is unavailable: ${config.reason}` };
+    return {
+      ok: false,
+      dryRun: true,
+      command,
+      transport: config.mode,
+      missingEnv: config.missingEnv || [],
+      error: `Live give-item is unavailable. ${config.dryRunReason || config.reason || "Transport is not configured."}`
+    };
   }
   if (!config.reachable) {
-    return { ok: false, dryRun: true, command, error: `Live give-item transport is configured but not reachable${config.error ? `: ${config.error}` : "."}` };
+    return {
+      ok: false,
+      dryRun: true,
+      command,
+      transport: config.mode,
+      missingEnv: config.missingEnv || [],
+      error: `Live give-item is unavailable. ${config.dryRunReason || "Transport is configured but not reachable."}`
+    };
   }
   if (config.mode === "http-json") {
     const headers = config.token ? { Authorization: `Bearer ${config.token}` } : {};
@@ -522,21 +595,29 @@ async function adminProbe() {
   `;
   const output = await dbQuery(tablesSql);
   const transport = await checkGiveTransport();
+  const liveGiveAvailable = Boolean(transport.configured && transport.reachable);
   return {
     ok: true,
-    liveGiveAvailable: Boolean(transport.configured && transport.reachable),
+    transport: transportDisplayName(transport.mode),
+    configured: Boolean(transport.configured),
+    reachable: Boolean(transport.reachable),
+    missingEnv: transport.missingEnv || [],
+    liveGiveAvailable,
+    dryRunReason: liveGiveAvailable ? "" : (transport.dryRunReason || transport.reason || transport.error || "Live give-item transport is unavailable."),
     giveTransport: {
       mode: transport.mode,
       configured: Boolean(transport.configured),
       reachable: Boolean(transport.reachable),
       statusCode: transport.statusCode || null,
       target: transport.url ? redactUrl(transport.url) : "",
-      reason: transport.reason || transport.error || ""
+      missingEnv: transport.missingEnv || [],
+      reason: transport.reason || transport.error || "",
+      dryRunReason: liveGiveAvailable ? "" : (transport.dryRunReason || transport.reason || transport.error || "Live give-item transport is unavailable.")
     },
     tables: output ? output.split(/\r?\n/).filter(Boolean) : [],
-    note: transport.configured && transport.reachable
+    note: liveGiveAvailable
       ? `Live item grants are enabled through ${transport.mode}.`
-      : `Player/item database access is reachable. Live item grants are dry-run only: ${transport.reason || transport.error || "transport is not reachable."}`
+      : `Player/item database access is reachable. Live item grants are dry-run only: ${transport.dryRunReason || transport.reason || transport.error || "transport is not reachable."}`
   };
 }
 
@@ -622,6 +703,22 @@ async function adminTunedChannels() {
     return { accountId, selectedChannel, channelName, isTuned };
   }) : [];
   return { ok: true, rows };
+}
+
+function logLiveGiveStartupValidation() {
+  const config = giveTransportConfig();
+  const selected = transportDisplayName(config.mode);
+  const missing = config.missingEnv || [];
+  console.log(`Live give-item transport: ${selected}`);
+  if (config.configured) {
+    console.log("Live give-item env: configured");
+    return;
+  }
+  if (missing.length) {
+    console.log(`Live give-item dry-run: missing ${missing.map((name) => LIVE_GIVE_SECRET_ENV_NAMES.has(name) ? `${name}=<secret missing>` : name).join(", ")}`);
+    return;
+  }
+  console.log(`Live give-item dry-run: ${config.reason || "transport is not configured"}`);
 }
 
 async function directorUrl() {
@@ -1042,6 +1139,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`AlphaNine Dune Suite: http://${HOST}:${PORT}`);
   console.log(`Expected server install: ${DEFAULT_SERVER_ROOT}`);
+  logLiveGiveStartupValidation();
 });
 
 process.on("exit", () => {

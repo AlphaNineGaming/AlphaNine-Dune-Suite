@@ -48,6 +48,51 @@ Stop AlphaNine Dune Suite.bat
 
 Do not commit `.env` or `.env.local`.
 
+## Desktop App / Windows Installer
+
+The Suite can also run as a Windows desktop app. The Electron app starts the local Suite server automatically, starts the live give-item receiver when `DUNE_ADMIN_GIVE_ITEM_TRANSPORT=http-json` and receiver SSH settings are configured, then opens the dashboard in a desktop window.
+
+Development run:
+
+```text
+npm install
+npm run app
+```
+
+Build the Windows installer:
+
+```text
+npm run build:win
+```
+
+Build all configured desktop targets:
+
+```text
+npm run dist
+```
+
+The Windows installer `.exe` is written to:
+
+```text
+installer-output\
+```
+
+The installer creates:
+
+- Start Menu shortcut: `AlphaNine Dune Suite`
+- Desktop shortcut: `AlphaNine Dune Suite`
+
+Installed desktop configuration is loaded from:
+
+```text
+%APPDATA%\AlphaNine Dune Suite\.env
+%APPDATA%\AlphaNine Dune Suite\.env.local
+```
+
+On first run, the desktop app creates a starter `.env.local` in that app data folder if one does not exist. Keep live give tokens, SSH host, and receiver settings there. The app also creates a writable `config.json` in the same app data folder for local machine settings.
+
+Run the desktop app as Administrator when you need Hyper-V status, VM controls, or other server-management features that require elevated Windows access.
+
 ## Requirements
 
 - Windows 10/11 Pro

@@ -1,10 +1,62 @@
 {
+  "name": "alphanine-dune-suite",
+  "version": "0.1.0-beta",
+  "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
+  "author": "AlphaNineGaming",
+  "main": "electron/main.js",
   "scripts": {
+    "app": "electron .",
+    "build:win": "set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win nsis",
+    "dist": "set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder",
     "test:admin": "node scripts/test-admin-endpoints.js",
     "receiver": "node receivers/dune-live-give-receiver.js",
     "receiver:give-item": "node receivers/dune-live-give-receiver.js"
   },
   "dependencies": {
     "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "electron": "^38.3.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.alphanine.dunesuite",
+    "productName": "AlphaNine Dune Suite",
+    "directories": {
+      "output": "installer-output"
+    },
+    "files": [
+      "**/*",
+      "!node_modules/.cache/**",
+      "!installer-output/**",
+      "!dist/**",
+      "!config.json",
+      "!test-http-json.js",
+      "!*.log",
+      "!*.tmp"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName} Setup ${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AlphaNine Dune Suite"
+    }
   }
 }

@@ -6,5 +6,8 @@ node_modules/
 *.zip
 dist/
 installer-output/
+out/
+release/
+.electron-builder-cache/
 manager/*.pyc
 manager/__pycache__/

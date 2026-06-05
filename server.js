@@ -1010,210 +1010,345 @@ function appPage() {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AlphaNine Dune Suite</title>
   <style>
-    :root { --bg:#101114; --panel:#1b1d21; --panel-2:#23262b; --text:#f2eee7; --muted:#a9b0b9; --line:#343941; --good:#5bd19a; --warn:#f0c46b; --bad:#ff7878; --accent:#d8a24c; --blue:#72a4f2; color-scheme:dark; font-family:"Segoe UI",system-ui,sans-serif; }
+    :root {
+      --bg:#07090c; --bg-2:#0d1116; --panel:rgba(18,22,28,.82); --panel-2:rgba(28,33,40,.78);
+      --glass:rgba(255,255,255,.045); --line:rgba(220,168,82,.28); --line-blue:rgba(108,166,255,.34);
+      --text:#f4eddf; --muted:#9fa9b7; --sand:#d9b26f; --gold:#f0c56b; --blue:#72a4f2;
+      --good:#56d68f; --warn:#eabf62; --bad:#ff6666; --shadow:0 24px 80px rgba(0,0,0,.45);
+      color-scheme:dark; font-family:"Segoe UI",system-ui,sans-serif;
+    }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; background:radial-gradient(circle at 12% 0%, rgba(216,162,76,.18), transparent 32%), var(--bg); color:var(--text); }
-    button { font:inherit; }
-    main { width:min(1440px, calc(100% - 32px)); margin:0 auto; padding:24px 0 30px; }
-    header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:16px; }
-    h1 { margin:0; font-size:30px; letter-spacing:0; }
-    .sub { margin-top:5px; color:var(--muted); line-height:1.45; }
-    .header-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
-    .kofi { display:inline-flex; align-items:center; min-height:40px; padding:0 14px; border:1px solid #a9c9ff; border-radius:4px; background:var(--blue); color:#08111f; text-decoration:none; font-weight:800; }
-    .pill { border:1px solid var(--line); color:var(--muted); background:rgba(255,255,255,.04); padding:6px 10px; border-radius:999px; font-size:13px; }
-    .dune-banner { position:relative; overflow:hidden; min-height:150px; margin:0 0 16px; border:1px solid rgba(216,162,76,.36); border-radius:8px; background:radial-gradient(circle at 78% 18%, rgba(255,220,140,.5) 0 7%, rgba(255,220,140,.16) 8% 15%, transparent 16%), linear-gradient(180deg, rgba(20,25,30,.1), rgba(16,17,20,.88)), linear-gradient(120deg, rgba(216,162,76,.32), rgba(123,183,255,.12) 54%, rgba(0,0,0,.28)); box-shadow:inset 0 0 85px rgba(0,0,0,.42), 0 18px 46px rgba(0,0,0,.2); }
-    .dune-banner::before { content:""; position:absolute; inset:0; background:linear-gradient(168deg, transparent 0 42%, rgba(227,157,70,.54) 43%, rgba(227,157,70,.14) 56%, transparent 57%), linear-gradient(8deg, rgba(67,45,29,.74) 0 31%, transparent 32%), linear-gradient(350deg, transparent 0 54%, rgba(245,195,111,.34) 55%, rgba(245,195,111,.08) 68%, transparent 69%); opacity:.96; }
-    .dune-banner::after { content:""; position:absolute; inset:auto -8% 0 -8%; height:48%; background:linear-gradient(170deg, transparent 0 28%, rgba(164,92,39,.62) 29%, rgba(164,92,39,.18) 58%, transparent 59%), linear-gradient(7deg, rgba(35,26,19,.84), rgba(147,84,37,.42) 52%, transparent 53%); }
-    .banner-content { position:relative; z-index:1; min-height:150px; display:grid; align-content:end; max-width:760px; padding:24px; }
-    .banner-kicker { color:#f4d19a; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; margin-bottom:7px; }
-    .banner-title { margin:0; font-size:25px; line-height:1.08; text-shadow:0 2px 18px rgba(0,0,0,.56); }
-    .banner-copy { margin:8px 0 0; color:#e7dcc8; line-height:1.45; }
-    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; border-bottom:1px solid var(--line); padding-bottom:10px; }
-    .tab { min-height:40px; border:1px solid var(--line); border-radius:7px; background:var(--panel-2); color:var(--text); padding:0 13px; cursor:pointer; }
-    .tab.active { background:#8f6729; border-color:#c8903f; color:#fff6e6; }
-    .view { display:none; }
+    body { margin:0; min-height:100vh; color:var(--text); background:
+      radial-gradient(circle at 76% 12%, rgba(114,164,242,.14), transparent 24%),
+      radial-gradient(circle at 18% 0%, rgba(240,197,107,.14), transparent 26%),
+      linear-gradient(160deg, #07090c 0%, #0d0f12 48%, #07090c 100%); }
+    body::before { content:""; position:fixed; inset:0; pointer-events:none; opacity:.2; background:
+      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px); background-size:42px 42px; }
+    button, input, select { font:inherit; }
+    button { cursor:pointer; }
+    .shell { min-height:100vh; display:grid; grid-template-columns:260px minmax(0,1fr); }
+    .sidebar { position:sticky; top:0; height:100vh; padding:22px 16px; border-right:1px solid var(--line); background:linear-gradient(180deg, rgba(12,15,20,.96), rgba(9,10,12,.91)); box-shadow:var(--shadow); }
+    .brand { padding:12px 10px 18px; border-bottom:1px solid rgba(217,178,111,.22); }
+    .brand h1 { margin:0; font-size:23px; line-height:1.05; }
+    .brand p { margin:8px 0 0; color:var(--sand); font-size:13px; text-transform:uppercase; letter-spacing:.08em; }
+    .version { display:inline-block; margin-top:12px; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:5px 8px; font-size:12px; background:var(--glass); }
+    .nav { display:grid; gap:8px; margin-top:18px; }
+    .tab { width:100%; min-height:42px; display:flex; align-items:center; gap:10px; border:1px solid transparent; border-radius:6px; padding:0 12px; background:transparent; color:var(--muted); text-align:left; }
+    .tab::before { content:""; width:8px; height:8px; border:1px solid currentColor; transform:rotate(45deg); }
+    .tab.active, .tab:hover { color:var(--text); border-color:var(--line); background:linear-gradient(90deg, rgba(217,178,111,.17), rgba(114,164,242,.05)); box-shadow:inset 0 0 18px rgba(240,197,107,.05); }
+    .sidebar-foot { position:absolute; left:16px; right:16px; bottom:18px; color:var(--muted); font-size:12px; line-height:1.5; }
+    .content { min-width:0; padding:18px 22px 28px; }
+    .topbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(220px,1fr) auto; gap:16px; align-items:center; margin:-18px -22px 18px; padding:14px 22px; backdrop-filter:blur(18px); background:rgba(7,9,12,.76); border-bottom:1px solid rgba(217,178,111,.18); }
+    .title h2 { margin:0; font-size:22px; }
+    .title p { margin:4px 0 0; color:var(--muted); }
+    .status-strip { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+    .badge { display:inline-flex; min-height:28px; align-items:center; gap:7px; border:1px solid var(--line); border-radius:999px; padding:0 10px; background:rgba(255,255,255,.04); color:var(--muted); font-size:12px; white-space:nowrap; }
+    .badge::before { content:""; width:7px; height:7px; border-radius:999px; background:currentColor; box-shadow:0 0 10px currentColor; }
+    .badge.ok { color:var(--good); border-color:rgba(86,214,143,.35); }
+    .badge.warn { color:var(--warn); border-color:rgba(234,191,98,.35); }
+    .badge.bad { color:var(--bad); border-color:rgba(255,102,102,.35); }
+    .view { display:none; animation:fade .16s ease-out; }
     .view.active { display:block; }
-    .grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
-    .card { background:rgba(27,29,33,.92); border:1px solid var(--line); border-radius:8px; padding:16px; min-height:92px; }
-    .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
-    .value { margin-top:7px; font-size:20px; font-weight:800; overflow-wrap:anywhere; }
-    .ok { color:var(--good); } .warn { color:var(--warn); } .bad { color:var(--bad); }
-    .controls { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }
-    .button, .controls button { display:inline-flex; align-items:center; justify-content:center; min-height:40px; border:1px solid #4a4f58; border-radius:7px; background:var(--panel-2); color:var(--text); text-decoration:none; padding:0 13px; cursor:pointer; }
-    .primary { background:#8f6729 !important; border-color:#c8903f !important; }
-    .danger { background:#6e2c2c !important; border-color:#a04c4c !important; }
-    select, input { min-height:40px; border:1px solid #4a4f58; border-radius:7px; background:#111317; color:var(--text); padding:0 11px; }
-    .deploy-panel { display:grid; grid-template-columns:minmax(220px,1fr) 110px auto auto; gap:10px; align-items:end; margin:14px 0; padding:14px; border:1px solid var(--line); border-radius:8px; background:rgba(15,16,19,.68); }
-    .deploy-panel label { display:grid; gap:6px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
-    .deploy-panel button { min-height:40px; border:1px solid #4a4f58; border-radius:7px; background:var(--panel-2); color:var(--text); padding:0 13px; cursor:pointer; }
-    .admin-layout { display:grid; grid-template-columns:minmax(300px, 420px) minmax(0,1fr); gap:12px; margin-top:16px; align-items:start; }
-    .admin-form { display:grid; gap:10px; }
-    .admin-form label { display:grid; gap:6px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
-    .admin-items { display:grid; gap:8px; max-height:420px; overflow:auto; padding-right:4px; }
-    .admin-item { display:grid; grid-template-columns:42px minmax(0,1fr); gap:10px; align-items:center; border:1px solid var(--line); border-radius:7px; padding:8px; background:rgba(255,255,255,.03); cursor:pointer; }
-    .admin-item.active { border-color:#c8903f; background:rgba(216,162,76,.12); }
-    .admin-item img { width:42px; height:42px; object-fit:contain; border-radius:6px; background:#111317; }
-    .admin-item strong { display:block; overflow-wrap:anywhere; }
-    .admin-item span { color:var(--muted); font-size:12px; }
-    .admin-table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
-    .admin-table th, .admin-table td { text-align:left; border-bottom:1px solid var(--line); padding:8px 7px; overflow-wrap:anywhere; }
-    .admin-table th { color:var(--muted); font-weight:750; }
-    .map-table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
-    .map-table th, .map-table td { text-align:left; border-bottom:1px solid var(--line); padding:8px 7px; }
-    .map-table th { color:var(--muted); font-weight:750; }
-    .map-table .active-map { color:var(--good); font-weight:800; }
-    .tool-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:12px; }
-    .tool-card { min-height:148px; display:grid; align-content:space-between; gap:12px; }
-    .tool-card p { margin:0; color:var(--muted); line-height:1.45; }
-    .frame-wrap { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#0b0c0e; min-height:720px; }
-    iframe { width:100%; height:78vh; min-height:720px; border:0; display:block; background:#0b0c0e; }
-    pre { white-space:pre-wrap; background:#0b0c0e; border:1px solid var(--line); border-radius:8px; padding:14px; max-height:300px; overflow:auto; }
-    @media (max-width:900px) { header{display:block}.header-actions{justify-content:flex-start;margin-top:12px}.grid,.tool-grid,.deploy-panel,.admin-layout{grid-template-columns:1fr}.banner-title{font-size:21px}.frame-wrap,iframe{min-height:620px} }
+    @keyframes fade { from { opacity:.2; transform:translateY(4px); } to { opacity:1; transform:none; } }
+    .hero { position:relative; overflow:hidden; min-height:170px; margin-bottom:16px; border:1px solid var(--line); border-radius:8px; background:
+      linear-gradient(180deg, rgba(7,9,12,.05), rgba(7,9,12,.85)),
+      radial-gradient(circle at 82% 16%, rgba(240,197,107,.48) 0 6%, rgba(240,197,107,.13) 7% 15%, transparent 16%),
+      linear-gradient(135deg, rgba(217,178,111,.23), rgba(114,164,242,.09) 50%, rgba(7,9,12,.3)); box-shadow:var(--shadow), inset 0 0 90px rgba(0,0,0,.38); }
+    .hero::before { content:""; position:absolute; inset:0; background:linear-gradient(164deg, transparent 0 45%, rgba(218,139,62,.56) 46%, rgba(218,139,62,.14) 62%, transparent 63%), linear-gradient(8deg, rgba(39,28,20,.88) 0 32%, transparent 33%); }
+    .hero-body { position:relative; min-height:170px; display:grid; align-content:end; max-width:760px; padding:24px; }
+    .kicker, .label { color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
+    .hero h3 { margin:8px 0 0; font-size:30px; line-height:1.08; }
+    .hero p { margin:10px 0 0; color:#ded3c1; line-height:1.45; }
+    .grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; }
+    .grid.four { grid-template-columns:repeat(4,minmax(0,1fr)); }
+    .panel { position:relative; border:1px solid var(--line); border-radius:8px; background:linear-gradient(180deg, var(--panel), rgba(10,12,15,.78)); box-shadow:inset 0 0 0 1px rgba(255,255,255,.025), 0 16px 42px rgba(0,0,0,.25); }
+    .panel::after { content:""; position:absolute; inset:0; border-radius:8px; pointer-events:none; box-shadow:inset 0 0 26px rgba(114,164,242,.035); }
+    .panel.pad { padding:16px; }
+    .value { margin-top:8px; font-size:23px; font-weight:850; overflow-wrap:anywhere; }
+    .subtle { color:var(--muted); font-size:13px; line-height:1.45; }
+    .layout-2 { display:grid; grid-template-columns:minmax(300px,390px) minmax(0,1fr); gap:12px; align-items:start; }
+    .layout-3 { display:grid; grid-template-columns:1.1fr .9fr; gap:12px; align-items:start; }
+    .controls, .action-row { display:flex; flex-wrap:wrap; gap:10px; }
+    .field-grid { display:grid; gap:10px; }
+    label { display:grid; gap:6px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+    select, input { width:100%; min-height:42px; border:1px solid rgba(217,178,111,.25); border-radius:6px; background:rgba(6,8,10,.86); color:var(--text); padding:0 12px; outline:none; }
+    select:focus, input:focus { border-color:var(--blue); box-shadow:0 0 0 3px rgba(114,164,242,.12); }
+    .button, .controls button { display:inline-flex; align-items:center; justify-content:center; min-height:40px; border:1px solid rgba(217,178,111,.32); border-radius:6px; background:linear-gradient(180deg, rgba(45,50,58,.92), rgba(24,28,34,.92)); color:var(--text); padding:0 13px; text-decoration:none; }
+    .primary { background:linear-gradient(180deg, rgba(169,116,42,.98), rgba(112,75,31,.98)) !important; border-color:rgba(240,197,107,.72) !important; color:#fff6e2 !important; box-shadow:0 0 22px rgba(240,197,107,.12); }
+    .danger { background:linear-gradient(180deg, rgba(112,42,42,.98), rgba(63,25,25,.98)) !important; border-color:rgba(255,102,102,.5) !important; }
+    .player-list, .admin-items { display:grid; gap:8px; max-height:520px; overflow:auto; padding-right:4px; }
+    .player-card, .admin-item { display:grid; grid-template-columns:46px minmax(0,1fr); gap:10px; align-items:center; width:100%; border:1px solid rgba(217,178,111,.22); border-radius:7px; padding:10px; background:rgba(255,255,255,.035); color:var(--text); text-align:left; }
+    .player-card.active, .admin-item.active { border-color:var(--gold); background:rgba(217,178,111,.13); box-shadow:0 0 18px rgba(240,197,107,.08); }
+    .avatar { width:46px; height:46px; display:grid; place-items:center; border:1px solid var(--line-blue); border-radius:6px; background:linear-gradient(135deg, rgba(114,164,242,.18), rgba(217,178,111,.08)); color:var(--blue); font-weight:900; }
+    .admin-item img { width:46px; height:46px; object-fit:contain; border-radius:6px; background:#0b0e12; }
+    .admin-item span, .player-card span { color:var(--muted); font-size:12px; display:block; overflow-wrap:anywhere; }
+    .detail-list { display:grid; gap:8px; margin-top:12px; }
+    .detail-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:8px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); }
+    .warning { border:1px solid rgba(234,191,98,.38); color:#f4d99c; background:rgba(234,191,98,.08); border-radius:6px; padding:10px; font-size:13px; line-height:1.4; }
+    .activity { display:grid; gap:8px; max-height:380px; overflow:auto; }
+    .activity-item { border-left:2px solid var(--line-blue); padding:8px 10px; background:rgba(255,255,255,.035); border-radius:0 6px 6px 0; }
+    .activity-time { color:var(--muted); font-size:12px; margin-bottom:3px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { text-align:left; border-bottom:1px solid rgba(255,255,255,.08); padding:9px 8px; overflow-wrap:anywhere; }
+    th { color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.07em; }
+    pre { white-space:pre-wrap; background:rgba(3,5,8,.72); border:1px solid rgba(217,178,111,.24); border-radius:8px; padding:14px; max-height:430px; overflow:auto; color:#dbe6f5; }
+    .frame-wrap { overflow:hidden; min-height:720px; }
+    iframe { width:100%; height:78vh; min-height:720px; border:0; display:block; background:#080a0d; }
+    .empty { padding:18px; border:1px dashed rgba(217,178,111,.35); border-radius:8px; color:var(--muted); background:rgba(255,255,255,.025); }
+    .mt { margin-top:12px; } .mb { margin-bottom:12px; }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.sidebar-foot{position:static;margin-top:16px}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3{grid-template-columns:1fr}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px} }
   </style>
 </head>
 <body>
-<main>
-  <header>
-    <div>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
       <h1>AlphaNine Dune Suite</h1>
-      <div class="sub">One local app for Server Control, Manager, and Gear Codex.</div>
+      <p>Arrakis Server Command Center</p>
+      <span class="version">v${APP_VERSION}</span>
     </div>
-    <div class="header-actions">
+    <nav class="nav">
+      <button class="tab active" data-view="dashboard">Dashboard</button>
+      <button class="tab" data-view="players">Players</button>
+      <button class="tab" data-view="give">Give Item</button>
+      <button class="tab" data-view="admin">Admin Tools</button>
+      <button class="tab" data-view="server">Server Status</button>
+      <button class="tab" data-view="logs">Logs</button>
+      <button class="tab" data-view="settings">Settings</button>
+    </nav>
+    <div class="sidebar-foot">
       <div class="kofi-widget"><script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'E1W220NMPA');kofiwidget2.draw();</script></div>
-      <span class="pill">v${APP_VERSION}</span>
     </div>
-  </header>
-  <div class="dune-banner">
-    <div class="banner-content">
-      <div class="banner-kicker">Unified command deck</div>
-      <h2 class="banner-title">One console for your Arrakis server tools.</h2>
-      <p class="banner-copy">Control the self-hosted server, tune manager settings, and browse the Gear Codex from a single application.</p>
-    </div>
-  </div>
-  <nav class="tabs">
-    <button class="tab active" data-view="dashboard">Dashboard</button>
-    <button class="tab" data-view="server">Server Control</button>
-    <button class="tab" data-view="maps">Maps</button>
-    <button class="tab" data-view="admin">Admin Tools</button>
-    <button class="tab" data-view="manager">Manager</button>
-    <button class="tab" data-view="codex">Gear Codex</button>
-  </nav>
-  <section id="dashboard" class="view active">
-    <div class="grid">
-      <div class="card"><div class="label">VM</div><div id="vm" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Battlegroup</div><div id="battlegroup" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Players</div><div id="players" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Manager</div><div id="managerState" class="value">Starting...</div></div>
-    </div>
-    <div class="tool-grid">
-      <div class="card tool-card"><div><div class="label">Server Control</div><div class="value">Actions and status</div><p>Start, stop, restart, update, backup, logs, Director link, and battlegroup status.</p></div><button class="button primary" data-open="server">Open Server Control</button></div>
-      <div class="card tool-card"><div><div class="label">Manager</div><div class="value">Settings and profiles</div><p>Server settings interface and admin/player tools through the suite backend.</p></div><button class="button primary" data-open="manager">Open Manager</button></div>
-      <div class="card tool-card"><div><div class="label">Gear Codex</div><div class="value">Items and notes</div><p>Search weapons, armor, vehicles, tools, and resources with local icons and notes.</p></div><button class="button primary" data-open="codex">Open Gear Codex</button></div>
-      <div class="card tool-card"><div><div class="label">Admin Tools</div><div class="value">Players and item grants</div><p>Find players, search local item templates, and prepare guarded admin item actions.</p></div><button class="button primary" data-open="admin">Open Admin Tools</button></div>
-    </div>
-  </section>
-  <section id="server" class="view">
-    <div class="grid">
-      <div class="card"><div class="label">VM</div><div id="svm" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Battlegroup</div><div id="sbg" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Database</div><div id="sdb" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Uptime</div><div id="suptime" class="value">Checking...</div></div>
-    </div>
-    <div class="label" style="margin-top:16px">Battlegroup Actions</div>
-    <div class="controls">
-      <button onclick="refresh()">Refresh</button>
-      <button class="primary" onclick="act('start')">Start Server</button>
-      <button onclick="act('restart')">Restart Server</button>
-      <button class="danger" onclick="act('stop')">Stop Server</button>
-      <button onclick="act('backup')">Backup</button>
-      <button onclick="act('update')">Update</button>
-      <button onclick="openDirector()">Open Director</button>
-      <button onclick="act('logs-export')">Export Logs</button>
-      <button onclick="act('operator-logs-export')">Export Operator Logs</button>
-    </div>
-    <pre id="serverLog">Ready.</pre>
-  </section>
-  <section id="maps" class="view">
-    <div class="grid">
-      <div class="card"><div class="label">Battlegroup</div><div id="mapBattlegroup" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Active Maps</div><div id="activeMaps" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Wanted Servers</div><div id="wantedMaps" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Memory</div><div id="mapMemory" class="value">Plan carefully</div></div>
-    </div>
-    <div class="card" style="margin-top:16px">
-      <div class="label">Map Deployment</div>
-      <div class="deploy-panel">
-        <label>Map<select id="mapSelect"></select></label>
-        <label>Replicas<input id="mapReplicas" type="number" min="0" max="3" value="1"></label>
-        <button class="primary" onclick="deployMap()">Set Map</button>
-        <button onclick="stopSelectedMap()">Stop Map</button>
+  </aside>
+  <main class="content">
+    <div class="topbar">
+      <div class="title">
+        <h2 id="viewTitle">Dashboard</h2>
+        <p id="viewSubtitle">Command overview for your self-hosted Arrakis battlegroup.</p>
       </div>
-      <div class="label">Maps with replicas above 0 are deployed by the battlegroup. Each extra map uses server memory.</div>
-      <table class="map-table">
-        <thead><tr><th>Map</th><th>Type</th><th>Wanted</th><th>Running</th><th>Memory</th></tr></thead>
-        <tbody id="mapRows"><tr><td colspan="4">Loading maps...</td></tr></tbody>
-      </table>
+      <div class="status-strip">
+        <span id="topServer" class="badge warn">Server checking</span>
+        <span id="topDb" class="badge warn">DB checking</span>
+        <span id="topLive" class="badge warn">Live give checking</span>
+        <span id="topPlayers" class="badge warn">Players 0</span>
+        <span id="topSsh" class="badge warn">SSH unknown</span>
+      </div>
     </div>
-    <pre id="mapLog">Ready.</pre>
-  </section>
-  <section id="admin" class="view">
-    <div class="grid">
-      <div class="card"><div class="label">Database</div><div id="adminDb" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Players Found</div><div id="adminPlayersFound" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Items Loaded</div><div id="adminItemsFound" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Live Grants</div><div id="adminLive" class="value">Guarded</div></div>
-    </div>
-    <div class="admin-layout">
-      <div class="card">
-        <div class="label">Give Item</div>
-        <div class="admin-form">
-          <label>Player<select id="adminPlayer"></select></label>
-          <label>Item Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
-          <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
-          <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0"></label>
-          <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Prepare Give Item</button>
-          <button onclick="refreshAdmin()">Refresh Admin Data</button>
+
+    <section id="dashboard" class="view active">
+      <div class="hero">
+        <div class="hero-body">
+          <div class="kicker">Command deck online</div>
+          <h3>AlphaNine Dune Suite</h3>
+          <p>Arrakis Server Command Center for players, live grants, battlegroup status, maps, logs, and manager tools.</p>
         </div>
       </div>
-      <div class="card">
-        <div class="label">Item Templates</div>
-        <div id="adminItems" class="admin-items"><div class="label">Loading items...</div></div>
+      <div class="grid">
+        <div class="panel pad"><div class="label">Players</div><div id="players" class="value">Checking...</div><div class="subtle">Detected from Dune player state.</div></div>
+        <div class="panel pad"><div class="label">Database</div><div id="adminDb" class="value">Checking...</div><div class="subtle">Postgres/admin probe.</div></div>
+        <div class="panel pad"><div class="label">Live Give</div><div id="adminLive" class="value">Checking...</div><div class="subtle">Grant transport state.</div></div>
+        <div class="panel pad"><div class="label">Receiver</div><div id="receiverState" class="value">Checking...</div><div class="subtle">HTTP JSON receiver health.</div></div>
+        <div class="panel pad"><div class="label">RabbitMQ</div><div id="rabbitState" class="value">Checking...</div><div class="subtle">Command bridge target.</div></div>
       </div>
-    </div>
-    <div class="card" style="margin-top:12px">
-      <div class="label">Tuned Channels</div>
-      <table class="admin-table">
-        <thead><tr><th>Account</th><th>Selected Channel</th><th>Channel</th><th>Tuned</th></tr></thead>
-        <tbody id="adminChannels"><tr><td colspan="4">Loading tuned channels...</td></tr></tbody>
-      </table>
-    </div>
-    <pre id="adminLog">Ready.</pre>
-  </section>
-  <section id="manager" class="view"><div class="frame-wrap"><iframe src="/manager/" title="AlphaNine Dune Manager"></iframe></div></section>
-  <section id="codex" class="view"><div class="frame-wrap"><iframe src="/gear-codex/" title="Dune Gear Codex"></iframe></div></section>
-</main>
+      <div class="layout-3 mt">
+        <div class="panel pad">
+          <div class="label">Recent Activity</div>
+          <div id="activityFeed" class="activity mt"><div class="empty">Activity will appear after probes, refreshes, grants, and errors.</div></div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Control Room</div>
+          <div class="action-row mt">
+            <button class="primary" data-open="give">Give Item</button>
+            <button data-open="players">Players</button>
+            <button data-open="server">Server Status</button>
+            <button onclick="refreshAll()">Refresh All</button>
+          </div>
+          <pre id="dashboardLog" class="mt">Awaiting telemetry.</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="players" class="view">
+      <div class="layout-2">
+        <div class="panel pad">
+          <div class="label">Player Management</div>
+          <label class="mt">Search Player<input id="playerSearch" placeholder="Search name, account, character id" oninput="renderPlayers()"></label>
+          <div id="playerCards" class="player-list mt"><div class="empty">Loading players...</div></div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Selected Player Details</div>
+          <div id="playerDetails" class="empty mt">Select a player to inspect account and character details.</div>
+          <div class="label mt">Quick Actions</div>
+          <div class="action-row mt">
+            <button class="primary" onclick="jumpToGive()">Give Item</button>
+            <button onclick="refreshAdmin()">Refresh Players</button>
+            <button data-open="logs">View Diagnostics</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="give" class="view">
+      <div class="layout-2">
+        <div class="panel pad">
+          <div class="label">Give Item</div>
+          <div class="field-grid mt">
+            <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
+            <label>Item Template Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
+            <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
+            <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0"></label>
+            <div class="warning">Quality/grade is unsupported by the live RabbitMQ grant path. Keep quality at 0 for live grants.</div>
+            <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Prepare Give Item</button>
+            <button onclick="refreshAdmin()">Refresh Admin Data</button>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Item Templates</div>
+          <div id="adminItems" class="admin-items mt"><div class="empty">Loading item templates...</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="admin" class="view">
+      <div class="grid four">
+        <div class="panel pad"><div class="label">DB</div><div id="adminDbMirror" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Players Found</div><div id="adminPlayersFound" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Items Loaded</div><div id="adminItemsFound" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Live Grants</div><div id="adminLiveMirror" class="value">Checking...</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Tuned Channels</div>
+        <table class="mt">
+          <thead><tr><th>Account</th><th>Selected Channel</th><th>Channel</th><th>Tuned</th></tr></thead>
+          <tbody id="adminChannels"><tr><td colspan="4">Loading tuned channels...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="server" class="view">
+      <div class="grid four">
+        <div class="panel pad"><div class="label">VM</div><div id="vm" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Battlegroup</div><div id="battlegroup" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Database</div><div id="sdb" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Uptime</div><div id="suptime" class="value">Checking...</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Battlegroup Actions</div>
+        <div class="controls mt">
+          <button onclick="refresh()">Refresh</button>
+          <button class="primary" onclick="act('start')">Start Server</button>
+          <button onclick="act('restart')">Restart Server</button>
+          <button class="danger" onclick="act('stop')">Stop Server</button>
+          <button onclick="act('backup')">Backup</button>
+          <button onclick="act('update')">Update</button>
+          <button onclick="openDirector()">Open Director</button>
+          <button onclick="act('logs-export')">Export Logs</button>
+          <button onclick="act('operator-logs-export')">Export Operator Logs</button>
+        </div>
+        <pre id="serverLog" class="mt">Ready.</pre>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Map Deployment</div>
+        <div class="layout-2 mt">
+          <div class="field-grid">
+            <label>Map<select id="mapSelect"></select></label>
+            <label>Replicas<input id="mapReplicas" type="number" min="0" max="3" value="1"></label>
+            <div class="action-row"><button class="primary" onclick="deployMap()">Set Map</button><button onclick="stopSelectedMap()">Stop Map</button></div>
+          </div>
+          <div>
+            <div class="grid four">
+              <div class="panel pad"><div class="label">Map Group</div><div id="mapBattlegroup" class="value">Checking...</div></div>
+              <div class="panel pad"><div class="label">Active</div><div id="activeMaps" class="value">Checking...</div></div>
+              <div class="panel pad"><div class="label">Wanted</div><div id="wantedMaps" class="value">Checking...</div></div>
+              <div class="panel pad"><div class="label">Memory</div><div id="mapMemory" class="value">Plan</div></div>
+            </div>
+          </div>
+        </div>
+        <table class="mt">
+          <thead><tr><th>Map</th><th>Type</th><th>Wanted</th><th>Running</th><th>Memory</th></tr></thead>
+          <tbody id="mapRows"><tr><td colspan="5">Loading maps...</td></tr></tbody>
+        </table>
+        <pre id="mapLog" class="mt">Ready.</pre>
+      </div>
+    </section>
+
+    <section id="logs" class="view">
+      <div class="layout-3">
+        <div class="panel pad"><div class="label">Recent Activity</div><div id="activityFeedLogs" class="activity mt"></div></div>
+        <div class="panel pad"><div class="label">Admin Probe and Errors</div><pre id="adminLog">Ready.</pre></div>
+      </div>
+      <div class="panel pad mt"><div class="label">Server Log</div><pre id="serverLogMirror">Ready.</pre></div>
+    </section>
+
+    <section id="settings" class="view">
+      <div class="layout-3">
+        <div class="panel pad">
+          <div class="label">Settings and Linked Tools</div>
+          <div class="action-row mt">
+            <button class="primary" onclick="showToolFrame('/manager/')">Open Manager</button>
+            <button onclick="showToolFrame('/gear-codex/')">Open Gear Codex</button>
+          </div>
+          <div class="subtle mt">Manager and Gear Codex remain available inside this command center.</div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Runtime</div>
+          <div class="detail-list">
+            <div class="detail-row"><span class="subtle">Suite URL</span><strong>http://127.0.0.1:8810</strong></div>
+            <div class="detail-row"><span class="subtle">Receiver</span><strong id="settingsReceiver">Checking...</strong></div>
+            <div class="detail-row"><span class="subtle">SSH Target</span><strong id="settingsSsh">Unknown</strong></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel frame-wrap mt"><iframe id="toolFrame" src="/manager/" title="AlphaNine Dune tools"></iframe></div>
+    </section>
+  </main>
+</div>
 <script>
 const tabs=[...document.querySelectorAll(".tab")], views=[...document.querySelectorAll(".view")];
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));location.hash=name;}
+const viewCopy={
+  dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
+  players:["Players","Search, inspect, and select characters for admin actions."],
+  give:["Give Item","Live item grants through the configured receiver."],
+  admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
+  server:["Server Status","Battlegroup controls, maps, and live server telemetry."],
+  logs:["Logs","Recent grants, probe results, and errors."],
+  settings:["Settings","Manager, Gear Codex, and local runtime details."]
+};
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(name==="logs")syncLogs();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-function tone(id,value){const el=document.getElementById(id);el.className="value";const text=String(value||"Unknown");if(/healthy|ready|running|online|true/i.test(text))el.classList.add("ok");else if(/offline|failed|error|missing|not|false/i.test(text))el.classList.add("bad");else el.classList.add("warn");el.textContent=text;}
-async function getJson(url, options){const r=await fetch(url,options);const t=await r.text();let d={};try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||t||"Request failed");return d;}
-async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);tone("vm",data.vm?.state||"Unknown");tone("battlegroup",s.status||"Unknown");tone("players",String(total));tone("managerState","Online");tone("svm",data.vm?.state||"Unknown");tone("sbg",s.status||"Unknown");tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";}catch(e){tone("vm","Status error");tone("battlegroup","Offline");tone("players","0");document.getElementById("serverLog").textContent=e.message;}}
-async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";try{const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=e.message;}}
-async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=e.message;}}
-async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];window.mapCatalog=maps;const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+m.map+'">'+m.map+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("");if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.map(m=>'<tr><td class="'+(m.running?'active-map':'')+'">'+m.map+'</td><td>'+(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+(m.memory||'-')+'</td></tr>').join("");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+e.message+'</td></tr>';document.getElementById("mapLog").textContent=e.message;}}
-async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=e.message;}}
-function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
-let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false;
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";tone("adminPlayersFound",String((players.players||[]).length));tone("adminItemsFound",String((items.items||[]).length));const playerSelect=document.getElementById("adminPlayer");playerSelect.innerHTML=(players.players||[]).map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join("")||'<option value="">No players found</option>';adminItems=items.items||[];renderAdminItems();renderAdminChannels(channels.rows||[]);const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";}catch(e){tone("adminDb","Error");log.textContent=e.message;}}
+let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",activity=[];
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
-function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td class="'+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
-function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,80);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<span></span>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' - '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join("")||'<div class="label">No matching items.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function statusClass(value){const text=String(value||"");if(/healthy|ready|running|online|enabled|reachable|true/i.test(text))return"ok";if(/offline|failed|error|missing|not|false|unavailable/i.test(text))return"bad";return"warn";}
+function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");}
+function badge(id,value){const el=document.getElementById(id);if(!el)return;el.className="badge "+statusClass(value);el.textContent=String(value||"Unknown");}
+function addActivity(type,message,detail){const item={time:new Date().toLocaleTimeString(),type,message,detail:detail||""};activity.unshift(item);activity=activity.slice(0,40);renderActivity();}
+function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
+function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
+async function getJson(url, options){const r=await fetch(url,options);const t=await r.text();let d={};try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||t||"Request failed");return d;}
+async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);tone("vm",data.vm?.state||"Unknown");tone("battlegroup",s.status||"Unknown");tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer",s.status?"Server "+s.status:"Server offline");document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity("status","Server telemetry refreshed",s.status||"Unknown");}catch(e){tone("vm","Status error");tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);}}
+function betterError(e){return e&&e.message?e.message:"Command failed. Check that the suite is running as Administrator and the Dune VM is reachable.";}
+async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";syncLogs();addActivity("action",action+" completed",(data.error||"").slice(0,120));setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);}}
+async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
+async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>'<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td></tr>').join(""):'<tr><td colspan="5">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
+async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";addActivity("maps","Map deployment updated",map+" -> "+replicas);setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);}}
+function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");tone("adminLiveMirror",adminLiveGiveAvailable?"Enabled":"Guarded");tone("receiverState",probe.giveTransport?.reachable?"Online":(probe.giveTransport?.configured?"Warning":"Dry-run"));tone("rabbitState",probe.giveTransport?.mode||probe.transport||"Unknown");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";renderPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+function renderPlayerSelect(){const select=document.getElementById("adminPlayer");select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name||p.character_name||p.id)+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;}
+function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Character '+esc(p.character_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
+function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;renderPlayers();}
+function renderPlayerDetails(){const p=adminPlayers.find(row=>row.id===selectedPlayerId);const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Grant ID</span><strong>'+esc(p.id)+'</strong></div>';}
+function jumpToGive(){setView("give");renderPlayerSelect();}
+function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td><span class="badge '+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</span></td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
+function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,90);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<div class="avatar">IT</div>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join(""):'<div class="empty">No matching item templates.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
-async function giveAdminItem(){const log=document.getElementById("adminLog");if(!selectedAdminItem){log.textContent="Choose an item first.";return;}const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};log.textContent=adminLiveGiveAvailable?"Giving item...":"Preparing dry-run item grant...";try{const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});const status=data.dryRun?"Dry run only.":"Live item grant sent.";log.textContent=status+"\\n"+(data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);}catch(e){log.textContent=e.message;}}
-refresh();refreshMaps();refreshAdmin();setInterval(refresh,30000);setInterval(refreshMaps,30000);
+async function giveAdminItem(){const log=document.getElementById("adminLog");if(!selectedAdminItem){log.textContent="Choose an item first.";addActivity("warning","Give item blocked","No item selected.");return;}const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};if(!payload.playerId){log.textContent="Choose a player first.";addActivity("warning","Give item blocked","No player selected.");return;}log.textContent=adminLiveGiveAvailable?"Giving item...":"Preparing dry-run item grant...";addActivity("grant",adminLiveGiveAvailable?"Sending live item grant":"Preparing dry-run",payload.template+" x"+payload.qty);try{const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});const status=data.dryRun?"Dry run only.":"Live item grant sent.";log.textContent=status+"\\n"+(data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);}}
+function showToolFrame(src){document.getElementById("toolFrame").src=src;}
+function refreshAll(){refresh();refreshMaps();refreshAdmin();}
+renderActivity();refreshAll();setInterval(refresh,30000);setInterval(refreshMaps,30000);
 </script>
 </body>
 </html>`;

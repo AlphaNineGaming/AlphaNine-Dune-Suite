@@ -6,7 +6,7 @@ const path = require("path");
 
 const APP_VERSION = "0.1.0-beta";
 const HOST = "127.0.0.1";
-const PORT = 8810;
+const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
 const CONFIG_PATH = path.join(__dirname, "config.json");
 const MANAGER_DIR = path.join(__dirname, "manager");
@@ -16,6 +16,7 @@ const defaultConfig = {
   host: "127.0.0.1",
   port: 8810,
   vmName: "dune-awakening",
+  vmIp: "",
   sshUser: "dune",
   sshKey: "",
   panelTitle: "AlphaNine Dune Suite",
@@ -32,7 +33,7 @@ function loadConfig() {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["host", "port", "vmName", "sshUser", "sshKey", "panelTitle", "panelSubtitle", "serverInstallPath"];
+  const allowed = ["host", "port", "vmName", "vmIp", "sshUser", "sshKey", "panelTitle", "panelSubtitle", "serverInstallPath"];
   const clean = {};
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(nextConfig, key)) clean[key] = nextConfig[key];
@@ -40,6 +41,7 @@ function saveConfig(nextConfig) {
   clean.host = String(clean.host || "127.0.0.1").trim();
   clean.port = Number(clean.port) || PORT;
   clean.vmName = String(clean.vmName || "dune-awakening").trim();
+  clean.vmIp = String(clean.vmIp || "").trim();
   clean.sshUser = String(clean.sshUser || "dune").trim();
   clean.sshKey = String(clean.sshKey || "").trim();
   clean.panelTitle = String(clean.panelTitle || "AlphaNine Dune Suite").trim();
@@ -75,6 +77,7 @@ function defaultSshKeyPath() {
 
 const config = loadConfig();
 const VM_NAME = config.vmName;
+const VM_IP = String(config.vmIp || "").trim();
 const SSH_USER = config.sshUser || "dune";
 const SSH_KEY = expandEnvPath(config.sshKey || defaultSshKeyPath());
 const DEFAULT_SERVER_ROOT = expandEnvPath(config.serverInstallPath);
@@ -120,14 +123,15 @@ async function vmInfo() {
 
 async function sshCommand(command, timeout = 180000) {
   const info = await vmInfo();
-  if (!info.exists) return { ok: false, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
-  if (info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running." };
-  if (!info.ip) return { ok: false, stdout: "", stderr: "VM IP address was not found.", error: "VM IP address was not found." };
+  const ip = info.ip || VM_IP;
+  if (!info.exists && !ip) return { ok: false, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
+  if (info.exists && info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running." };
+  if (!ip) return { ok: false, stdout: "", stderr: "VM IP address was not found.", error: "VM IP address was not found." };
   return run("ssh", [
     "-o", "StrictHostKeyChecking=no",
     "-o", "LogLevel=QUIET",
     "-i", SSH_KEY,
-    `${SSH_USER}@${info.ip}`,
+    `${SSH_USER}@${ip}`,
     command
   ], { timeout });
 }
@@ -172,6 +176,234 @@ async function battlegroup(action) {
   const allowed = new Set(["status", "start", "restart", "stop", "update", "backup", "logs-export", "operator-logs-export"]);
   if (!allowed.has(action)) return { ok: false, error: "Unsupported action." };
   return sshCommand(`/home/dune/.dune/bin/battlegroup ${action}`, action === "update" ? 600000 : 240000);
+}
+
+function shQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+async function battlegroupResource() {
+  const result = await sshCommand("sudo kubectl get igwbg -A -o json", 30000);
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Could not read battlegroup resource.");
+  let data = null;
+  try { data = JSON.parse(result.stdout || "{}"); }
+  catch { throw new Error("Could not parse battlegroup resource."); }
+  const item = data.items && data.items[0];
+  if (!item) throw new Error("No battlegroup resource was found.");
+  return item;
+}
+
+function mapRowsFromResource(item) {
+  const active = new Map();
+  for (const server of item.status?.servers || []) {
+    const key = server.partitionMap || server.map;
+    if (!key) continue;
+    active.set(key, (active.get(key) || 0) + 1);
+  }
+  return (item.spec?.serverGroup?.template?.spec?.sets || []).map((set, index) => ({
+    index,
+    map: set.map || `Map ${index + 1}`,
+    replicas: Number(set.replicas || 0),
+    running: active.get(set.map) || 0,
+    memory: set.resources?.limits?.memory || "",
+    dedicatedScaling: Boolean(set.dedicatedScaling),
+    deploymentMode: set.dedicatedScaling ? "Dedicated" : "Standard"
+  }));
+}
+
+async function mapDeploymentList() {
+  const item = await battlegroupResource();
+  return {
+    battlegroup: item.metadata?.name || "",
+    namespace: item.metadata?.namespace || "",
+    maps: mapRowsFromResource(item)
+  };
+}
+
+async function setMapReplicas(mapName, replicas) {
+  const cleanMap = String(mapName || "").trim();
+  const count = Number(replicas);
+  if (!/^[A-Za-z0-9_]+$/.test(cleanMap)) throw new Error("Choose a valid map.");
+  if (!Number.isInteger(count) || count < 0 || count > 3) throw new Error("Replica count must be between 0 and 3.");
+
+  const item = await battlegroupResource();
+  const rows = mapRowsFromResource(item);
+  const row = rows.find((entry) => entry.map === cleanMap);
+  if (!row) throw new Error("Map was not found in the battlegroup.");
+  if (row.dedicatedScaling && count > 0) {
+    throw new Error(`${cleanMap} is a dedicated-scaling map. The current safe deploy button can only start standard maps; dedicated maps need battlegroup director scaling first.`);
+  }
+
+  const namespace = item.metadata?.namespace;
+  const name = item.metadata?.name;
+  const patch = JSON.stringify([{ op: "replace", path: `/spec/serverGroup/template/spec/sets/${row.index}/replicas`, value: count }]);
+  const command = [
+    "sudo kubectl patch igwbg",
+    shQuote(name),
+    "-n",
+    shQuote(namespace),
+    "--type=json",
+    `-p=${shQuote(patch)}`
+  ].join(" ");
+  const result = await sshCommand(command, 120000);
+  return { ...result, map: cleanMap, replicas: count };
+}
+
+function gearCatalog() {
+  const filePath = path.join(CODEX_DIR, "index.html");
+  if (!fs.existsSync(filePath)) return [];
+  const html = fs.readFileSync(filePath, "utf8");
+  const match = html.match(/<script id="catalogData" type="application\/json">([\s\S]*?)<\/script>/);
+  if (!match) return [];
+  try {
+    const data = JSON.parse(match[1]);
+    return (data.items || []).map((item) => ({
+      id: String(item.id || ""),
+      name: String(item.name || item.id || ""),
+      category: String(item.category || ""),
+      detail: String(item.detail || ""),
+      tier: String(item.tier || ""),
+      rarity: String(item.rarity || ""),
+      maxStack: String(item.maxStack || ""),
+      icon: item.icon ? `/gear-codex/${item.icon}` : ""
+    })).filter((item) => item.id && item.name);
+  } catch {
+    return [];
+  }
+}
+
+async function dbQuery(sql, timeout = 45000) {
+  const item = await battlegroupResource();
+  const namespace = item.metadata?.namespace;
+  const dbPod = `${item.metadata?.name}-db-dbdepl-sts-0`;
+  const dbSvc = `${item.metadata?.name}-db-dbdepl-svc`;
+  const command = [
+    `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
+    `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" psql -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -c ${shQuote(sql)}`
+  ].join("; ");
+  const result = await sshCommand(command, timeout);
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Database query failed.");
+  return result.stdout.trim();
+}
+
+async function adminProbe() {
+  const tablesSql = `
+    select table_schema || '.' || table_name
+    from information_schema.tables
+    where table_type = 'BASE TABLE'
+      and table_schema not in ('pg_catalog', 'information_schema')
+      and (
+        lower(table_name) like '%player%' or
+        lower(table_name) like '%character%' or
+        lower(table_name) like '%inventory%' or
+        lower(table_name) like '%item%'
+      )
+    order by table_schema, table_name
+    limit 80
+  `;
+  const output = await dbQuery(tablesSql);
+  return {
+    ok: true,
+    liveGiveAvailable: false,
+    tables: output ? output.split(/\r?\n/).filter(Boolean) : [],
+    note: "Player/item database access is reachable. Live item grants need the RabbitMQ command envelope before enabling writes."
+  };
+}
+
+async function adminPlayers() {
+  const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  const metaSql = `
+    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
+    from information_schema.columns
+    where table_schema = 'dune'
+      and (
+        lower(table_name) like '%player%' or
+        lower(table_name) like '%character%'
+      )
+    group by table_name
+    order by
+      case
+        when table_name = 'communinet_player' then 0
+        when table_name = 'overmap_players' then 1
+        when table_name like '%player%' then 2
+        else 3
+      end,
+      table_name
+    limit 40
+  `;
+  const metaOutput = await dbQuery(metaSql);
+  const idNames = ["player_id", "playerid", "account_id", "accountid", "character_id", "characterid", "id", "uid", "uuid"];
+  const nameNames = ["display_name", "displayname", "player_name", "playername", "character_name", "charactername", "name", "username", "nickname"];
+  const candidates = metaOutput.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [table, columnsRaw = ""] = line.split("\t");
+    const columns = columnsRaw.split(",").filter(Boolean);
+    const lower = new Map(columns.map((column) => [column.toLowerCase(), column]));
+    const idCol = idNames.map((name) => lower.get(name)).find(Boolean) || columns.find((column) => /player.*id|id.*player|character.*id|id$/i.test(column));
+    const nameCol = nameNames.map((name) => lower.get(name)).find(Boolean) || columns.find((column) => /name|display/i.test(column));
+    if (!table || !idCol) return null;
+    const idExpr = quoteIdent(idCol);
+    const nameExpr = nameCol ? `coalesce(${quoteIdent(nameCol)}::text, ${idExpr}::text)` : `${idExpr}::text`;
+    return {
+      table: `dune.${table}`,
+      sql: `select distinct ${idExpr}::text, ${nameExpr} from dune.${quoteIdent(table)} where ${idExpr} is not null order by 2 limit 100`
+    };
+  }).filter(Boolean);
+  const errors = [];
+  for (const candidate of candidates) {
+    try {
+      const output = await dbQuery(candidate.sql);
+      const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
+        const [id, name] = line.split("\t");
+        return { id: id || "", name: name || id || "Unknown" };
+      }) : [];
+      return { ok: true, source: candidate.table, players };
+    } catch (error) {
+      errors.push(`${candidate.table}: ${error.message}`);
+    }
+  }
+  return {
+    ok: false,
+    players: [],
+    error: "Could not auto-detect the player table yet.",
+    details: errors.slice(0, 4)
+  };
+}
+
+async function adminGiveItem(payload) {
+  const playerId = String(payload.playerId || "").trim();
+  const template = String(payload.template || "").trim();
+  const qty = Number(payload.qty || 1);
+  const quality = Number(payload.quality || 0);
+  if (!playerId) throw new Error("Choose a player first.");
+  if (!/^[A-Za-z0-9_:.+-]+$/.test(template)) throw new Error("Choose a valid item template.");
+  if (!Number.isInteger(qty) || qty < 1 || qty > 9999) throw new Error("Quantity must be between 1 and 9999.");
+  if (!Number.isInteger(quality) || quality < 0 || quality > 100) throw new Error("Quality must be between 0 and 100.");
+  return {
+    ok: false,
+    dryRun: true,
+    command: { playerId, template, qty, quality },
+    error: "Live give-item is not enabled yet. The suite can see the DB and item catalog, but needs the RabbitMQ command envelope/token mapping before it can safely mutate inventories."
+  };
+}
+
+async function adminTunedChannels() {
+  const sql = `
+    select
+      coalesce(p.account_id::text, c.account_id::text) as account_id,
+      coalesce(p.selected_channel_name::text, '') as selected_channel,
+      coalesce(c.channel_name::text, '') as channel_name,
+      coalesce(c.is_tuned::text, '') as is_tuned
+    from dune.communinet_player p
+    full outer join dune.communinet_player_channels c on c.account_id = p.account_id
+    order by account_id, channel_name
+    limit 300
+  `;
+  const output = await dbQuery(sql);
+  const rows = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [accountId = "", selectedChannel = "", channelName = "", isTuned = ""] = line.split("\t");
+    return { accountId, selectedChannel, channelName, isTuned };
+  }) : [];
+  return { ok: true, rows };
 }
 
 async function directorUrl() {
@@ -299,13 +531,33 @@ function appPage() {
     .button, .controls button { display:inline-flex; align-items:center; justify-content:center; min-height:40px; border:1px solid #4a4f58; border-radius:7px; background:var(--panel-2); color:var(--text); text-decoration:none; padding:0 13px; cursor:pointer; }
     .primary { background:#8f6729 !important; border-color:#c8903f !important; }
     .danger { background:#6e2c2c !important; border-color:#a04c4c !important; }
+    select, input { min-height:40px; border:1px solid #4a4f58; border-radius:7px; background:#111317; color:var(--text); padding:0 11px; }
+    .deploy-panel { display:grid; grid-template-columns:minmax(220px,1fr) 110px auto auto; gap:10px; align-items:end; margin:14px 0; padding:14px; border:1px solid var(--line); border-radius:8px; background:rgba(15,16,19,.68); }
+    .deploy-panel label { display:grid; gap:6px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+    .deploy-panel button { min-height:40px; border:1px solid #4a4f58; border-radius:7px; background:var(--panel-2); color:var(--text); padding:0 13px; cursor:pointer; }
+    .admin-layout { display:grid; grid-template-columns:minmax(300px, 420px) minmax(0,1fr); gap:12px; margin-top:16px; align-items:start; }
+    .admin-form { display:grid; gap:10px; }
+    .admin-form label { display:grid; gap:6px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+    .admin-items { display:grid; gap:8px; max-height:420px; overflow:auto; padding-right:4px; }
+    .admin-item { display:grid; grid-template-columns:42px minmax(0,1fr); gap:10px; align-items:center; border:1px solid var(--line); border-radius:7px; padding:8px; background:rgba(255,255,255,.03); cursor:pointer; }
+    .admin-item.active { border-color:#c8903f; background:rgba(216,162,76,.12); }
+    .admin-item img { width:42px; height:42px; object-fit:contain; border-radius:6px; background:#111317; }
+    .admin-item strong { display:block; overflow-wrap:anywhere; }
+    .admin-item span { color:var(--muted); font-size:12px; }
+    .admin-table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
+    .admin-table th, .admin-table td { text-align:left; border-bottom:1px solid var(--line); padding:8px 7px; overflow-wrap:anywhere; }
+    .admin-table th { color:var(--muted); font-weight:750; }
+    .map-table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
+    .map-table th, .map-table td { text-align:left; border-bottom:1px solid var(--line); padding:8px 7px; }
+    .map-table th { color:var(--muted); font-weight:750; }
+    .map-table .active-map { color:var(--good); font-weight:800; }
     .tool-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:12px; }
     .tool-card { min-height:148px; display:grid; align-content:space-between; gap:12px; }
     .tool-card p { margin:0; color:var(--muted); line-height:1.45; }
     .frame-wrap { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#0b0c0e; min-height:720px; }
     iframe { width:100%; height:78vh; min-height:720px; border:0; display:block; background:#0b0c0e; }
     pre { white-space:pre-wrap; background:#0b0c0e; border:1px solid var(--line); border-radius:8px; padding:14px; max-height:300px; overflow:auto; }
-    @media (max-width:900px) { header{display:block}.header-actions{justify-content:flex-start;margin-top:12px}.grid,.tool-grid{grid-template-columns:1fr}.banner-title{font-size:21px}.frame-wrap,iframe{min-height:620px} }
+    @media (max-width:900px) { header{display:block}.header-actions{justify-content:flex-start;margin-top:12px}.grid,.tool-grid,.deploy-panel,.admin-layout{grid-template-columns:1fr}.banner-title{font-size:21px}.frame-wrap,iframe{min-height:620px} }
   </style>
 </head>
 <body>
@@ -316,7 +568,7 @@ function appPage() {
       <div class="sub">One local app for Server Control, Manager, and Gear Codex.</div>
     </div>
     <div class="header-actions">
-      <a class="kofi" href="https://ko-fi.com/E1W220NMPA" target="_blank" rel="noopener noreferrer">Support me on Ko-fi</a>
+      <div class="kofi-widget"><script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'E1W220NMPA');kofiwidget2.draw();</script></div>
       <span class="pill">v${APP_VERSION}</span>
     </div>
   </header>
@@ -330,6 +582,8 @@ function appPage() {
   <nav class="tabs">
     <button class="tab active" data-view="dashboard">Dashboard</button>
     <button class="tab" data-view="server">Server Control</button>
+    <button class="tab" data-view="maps">Maps</button>
+    <button class="tab" data-view="admin">Admin Tools</button>
     <button class="tab" data-view="manager">Manager</button>
     <button class="tab" data-view="codex">Gear Codex</button>
   </nav>
@@ -344,6 +598,7 @@ function appPage() {
       <div class="card tool-card"><div><div class="label">Server Control</div><div class="value">Actions and status</div><p>Start, stop, restart, update, backup, logs, Director link, and battlegroup status.</p></div><button class="button primary" data-open="server">Open Server Control</button></div>
       <div class="card tool-card"><div><div class="label">Manager</div><div class="value">Settings and profiles</div><p>Server settings interface and admin/player tools through the suite backend.</p></div><button class="button primary" data-open="manager">Open Manager</button></div>
       <div class="card tool-card"><div><div class="label">Gear Codex</div><div class="value">Items and notes</div><p>Search weapons, armor, vehicles, tools, and resources with local icons and notes.</p></div><button class="button primary" data-open="codex">Open Gear Codex</button></div>
+      <div class="card tool-card"><div><div class="label">Admin Tools</div><div class="value">Players and item grants</div><p>Find players, search local item templates, and prepare guarded admin item actions.</p></div><button class="button primary" data-open="admin">Open Admin Tools</button></div>
     </div>
   </section>
   <section id="server" class="view">
@@ -353,6 +608,7 @@ function appPage() {
       <div class="card"><div class="label">Database</div><div id="sdb" class="value">Checking...</div></div>
       <div class="card"><div class="label">Uptime</div><div id="suptime" class="value">Checking...</div></div>
     </div>
+    <div class="label" style="margin-top:16px">Battlegroup Actions</div>
     <div class="controls">
       <button onclick="refresh()">Refresh</button>
       <button class="primary" onclick="act('start')">Start Server</button>
@@ -362,8 +618,65 @@ function appPage() {
       <button onclick="act('update')">Update</button>
       <button onclick="openDirector()">Open Director</button>
       <button onclick="act('logs-export')">Export Logs</button>
+      <button onclick="act('operator-logs-export')">Export Operator Logs</button>
     </div>
     <pre id="serverLog">Ready.</pre>
+  </section>
+  <section id="maps" class="view">
+    <div class="grid">
+      <div class="card"><div class="label">Battlegroup</div><div id="mapBattlegroup" class="value">Checking...</div></div>
+      <div class="card"><div class="label">Active Maps</div><div id="activeMaps" class="value">Checking...</div></div>
+      <div class="card"><div class="label">Wanted Servers</div><div id="wantedMaps" class="value">Checking...</div></div>
+      <div class="card"><div class="label">Memory</div><div id="mapMemory" class="value">Plan carefully</div></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="label">Map Deployment</div>
+      <div class="deploy-panel">
+        <label>Map<select id="mapSelect"></select></label>
+        <label>Replicas<input id="mapReplicas" type="number" min="0" max="3" value="1"></label>
+        <button class="primary" onclick="deployMap()">Set Map</button>
+        <button onclick="stopSelectedMap()">Stop Map</button>
+      </div>
+      <div class="label">Maps with replicas above 0 are deployed by the battlegroup. Each extra map uses server memory.</div>
+      <table class="map-table">
+        <thead><tr><th>Map</th><th>Type</th><th>Wanted</th><th>Running</th><th>Memory</th></tr></thead>
+        <tbody id="mapRows"><tr><td colspan="4">Loading maps...</td></tr></tbody>
+      </table>
+    </div>
+    <pre id="mapLog">Ready.</pre>
+  </section>
+  <section id="admin" class="view">
+    <div class="grid">
+      <div class="card"><div class="label">Database</div><div id="adminDb" class="value">Checking...</div></div>
+      <div class="card"><div class="label">Players Found</div><div id="adminPlayersFound" class="value">Checking...</div></div>
+      <div class="card"><div class="label">Items Loaded</div><div id="adminItemsFound" class="value">Checking...</div></div>
+      <div class="card"><div class="label">Live Grants</div><div id="adminLive" class="value">Guarded</div></div>
+    </div>
+    <div class="admin-layout">
+      <div class="card">
+        <div class="label">Give Item</div>
+        <div class="admin-form">
+          <label>Player<select id="adminPlayer"></select></label>
+          <label>Item Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
+          <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
+          <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0"></label>
+          <button class="primary" onclick="giveAdminItem()">Prepare Give Item</button>
+          <button onclick="refreshAdmin()">Refresh Admin Data</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="label">Item Templates</div>
+        <div id="adminItems" class="admin-items"><div class="label">Loading items...</div></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="label">Tuned Channels</div>
+      <table class="admin-table">
+        <thead><tr><th>Account</th><th>Selected Channel</th><th>Channel</th><th>Tuned</th></tr></thead>
+        <tbody id="adminChannels"><tr><td colspan="4">Loading tuned channels...</td></tr></tbody>
+      </table>
+    </div>
+    <pre id="adminLog">Ready.</pre>
   </section>
   <section id="manager" class="view"><div class="frame-wrap"><iframe src="/manager/" title="AlphaNine Dune Manager"></iframe></div></section>
   <section id="codex" class="view"><div class="frame-wrap"><iframe src="/gear-codex/" title="Dune Gear Codex"></iframe></div></section>
@@ -379,7 +692,17 @@ async function getJson(url, options){const r=await fetch(url,options);const t=aw
 async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);tone("vm",data.vm?.state||"Unknown");tone("battlegroup",s.status||"Unknown");tone("players",String(total));tone("managerState","Online");tone("svm",data.vm?.state||"Unknown");tone("sbg",s.status||"Unknown");tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";}catch(e){tone("vm","Status error");tone("battlegroup","Offline");tone("players","0");document.getElementById("serverLog").textContent=e.message;}}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";try{const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=e.message;}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=e.message;}}
-refresh();setInterval(refresh,30000);
+async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];window.mapCatalog=maps;const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+m.map+'">'+m.map+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("");if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.map(m=>'<tr><td class="'+(m.running?'active-map':'')+'">'+m.map+'</td><td>'+(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+(m.memory||'-')+'</td></tr>').join("");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+e.message+'</td></tr>';document.getElementById("mapLog").textContent=e.message;}}
+async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=e.message;}}
+function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
+let adminItems=[],selectedAdminItem=null;
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminLive",probe.liveGiveAvailable?"Enabled":"Guarded");tone("adminPlayersFound",String((players.players||[]).length));tone("adminItemsFound",String((items.items||[]).length));const playerSelect=document.getElementById("adminPlayer");playerSelect.innerHTML=(players.players||[]).map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join("")||'<option value="">No players found</option>';adminItems=items.items||[];renderAdminItems();renderAdminChannels(channels.rows||[]);log.textContent=[probe.note,players.error,players.details&&players.details.join("\\n")].filter(Boolean).join("\\n")||"Admin tools ready.";}catch(e){tone("adminDb","Error");log.textContent=e.message;}}
+function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
+function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td class="'+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
+function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,80);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<span></span>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' - '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join("")||'<div class="label">No matching items.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
+async function giveAdminItem(){const log=document.getElementById("adminLog");if(!selectedAdminItem){log.textContent="Choose an item first.";return;}const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};log.textContent="Preparing item grant...";try{const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});log.textContent=(data.error||"Prepared.")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);}catch(e){log.textContent=e.message;}}
+refresh();refreshMaps();refreshAdmin();setInterval(refresh,30000);setInterval(refreshMaps,30000);
 </script>
 </body>
 </html>`;
@@ -412,6 +735,51 @@ async function route(req, res) {
   if (url.pathname === "/api/config" && req.method === "POST") {
     try { await json(res, { ok: true, config: saveConfig(JSON.parse(await readBody(req) || "{}")), restartRequired: true }); }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/maps" && req.method === "GET") {
+    try { await json(res, await mapDeploymentList()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/maps/deploy" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await setMapReplicas(body.map, body.replicas);
+      await json(res, result, result.ok ? 200 : 500);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/probe" && req.method === "GET") {
+    try { await json(res, await adminProbe()); }
+    catch (error) { await json(res, { ok: false, liveGiveAvailable: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/players" && req.method === "GET") {
+    try { await json(res, await adminPlayers()); }
+    catch (error) { await json(res, { ok: false, players: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/items" && req.method === "GET") {
+    const items = gearCatalog();
+    await json(res, { ok: true, items });
+    return;
+  }
+  if (url.pathname === "/api/admin/tuned-channels" && req.method === "GET") {
+    try { await json(res, await adminTunedChannels()); }
+    catch (error) { await json(res, { ok: false, rows: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/give-item" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await adminGiveItem(body);
+      await json(res, result, result.ok ? 200 : 409);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname.startsWith("/api/action/") && req.method === "POST") {

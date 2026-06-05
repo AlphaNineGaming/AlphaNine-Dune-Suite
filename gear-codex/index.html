@@ -69,18 +69,6 @@
       align-items: center;
       min-height: 40px;
     }
-    .kofi-fallback {
-      display: inline-flex;
-      align-items: center;
-      min-height: 40px;
-      padding: 0 14px;
-      border: 1px solid #a9c9ff;
-      background: #72a4f2;
-      color: #08111f;
-      font-weight: 800;
-      text-decoration: none;
-      border-radius: 4px;
-    }
     .btn {
       border: 1px solid var(--line);
       background: var(--panel-2);
@@ -394,11 +382,7 @@
         </div>
       </div>
       <div class="actions">
-        <div class="kofi-widget">
-          <a class="kofi-fallback" href="https://ko-fi.com/E1W220NMPA" target="_blank" rel="noopener noreferrer">Support me on Ko-fi</a>
-          <script type="text/javascript" src="https://storage.ko-fi.com/cdn/widget/Widget_2.js"></script>
-          <script type="text/javascript">(function(){const root=document.currentScript.closest('.kofi-widget');if(window.kofiwidget2){root.querySelector('.kofi-fallback')?.remove();kofiwidget2.init('Support me on Ko-fi','#72a4f2','E1W220NMPA');kofiwidget2.draw();}}());</script>
-        </div>
+        <div class="kofi-widget"><script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'E1W220NMPA');kofiwidget2.draw();</script></div>
         <span class="pill version">v1.0.1</span>
         <button class="btn" id="exportBtn">Export Notes</button>
         <button class="btn" id="importBtn">Import Notes</button>

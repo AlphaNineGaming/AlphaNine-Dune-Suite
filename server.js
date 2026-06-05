@@ -673,22 +673,27 @@ async function adminPlayers() {
     )
     select
       a.account_id::text,
+      coalesce(ac.funcom_id, ac.user, '') as funcom_id,
+      coalesce(ps.player_controller_id::text, '') as player_controller_id,
       coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
       coalesce(nullif(ps.character_name, ''), a.account_id::text) as character_name,
       case when nullif(ps.character_name, '') is null then 'false' else 'true' end as resolved
     from account_ids a
     left join dune.player_state ps on ps.account_id = a.account_id
+    left join dune.accounts ac on ac.id = a.account_id
     order by a.account_id, ps.last_avatar_activity desc nulls last, ps.player_state_id
     limit 200
   `;
   try {
     const output = await dbQuery(characterQuery);
     const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
-      const [accountId = "", characterId = "", characterName = "", resolved = "false"] = line.split("\t");
+      const [accountId = "", funcomId = "", playerControllerId = "", characterId = "", characterName = "", resolved = "false"] = line.split("\t");
       return {
         id: accountId,
         name: characterName || accountId || "Unknown",
         account_id: accountId,
+        funcom_id: funcomId,
+        player_controller_id: playerControllerId,
         character_id: characterId,
         character_name: characterName || accountId || "Unknown",
         characterNameResolved: /^true$/i.test(resolved)
@@ -703,10 +708,10 @@ async function adminPlayers() {
       rows: players.length,
       resolvedNames: resolvedCount,
       ok: true,
-      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id"
+      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id"
     });
     diagnostics.sourceTableUsed = "dune.player_state";
-    diagnostics.joinPathUsed = "dune.communinet_player.account_id -> dune.player_state.account_id";
+    diagnostics.joinPathUsed = "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id";
     diagnostics.characterNamesResolved = resolvedCount;
     diagnostics.playersFound = players.length;
     if (players.length) {
@@ -732,7 +737,7 @@ async function adminPlayers() {
       rows: 0,
       resolvedNames: 0,
       ok: false,
-      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id",
+      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id",
       error: error.message
     });
     diagnostics.errors.push(`dune.player_state character query: ${error.message}`);
@@ -879,6 +884,183 @@ function playerDiagnosticLines(diagnostics) {
 async function adminGiveItem(payload) {
   const command = validateGiveItemPayload(payload);
   return sendLiveGiveItem(command);
+}
+
+function sqlString(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function requireInteger(value, name, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const text = String(value ?? "").trim();
+  if (!/^-?\d+$/.test(text)) throw new Error(`${name} must be a whole number.`);
+  const number = Number(text);
+  if (!Number.isSafeInteger(number) || number < min || number > max) {
+    throw new Error(`${name} must be between ${min} and ${max}.`);
+  }
+  return number;
+}
+
+function optionalInteger(value, name, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  return requireInteger(value, name, min, max);
+}
+
+function requireConfirmed(value) {
+  if (value !== true && value !== "true" && value !== 1 && value !== "1") {
+    throw new Error("Confirm the exact function call before running this permission action.");
+  }
+}
+
+async function adminPermissions(playerControllerIdValue) {
+  const playerControllerId = optionalInteger(playerControllerIdValue, "player_controller_id", 0);
+  const selectedWhere = playerControllerId === null ? "" : `where gm.player_id = ${playerControllerId}`;
+  const rankWhere = playerControllerId === null ? "" : `where par.player_id = ${playerControllerId}`;
+  const accessWhere = playerControllerId === null ? "" : `where pac.account_id in (select account_id from dune.player_state where player_controller_id = ${playerControllerId})`;
+  const sql = `
+    select
+      'guild' as row_type,
+      gm.player_id::text,
+      gm.guild_id::text,
+      gm.role_id::text,
+      coalesce(ps.account_id::text, ''),
+      coalesce(ps.character_name, ''),
+      coalesce(ac.funcom_id, ac.user, ''),
+      case when gm.role_id = 100 then 'true' else 'false' end
+    from dune.guild_members gm
+    left join dune.player_state ps on ps.player_controller_id = gm.player_id
+    left join dune.accounts ac on ac.id = ps.account_id
+    ${selectedWhere}
+    order by gm.guild_id, gm.role_id desc, gm.player_id
+    limit 300;
+
+    select
+      'actor_rank' as row_type,
+      par.player_id::text,
+      par.permission_actor_id::text,
+      par.rank::text,
+      coalesce(pa.actor_name, ''),
+      coalesce(pa.actor_type::text, ''),
+      coalesce(pa.access_level::text, '')
+    from dune.permission_actor_rank par
+    left join dune.permission_actor pa on pa.actor_id = par.permission_actor_id
+    ${rankWhere}
+    order by par.permission_actor_id, par.player_id
+    limit 300;
+
+    select
+      'access_code' as row_type,
+      pac.account_id::text,
+      pac.access_code::text,
+      pac.access_code_type::text,
+      pac.is_resettable::text
+    from dune.player_access_codes pac
+    ${accessWhere}
+    order by pac.account_id, pac.access_code_type, pac.access_code
+    limit 300;
+  `;
+  const output = await dbQuery(sql);
+  const guildMembers = [];
+  const objectPermissions = [];
+  const accessCodes = [];
+  for (const line of output.split(/\r?\n/).filter(Boolean)) {
+    const parts = line.split("\t");
+    if (parts[0] === "guild") {
+      guildMembers.push({
+        player_id: parts[1] || "",
+        guild_id: parts[2] || "",
+        role_id: parts[3] || "",
+        account_id: parts[4] || "",
+        character_name: parts[5] || "",
+        funcom_id: parts[6] || "",
+        is_guild_admin: /^true$/i.test(parts[7] || "")
+      });
+    } else if (parts[0] === "actor_rank") {
+      objectPermissions.push({
+        player_id: parts[1] || "",
+        actor_id: parts[2] || "",
+        rank: parts[3] || "",
+        actor_name: parts[4] || "",
+        actor_type: parts[5] || "",
+        access_level: parts[6] || ""
+      });
+    } else if (parts[0] === "access_code") {
+      accessCodes.push({
+        account_id: parts[1] || "",
+        access_code: parts[2] || "",
+        access_code_type: parts[3] || "",
+        is_resettable: parts[4] || ""
+      });
+    }
+  }
+  return {
+    ok: true,
+    playerControllerId: playerControllerId === null ? "" : String(playerControllerId),
+    guildMembers,
+    objectPermissions,
+    accessCodes,
+    isGuildAdmin: guildMembers.some((row) => row.is_guild_admin),
+    diagnostics: {
+      sourceTables: ["dune.guild_members", "dune.permission_actor_rank", "dune.permission_actor", "dune.player_access_codes", "dune.player_state", "dune.accounts"],
+      selectedPlayerControllerId: playerControllerId === null ? "" : String(playerControllerId),
+      guildMembersFound: guildMembers.length,
+      objectPermissionsFound: objectPermissions.length,
+      accessCodesFound: accessCodes.length,
+      writePolicy: "Writes call confirmed Dune functions only; no direct permission table insert/update."
+    }
+  };
+}
+
+function previewPermissionRankCall(payload) {
+  const actorId = requireInteger(payload.actorId, "actor_id", 0);
+  const playerControllerId = requireInteger(payload.playerControllerId, "player_controller_id", 0);
+  const rank = requireInteger(payload.rank, "rank", 0, 100);
+  const mapId = String(payload.mapId || "").trim();
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(mapId)) throw new Error("map_id must use letters, numbers, underscore, or dash.");
+  return {
+    actorId,
+    playerControllerId,
+    rank,
+    mapId,
+    sql: `select dune.permission_set_player_rank(${actorId}, ${playerControllerId}, ${rank}, ${sqlString(mapId)});`
+  };
+}
+
+async function adminSetPermissionRank(payload) {
+  const call = previewPermissionRankCall(payload || {});
+  requireConfirmed(payload?.confirmed);
+  await dbQuery(call.sql);
+  return {
+    ok: true,
+    action: "permission_set_player_rank",
+    sql: call.sql,
+    message: "Object permission rank function executed."
+  };
+}
+
+function previewAccessCodeCall(payload) {
+  const accountId = requireInteger(payload.accountId, "account_id", 0);
+  const accessCode = requireInteger(payload.accessCode, "access_code", 0, 2147483647);
+  const accessCodeType = requireInteger(payload.accessCodeType, "access_code_type", 0, 2147483647);
+  const isResettable = payload.isResettable === true || payload.isResettable === "true" || payload.isResettable === 1 || payload.isResettable === "1";
+  return {
+    accountId,
+    accessCode,
+    accessCodeType,
+    isResettable,
+    sql: `select dune.create_server_player_access_codes(${accountId}, ${accessCode}, ${accessCodeType}, ${isResettable ? "true" : "false"});`
+  };
+}
+
+async function adminCreateAccessCode(payload) {
+  const call = previewAccessCodeCall(payload || {});
+  requireConfirmed(payload?.confirmed);
+  await dbQuery(call.sql);
+  return {
+    ok: true,
+    action: "create_server_player_access_codes",
+    sql: call.sql,
+    message: "Access code function executed."
+  };
 }
 
 async function adminTunedChannels() {
@@ -1087,6 +1269,8 @@ function appPage() {
     .detail-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:8px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); }
     .warning { border:1px solid rgba(234,191,98,.38); color:#f4d99c; background:rgba(234,191,98,.08); border-radius:6px; padding:10px; font-size:13px; line-height:1.4; }
     .warning.hidden { display:none; }
+    .check-row { display:flex; align-items:center; gap:9px; color:var(--muted); font-size:13px; text-transform:none; letter-spacing:0; }
+    .check-row input { width:auto; min-height:0; }
     .activity { display:grid; gap:8px; max-height:380px; overflow:auto; }
     .activity-item { border-left:2px solid var(--line-blue); padding:8px 10px; background:rgba(255,255,255,.035); border-radius:0 6px 6px 0; }
     .activity-time { color:var(--muted); font-size:12px; margin-bottom:3px; }
@@ -1219,6 +1403,68 @@ function appPage() {
         <div class="panel pad"><div class="label">Live Grants</div><div id="adminLiveMirror" class="value">Checking...</div></div>
       </div>
       <div class="panel pad mt">
+        <div class="label">Permission Tools</div>
+        <div class="subtle mt">Confirmed systems only: Guild Admin / Object Permissions / Access Codes. This panel does not grant global server admin.</div>
+        <div class="layout-2 mt">
+          <div class="field-grid">
+            <label>Selected Character<select id="permissionPlayer" onchange="syncPermissionPlayer()"></select></label>
+            <div id="permissionSummary" class="empty">Select a player to inspect permission state.</div>
+            <button onclick="refreshPermissions()">Refresh Permission Views</button>
+          </div>
+          <div>
+            <div class="label">Selected Player Identity</div>
+            <div id="permissionIdentity" class="detail-list"><div class="empty">No player selected.</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="layout-3 mt">
+        <div class="panel pad">
+          <div class="label">Guild Admin / Object Permissions</div>
+          <div class="subtle mt">Guild admin is read from <strong>guild_members.role_id = 100</strong>. Object ranks come from permission_actor_rank.</div>
+          <table class="mt">
+            <thead><tr><th>Guild Player</th><th>Guild</th><th>Role ID</th><th>Guild Admin</th></tr></thead>
+            <tbody id="guildRows"><tr><td colspan="4">Loading guild members...</td></tr></tbody>
+          </table>
+          <table class="mt">
+            <thead><tr><th>Actor</th><th>Name</th><th>Player</th><th>Rank</th></tr></thead>
+            <tbody id="permissionRows"><tr><td colspan="4">Loading object permissions...</td></tr></tbody>
+          </table>
+        </div>
+        <div class="panel pad">
+          <div class="label">Access Codes</div>
+          <table class="mt">
+            <thead><tr><th>Account</th><th>Code</th><th>Type</th><th>Resettable</th></tr></thead>
+            <tbody id="accessCodeRows"><tr><td colspan="4">Loading access codes...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="layout-3 mt">
+        <div class="panel pad">
+          <div class="label">Set Object Permission Rank</div>
+          <div class="field-grid mt">
+            <label>Actor ID<input id="permActorId" placeholder="permission_actor.actor_id"></label>
+            <label>Player Controller ID<input id="permControllerId" placeholder="player_controller_id"></label>
+            <label>Rank<input id="permRank" type="number" min="0" max="100" value="1"></label>
+            <label>Map ID<input id="permMapId" value="Survival_1"></label>
+            <pre id="permRankPreview">select dune.permission_set_player_rank(actor_id, player_controller_id, rank, 'Survival_1');</pre>
+            <label class="check-row"><input id="permRankConfirm" type="checkbox">I confirm this exact function call.</label>
+            <button class="primary" onclick="setPermissionRank()">Run Permission Function</button>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Create Server Player Access Code</div>
+          <div class="field-grid mt">
+            <label>Account ID<input id="accessAccountId" placeholder="accounts.id"></label>
+            <label>Access Code<input id="accessCodeValue" type="number" min="0" value="0"></label>
+            <label>Access Code Type<input id="accessCodeType" type="number" min="0" value="0"></label>
+            <label class="check-row"><input id="accessResettable" type="checkbox" checked>Resettable access code</label>
+            <pre id="accessCodePreview">select dune.create_server_player_access_codes(account_id, access_code, access_code_type, true);</pre>
+            <label class="check-row"><input id="accessCodeConfirm" type="checkbox">I confirm this exact function call.</label>
+            <button class="primary" onclick="createAccessCode()">Run Access Code Function</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel pad mt">
         <div class="label">Tuned Channels</div>
         <table class="mt">
           <thead><tr><th>Account</th><th>Selected Channel</th><th>Channel</th><th>Tuned</th></tr></thead>
@@ -1320,7 +1566,7 @@ function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.vie
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",activity=[];
+let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,activity=[];
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function statusClass(value){const text=String(value||"");if(/healthy|ready|running|online|enabled|reachable|true/i.test(text))return"ok";if(/offline|failed|error|missing|not|false|unavailable/i.test(text))return"bad";return"warn";}
 function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");}
@@ -1336,12 +1582,24 @@ async function openDirector(){try{const data=await getJson("/api/director");if(d
 async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>'<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td></tr>').join(""):'<tr><td colspan="5">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
 async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";addActivity("maps","Map deployment updated",map+" -> "+replicas);setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);}}
 function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");tone("adminLiveMirror",adminLiveGiveAvailable?"Enabled":"Guarded");tone("receiverState",probe.giveTransport?.reachable?"Online":(probe.giveTransport?.configured?"Warning":"Dry-run"));tone("rabbitState",probe.giveTransport?.mode||probe.transport||"Unknown");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";renderPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
-function renderPlayerSelect(){const select=document.getElementById("adminPlayer");select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name||p.character_name||p.id)+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;}
-function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Character '+esc(p.character_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
-function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();}
-function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;renderPlayers();}
-function renderPlayerDetails(){const p=adminPlayers.find(row=>row.id===selectedPlayerId);const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Grant ID</span><strong>'+esc(p.id)+'</strong></div>';}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");tone("adminLiveMirror",adminLiveGiveAvailable?"Enabled":"Guarded");tone("receiverState",probe.giveTransport?.reachable?"Online":(probe.giveTransport?.configured?"Warning":"Dry-run"));tone("rabbitState",probe.giveTransport?.mode||probe.transport||"Unknown");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);await refreshPermissions();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
+function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
+function renderPlayerSelect(){const select=document.getElementById("adminPlayer");select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;}
+function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
+function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
+function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();}
+function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();}
+function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
+function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
+function permissionQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
+async function refreshPermissions(){const summary=document.getElementById("permissionSummary");if(summary)summary.textContent="Loading permission views...";try{permissionState=await getJson("/api/admin/permissions"+permissionQuery());renderPermissions();addActivity("permissions","Permission views refreshed",permissionState.playerControllerId?("controller "+permissionState.playerControllerId):"all players");}catch(e){if(summary)summary.textContent=betterError(e);addActivity("error","Permission refresh failed",e.message);}}
+function renderPermissions(){const data=permissionState||{};const summary=document.getElementById("permissionSummary");if(summary){summary.className=data.isGuildAdmin?"warning mt":"empty mt";summary.innerHTML=data.playerControllerId?('Controller '+esc(data.playerControllerId)+' / Guild admin: <strong>'+esc(data.isGuildAdmin?"yes":"no")+'</strong>'):'All permission rows. Select a player for focused views.';}const guild=document.getElementById("guildRows");if(guild)guild.innerHTML=(data.guildMembers||[]).length?(data.guildMembers||[]).map(row=>'<tr><td>'+esc(row.player_id)+'</td><td>'+esc(row.guild_id)+'</td><td>'+esc(row.role_id)+'</td><td><span class="badge '+(row.is_guild_admin?'ok':'warn')+'">'+esc(row.is_guild_admin?'role_id 100':'no')+'</span></td></tr>').join(""):'<tr><td colspan="4">No guild member rows found for this selection.</td></tr>';const perms=document.getElementById("permissionRows");if(perms)perms.innerHTML=(data.objectPermissions||[]).length?(data.objectPermissions||[]).map(row=>'<tr><td>'+esc(row.actor_id)+'</td><td>'+esc(row.actor_name||"-")+'</td><td>'+esc(row.player_id)+'</td><td>'+esc(row.rank)+'</td></tr>').join(""):'<tr><td colspan="4">No object permission rows found for this selection.</td></tr>';const codes=document.getElementById("accessCodeRows");if(codes)codes.innerHTML=(data.accessCodes||[]).length?(data.accessCodes||[]).map(row=>'<tr><td>'+esc(row.account_id)+'</td><td>'+esc(row.access_code)+'</td><td>'+esc(row.access_code_type)+'</td><td>'+esc(row.is_resettable)+'</td></tr>').join(""):'<tr><td colspan="4">No access codes found for this selection.</td></tr>';syncPermissionForms();}
+function updatePermissionPreviews(){const actor=document.getElementById("permActorId")?.value||"actor_id";const ctrl=document.getElementById("permControllerId")?.value||"player_controller_id";const rank=document.getElementById("permRank")?.value||"rank";const map=document.getElementById("permMapId")?.value||"map_id";const p1=document.getElementById("permRankPreview");if(p1)p1.textContent="select dune.permission_set_player_rank("+actor+", "+ctrl+", "+rank+", '"+map.replace(/'/g,"''")+"');";const account=document.getElementById("accessAccountId")?.value||"account_id";const code=document.getElementById("accessCodeValue")?.value||"access_code";const type=document.getElementById("accessCodeType")?.value||"access_code_type";const reset=document.getElementById("accessResettable")?.checked?"true":"false";const p2=document.getElementById("accessCodePreview");if(p2)p2.textContent="select dune.create_server_player_access_codes("+account+", "+code+", "+type+", "+reset+");";}
+["permActorId","permControllerId","permRank","permMapId","accessAccountId","accessCodeValue","accessCodeType","accessResettable"].forEach(id=>setTimeout(()=>{const el=document.getElementById(id);if(el)el.addEventListener("input",updatePermissionPreviews);if(el)el.addEventListener("change",updatePermissionPreviews);},0));
+async function setPermissionRank(){updatePermissionPreviews();const payload={actorId:document.getElementById("permActorId").value,playerControllerId:document.getElementById("permControllerId").value,rank:document.getElementById("permRank").value,mapId:document.getElementById("permMapId").value,confirmed:document.getElementById("permRankConfirm").checked};try{const data=await getJson("/api/admin/permissions/set-rank",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.message+"\\n"+data.sql;document.getElementById("permRankConfirm").checked=false;addActivity("permissions","Object permission function executed",data.sql);await refreshPermissions();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("permRankPreview").textContent;addActivity("error","Object permission function blocked",e.message);}}
+async function createAccessCode(){updatePermissionPreviews();const payload={accountId:document.getElementById("accessAccountId").value,accessCode:document.getElementById("accessCodeValue").value,accessCodeType:document.getElementById("accessCodeType").value,isResettable:document.getElementById("accessResettable").checked,confirmed:document.getElementById("accessCodeConfirm").checked};try{const data=await getJson("/api/admin/permissions/create-access-code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.message+"\\n"+data.sql;document.getElementById("accessCodeConfirm").checked=false;addActivity("permissions","Access code function executed",data.sql);await refreshPermissions();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("accessCodePreview").textContent;addActivity("error","Access code function blocked",e.message);}}
 function jumpToGive(){setView("give");renderPlayerSelect();}
 function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td><span class="badge '+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</span></td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
 function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,90);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<div class="avatar">IT</div>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join(""):'<div class="empty">No matching item templates.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
@@ -1418,6 +1676,29 @@ async function route(req, res) {
   if (url.pathname === "/api/admin/tuned-channels" && req.method === "GET") {
     try { await json(res, await adminTunedChannels()); }
     catch (error) { await json(res, { ok: false, rows: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/permissions" && req.method === "GET") {
+    try { await json(res, await adminPermissions(url.searchParams.get("playerControllerId"))); }
+    catch (error) { await json(res, { ok: false, guildMembers: [], objectPermissions: [], accessCodes: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/permissions/set-rank" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminSetPermissionRank(body));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/permissions/create-access-code" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminCreateAccessCode(body));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/admin/give-item" && req.method === "POST") {

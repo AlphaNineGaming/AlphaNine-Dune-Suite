@@ -1,6 +1,7 @@
 {
   "scripts": {
     "test:admin": "node scripts/test-admin-endpoints.js",
+    "receiver": "node receivers/dune-live-give-receiver.js",
     "receiver:give-item": "node receivers/dune-live-give-receiver.js"
   },
   "dependencies": {

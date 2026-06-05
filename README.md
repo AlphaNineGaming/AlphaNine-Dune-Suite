@@ -24,6 +24,30 @@ Start AlphaNine Dune Suite.bat
 
 Accept the Administrator prompt so the suite can read Hyper-V.
 
+For live give-item, keep the configuration in `.env` or `.env.local`, then use the same one-click start. The launcher will load `.env`, then `.env.local`, start the give-item receiver in a separate window, wait for `http://127.0.0.1:5055/health`, and then start the main suite with live give-item enabled.
+
+Minimum `.env.local` example:
+
+```text
+DUNE_RECEIVER_SSH_HOST=192.168.1.11
+DUNE_RECEIVER_SSH_USER=dune
+DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\DuneAwakeningServer\sshKey
+DUNE_RECEIVER_TOKEN=your_receiver_token
+
+DUNE_ADMIN_GIVE_ITEM_TRANSPORT=http-json
+DUNE_ADMIN_GIVE_ITEM_URL=http://127.0.0.1:5055/api/give-item
+DUNE_ADMIN_GIVE_ITEM_HEALTH_URL=http://127.0.0.1:5055/health
+DUNE_ADMIN_GIVE_ITEM_TOKEN=your_receiver_token
+```
+
+To stop both the suite and the receiver, double-click:
+
+```text
+Stop AlphaNine Dune Suite.bat
+```
+
+Do not commit `.env` or `.env.local`.
+
 ## Requirements
 
 - Windows 10/11 Pro
@@ -78,7 +102,7 @@ Live grants become available only when the transport is configured and reachable
 The Suite sender only posts JSON. To turn that JSON into a real in-game item grant, run the standalone receiver:
 
 ```text
-npm run receiver:give-item
+npm run receiver
 ```
 
 Configure the Suite sender to call it:

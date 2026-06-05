@@ -10,6 +10,7 @@ const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
 const CONFIG_PATH = path.join(__dirname, "config.json");
+const ADMIN_AUDIT_LOG = path.join(__dirname, "admin-audit.log");
 const MANAGER_DIR = path.join(__dirname, "manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
 
@@ -905,10 +906,27 @@ function optionalInteger(value, name, min = 0, max = Number.MAX_SAFE_INTEGER) {
   return requireInteger(value, name, min, max);
 }
 
+function requireReal(value, name, min = 0, max = 1000) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max) {
+    throw new Error(`${name} must be between ${min} and ${max}.`);
+  }
+  return number;
+}
+
 function requireConfirmed(value) {
   if (value !== true && value !== "true" && value !== 1 && value !== "1") {
     throw new Error("Confirm the exact function call before running this permission action.");
   }
+}
+
+function appendAdminAudit(action, payload) {
+  const entry = {
+    at: new Date().toISOString(),
+    action,
+    ...payload
+  };
+  fs.appendFileSync(ADMIN_AUDIT_LOG, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
 async function adminPermissions(playerControllerIdValue) {
@@ -1061,6 +1079,155 @@ async function adminCreateAccessCode(payload) {
     sql: call.sql,
     message: "Access code function executed."
   };
+}
+
+const SPECIALIZATION_TRACKS = ["Crafting", "Gathering", "Exploration", "Combat", "Sabotage"];
+
+function requireTrack(value) {
+  const clean = String(value || "").trim();
+  if (!SPECIALIZATION_TRACKS.includes(clean)) {
+    throw new Error(`Track must be one of: ${SPECIALIZATION_TRACKS.join(", ")}.`);
+  }
+  return clean;
+}
+
+async function adminSkillReputation(playerControllerIdValue) {
+  const playerControllerId = optionalInteger(playerControllerIdValue, "player_controller_id", 0);
+  const trackWhere = playerControllerId === null ? "" : `where st.player_id = ${playerControllerId}`;
+  const repWhere = playerControllerId === null ? "" : `where pfr.actor_id = ${playerControllerId}`;
+  const factionWhere = playerControllerId === null ? "" : `where pf.actor_id = ${playerControllerId}`;
+  const sql = `
+    select 'track', st.player_id::text, st.track_type::text, st.xp_amount::text, st.level::text
+    from dune.specialization_tracks st
+    ${trackWhere}
+    order by st.player_id, st.track_type;
+
+    select 'reputation', pfr.actor_id::text, pfr.faction_id::text, coalesce(f.name, ''), pfr.reputation_amount::text
+    from dune.player_faction_reputation pfr
+    left join dune.factions f on f.id = pfr.faction_id
+    ${repWhere}
+    order by pfr.actor_id, pfr.faction_id;
+
+    select 'current_faction', pf.actor_id::text, pf.faction_id::text, coalesce(f.name, ''), coalesce(pf.utc_time_faction_change::text, '')
+    from dune.player_faction pf
+    left join dune.factions f on f.id = pf.faction_id
+    ${factionWhere}
+    order by pf.actor_id;
+
+    select 'faction', id::text, name, '', '' from dune.factions order by id;
+  `;
+  const output = await dbQuery(sql);
+  const tracks = [];
+  const reputation = [];
+  const currentFactions = [];
+  const factions = [];
+  for (const line of output.split(/\r?\n/).filter(Boolean)) {
+    const parts = line.split("\t");
+    if (parts[0] === "track") {
+      tracks.push({ player_id: parts[1] || "", track_type: parts[2] || "", xp_amount: parts[3] || "0", level: parts[4] || "0" });
+    } else if (parts[0] === "reputation") {
+      reputation.push({ actor_id: parts[1] || "", faction_id: parts[2] || "", faction_name: parts[3] || "", reputation_amount: parts[4] || "0" });
+    } else if (parts[0] === "current_faction") {
+      currentFactions.push({ actor_id: parts[1] || "", faction_id: parts[2] || "", faction_name: parts[3] || "", changed_at: parts[4] || "" });
+    } else if (parts[0] === "faction") {
+      factions.push({ id: parts[1] || "", name: parts[2] || "" });
+    }
+  }
+  return {
+    ok: true,
+    playerControllerId: playerControllerId === null ? "" : String(playerControllerId),
+    availableTracks: SPECIALIZATION_TRACKS,
+    tracks,
+    reputation,
+    currentFactions,
+    factions,
+    warning: "Live pickup is not confirmed for specialization XP/level or reputation. A player relog or server restart may be required."
+  };
+}
+
+async function currentTrackRow(playerControllerId, track) {
+  const sql = `
+    select xp_amount::text, level::text
+    from dune.specialization_tracks
+    where player_id = ${playerControllerId}
+      and track_type = ${sqlString(track)}::dune.specializationtracktype
+  `;
+  const output = await dbQuery(sql);
+  if (!output) return null;
+  const [xp = "0", level = "0"] = output.split(/\t/);
+  return { xp_amount: Number(xp) || 0, level: Number(level) || 0 };
+}
+
+function specializationCall(playerControllerId, track, xpAmount, level) {
+  return `select dune.set_specialization_xp_and_level(${playerControllerId}, ${sqlString(track)}::dune.specializationtracktype, ${xpAmount}, ${level});`;
+}
+
+async function adminSpecializationAction(payload, mode) {
+  const playerControllerId = requireInteger(payload?.playerControllerId, "player_controller_id", 0);
+  const track = requireTrack(payload?.trackType);
+  const previous = await currentTrackRow(playerControllerId, track);
+  const amount = requireInteger(payload?.xpAmount, mode === "add" ? "xp_to_add" : "xp_amount", 0, 2147483647);
+  const levelInput = payload?.level === undefined || payload?.level === null || String(payload.level).trim() === "" ? null : requireReal(payload.level, "level", 0, 1000);
+  const nextXp = mode === "add" ? (previous?.xp_amount || 0) + amount : amount;
+  const nextLevel = levelInput === null ? (previous?.level || 0) : levelInput;
+  const sql = specializationCall(playerControllerId, track, nextXp, nextLevel);
+  requireConfirmed(payload?.confirmed);
+  await dbQuery(sql);
+  const result = {
+    ok: true,
+    action: mode === "add" ? "give_skill_points" : "set_skill_points",
+    sql,
+    previous,
+    next: { xp_amount: nextXp, level: nextLevel },
+    rollbackSql: previous
+      ? specializationCall(playerControllerId, track, previous.xp_amount, previous.level)
+      : `delete from dune.specialization_tracks where player_id = ${playerControllerId} and track_type = ${sqlString(track)}::dune.specializationtracktype;`,
+    warning: "Live pickup is not confirmed. Player relog or server restart may be required."
+  };
+  appendAdminAudit(result.action, { playerControllerId, track, previous, next: result.next, sql, rollbackSql: result.rollbackSql });
+  return result;
+}
+
+async function currentReputationRow(playerControllerId, factionId) {
+  const sql = `
+    select reputation_amount::text
+    from dune.player_faction_reputation
+    where actor_id = ${playerControllerId}
+      and faction_id = ${factionId}
+  `;
+  const output = await dbQuery(sql);
+  if (!output) return null;
+  return { reputation_amount: Number(output.trim()) || 0 };
+}
+
+function reputationCall(playerControllerId, factionId, amount) {
+  return `select dune.set_player_faction_reputation(${playerControllerId}, ${factionId}, ${amount});`;
+}
+
+async function adminReputationAction(payload, mode) {
+  const playerControllerId = requireInteger(payload?.playerControllerId, "player_controller_id", 0);
+  const factionId = requireInteger(payload?.factionId, "faction_id", 1, 32767);
+  const previous = await currentReputationRow(playerControllerId, factionId);
+  const amount = mode === "add"
+    ? requireInteger(payload?.reputationAmount, "reputation_to_add", 0, 2147483647)
+    : requireInteger(payload?.reputationAmount, "reputation_amount", 0, 2147483647);
+  const nextAmount = mode === "add" ? (previous?.reputation_amount || 0) + amount : amount;
+  const sql = reputationCall(playerControllerId, factionId, nextAmount);
+  requireConfirmed(payload?.confirmed);
+  await dbQuery(sql);
+  const result = {
+    ok: true,
+    action: mode === "add" ? "add_reputation" : "set_reputation",
+    sql,
+    previous,
+    next: { reputation_amount: nextAmount },
+    rollbackSql: previous
+      ? reputationCall(playerControllerId, factionId, previous.reputation_amount)
+      : `delete from dune.player_faction_reputation where actor_id = ${playerControllerId} and faction_id = ${factionId};`,
+    warning: "Live pickup is not confirmed. Player relog or server restart may be required."
+  };
+  appendAdminAudit(result.action, { playerControllerId, factionId, previous, next: result.next, sql, rollbackSql: result.rollbackSql });
+  return result;
 }
 
 async function adminTunedChannels() {
@@ -1465,6 +1632,49 @@ function appPage() {
         </div>
       </div>
       <div class="panel pad mt">
+        <div class="label">Skill Points and Reputation</div>
+        <div class="warning mt">Confirmed safe path uses specialization XP/level and faction reputation functions. Live pickup is not confirmed; a player relog or server restart may be required.</div>
+        <div class="layout-3 mt">
+          <div>
+            <div class="label">Current Specialization Tracks</div>
+            <table class="mt">
+              <thead><tr><th>Track</th><th>XP</th><th>Level</th></tr></thead>
+              <tbody id="skillRows"><tr><td colspan="3">Loading specialization tracks...</td></tr></tbody>
+            </table>
+          </div>
+          <div>
+            <div class="label">Current Reputation</div>
+            <table class="mt">
+              <thead><tr><th>Faction</th><th>Reputation</th><th>Current</th></tr></thead>
+              <tbody id="reputationRows"><tr><td colspan="3">Loading reputation...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="layout-3 mt">
+          <div class="panel pad">
+            <div class="label">Give / Set Skill Points</div>
+            <div class="field-grid mt">
+              <label>Track<select id="skillTrack"></select></label>
+              <label>XP Amount<input id="skillXpAmount" type="number" min="0" value="0"></label>
+              <label>Level<input id="skillLevel" type="number" min="0" step="0.1" placeholder="Leave blank to keep current"></label>
+              <pre id="skillPreview">select dune.set_specialization_xp_and_level(player_controller_id, 'Combat'::dune.specializationtracktype, xp_amount, level);</pre>
+              <label class="check-row"><input id="skillConfirm" type="checkbox">I confirm this exact function call.</label>
+              <div class="action-row"><button class="primary" onclick="giveSkillPoints()">Give Skill Points</button><button onclick="setSkillPoints()">Set Skill Points</button></div>
+            </div>
+          </div>
+          <div class="panel pad">
+            <div class="label">Add / Set Reputation</div>
+            <div class="field-grid mt">
+              <label>Faction<select id="reputationFaction"></select></label>
+              <label>Reputation Amount<input id="reputationAmount" type="number" min="0" value="0"></label>
+              <pre id="reputationPreview">select dune.set_player_faction_reputation(player_controller_id, faction_id, reputation_amount);</pre>
+              <label class="check-row"><input id="reputationConfirm" type="checkbox">I confirm this exact function call.</label>
+              <div class="action-row"><button class="primary" onclick="addReputation()">Add Reputation</button><button onclick="setReputation()">Set Reputation</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel pad mt">
         <div class="label">Tuned Channels</div>
         <table class="mt">
           <thead><tr><th>Account</th><th>Selected Channel</th><th>Channel</th><th>Tuned</th></tr></thead>
@@ -1566,7 +1776,7 @@ function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.vie
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,activity=[];
+let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[];
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function statusClass(value){const text=String(value||"");if(/healthy|ready|running|online|enabled|reachable|true/i.test(text))return"ok";if(/offline|failed|error|missing|not|false|unavailable/i.test(text))return"bad";return"warn";}
 function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");}
@@ -1582,15 +1792,15 @@ async function openDirector(){try{const data=await getJson("/api/director");if(d
 async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>'<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td></tr>').join(""):'<tr><td colspan="5">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
 async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";addActivity("maps","Map deployment updated",map+" -> "+replicas);setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);}}
 function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");tone("adminLiveMirror",adminLiveGiveAvailable?"Enabled":"Guarded");tone("receiverState",probe.giveTransport?.reachable?"Online":(probe.giveTransport?.configured?"Warning":"Dry-run"));tone("rabbitState",probe.giveTransport?.mode||probe.transport||"Unknown");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);await refreshPermissions();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");tone("adminLiveMirror",adminLiveGiveAvailable?"Enabled":"Guarded");tone("receiverState",probe.giveTransport?.reachable?"Online":(probe.giveTransport?.configured?"Warning":"Dry-run"));tone("rabbitState",probe.giveTransport?.mode||probe.transport||"Unknown");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function renderPlayerSelect(){const select=document.getElementById("adminPlayer");select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
-function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();}
-function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();}
-function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();}
+function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
 function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
 function permissionQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
@@ -1600,6 +1810,19 @@ function updatePermissionPreviews(){const actor=document.getElementById("permAct
 ["permActorId","permControllerId","permRank","permMapId","accessAccountId","accessCodeValue","accessCodeType","accessResettable"].forEach(id=>setTimeout(()=>{const el=document.getElementById(id);if(el)el.addEventListener("input",updatePermissionPreviews);if(el)el.addEventListener("change",updatePermissionPreviews);},0));
 async function setPermissionRank(){updatePermissionPreviews();const payload={actorId:document.getElementById("permActorId").value,playerControllerId:document.getElementById("permControllerId").value,rank:document.getElementById("permRank").value,mapId:document.getElementById("permMapId").value,confirmed:document.getElementById("permRankConfirm").checked};try{const data=await getJson("/api/admin/permissions/set-rank",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.message+"\\n"+data.sql;document.getElementById("permRankConfirm").checked=false;addActivity("permissions","Object permission function executed",data.sql);await refreshPermissions();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("permRankPreview").textContent;addActivity("error","Object permission function blocked",e.message);}}
 async function createAccessCode(){updatePermissionPreviews();const payload={accountId:document.getElementById("accessAccountId").value,accessCode:document.getElementById("accessCodeValue").value,accessCodeType:document.getElementById("accessCodeType").value,isResettable:document.getElementById("accessResettable").checked,confirmed:document.getElementById("accessCodeConfirm").checked};try{const data=await getJson("/api/admin/permissions/create-access-code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.message+"\\n"+data.sql;document.getElementById("accessCodeConfirm").checked=false;addActivity("permissions","Access code function executed",data.sql);await refreshPermissions();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("accessCodePreview").textContent;addActivity("error","Access code function blocked",e.message);}}
+function skillRepQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
+async function refreshSkillReputation(){try{skillRepState=await getJson("/api/admin/skill-reputation"+skillRepQuery());renderSkillReputation();addActivity("progression","Skill/reputation refreshed",skillRepState.playerControllerId?("controller "+skillRepState.playerControllerId):"all players");}catch(e){const skill=document.getElementById("skillRows");const rep=document.getElementById("reputationRows");if(skill)skill.innerHTML='<tr><td colspan="3">'+esc(e.message)+'</td></tr>';if(rep)rep.innerHTML='<tr><td colspan="3">'+esc(e.message)+'</td></tr>';addActivity("error","Skill/reputation refresh failed",e.message);}}
+function renderSkillReputation(){const data=skillRepState||{};const trackSelect=document.getElementById("skillTrack");if(trackSelect){const selected=trackSelect.value;trackSelect.innerHTML=(data.availableTracks||[]).map(t=>'<option value="'+esc(t)+'">'+esc(t)+'</option>').join("")||'<option value="">No tracks found</option>';if(selected)trackSelect.value=selected;}const factionSelect=document.getElementById("reputationFaction");if(factionSelect){const selected=factionSelect.value;factionSelect.innerHTML=(data.factions||[]).filter(f=>f.name!=="None").map(f=>'<option value="'+esc(f.id)+'">'+esc(f.name)+' ('+esc(f.id)+')</option>').join("")||'<option value="">No factions found</option>';if(selected)factionSelect.value=selected;}const skillRows=document.getElementById("skillRows");if(skillRows)skillRows.innerHTML=(data.tracks||[]).length?(data.tracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this selection.</td></tr>';const repRows=document.getElementById("reputationRows");if(repRows){const current=new Map((data.currentFactions||[]).map(row=>[String(row.faction_id),row]));repRows.innerHTML=(data.reputation||[]).length?(data.reputation||[]).map(row=>'<tr><td>'+esc(row.faction_name||row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td><td>'+esc(current.has(String(row.faction_id))?'yes':'no')+'</td></tr>').join(""):'<tr><td colspan="3">No reputation rows found for this selection.</td></tr>';}updateSkillReputationPreviews();}
+function currentSkillRow(track){return (skillRepState?.tracks||[]).find(row=>row.track_type===track)||null;}
+function currentRepRow(factionId){return (skillRepState?.reputation||[]).find(row=>String(row.faction_id)===String(factionId))||null;}
+function updateSkillReputationPreviews(){const p=selectedPlayer();const ctrl=p?.player_controller_id||"player_controller_id";const track=document.getElementById("skillTrack")?.value||"Combat";const xp=Number(document.getElementById("skillXpAmount")?.value||0);const levelRaw=document.getElementById("skillLevel")?.value||"";const current=currentSkillRow(track);const level=levelRaw===""?(current?.level||0):levelRaw;const escapedTrack=String(track).replace(/'/g,"''");const giveXp=(Number(current?.xp_amount)||0)+xp;const skillPreview=document.getElementById("skillPreview");if(skillPreview)skillPreview.textContent="Give Skill Points will execute:\\nselect dune.set_specialization_xp_and_level("+ctrl+", '"+escapedTrack+"'::dune.specializationtracktype, "+giveXp+", "+level+");\\n\\nSet Skill Points will execute:\\nselect dune.set_specialization_xp_and_level("+ctrl+", '"+escapedTrack+"'::dune.specializationtracktype, "+xp+", "+level+");";const faction=document.getElementById("reputationFaction")?.value||"faction_id";const rep=Number(document.getElementById("reputationAmount")?.value||0);const currentRep=Number(currentRepRow(faction)?.reputation_amount)||0;const repPreview=document.getElementById("reputationPreview");if(repPreview)repPreview.textContent="Add Reputation will execute:\\nselect dune.set_player_faction_reputation("+ctrl+", "+faction+", "+(currentRep+rep)+");\\n\\nSet Reputation will execute:\\nselect dune.set_player_faction_reputation("+ctrl+", "+faction+", "+rep+");";}
+["skillTrack","skillXpAmount","skillLevel","reputationFaction","reputationAmount"].forEach(id=>setTimeout(()=>{const el=document.getElementById(id);if(el)el.addEventListener("input",updateSkillReputationPreviews);if(el)el.addEventListener("change",updateSkillReputationPreviews);},0));
+async function runSkillAction(mode){updateSkillReputationPreviews();const p=selectedPlayer();const payload={playerControllerId:p?.player_controller_id||"",trackType:document.getElementById("skillTrack").value,xpAmount:document.getElementById("skillXpAmount").value,level:document.getElementById("skillLevel").value,confirmed:document.getElementById("skillConfirm").checked};try{const data=await getJson("/api/admin/skill-reputation/"+(mode==="add"?"give-skill-points":"set-skill-points"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.action+" executed\\n"+data.sql+"\\n\\nPrevious: "+JSON.stringify(data.previous)+"\\nNext: "+JSON.stringify(data.next)+"\\nRollback: "+data.rollbackSql+"\\n"+data.warning;document.getElementById("skillConfirm").checked=false;addActivity("progression",mode==="add"?"Give Skill Points executed":"Set Skill Points executed",data.sql);await refreshSkillReputation();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("skillPreview").textContent;addActivity("error","Skill points action blocked",e.message);}}
+function giveSkillPoints(){runSkillAction("add");}
+function setSkillPoints(){runSkillAction("set");}
+async function runReputationAction(mode){updateSkillReputationPreviews();const p=selectedPlayer();const payload={playerControllerId:p?.player_controller_id||"",factionId:document.getElementById("reputationFaction").value,reputationAmount:document.getElementById("reputationAmount").value,confirmed:document.getElementById("reputationConfirm").checked};try{const data=await getJson("/api/admin/skill-reputation/"+(mode==="add"?"add-reputation":"set-reputation"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.action+" executed\\n"+data.sql+"\\n\\nPrevious: "+JSON.stringify(data.previous)+"\\nNext: "+JSON.stringify(data.next)+"\\nRollback: "+data.rollbackSql+"\\n"+data.warning;document.getElementById("reputationConfirm").checked=false;addActivity("progression",mode==="add"?"Add Reputation executed":"Set Reputation executed",data.sql);await refreshSkillReputation();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("reputationPreview").textContent;addActivity("error","Reputation action blocked",e.message);}}
+function addReputation(){runReputationAction("add");}
+function setReputation(){runReputationAction("set");}
 function jumpToGive(){setView("give");renderPlayerSelect();}
 function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td><span class="badge '+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</span></td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
 function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,90);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<div class="avatar">IT</div>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join(""):'<div class="empty">No matching item templates.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
@@ -1696,6 +1919,47 @@ async function route(req, res) {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
       await json(res, await adminCreateAccessCode(body));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation" && req.method === "GET") {
+    try { await json(res, await adminSkillReputation(url.searchParams.get("playerControllerId"))); }
+    catch (error) { await json(res, { ok: false, tracks: [], reputation: [], factions: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation/give-skill-points" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminSpecializationAction(body, "add"));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation/set-skill-points" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminSpecializationAction(body, "set"));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation/add-reputation" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminReputationAction(body, "add"));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation/set-reputation" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminReputationAction(body, "set"));
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 400);
     }

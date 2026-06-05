@@ -653,6 +653,90 @@ function adminProbeUnavailable(error) {
 
 async function adminPlayers() {
   const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  const diagnostics = {
+    serverPath: DEFAULT_SERVER_ROOT || "",
+    sshTarget: VM_IP ? `${SSH_USER}@${VM_IP}` : `${SSH_USER}@auto-vm-ip`,
+    sourcesChecked: [],
+    filesChecked: [],
+    sourceTableUsed: "",
+    joinPathUsed: "",
+    characterNamesResolved: 0,
+    playersFound: 0,
+    reason: "",
+    errors: []
+  };
+  const characterQuery = `
+    with account_ids as (
+      select account_id from dune.communinet_player where account_id is not null
+      union
+      select account_id from dune.player_state where account_id is not null
+    )
+    select
+      a.account_id::text,
+      coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
+      coalesce(nullif(ps.character_name, ''), a.account_id::text) as character_name,
+      case when nullif(ps.character_name, '') is null then 'false' else 'true' end as resolved
+    from account_ids a
+    left join dune.player_state ps on ps.account_id = a.account_id
+    order by a.account_id, ps.last_avatar_activity desc nulls last, ps.player_state_id
+    limit 200
+  `;
+  try {
+    const output = await dbQuery(characterQuery);
+    const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
+      const [accountId = "", characterId = "", characterName = "", resolved = "false"] = line.split("\t");
+      return {
+        id: accountId,
+        name: characterName || accountId || "Unknown",
+        account_id: accountId,
+        character_id: characterId,
+        character_name: characterName || accountId || "Unknown",
+        characterNameResolved: /^true$/i.test(resolved)
+      };
+    }).filter((player) => player.id) : [];
+    const resolvedCount = players.filter((player) => player.characterNameResolved).length;
+    diagnostics.sourcesChecked.push({
+      type: "database",
+      source: "dune.communinet_player + dune.player_state",
+      idColumn: "communinet_player.account_id / player_state.account_id",
+      nameColumn: "player_state.character_name",
+      rows: players.length,
+      resolvedNames: resolvedCount,
+      ok: true,
+      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id"
+    });
+    diagnostics.sourceTableUsed = "dune.player_state";
+    diagnostics.joinPathUsed = "dune.communinet_player.account_id -> dune.player_state.account_id";
+    diagnostics.characterNamesResolved = resolvedCount;
+    diagnostics.playersFound = players.length;
+    if (players.length) {
+      if (!resolvedCount) diagnostics.reason = "Player rows were found, but none had a character_name in dune.player_state.";
+      return {
+        ok: true,
+        source: "dune.player_state",
+        joinPath: diagnostics.joinPathUsed,
+        characterNamesResolved: resolvedCount,
+        players,
+        diagnostics,
+        error: resolvedCount ? "" : diagnostics.reason,
+        details: playerDiagnosticLines(diagnostics)
+      };
+    }
+    diagnostics.reason = "No account/player rows were found in dune.communinet_player or dune.player_state.";
+  } catch (error) {
+    diagnostics.sourcesChecked.push({
+      type: "database",
+      source: "dune.communinet_player + dune.player_state",
+      idColumn: "communinet_player.account_id / player_state.account_id",
+      nameColumn: "player_state.character_name",
+      rows: 0,
+      resolvedNames: 0,
+      ok: false,
+      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id",
+      error: error.message
+    });
+    diagnostics.errors.push(`dune.player_state character query: ${error.message}`);
+  }
   const metaSql = `
     select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
     from information_schema.columns
@@ -672,7 +756,21 @@ async function adminPlayers() {
       table_name
     limit 40
   `;
-  const metaOutput = await dbQuery(metaSql);
+  let metaOutput = "";
+  try {
+    metaOutput = await dbQuery(metaSql);
+  } catch (error) {
+    diagnostics.reason = "Could not read Dune database metadata.";
+    diagnostics.errors.push(error.message);
+    return {
+      ok: false,
+      source: "",
+      players: [],
+      diagnostics,
+      error: diagnostics.reason,
+      details: playerDiagnosticLines(diagnostics)
+    };
+  }
   const idNames = ["player_id", "playerid", "account_id", "accountid", "character_id", "characterid", "id", "uid", "uuid"];
   const nameNames = ["display_name", "displayname", "player_name", "playername", "character_name", "charactername", "name", "username", "nickname"];
   const candidates = metaOutput.split(/\r?\n/).filter(Boolean).map((line) => {
@@ -680,34 +778,102 @@ async function adminPlayers() {
     const columns = columnsRaw.split(",").filter(Boolean);
     const lower = new Map(columns.map((column) => [column.toLowerCase(), column]));
     const idCol = idNames.map((name) => lower.get(name)).find(Boolean) || columns.find((column) => /player.*id|id.*player|character.*id|id$/i.test(column));
-    const nameCol = nameNames.map((name) => lower.get(name)).find(Boolean) || columns.find((column) => /name|display/i.test(column));
+    const nameCol = nameNames.map((name) => lower.get(name)).find(Boolean) || columns.find((column) => /display/i.test(column) || (/name/i.test(column) && !/channel|guild|clan|faction|session|server|map/i.test(column)));
     if (!table || !idCol) return null;
     const idExpr = quoteIdent(idCol);
     const nameExpr = nameCol ? `coalesce(${quoteIdent(nameCol)}::text, ${idExpr}::text)` : `${idExpr}::text`;
     return {
       table: `dune.${table}`,
+      idColumn: idCol,
+      nameColumn: nameCol || "",
       sql: `select distinct ${idExpr}::text, ${nameExpr} from dune.${quoteIdent(table)} where ${idExpr} is not null order by 2 limit 100`
     };
   }).filter(Boolean);
-  const errors = [];
+
+  if (!candidates.length) {
+    diagnostics.reason = "No Dune database tables with player-like or character-like columns were found.";
+    return {
+      ok: true,
+      source: "",
+      players: [],
+      diagnostics,
+      error: diagnostics.reason,
+      details: playerDiagnosticLines(diagnostics)
+    };
+  }
+
+  let best = { source: "", players: [] };
   for (const candidate of candidates) {
+    const check = {
+      type: "database",
+      source: candidate.table,
+      idColumn: candidate.idColumn,
+      nameColumn: candidate.nameColumn || "(id only)",
+      rows: 0,
+      ok: false
+    };
     try {
       const output = await dbQuery(candidate.sql);
       const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
         const [id, name] = line.split("\t");
         return { id: id || "", name: name || id || "Unknown" };
       }) : [];
-      return { ok: true, source: candidate.table, players };
+      check.rows = players.length;
+      check.ok = true;
+      diagnostics.sourcesChecked.push(check);
+      if (players.length > 0) {
+        best = { source: candidate.table, players };
+        break;
+      }
     } catch (error) {
-      errors.push(`${candidate.table}: ${error.message}`);
+      check.error = error.message;
+      diagnostics.sourcesChecked.push(check);
+      diagnostics.errors.push(`${candidate.table}: ${error.message}`);
     }
   }
+
+  diagnostics.playersFound = best.players.length;
+  if (!best.players.length) {
+    diagnostics.reason = "No player rows were found in the checked Dune database tables. Players may need to join once, or their records may be stored in another table not yet recognized.";
+  }
+
   return {
-    ok: false,
-    players: [],
-    error: "Could not auto-detect the player table yet.",
-    details: errors.slice(0, 4)
+    ok: true,
+    source: best.source,
+    players: best.players,
+    diagnostics,
+    error: best.players.length ? "" : diagnostics.reason,
+    details: playerDiagnosticLines(diagnostics)
   };
+}
+
+function playerDiagnosticLines(diagnostics) {
+  const lines = [
+    `Server path: ${diagnostics.serverPath || "Not configured"}`,
+    `SSH target: ${diagnostics.sshTarget || "Not configured"}`,
+    `Source table used: ${diagnostics.sourceTableUsed || "Auto-detect fallback"}`,
+    `Join path used: ${diagnostics.joinPathUsed || "No join path selected"}`,
+    `Character names resolved: ${diagnostics.characterNamesResolved || 0}`,
+    `Sources checked: ${diagnostics.sourcesChecked.length}`,
+    `Players found: ${diagnostics.playersFound}`
+  ];
+  if (diagnostics.filesChecked.length) {
+    lines.push(`Files/logs checked: ${diagnostics.filesChecked.join(", ")}`);
+  } else {
+    lines.push("Files/logs checked: none; current player discovery uses the Dune database.");
+  }
+  for (const source of diagnostics.sourcesChecked.slice(0, 10)) {
+    const status = source.ok ? `${source.rows} row(s)` : `error: ${source.error || "unknown"}`;
+    const resolved = typeof source.resolvedNames === "number" ? `, resolved=${source.resolvedNames}` : "";
+    const join = source.joinPath ? `, join=${source.joinPath}` : "";
+    lines.push(`${source.source} [id=${source.idColumn}, name=${source.nameColumn}${resolved}${join}] -> ${status}`);
+  }
+  if (diagnostics.sourcesChecked.length > 10) {
+    lines.push(`...${diagnostics.sourcesChecked.length - 10} more source(s) checked.`);
+  }
+  if (diagnostics.reason) lines.push(`Reason: ${diagnostics.reason}`);
+  for (const error of diagnostics.errors.slice(0, 5)) lines.push(`Parse/check error: ${error}`);
+  return lines;
 }
 
 async function adminGiveItem(payload) {
@@ -1041,7 +1207,7 @@ async function refreshMaps(){try{const data=await getJson("/api/maps");const map
 async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=e.message;}}
 function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
 let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false;
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";tone("adminPlayersFound",String((players.players||[]).length));tone("adminItemsFound",String((items.items||[]).length));const playerSelect=document.getElementById("adminPlayer");playerSelect.innerHTML=(players.players||[]).map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join("")||'<option value="">No players found</option>';adminItems=items.items||[];renderAdminItems();renderAdminChannels(channels.rows||[]);log.textContent=[probe.note,players.error,players.details&&players.details.join("\\n")].filter(Boolean).join("\\n")||"Admin tools ready.";}catch(e){tone("adminDb","Error");log.textContent=e.message;}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";tone("adminPlayersFound",String((players.players||[]).length));tone("adminItemsFound",String((items.items||[]).length));const playerSelect=document.getElementById("adminPlayer");playerSelect.innerHTML=(players.players||[]).map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join("")||'<option value="">No players found</option>';adminItems=items.items||[];renderAdminItems();renderAdminChannels(channels.rows||[]);const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";}catch(e){tone("adminDb","Error");log.textContent=e.message;}}
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td class="'+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
 function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,80);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<span></span>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' - '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join("")||'<div class="label">No matching items.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}

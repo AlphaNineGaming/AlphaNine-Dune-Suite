@@ -1,4 +1,5 @@
 const http = require("http");
+const https = require("https");
 const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -83,6 +84,18 @@ const SSH_KEY = expandEnvPath(config.sshKey || defaultSshKeyPath());
 const DEFAULT_SERVER_ROOT = expandEnvPath(config.serverInstallPath);
 let lastDirectorUrl = null;
 let managerProcess = null;
+
+function envFlag(name, fallback = "") {
+  return String(process.env[name] || fallback).trim();
+}
+
+function envNumber(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const GIVE_ITEM_TRANSPORT = envFlag("DUNE_ADMIN_GIVE_ITEM_TRANSPORT").toLowerCase();
+const GIVE_ITEM_TIMEOUT = envNumber("DUNE_ADMIN_GIVE_ITEM_TIMEOUT_MS", 15000);
 
 function run(command, args, options = {}) {
   return new Promise((resolve) => {
@@ -286,6 +299,201 @@ async function dbQuery(sql, timeout = 45000) {
   return result.stdout.trim();
 }
 
+function redactUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.password) parsed.password = "****";
+    if (parsed.username) parsed.username = "****";
+    return parsed.toString();
+  } catch {
+    return String(value || "");
+  }
+}
+
+function httpRequestJson(urlValue, options = {}) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try { parsed = new URL(urlValue); }
+    catch { reject(new Error("Give-item transport URL is invalid.")); return; }
+    const client = parsed.protocol === "https:" ? https : http;
+    const body = options.body == null ? null : Buffer.from(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
+    const req = client.request(parsed, {
+      method: options.method || (body ? "POST" : "GET"),
+      headers: {
+        ...(body ? { "Content-Type": "application/json", "Content-Length": body.length } : {}),
+        ...(options.headers || {})
+      },
+      timeout: options.timeout || GIVE_ITEM_TIMEOUT
+    }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { text += chunk; });
+      res.on("end", () => {
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, statusCode: res.statusCode, data, text });
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error("Give-item transport timed out.")));
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+function basicAuthHeader(user, password) {
+  return `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`;
+}
+
+function jsonPathEscape(value) {
+  return JSON.stringify(String(value)).slice(1, -1);
+}
+
+function renderGiveItemTemplate(template, command) {
+  return String(template || "").replace(/\{\{\s*(playerId|template|qty|quality|requestId)\s*\}\}/g, (_match, key) => {
+    const value = key === "requestId" ? command.requestId : command[key];
+    return jsonPathEscape(value);
+  });
+}
+
+function validateGiveItemPayload(payload) {
+  const playerId = String(payload.playerId || "").trim();
+  const template = String(payload.template || "").trim();
+  const qty = Number(payload.qty || 1);
+  const quality = Number(payload.quality || 0);
+  if (!playerId) throw new Error("Choose a player first.");
+  if (playerId.length > 128 || !/^[A-Za-z0-9_:.+\-# @]+$/.test(playerId)) throw new Error("Player name/id contains unsupported characters.");
+  if (!template || template.length > 160 || !/^[A-Za-z0-9_:.+-]+$/.test(template)) throw new Error("Choose a valid item template.");
+  const catalogMatch = gearCatalog().some((item) => item.id === template);
+  if (!catalogMatch) throw new Error("Item template was not found in the local Gear Codex catalog.");
+  if (!Number.isInteger(qty) || qty < 1 || qty > 9999) throw new Error("Quantity must be a whole number between 1 and 9999.");
+  if (!Number.isInteger(quality) || quality < 0 || quality > 100) throw new Error("Quality must be a whole number between 0 and 100.");
+  return {
+    playerId,
+    template,
+    qty,
+    quality,
+    requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  };
+}
+
+function giveTransportConfig() {
+  if (!GIVE_ITEM_TRANSPORT || GIVE_ITEM_TRANSPORT === "dry-run" || GIVE_ITEM_TRANSPORT === "disabled") {
+    return { mode: "dry-run", configured: false, reason: "Set DUNE_ADMIN_GIVE_ITEM_TRANSPORT to http-json or rabbitmq-http to enable live item grants." };
+  }
+  if (GIVE_ITEM_TRANSPORT === "http-json") {
+    const url = envFlag("DUNE_ADMIN_GIVE_ITEM_URL");
+    if (!url) return { mode: "http-json", configured: false, reason: "DUNE_ADMIN_GIVE_ITEM_URL is required for http-json transport." };
+    return {
+      mode: "http-json",
+      configured: true,
+      url,
+      healthUrl: envFlag("DUNE_ADMIN_GIVE_ITEM_HEALTH_URL", url),
+      token: envFlag("DUNE_ADMIN_GIVE_ITEM_TOKEN")
+    };
+  }
+  if (GIVE_ITEM_TRANSPORT === "rabbitmq-http") {
+    const url = envFlag("DUNE_ADMIN_RABBITMQ_PUBLISH_URL");
+    const user = envFlag("DUNE_ADMIN_RABBITMQ_USER");
+    const password = envFlag("DUNE_ADMIN_RABBITMQ_PASSWORD");
+    const routingKey = envFlag("DUNE_ADMIN_RABBITMQ_ROUTING_KEY");
+    const messageTemplate = envFlag("DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE");
+    const missing = [];
+    if (!url) missing.push("DUNE_ADMIN_RABBITMQ_PUBLISH_URL");
+    if (!user) missing.push("DUNE_ADMIN_RABBITMQ_USER");
+    if (!password) missing.push("DUNE_ADMIN_RABBITMQ_PASSWORD");
+    if (!routingKey) missing.push("DUNE_ADMIN_RABBITMQ_ROUTING_KEY");
+    if (!messageTemplate) missing.push("DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE");
+    if (missing.length) return { mode: "rabbitmq-http", configured: false, reason: `${missing.join(", ")} required for rabbitmq-http transport.` };
+    let overviewUrl = envFlag("DUNE_ADMIN_RABBITMQ_HEALTH_URL");
+    if (!overviewUrl) {
+      try {
+        const parsed = new URL(url);
+        parsed.pathname = "/api/overview";
+        parsed.search = "";
+        overviewUrl = parsed.toString();
+      } catch {
+        overviewUrl = "";
+      }
+    }
+    return { mode: "rabbitmq-http", configured: true, url, user, password, routingKey, messageTemplate, overviewUrl };
+  }
+  return { mode: GIVE_ITEM_TRANSPORT, configured: false, reason: `Unsupported DUNE_ADMIN_GIVE_ITEM_TRANSPORT '${GIVE_ITEM_TRANSPORT}'. Use http-json, rabbitmq-http, dry-run, or disabled.` };
+}
+
+async function checkGiveTransport() {
+  const config = giveTransportConfig();
+  if (!config.configured) return { ...config, reachable: false };
+  try {
+    if (config.mode === "http-json") {
+      const headers = config.token ? { Authorization: `Bearer ${config.token}` } : {};
+      const response = await httpRequestJson(config.healthUrl, { method: "GET", headers, timeout: GIVE_ITEM_TIMEOUT });
+      return { ...config, reachable: response.statusCode >= 200 && response.statusCode < 500, statusCode: response.statusCode };
+    }
+    if (config.mode === "rabbitmq-http") {
+      const response = await httpRequestJson(config.overviewUrl, {
+        method: "GET",
+        headers: { Authorization: basicAuthHeader(config.user, config.password) },
+        timeout: GIVE_ITEM_TIMEOUT
+      });
+      return { ...config, reachable: response.ok, statusCode: response.statusCode };
+    }
+  } catch (error) {
+    return { ...config, reachable: false, error: error.message };
+  }
+  return { ...config, reachable: false, error: "Transport reachability check is not implemented." };
+}
+
+async function sendLiveGiveItem(command) {
+  const config = await checkGiveTransport();
+  if (!config.configured) {
+    return { ok: false, dryRun: true, command, error: `Live give-item is unavailable: ${config.reason}` };
+  }
+  if (!config.reachable) {
+    return { ok: false, dryRun: true, command, error: `Live give-item transport is configured but not reachable${config.error ? `: ${config.error}` : "."}` };
+  }
+  if (config.mode === "http-json") {
+    const headers = config.token ? { Authorization: `Bearer ${config.token}` } : {};
+    const response = await httpRequestJson(config.url, {
+      method: "POST",
+      headers,
+      body: {
+        playerId: command.playerId,
+        itemId: command.template,
+        template: command.template,
+        quantity: command.qty,
+        qty: command.qty,
+        quality: command.quality,
+        requestId: command.requestId
+      },
+      timeout: GIVE_ITEM_TIMEOUT
+    });
+    if (!response.ok) throw new Error(`Give-item HTTP transport returned ${response.statusCode}: ${response.text || "no response body"}`);
+    return { ok: true, dryRun: false, transport: "http-json", command, response: response.data };
+  }
+  if (config.mode === "rabbitmq-http") {
+    const payload = renderGiveItemTemplate(config.messageTemplate, command);
+    try { JSON.parse(payload); }
+    catch (error) { throw new Error(`DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE did not render valid JSON: ${error.message}`); }
+    const response = await httpRequestJson(config.url, {
+      method: "POST",
+      headers: { Authorization: basicAuthHeader(config.user, config.password) },
+      body: {
+        properties: {},
+        routing_key: config.routingKey,
+        payload,
+        payload_encoding: "string"
+      },
+      timeout: GIVE_ITEM_TIMEOUT
+    });
+    if (!response.ok || response.data?.routed === false) {
+      throw new Error(`RabbitMQ publish failed${response.statusCode ? ` (${response.statusCode})` : ""}: ${response.text || "message was not routed"}`);
+    }
+    return { ok: true, dryRun: false, transport: "rabbitmq-http", command, response: { routed: response.data?.routed !== false } };
+  }
+  return { ok: false, dryRun: true, command, error: `Live give-item is unavailable: unsupported transport '${config.mode}'.` };
+}
+
 async function adminProbe() {
   const tablesSql = `
     select table_schema || '.' || table_name
@@ -302,11 +510,22 @@ async function adminProbe() {
     limit 80
   `;
   const output = await dbQuery(tablesSql);
+  const transport = await checkGiveTransport();
   return {
     ok: true,
-    liveGiveAvailable: false,
+    liveGiveAvailable: Boolean(transport.configured && transport.reachable),
+    giveTransport: {
+      mode: transport.mode,
+      configured: Boolean(transport.configured),
+      reachable: Boolean(transport.reachable),
+      statusCode: transport.statusCode || null,
+      target: transport.url ? redactUrl(transport.url) : "",
+      reason: transport.reason || transport.error || ""
+    },
     tables: output ? output.split(/\r?\n/).filter(Boolean) : [],
-    note: "Player/item database access is reachable. Live item grants need the RabbitMQ command envelope before enabling writes."
+    note: transport.configured && transport.reachable
+      ? `Live item grants are enabled through ${transport.mode}.`
+      : `Player/item database access is reachable. Live item grants are dry-run only: ${transport.reason || transport.error || "transport is not reachable."}`
   };
 }
 
@@ -370,20 +589,8 @@ async function adminPlayers() {
 }
 
 async function adminGiveItem(payload) {
-  const playerId = String(payload.playerId || "").trim();
-  const template = String(payload.template || "").trim();
-  const qty = Number(payload.qty || 1);
-  const quality = Number(payload.quality || 0);
-  if (!playerId) throw new Error("Choose a player first.");
-  if (!/^[A-Za-z0-9_:.+-]+$/.test(template)) throw new Error("Choose a valid item template.");
-  if (!Number.isInteger(qty) || qty < 1 || qty > 9999) throw new Error("Quantity must be between 1 and 9999.");
-  if (!Number.isInteger(quality) || quality < 0 || quality > 100) throw new Error("Quality must be between 0 and 100.");
-  return {
-    ok: false,
-    dryRun: true,
-    command: { playerId, template, qty, quality },
-    error: "Live give-item is not enabled yet. The suite can see the DB and item catalog, but needs the RabbitMQ command envelope/token mapping before it can safely mutate inventories."
-  };
+  const command = validateGiveItemPayload(payload);
+  return sendLiveGiveItem(command);
 }
 
 async function adminTunedChannels() {
@@ -660,7 +867,7 @@ function appPage() {
           <label>Item Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
           <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
           <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0"></label>
-          <button class="primary" onclick="giveAdminItem()">Prepare Give Item</button>
+          <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Prepare Give Item</button>
           <button onclick="refreshAdmin()">Refresh Admin Data</button>
         </div>
       </div>
@@ -695,13 +902,13 @@ async function openDirector(){try{const data=await getJson("/api/director");if(d
 async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];window.mapCatalog=maps;const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+m.map+'">'+m.map+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("");if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.map(m=>'<tr><td class="'+(m.running?'active-map':'')+'">'+m.map+'</td><td>'+(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+(m.memory||'-')+'</td></tr>').join("");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+e.message+'</td></tr>';document.getElementById("mapLog").textContent=e.message;}}
 async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=e.message;}}
 function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
-let adminItems=[],selectedAdminItem=null;
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminLive",probe.liveGiveAvailable?"Enabled":"Guarded");tone("adminPlayersFound",String((players.players||[]).length));tone("adminItemsFound",String((items.items||[]).length));const playerSelect=document.getElementById("adminPlayer");playerSelect.innerHTML=(players.players||[]).map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join("")||'<option value="">No players found</option>';adminItems=items.items||[];renderAdminItems();renderAdminChannels(channels.rows||[]);log.textContent=[probe.note,players.error,players.details&&players.details.join("\\n")].filter(Boolean).join("\\n")||"Admin tools ready.";}catch(e){tone("adminDb","Error");log.textContent=e.message;}}
+let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false;
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";tone("adminPlayersFound",String((players.players||[]).length));tone("adminItemsFound",String((items.items||[]).length));const playerSelect=document.getElementById("adminPlayer");playerSelect.innerHTML=(players.players||[]).map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join("")||'<option value="">No players found</option>';adminItems=items.items||[];renderAdminItems();renderAdminChannels(channels.rows||[]);log.textContent=[probe.note,players.error,players.details&&players.details.join("\\n")].filter(Boolean).join("\\n")||"Admin tools ready.";}catch(e){tone("adminDb","Error");log.textContent=e.message;}}
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td class="'+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
 function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,80);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<span></span>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' - '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join("")||'<div class="label">No matching items.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
-async function giveAdminItem(){const log=document.getElementById("adminLog");if(!selectedAdminItem){log.textContent="Choose an item first.";return;}const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};log.textContent="Preparing item grant...";try{const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});log.textContent=(data.error||"Prepared.")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);}catch(e){log.textContent=e.message;}}
+async function giveAdminItem(){const log=document.getElementById("adminLog");if(!selectedAdminItem){log.textContent="Choose an item first.";return;}const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};log.textContent=adminLiveGiveAvailable?"Giving item...":"Preparing dry-run item grant...";try{const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});const status=data.dryRun?"Dry run only.":"Live item grant sent.";log.textContent=status+"\\n"+(data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);}catch(e){log.textContent=e.message;}}
 refresh();refreshMaps();refreshAdmin();setInterval(refresh,30000);setInterval(refreshMaps,30000);
 </script>
 </body>
@@ -776,7 +983,7 @@ async function route(req, res) {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
       const result = await adminGiveItem(body);
-      await json(res, result, result.ok ? 200 : 409);
+      await json(res, result, result.ok || result.dryRun ? 200 : 409);
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 400);
     }

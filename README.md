@@ -24,6 +24,8 @@ DUNE_ADMIN_GIVE_ITEM_HEALTH_URL=http://127.0.0.1:5055/health
 
 DUNE_ADMIN_GIVE_ITEM_TOKEN=test-token
 
+DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\DuneAwakeningServer\sshKey "Most Likley if not try to find where your steam installed it"
+
 This will be fixed in the coming releases to make it more friendly user
 
 <img width="3840" height="2160" alt="Screenshot (680)" src="https://github.com/user-attachments/assets/0bb0477f-e88e-4750-91f3-7554a2266bc2" />

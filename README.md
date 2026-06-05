@@ -73,6 +73,74 @@ DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE={"playerId":"{{playerId}}","template":"{{t
 
 Live grants become available only when the transport is configured and reachable. If anything is missing, the button remains in dry-run mode with a clear message.
 
+### Real http-json Receiver
+
+The Suite sender only posts JSON. To turn that JSON into a real in-game item grant, run the standalone receiver:
+
+```text
+npm run receiver:give-item
+```
+
+Configure the Suite sender to call it:
+
+```text
+DUNE_ADMIN_GIVE_ITEM_TRANSPORT=http-json
+DUNE_ADMIN_GIVE_ITEM_URL=http://127.0.0.1:5055/api/give-item
+DUNE_ADMIN_GIVE_ITEM_HEALTH_URL=http://127.0.0.1:5055/health
+DUNE_ADMIN_GIVE_ITEM_TOKEN=optional_bearer_token
+```
+
+Configure the receiver side:
+
+```text
+DUNE_RECEIVER_HOST=127.0.0.1
+DUNE_RECEIVER_PORT=5055
+DUNE_RECEIVER_TOKEN=optional_same_bearer_token
+DUNE_RECEIVER_SSH_HOST=192.168.1.11
+DUNE_RECEIVER_SSH_USER=dune
+DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\DuneAwakeningServer\sshKey
+```
+
+The receiver accepts:
+
+```json
+{
+  "playerId": "FLS_OR_FUNCOM_PLAYER_ID",
+  "template": "AluminiumBar",
+  "qty": 5,
+  "quality": 0,
+  "requestId": "optional-id"
+}
+```
+
+If `playerId` is numeric, the receiver treats it as a Dune account/actor id and resolves it through the Dune Postgres database to the FLS/Funcom id required by live server commands. If the battlegroup cannot be auto-detected, set:
+
+```text
+DUNE_RECEIVER_BG_NAMESPACE=your-namespace
+DUNE_RECEIVER_BG_NAME=your-battlegroup-name
+```
+
+It converts that payload into the Dune server command:
+
+```json
+{
+  "ServerCommand": "AddItemToInventory",
+  "PlayerId": "FLS_OR_FUNCOM_PLAYER_ID",
+  "ItemName": "AluminiumBar",
+  "Quantity": 5,
+  "Durability": 1.0
+}
+```
+
+Then it publishes the command inside the game RabbitMQ broker with `rabbitmqctl eval`, using the `heartbeats` exchange and `notifications` routing key. The receiver auto-detects the `mq-game` pod over SSH. If auto-detect fails, set:
+
+```text
+DUNE_RECEIVER_MQ_NAMESPACE=your-namespace
+DUNE_RECEIVER_MQ_POD=your-mq-game-pod
+```
+
+Known limit: the live RabbitMQ `AddItemToInventory` command has no item grade/quality field. The receiver rejects `quality > 0` instead of pretending it worked. Grade-sensitive items need a DB-backed grant path.
+
 Test the local Admin Tools endpoints while the suite is running:
 
 ```text

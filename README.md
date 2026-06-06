@@ -8,6 +8,8 @@ If AlphaNine Dune Suite helps your Dune Awakening server, you can support develo
 
 - After installtion you need to find .env.local in C:\Users\"yourname"\AppData\Roaming\AlphaNine Dune Suite and change the settings to suits your server settings
 
+- Run .exe as administrator
+
 DUNE_RECEIVER_SSH_HOST=Your VM-IP
 
 DUNE_RECEIVER_SSH_USER=

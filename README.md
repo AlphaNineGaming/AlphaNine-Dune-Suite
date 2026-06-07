@@ -6,6 +6,8 @@ If AlphaNine Dune Suite helps your Dune Awakening server, you can support develo
   <img src="https://storage.ko-fi.com/cdn/kofi5.png" alt="Support me on Ko-fi" width="180">
 </a>
 
+https://discord.gg/ENuxwjngs
+
 - After installtion you need to find .env.local in C:\Users\"yourname"\AppData\Roaming\AlphaNine Dune Suite and change the settings to suits your server settings
 
 - Run .exe as administrator

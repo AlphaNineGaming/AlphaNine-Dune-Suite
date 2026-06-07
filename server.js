@@ -1306,6 +1306,17 @@ function unquoteEnvValue(value) {
   return trimmed;
 }
 
+function normalizeExecutablePath(value) {
+  let executable = unquoteEnvValue(value).trim();
+  executable = executable.replace(/^\uFEFF/, "");
+  executable = unquoteEnvValue(executable).trim();
+  if (process.platform === "win32") {
+    executable = executable.replace(/\//g, "\\");
+  }
+  if (!executable) return "";
+  return path.normalize(executable);
+}
+
 function readEnvValue(filePath, name) {
   if (!filePath || !fs.existsSync(filePath)) return "";
   const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
@@ -1313,7 +1324,7 @@ function readEnvValue(filePath, name) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-    if (match && match[1] === name) return expandEnvPath(unquoteEnvValue(match[2]));
+    if (match && match[1] === name) return normalizeExecutablePath(expandEnvPath(match[2]));
   }
   return "";
 }
@@ -1349,19 +1360,21 @@ function configuredPythonPath() {
 function findPython() {
   const configured = configuredPythonPath();
   if (configured) {
-    if (fs.existsSync(configured.command)) {
-      return { command: configured.command, source: `PYTHON_PATH from ${configured.source}` };
+    const exists = fs.existsSync(configured.command);
+    console.log(`Manager service PYTHON_PATH: ${configured.command} (${configured.source}) exists=${exists}`);
+    if (exists) {
+      return { command: configured.command, source: `PYTHON_PATH from ${configured.source}`, exists };
     }
     console.warn(`Configured PYTHON_PATH was not found: ${configured.command} (${configured.source})`);
   }
-  if (commandAvailable("python")) return { command: "python", source: "PATH" };
-  if (commandAvailable("py")) return { command: "py", source: "PATH" };
+  if (commandAvailable("python")) return { command: "python", source: "PATH", exists: true };
+  if (commandAvailable("py")) return { command: "py", source: "PATH", exists: true };
   return null;
 }
 
 function logPythonResolution(resolved) {
   const message = resolved
-    ? `Manager service Python command resolved: ${resolved.command} (${resolved.source})`
+    ? `Manager service Python command resolved: ${resolved.command} (${resolved.source}) exists=${resolved.exists}`
     : "Manager service warning: Python was not found. Set PYTHON_PATH in .env.local or install python/py.";
   if (message === loggedPythonCommand) return;
   loggedPythonCommand = message;
@@ -1488,6 +1501,7 @@ function startManagerService() {
   }
   managerProcess = spawn(resolved.command, ["manager-server.py", "--no-open"], {
     cwd: MANAGER_DIR,
+    shell: false,
     windowsHide: true,
     stdio: "ignore"
   });

@@ -1,7 +1,8 @@
-const { app, BrowserWindow, dialog, shell } = require("electron");
+const { app, BrowserWindow, dialog, shell, utilityProcess } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
+const os = require("os");
 const path = require("path");
 
 const APP_PORT = Number(process.env.PORT || 8810);
@@ -9,10 +10,14 @@ const RECEIVER_DEFAULT_HOST = "127.0.0.1";
 const RECEIVER_DEFAULT_PORT = 5055;
 const START_TIMEOUT_MS = 45000;
 
+app.setName("AlphaNine Dune Suite");
+app.setAppUserModelId("com.alphanine.dunesuite");
+
 let mainWindow = null;
 let serverProcess = null;
 let receiverProcess = null;
 let shuttingDown = false;
+const childErrors = new Map();
 
 function appPath(...parts) {
   return path.join(app.getAppPath(), ...parts);
@@ -24,6 +29,36 @@ function userPath(...parts) {
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
+}
+
+function logDirPath() {
+  return userPath("logs");
+}
+
+function logPath(label) {
+  return path.join(logDirPath(), `${label}.log`);
+}
+
+function appendLog(label, message) {
+  try {
+    ensureDir(logDirPath());
+    const line = `[${new Date().toISOString()}] ${message}${os.EOL}`;
+    fs.appendFileSync(logPath(label), line, "utf8");
+  } catch {
+    // Logging must never be the reason startup fails.
+  }
+}
+
+function startupErrorMessage(error) {
+  const details = error?.stack || error?.message || String(error);
+  return [
+    details,
+    "",
+    "Logs:",
+    logPath("desktop"),
+    logPath("suite"),
+    logPath("receiver")
+  ].join("\n");
 }
 
 function readEnvFile(filePath, override = false) {
@@ -94,24 +129,80 @@ function loadEnvironment() {
 function childEnv(extra = {}) {
   return {
     ...process.env,
-    ELECTRON_RUN_AS_NODE: "1",
     ...extra
   };
 }
 
-function spawnNodeScript(scriptPath, label, extraEnv = {}) {
-  const logDir = userPath("logs");
-  ensureDir(logDir);
-  const out = fs.openSync(path.join(logDir, `${label}.log`), "a");
-  const child = spawn(process.execPath, [scriptPath], {
-    cwd: app.getAppPath(),
+function pipeChildLogs(child, label) {
+  if (child.stdout) {
+    child.stdout.on("data", (chunk) => appendLog(label, String(chunk).trimEnd()));
+  }
+  if (child.stderr) {
+    child.stderr.on("data", (chunk) => appendLog(label, String(chunk).trimEnd()));
+  }
+}
+
+function childCwd() {
+  return app.isPackaged ? path.dirname(process.execPath) : app.getAppPath();
+}
+
+function spawnDevelopmentNodeScript(scriptPath, label, extraEnv = {}) {
+  const child = spawn("node", [scriptPath], {
+    cwd: childCwd(),
     env: childEnv(extraEnv),
-    stdio: ["ignore", out, out],
+    stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
   });
+  pipeChildLogs(child, label);
+  child.on("error", (error) => {
+    childErrors.set(label, error.message);
+    appendLog(label, `spawn error: ${error.stack || error.message}`);
+    appendLog("desktop", `${label} spawn error: ${error.stack || error.message}`);
+  });
+  child.on("spawn", () => {
+    appendLog(label, `${label} started with node. pid=${child.pid || ""}`);
+  });
+  return child;
+}
+
+function forkPackagedNodeScript(scriptPath, label, extraEnv = {}) {
+  const child = utilityProcess.fork(scriptPath, [], {
+    cwd: childCwd(),
+    env: childEnv(extraEnv),
+    stdio: ["ignore", "pipe", "pipe"],
+    serviceName: `AlphaNine ${label}`
+  });
+  pipeChildLogs(child, label);
+  child.on("error", (type, location, report) => {
+    const message = `${type || "UtilityProcessError"} ${location || ""}`.trim();
+    childErrors.set(label, message);
+    appendLog(label, `utility process error: ${message}\n${report || ""}`.trim());
+    appendLog("desktop", `${label} utility process error: ${message}`);
+  });
+  child.on("spawn", () => {
+    appendLog(label, `${label} started with Electron utilityProcess. pid=${child.pid || ""}`);
+  });
+  return child;
+}
+
+function spawnNodeScript(scriptPath, label, extraEnv = {}) {
+  ensureDir(logDirPath());
+  appendLog("desktop", `Starting ${label}: ${scriptPath}`);
+  if (!fs.existsSync(scriptPath)) {
+    const error = new Error(`${label} script was not found: ${scriptPath}`);
+    childErrors.set(label, error.message);
+    appendLog("desktop", error.message);
+    throw error;
+  }
+  const child = app.isPackaged
+    ? forkPackagedNodeScript(scriptPath, label, extraEnv)
+    : spawnDevelopmentNodeScript(scriptPath, label, extraEnv);
   child.on("exit", (code, signal) => {
     if (!shuttingDown && code !== 0) {
-      console.error(`${label} exited with code ${code || ""} ${signal || ""}`.trim());
+      const message = `${label} exited with code ${code || ""} ${signal || ""}`.trim();
+      childErrors.set(label, message);
+      appendLog(label, message);
+      appendLog("desktop", message);
     }
   });
   return child;
@@ -170,7 +261,8 @@ async function startReceiverIfNeeded() {
   receiverProcess = spawnNodeScript(receiverFile, "receiver");
   const ready = await waitForUrl(cfg.healthUrl, START_TIMEOUT_MS);
   if (!ready) {
-    throw new Error(`Give-item receiver did not become healthy at ${cfg.healthUrl}.`);
+    const reason = childErrors.get("receiver") || "No child-process error was reported.";
+    throw new Error(`Give-item receiver did not become healthy at ${cfg.healthUrl}.\n${reason}\nSee ${logPath("receiver")}`);
   }
 }
 
@@ -179,16 +271,19 @@ async function startServer() {
   serverProcess = spawnNodeScript(serverFile, "suite");
   const ready = await waitForUrl(`http://127.0.0.1:${APP_PORT}/`, START_TIMEOUT_MS);
   if (!ready) {
-    throw new Error(`AlphaNine Dune Suite did not start at http://127.0.0.1:${APP_PORT}/.`);
+    const reason = childErrors.get("suite") || "No child-process error was reported.";
+    throw new Error(`AlphaNine Dune Suite did not start at http://127.0.0.1:${APP_PORT}/.\n${reason}\nSee ${logPath("suite")}`);
   }
 }
 
 function killTree(child) {
-  if (!child || child.killed || !child.pid) return;
+  if (!child) return;
   try {
-    if (process.platform === "win32") {
+    if (app.isPackaged && typeof child.kill === "function") {
+      child.kill();
+    } else if (process.platform === "win32" && child.pid) {
       spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
-    } else {
+    } else if (typeof child.kill === "function") {
       child.kill("SIGTERM");
     }
   } catch {
@@ -226,14 +321,13 @@ function createWindow() {
 }
 
 async function boot() {
+  appendLog("desktop", `Booting AlphaNine Dune Suite. packaged=${app.isPackaged} appPath=${app.getAppPath()} resourcesPath=${process.resourcesPath || ""}`);
   createFirstRunFiles();
   loadEnvironment();
   await startReceiverIfNeeded();
   await startServer();
   createWindow();
 }
-
-app.setAppUserModelId("com.alphanine.dunesuite");
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -248,7 +342,8 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     boot().catch((error) => {
-      dialog.showErrorBox("AlphaNine Dune Suite failed to start", error.message);
+      appendLog("desktop", `Startup failed: ${error.stack || error.message}`);
+      dialog.showErrorBox("AlphaNine Dune Suite failed to start", startupErrorMessage(error));
       cleanupChildren();
       app.quit();
     });

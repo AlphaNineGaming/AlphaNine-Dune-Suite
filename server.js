@@ -93,6 +93,7 @@ let lastDirectorUrl = null;
 let managerProcess = null;
 let managerStartError = "";
 let loggedPythonCommand = "";
+let managerSpawnDiagnostics = null;
 
 function envFlag(name, fallback = "") {
   return String(process.env[name] || fallback).trim();
@@ -1372,6 +1373,40 @@ function findPython() {
   return null;
 }
 
+function isWindowsAppsAlias(command) {
+  return process.platform === "win32" && /\\WindowsApps\\/i.test(String(command || ""));
+}
+
+function managerSpawnDetails(resolved, args, useShell, reason = "") {
+  const executable = resolved?.command || "";
+  return {
+    reason,
+    command: executable,
+    source: resolved?.source || "",
+    cwd: MANAGER_DIR,
+    args,
+    shell: Boolean(useShell),
+    executableExists: executable ? fs.existsSync(executable) : false,
+    isWindowsAppsAlias: isWindowsAppsAlias(executable),
+    PATH: process.env.PATH || "",
+    PYTHONPATH: process.env.PYTHONPATH || ""
+  };
+}
+
+function logManagerSpawnDetails(details) {
+  const attempts = Array.isArray(managerSpawnDiagnostics?.attempts) ? managerSpawnDiagnostics.attempts : [];
+  managerSpawnDiagnostics = { ...details, attempts: [...attempts, details] };
+  console.log(`Manager service spawn diagnostics: ${JSON.stringify(details)}`);
+}
+
+function managerErrorPayload(error) {
+  return {
+    ok: false,
+    error: error || managerFallbackWarning(),
+    spawnDiagnostics: managerSpawnDiagnostics
+  };
+}
+
 function logPythonResolution(resolved) {
   const message = resolved
     ? `Manager service Python command resolved: ${resolved.command} (${resolved.source}) exists=${resolved.exists}`
@@ -1416,16 +1451,20 @@ function managerFallbackWarning() {
 
 async function handleManagerFallback(req, res, managerPath) {
   if (managerPath === "/api/server/config" && req.method === "GET") {
-    await json(res, { config: readManagerConfigFallback(), configFile: MANAGER_CONFIG_PATH, warning: managerFallbackWarning() });
+    await json(res, { config: readManagerConfigFallback(), configFile: MANAGER_CONFIG_PATH, warning: managerFallbackWarning(), spawnDiagnostics: managerSpawnDiagnostics });
     return true;
   }
   if (managerPath === "/api/server/config" && req.method === "POST") {
     try {
       const config = writeManagerConfigFallback(JSON.parse(await readBody(req) || "{}"));
-      await json(res, { ok: true, config, configFile: MANAGER_CONFIG_PATH, warning: managerFallbackWarning() });
+      await json(res, { ok: true, config, configFile: MANAGER_CONFIG_PATH, warning: managerFallbackWarning(), spawnDiagnostics: managerSpawnDiagnostics });
     } catch {
       await json(res, { ok: false, error: "Invalid server setup payload" }, 400);
     }
+    return true;
+  }
+  if (managerPath === "/api/server/discover" && req.method === "GET") {
+    await json(res, managerErrorPayload(`Battlegroup discovery could not start the manager service. ${managerFallbackWarning()}`), 502);
     return true;
   }
   if (managerPath === "/api/server/settings" && req.method === "GET") {
@@ -1433,7 +1472,7 @@ async function handleManagerFallback(req, res, managerPath) {
     try {
       if (fs.existsSync(MANAGER_APPLIED_PROFILE_PATH)) payload = JSON.parse(fs.readFileSync(MANAGER_APPLIED_PROFILE_PATH, "utf8"));
     } catch {}
-    await json(res, { ...payload, warning: managerFallbackWarning() });
+    await json(res, { ...payload, warning: managerFallbackWarning(), spawnDiagnostics: managerSpawnDiagnostics });
     return true;
   }
   if (managerPath === "/api/server/settings" && req.method === "POST") {
@@ -1453,7 +1492,8 @@ async function handleManagerFallback(req, res, managerPath) {
         profileFile: MANAGER_APPLIED_PROFILE_PATH,
         settingsFile: MANAGER_APPLIED_SETTINGS_PATH,
         settingCount: Object.keys(flatSettings).length,
-        warning: managerFallbackWarning()
+        warning: managerFallbackWarning(),
+        spawnDiagnostics: managerSpawnDiagnostics
       });
     } catch {
       await json(res, { ok: false, error: "Invalid JSON payload" }, 400);
@@ -1499,13 +1539,28 @@ function startManagerService() {
     console.warn(managerStartError);
     return;
   }
-  managerProcess = spawn(resolved.command, ["manager-server.py", "--no-open"], {
+  spawnManagerProcess(resolved, isWindowsAppsAlias(resolved.command), isWindowsAppsAlias(resolved.command) ? "WindowsApps alias requires shell fallback" : "direct spawn");
+}
+
+function spawnManagerProcess(resolved, useShell, reason) {
+  const args = ["manager-server.py", "--no-open"];
+  const details = managerSpawnDetails(resolved, args, useShell, reason);
+  logManagerSpawnDetails(details);
+  managerProcess = spawn(resolved.command, args, {
     cwd: MANAGER_DIR,
-    shell: false,
+    shell: useShell,
     windowsHide: true,
     stdio: "ignore"
   });
   managerProcess.on("error", (error) => {
+    if (error.code === "ENOENT" && !useShell && resolved.source.startsWith("PYTHON_PATH")) {
+      managerSpawnDiagnostics = { ...managerSpawnDiagnostics, errorCode: error.code || "", errorMessage: error.message || String(error) };
+      console.warn(`Manager service direct spawn failed with ENOENT for ${resolved.command}; retrying with shell:true.`);
+      managerProcess = null;
+      spawnManagerProcess(resolved, true, "direct spawn ENOENT; retrying with shell:true");
+      return;
+    }
+    managerSpawnDiagnostics = { ...managerSpawnDiagnostics, errorCode: error.code || "", errorMessage: error.message || String(error) };
     managerStartError = `Manager service failed to start with ${resolved.command}: ${error.message}`;
     console.error(managerStartError);
     managerProcess = null;
@@ -1530,7 +1585,7 @@ async function proxyToManager(req, res, pathname) {
     res.end(text);
   } catch (error) {
     if (await handleManagerFallback(req, res, managerPath)) return;
-    await json(res, { ok: false, error: managerStartError || `Manager service is not ready: ${error.message}` }, 502);
+    await json(res, managerErrorPayload(managerStartError || `Manager service is not ready: ${error.message}`), 502);
   }
 }
 

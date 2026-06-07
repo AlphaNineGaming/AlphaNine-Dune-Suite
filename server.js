@@ -11,7 +11,12 @@ const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
 const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || path.join(__dirname, "config.json");
 const ADMIN_AUDIT_LOG = path.join(__dirname, "admin-audit.log");
-const MANAGER_DIR = path.join(__dirname, "manager");
+function packagedUnpackedPath(...parts) {
+  if (!String(__dirname).includes("app.asar")) return path.join(__dirname, ...parts);
+  return path.join(__dirname.replace("app.asar", "app.asar.unpacked"), ...parts);
+}
+
+const MANAGER_DIR = packagedUnpackedPath("manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
 const APPDATA_DIR = process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "";
 const LOCALAPPDATA_DIR = process.env.LOCALAPPDATA || process.env.APPDATA || "";
@@ -1363,7 +1368,7 @@ function findPython() {
   if (configured) {
     const exists = fs.existsSync(configured.command);
     console.log(`Manager service PYTHON_PATH: ${configured.command} (${configured.source}) exists=${exists}`);
-    if (exists) {
+    if (exists || isWindowsAppsAlias(configured.command)) {
       return { command: configured.command, source: `PYTHON_PATH from ${configured.source}`, exists };
     }
     console.warn(`Configured PYTHON_PATH was not found: ${configured.command} (${configured.source})`);

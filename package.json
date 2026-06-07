@@ -35,6 +35,9 @@
       "!*.log",
       "!*.tmp"
     ],
+    "asarUnpack": [
+      "manager/**"
+    ],
     "extraMetadata": {
       "main": "electron/main.js"
     },

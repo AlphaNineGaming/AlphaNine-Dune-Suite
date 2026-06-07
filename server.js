@@ -9,6 +9,7 @@ const APP_VERSION = "0.1.0-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
+const RECEIVER_DEFAULT_PORT = 5055;
 const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || path.join(__dirname, "config.json");
 const ADMIN_AUDIT_LOG = path.join(__dirname, "admin-audit.log");
 function packagedUnpackedPath(...parts) {
@@ -63,6 +64,10 @@ function saveConfig(nextConfig) {
   if (clean.port < 1 || clean.port > 65535) throw new Error("Port must be between 1 and 65535.");
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(clean, null, 2));
   return clean;
+}
+
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
 }
 
 function readBody(req) {
@@ -127,6 +132,24 @@ const LIVE_GIVE_SECRET_ENV_NAMES = new Set([
   "DUNE_ADMIN_GIVE_ITEM_TOKEN",
   "DUNE_ADMIN_RABBITMQ_PASSWORD"
 ]);
+
+const ENV_LOCAL_PATH = APPDATA_DIR ? path.join(APPDATA_DIR, ".env.local") : path.join(__dirname, ".env.local");
+const ENV_SETTING_FIELDS = [
+  ["DUNE_ADMIN_GIVE_ITEM_TRANSPORT", "Give Item Transport"],
+  ["DUNE_ADMIN_GIVE_ITEM_URL", "Give Item URL"],
+  ["DUNE_ADMIN_GIVE_ITEM_HEALTH_URL", "Give Item Health URL"],
+  ["DUNE_ADMIN_GIVE_ITEM_TOKEN", "Give Item Token"],
+  ["DUNE_RECEIVER_HOST", "Receiver Host"],
+  ["DUNE_RECEIVER_PORT", "Receiver Port"],
+  ["DUNE_RECEIVER_TOKEN", "Receiver Token"],
+  ["DUNE_RECEIVER_SSH_HOST", "SSH Host"],
+  ["DUNE_RECEIVER_SSH_USER", "SSH User"],
+  ["DUNE_RECEIVER_SSH_KEY", "SSH Key Path"],
+  ["DUNE_RECEIVER_MQ_NAMESPACE", "MQ Namespace"],
+  ["DUNE_RECEIVER_MQ_POD", "MQ Pod"],
+  ["PYTHON_PATH", "Python Path"]
+];
+const ENV_SETTING_KEYS = new Set(ENV_SETTING_FIELDS.map(([key]) => key));
 
 function run(command, args, options = {}) {
   return new Promise((resolve) => {
@@ -370,6 +393,115 @@ function httpRequestJson(urlValue, options = {}) {
     if (body) req.write(body);
     req.end();
   });
+}
+
+function parseEnvText(text) {
+  const values = {};
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) continue;
+    values[match[1]] = unquoteEnvValue(match[2]);
+  }
+  return values;
+}
+
+function readEnvLocalSettings() {
+  const text = fs.existsSync(ENV_LOCAL_PATH) ? fs.readFileSync(ENV_LOCAL_PATH, "utf8") : "";
+  const parsed = parseEnvText(text);
+  const values = {};
+  for (const [key] of ENV_SETTING_FIELDS) values[key] = parsed[key] || "";
+  return { values, path: ENV_LOCAL_PATH, fields: ENV_SETTING_FIELDS.map(([key, label]) => ({ key, label })) };
+}
+
+function quoteEnvValue(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/[\s#"'=]/.test(text)) return `"${text.replace(/"/g, "'")}"`;
+  return text;
+}
+
+function writeEnvLocalSettings(nextValues) {
+  ensureDir(path.dirname(ENV_LOCAL_PATH));
+  const existing = fs.existsSync(ENV_LOCAL_PATH) ? fs.readFileSync(ENV_LOCAL_PATH, "utf8").split(/\r?\n/) : [
+    "# AlphaNine Dune Suite local configuration",
+    "# Edit this file for installed desktop app settings.",
+    "# Secrets stay on this machine and are not committed.",
+    ""
+  ];
+  const seen = new Set();
+  const lines = existing.map((line) => {
+    const match = String(line).match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!match || !ENV_SETTING_KEYS.has(match[1])) return line;
+    seen.add(match[1]);
+    return `${match[1]}=${quoteEnvValue(nextValues[match[1]])}`;
+  });
+  if (lines.length && lines[lines.length - 1].trim()) lines.push("");
+  for (const [key] of ENV_SETTING_FIELDS) {
+    if (!seen.has(key)) lines.push(`${key}=${quoteEnvValue(nextValues[key])}`);
+  }
+  fs.writeFileSync(ENV_LOCAL_PATH, `${lines.join(os.EOL).replace(/\s+$/, "")}${os.EOL}`, "utf8");
+  return readEnvLocalSettings();
+}
+
+function reloadEnvLocalSettings() {
+  const settings = readEnvLocalSettings();
+  for (const [key] of ENV_SETTING_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(settings.values, key)) process.env[key] = settings.values[key];
+  }
+  return settings;
+}
+
+function envSettingsSnapshot() {
+  return readEnvLocalSettings();
+}
+
+function envSettingsReceiverHealthUrl(values = readEnvLocalSettings().values) {
+  const explicit = String(values.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL || "").trim();
+  if (explicit) return explicit;
+  const host = String(values.DUNE_RECEIVER_HOST || "127.0.0.1").trim();
+  const port = Number(values.DUNE_RECEIVER_PORT || RECEIVER_DEFAULT_PORT) || RECEIVER_DEFAULT_PORT;
+  return `http://${host}:${port}/health`;
+}
+
+async function testEnvReceiverHealth() {
+  const settings = readEnvLocalSettings();
+  const url = envSettingsReceiverHealthUrl(settings.values);
+  const response = await httpRequestJson(url, { method: "GET", timeout: 8000 });
+  return { ok: response.statusCode >= 200 && response.statusCode < 500, url, statusCode: response.statusCode, body: response.data || response.text || "" };
+}
+
+function envSshArgs(values, command) {
+  const host = String(values.DUNE_RECEIVER_SSH_HOST || "").trim();
+  const user = String(values.DUNE_RECEIVER_SSH_USER || "dune").trim();
+  const key = expandEnvPath(values.DUNE_RECEIVER_SSH_KEY || "");
+  if (!host) throw new Error("SSH Host is required.");
+  const args = ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=QUIET", "-o", "ConnectTimeout=8"];
+  if (key) args.push("-i", key);
+  args.push(`${user}@${host}`, command);
+  return args;
+}
+
+async function testEnvSsh() {
+  const values = readEnvLocalSettings().values;
+  const result = await run("ssh", envSshArgs(values, "echo alphanine-ssh-ok"), { timeout: 15000 });
+  return { ok: result.ok, stdout: result.stdout.trim(), stderr: result.stderr.trim(), error: result.error };
+}
+
+async function detectEnvBattlegroup() {
+  const values = readEnvLocalSettings().values;
+  const command = "sudo kubectl get ns --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | sed -n 's/^funcom-seabass-//p'";
+  const result = await run("ssh", envSshArgs(values, command), { timeout: 30000 });
+  const battlegroups = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return { ok: result.ok && battlegroups.length > 0, battlegroups: [...new Set(battlegroups)].sort(), stdout: result.stdout.trim(), stderr: result.stderr.trim(), error: result.error };
+}
+
+function openEnvConfigFolder() {
+  ensureDir(path.dirname(ENV_LOCAL_PATH));
+  const child = spawn("explorer.exe", [path.dirname(ENV_LOCAL_PATH)], { windowsHide: true, stdio: "ignore", detached: true });
+  child.unref();
+  return { ok: true, path: path.dirname(ENV_LOCAL_PATH) };
 }
 
 function basicAuthHeader(user, password) {
@@ -1663,6 +1795,7 @@ function appPage() {
     .layout-3 { display:grid; grid-template-columns:1.1fr .9fr; gap:12px; align-items:start; }
     .controls, .action-row { display:flex; flex-wrap:wrap; gap:10px; }
     .field-grid { display:grid; gap:10px; }
+    .env-grid { display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:10px; }
     label { display:grid; gap:6px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
     select, input { width:100%; min-height:42px; border:1px solid rgba(217,178,111,.25); border-radius:6px; background:rgba(6,8,10,.86); color:var(--text); padding:0 12px; outline:none; }
     select:focus, input:focus { border-color:var(--blue); box-shadow:0 0 0 3px rgba(114,164,242,.12); }
@@ -1711,6 +1844,7 @@ function appPage() {
       <button class="tab" data-view="server">Server Status</button>
       <button class="tab" data-view="logs">Logs</button>
       <button class="tab" data-view="settings">Settings</button>
+      <button class="tab" data-view="environment">Environment Settings</button>
     </nav>
     <div class="sidebar-foot">
       <div class="kofi-widget"><script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'E1W220NMPA');kofiwidget2.draw();</script></div>
@@ -2002,6 +2136,41 @@ function appPage() {
       </div>
       <div class="panel frame-wrap mt"><iframe id="toolFrame" src="/manager/" title="AlphaNine Dune tools"></iframe></div>
     </section>
+
+    <section id="environment" class="view">
+      <div class="panel pad">
+        <div class="label">Environment Settings</div>
+        <div class="subtle mt">These values are saved only to the installed app .env.local file.</div>
+        <div id="envSettingsPath" class="warning mt">Loading configuration path...</div>
+        <div class="env-grid mt">
+          <label>Give Item Transport<input data-env-key="DUNE_ADMIN_GIVE_ITEM_TRANSPORT" placeholder="dry-run, http-json, rabbitmq-http"></label>
+          <label>Give Item URL<input data-env-key="DUNE_ADMIN_GIVE_ITEM_URL" placeholder="http://127.0.0.1:5055/api/give-item"></label>
+          <label>Give Item Health URL<input data-env-key="DUNE_ADMIN_GIVE_ITEM_HEALTH_URL" placeholder="http://127.0.0.1:5055/health"></label>
+          <label>Give Item Token<input data-env-key="DUNE_ADMIN_GIVE_ITEM_TOKEN" type="password" autocomplete="off"></label>
+          <label>Receiver Host<input data-env-key="DUNE_RECEIVER_HOST" placeholder="127.0.0.1"></label>
+          <label>Receiver Port<input data-env-key="DUNE_RECEIVER_PORT" type="number" min="1" max="65535" placeholder="5055"></label>
+          <label>Receiver Token<input data-env-key="DUNE_RECEIVER_TOKEN" type="password" autocomplete="off"></label>
+          <label>SSH Host<input data-env-key="DUNE_RECEIVER_SSH_HOST" placeholder="192.168.1.11"></label>
+          <label>SSH User<input data-env-key="DUNE_RECEIVER_SSH_USER" placeholder="dune"></label>
+          <label>SSH Key Path<input data-env-key="DUNE_RECEIVER_SSH_KEY" placeholder="%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey"></label>
+          <label>MQ Namespace<input data-env-key="DUNE_RECEIVER_MQ_NAMESPACE" placeholder="funcom-seabass-..."></label>
+          <label>MQ Pod<input data-env-key="DUNE_RECEIVER_MQ_POD" placeholder="rabbitmq pod name"></label>
+          <label>Python Path<input data-env-key="PYTHON_PATH" placeholder="C:\\Users\\Khader\\AppData\\Local\\Python\\bin\\python.exe"></label>
+        </div>
+        <div class="action-row mt">
+          <button class="primary" onclick="saveEnvironmentSettings()">Save Settings</button>
+          <button onclick="reloadEnvironmentSettings()">Reload Settings</button>
+          <button onclick="openEnvironmentFolder()">Open Config Folder</button>
+          <button onclick="testReceiverHealth()">Test Receiver Health</button>
+          <button onclick="testEnvironmentSsh()">Test SSH</button>
+          <button onclick="detectEnvironmentBattlegroup()">Detect Battlegroup</button>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Result</div>
+        <pre id="envSettingsStatus">Ready.</pre>
+      </div>
+    </section>
   </main>
 </div>
 <script>
@@ -2013,9 +2182,10 @@ const viewCopy={
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   server:["Server Status","Battlegroup controls, maps, and live server telemetry."],
   logs:["Logs","Recent grants, probe results, and errors."],
-  settings:["Settings","Manager, Gear Codex, and local runtime details."]
+  settings:["Settings","Manager, Gear Codex, and local runtime details."],
+  environment:["Environment Settings","Edit the installed app .env.local values and test receiver connectivity."]
 };
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(name==="logs")syncLogs();}
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(name==="logs")syncLogs();if(name==="environment")loadEnvironmentSettings();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
@@ -2028,6 +2198,17 @@ function addActivity(type,message,detail){const item={time:new Date().toLocaleTi
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 async function getJson(url, options){const r=await fetch(url,options);const t=await r.text();let d={};try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||t||"Request failed");return d;}
+function envInputs(){return [...document.querySelectorAll("[data-env-key]")];}
+function envValuesFromForm(){const values={};envInputs().forEach(input=>{values[input.dataset.envKey]=input.value.trim();});return values;}
+function setEnvStatus(message,data){const out=document.getElementById("envSettingsStatus");if(!out)return;out.textContent=message+(data?"\n\n"+JSON.stringify(data,null,2):"");}
+function writeEnvForm(values){envInputs().forEach(input=>{input.value=values?.[input.dataset.envKey]||"";});}
+async function loadEnvironmentSettings(){try{const data=await getJson("/api/environment-settings");writeEnvForm(data.values||{});document.getElementById("envSettingsPath").textContent="Config file: "+(data.path||".env.local");setEnvStatus("Settings loaded.",{path:data.path});}catch(e){setEnvStatus("Could not load settings: "+betterError(e));}}
+async function saveEnvironmentSettings(){try{const data=await getJson("/api/environment-settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:envValuesFromForm()})});writeEnvForm(data.values||{});document.getElementById("envSettingsPath").textContent="Config file: "+(data.path||".env.local");setEnvStatus("Settings saved. Restart required for running services to use the new values.",{path:data.path,restartRequired:data.restartRequired,warning:data.warning});addActivity("settings","Environment settings saved","Restart required.");}catch(e){setEnvStatus("Could not save settings: "+betterError(e));}}
+async function reloadEnvironmentSettings(){try{const data=await getJson("/api/environment-settings/reload",{method:"POST"});writeEnvForm(data.values||{});setEnvStatus("Settings reloaded from .env.local.",{path:data.path});addActivity("settings","Environment settings reloaded",data.path||"");}catch(e){setEnvStatus("Could not reload settings: "+betterError(e));}}
+async function openEnvironmentFolder(){try{const data=await getJson("/api/environment-settings/open-folder",{method:"POST"});setEnvStatus("Config folder opened.",data);}catch(e){setEnvStatus("Could not open config folder: "+betterError(e));}}
+async function testReceiverHealth(){try{const data=await getJson("/api/environment-settings/test-receiver",{method:"POST"});setEnvStatus(data.ok?"Receiver health check passed.":"Receiver health check returned a warning.",data);}catch(e){setEnvStatus("Receiver health check failed: "+betterError(e));}}
+async function testEnvironmentSsh(){try{const data=await getJson("/api/environment-settings/test-ssh",{method:"POST"});setEnvStatus(data.ok?"SSH test passed.":"SSH test failed.",data);}catch(e){setEnvStatus("SSH test failed: "+betterError(e));}}
+async function detectEnvironmentBattlegroup(){try{const data=await getJson("/api/environment-settings/detect-battlegroup",{method:"POST"});setEnvStatus(data.ok?"Battlegroup detected.":"Battlegroup detection did not find a battlegroup.",data);if(data.battlegroups&&data.battlegroups[0]){const ns=document.querySelector('[data-env-key="DUNE_RECEIVER_MQ_NAMESPACE"]');if(ns&&!ns.value)ns.value="funcom-seabass-"+data.battlegroups[0];}}catch(e){setEnvStatus("Battlegroup detection failed: "+betterError(e));}}
 async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);tone("vm",data.vm?.state||"Unknown");tone("battlegroup",s.status||"Unknown");tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer",s.status?"Server "+s.status:"Server offline");document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity("status","Server telemetry refreshed",s.status||"Unknown");}catch(e){tone("vm","Status error");tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);}}
 function betterError(e){return e&&e.message?e.message:"Command failed. Check that the suite is running as Administrator and the Dune VM is reachable.";}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";syncLogs();addActivity("action",action+" completed",(data.error||"").slice(0,120));setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);}}
@@ -2107,6 +2288,53 @@ async function route(req, res) {
   if (url.pathname === "/api/config" && req.method === "POST") {
     try { await json(res, { ok: true, config: saveConfig(JSON.parse(await readBody(req) || "{}")), restartRequired: true }); }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/environment-settings" && req.method === "GET") {
+    await json(res, envSettingsSnapshot());
+    return;
+  }
+  if (url.pathname === "/api/environment-settings" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const settings = writeEnvLocalSettings(body.values || {});
+      await json(res, { ok: true, ...settings, restartRequired: true, warning: "Restart AlphaNine Dune Suite for saved environment changes to affect running services." });
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/environment-settings/reload" && req.method === "POST") {
+    try { await json(res, { ok: true, ...reloadEnvLocalSettings() }); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/environment-settings/open-folder" && req.method === "POST") {
+    try { await json(res, openEnvConfigFolder()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/environment-settings/test-receiver" && req.method === "POST") {
+    try { await json(res, await testEnvReceiverHealth()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 502); }
+    return;
+  }
+  if (url.pathname === "/api/environment-settings/test-ssh" && req.method === "POST") {
+    try {
+      const result = await testEnvSsh();
+      await json(res, result, result.ok ? 200 : 502);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/environment-settings/detect-battlegroup" && req.method === "POST") {
+    try {
+      const result = await detectEnvBattlegroup();
+      await json(res, result, result.ok ? 200 : 502);
+    } catch (error) {
+      await json(res, { ok: false, battlegroups: [], error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/maps" && req.method === "GET") {

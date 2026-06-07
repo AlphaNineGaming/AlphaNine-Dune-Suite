@@ -1,6 +1,6 @@
 const http = require("http");
 const https = require("https");
-const { execFile, spawn } = require("child_process");
+const { execFile, spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -13,6 +13,12 @@ const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || path.join(__dirname, "c
 const ADMIN_AUDIT_LOG = path.join(__dirname, "admin-audit.log");
 const MANAGER_DIR = path.join(__dirname, "manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
+const APPDATA_DIR = process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "";
+const LOCALAPPDATA_DIR = process.env.LOCALAPPDATA || process.env.APPDATA || "";
+const MANAGER_DATA_DIR = LOCALAPPDATA_DIR ? path.join(LOCALAPPDATA_DIR, "AlphaNine Dune Awakening Manager") : MANAGER_DIR;
+const MANAGER_CONFIG_PATH = path.join(MANAGER_DATA_DIR, "manager-config.json");
+const MANAGER_APPLIED_PROFILE_PATH = path.join(MANAGER_DATA_DIR, "applied-profile.json");
+const MANAGER_APPLIED_SETTINGS_PATH = path.join(MANAGER_DATA_DIR, "applied-server-settings.json");
 
 const defaultConfig = {
   host: "127.0.0.1",
@@ -85,6 +91,8 @@ const SSH_KEY = expandEnvPath(config.sshKey || defaultSshKeyPath());
 const DEFAULT_SERVER_ROOT = expandEnvPath(config.serverInstallPath);
 let lastDirectorUrl = null;
 let managerProcess = null;
+let managerStartError = "";
+let loggedPythonCommand = "";
 
 function envFlag(name, fallback = "") {
   return String(process.env[name] || fallback).trim();
@@ -1290,6 +1298,158 @@ function contentTypeFor(filePath) {
   return "application/octet-stream";
 }
 
+function unquoteEnvValue(value) {
+  const trimmed = String(value || "").trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function readEnvValue(filePath, name) {
+  if (!filePath || !fs.existsSync(filePath)) return "";
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (match && match[1] === name) return expandEnvPath(unquoteEnvValue(match[2]));
+  }
+  return "";
+}
+
+function envFilesByName(fileName) {
+  return [
+    APPDATA_DIR ? path.join(APPDATA_DIR, fileName) : "",
+    path.join(__dirname, fileName)
+  ].filter(Boolean);
+}
+
+function commandAvailable(command) {
+  const result = spawnSync(command, ["--version"], {
+    windowsHide: true,
+    stdio: "ignore",
+    timeout: 5000
+  });
+  return !result.error && result.status === 0;
+}
+
+function configuredPythonPath() {
+  for (const filePath of envFilesByName(".env.local")) {
+    const pythonPath = readEnvValue(filePath, "PYTHON_PATH");
+    if (pythonPath) return { command: pythonPath, source: filePath };
+  }
+  for (const filePath of envFilesByName(".env")) {
+    const pythonPath = readEnvValue(filePath, "PYTHON_PATH");
+    if (pythonPath) return { command: pythonPath, source: filePath };
+  }
+  return null;
+}
+
+function findPython() {
+  const configured = configuredPythonPath();
+  if (configured) {
+    if (fs.existsSync(configured.command)) {
+      return { command: configured.command, source: `PYTHON_PATH from ${configured.source}` };
+    }
+    console.warn(`Configured PYTHON_PATH was not found: ${configured.command} (${configured.source})`);
+  }
+  if (commandAvailable("python")) return { command: "python", source: "PATH" };
+  if (commandAvailable("py")) return { command: "py", source: "PATH" };
+  return null;
+}
+
+function logPythonResolution(resolved) {
+  const message = resolved
+    ? `Manager service Python command resolved: ${resolved.command} (${resolved.source})`
+    : "Manager service warning: Python was not found. Set PYTHON_PATH in .env.local or install python/py.";
+  if (message === loggedPythonCommand) return;
+  loggedPythonCommand = message;
+  console.log(message);
+}
+
+function defaultManagerConfig() {
+  const sshKeyPath = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "DuneAwakeningServer", "sshKey") : "";
+  return { vmIp: "", sshKeyPath, battlegroup: "" };
+}
+
+function readManagerConfigFallback() {
+  const config = defaultManagerConfig();
+  if (!fs.existsSync(MANAGER_CONFIG_PATH)) return config;
+  try {
+    const saved = JSON.parse(fs.readFileSync(MANAGER_CONFIG_PATH, "utf8"));
+    if (saved && typeof saved === "object") {
+      for (const key of Object.keys(config)) {
+        if (Object.prototype.hasOwnProperty.call(saved, key)) config[key] = String(saved[key] || "").trim();
+      }
+    }
+  } catch {}
+  return config;
+}
+
+function writeManagerConfigFallback(payload) {
+  const config = readManagerConfigFallback();
+  for (const key of ["vmIp", "sshKeyPath", "battlegroup"]) {
+    if (Object.prototype.hasOwnProperty.call(payload || {}, key)) config[key] = String(payload[key] || "").trim();
+  }
+  fs.mkdirSync(MANAGER_DATA_DIR, { recursive: true });
+  fs.writeFileSync(MANAGER_CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  return config;
+}
+
+function managerFallbackWarning() {
+  return managerStartError || "Manager service is unavailable because Python was not found.";
+}
+
+async function handleManagerFallback(req, res, managerPath) {
+  if (managerPath === "/api/server/config" && req.method === "GET") {
+    await json(res, { config: readManagerConfigFallback(), configFile: MANAGER_CONFIG_PATH, warning: managerFallbackWarning() });
+    return true;
+  }
+  if (managerPath === "/api/server/config" && req.method === "POST") {
+    try {
+      const config = writeManagerConfigFallback(JSON.parse(await readBody(req) || "{}"));
+      await json(res, { ok: true, config, configFile: MANAGER_CONFIG_PATH, warning: managerFallbackWarning() });
+    } catch {
+      await json(res, { ok: false, error: "Invalid server setup payload" }, 400);
+    }
+    return true;
+  }
+  if (managerPath === "/api/server/settings" && req.method === "GET") {
+    let payload = { profileName: "No applied profile", settings: {} };
+    try {
+      if (fs.existsSync(MANAGER_APPLIED_PROFILE_PATH)) payload = JSON.parse(fs.readFileSync(MANAGER_APPLIED_PROFILE_PATH, "utf8"));
+    } catch {}
+    await json(res, { ...payload, warning: managerFallbackWarning() });
+    return true;
+  }
+  if (managerPath === "/api/server/settings" && req.method === "POST") {
+    try {
+      const payload = JSON.parse(await readBody(req) || "{}");
+      const flatSettings = {};
+      for (const [sectionName, sectionSettings] of Object.entries(payload.settings || {})) {
+        if (!sectionSettings || typeof sectionSettings !== "object" || Array.isArray(sectionSettings)) continue;
+        for (const [key, value] of Object.entries(sectionSettings)) flatSettings[`${sectionName}.${key}`] = value;
+      }
+      fs.mkdirSync(MANAGER_DATA_DIR, { recursive: true });
+      fs.writeFileSync(MANAGER_APPLIED_PROFILE_PATH, JSON.stringify(payload, null, 2), "utf8");
+      fs.writeFileSync(MANAGER_APPLIED_SETTINGS_PATH, JSON.stringify(flatSettings, null, 2), "utf8");
+      await json(res, {
+        ok: true,
+        message: "Settings saved locally. Install Python or set PYTHON_PATH to apply them to the server.",
+        profileFile: MANAGER_APPLIED_PROFILE_PATH,
+        settingsFile: MANAGER_APPLIED_SETTINGS_PATH,
+        settingCount: Object.keys(flatSettings).length,
+        warning: managerFallbackWarning()
+      });
+    } catch {
+      await json(res, { ok: false, error: "Invalid JSON payload" }, 400);
+    }
+    return true;
+  }
+  return false;
+}
+
 function safeFile(baseDir, requestPath) {
   const relative = decodeURIComponent(requestPath).replace(/^\/+/, "") || "index.html";
   const fullPath = path.join(baseDir, relative);
@@ -1316,26 +1476,34 @@ function serveStatic(res, baseDir, requestPath) {
   return true;
 }
 
-function findPython() {
-  const bundled = path.join(os.homedir(), ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "python", "python.exe");
-  if (fs.existsSync(bundled)) return bundled;
-  return "python";
-}
-
 function startManagerService() {
   if (managerProcess) return;
-  const python = findPython();
-  managerProcess = spawn(python, ["manager-server.py", "--no-open"], {
+  if (managerStartError) return;
+  const resolved = findPython();
+  logPythonResolution(resolved);
+  if (!resolved) {
+    managerStartError = "Manager service failed to start: Python was not found. Set PYTHON_PATH in .env.local or install python/py.";
+    console.warn(managerStartError);
+    return;
+  }
+  managerProcess = spawn(resolved.command, ["manager-server.py", "--no-open"], {
     cwd: MANAGER_DIR,
     windowsHide: true,
     stdio: "ignore"
+  });
+  managerProcess.on("error", (error) => {
+    managerStartError = `Manager service failed to start with ${resolved.command}: ${error.message}`;
+    console.error(managerStartError);
+    managerProcess = null;
   });
   managerProcess.on("exit", () => { managerProcess = null; });
 }
 
 async function proxyToManager(req, res, pathname) {
   startManagerService();
-  const target = `http://127.0.0.1:${MANAGER_PORT}${pathname.replace(/^\/manager-api/, "")}`;
+  const managerPath = pathname.replace(/^\/manager-api/, "");
+  if (managerStartError && await handleManagerFallback(req, res, managerPath)) return;
+  const target = `http://127.0.0.1:${MANAGER_PORT}${managerPath}`;
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : await readBody(req);
   try {
     const response = await fetch(target, {
@@ -1347,7 +1515,8 @@ async function proxyToManager(req, res, pathname) {
     res.writeHead(response.status, { "Content-Type": response.headers.get("content-type") || "application/json; charset=utf-8" });
     res.end(text);
   } catch (error) {
-    await json(res, { ok: false, error: `Manager service is not ready: ${error.message}` }, 502);
+    if (await handleManagerFallback(req, res, managerPath)) return;
+    await json(res, { ok: false, error: managerStartError || `Manager service is not ready: ${error.message}` }, 502);
   }
 }
 

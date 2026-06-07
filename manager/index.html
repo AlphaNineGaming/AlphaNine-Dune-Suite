@@ -1367,6 +1367,10 @@
         if (!response.ok) throw new Error(`Server returned ${response.status}`);
         const data = await response.json();
         writeSetup(data.config || {});
+        if (data.warning) {
+          setServerStatus(`Manager service warning: ${data.warning}`, "warn");
+          return;
+        }
         if (!(data.config?.vmIp && data.config?.battlegroup)) {
           setServerStatus("Add your VM IP, SSH key, and battlegroup, then save setup.");
         }
@@ -1400,8 +1404,8 @@
       const data = await response.json();
       writeSetup(data.config || payload);
       if (showSaved) {
-        setServerStatus("Server setup saved.", "ok");
-        showToast("Server setup saved");
+        setServerStatus(data.warning ? `Server setup saved. ${data.warning}` : "Server setup saved.", data.warning ? "warn" : "ok");
+        showToast(data.warning ? "Server setup saved with warning" : "Server setup saved");
       }
       return data.config || payload;
     }
@@ -1474,12 +1478,13 @@
           throw new Error(detail || `Server returned ${response.status}`);
         }
 
+        const data = await response.json().catch(() => ({}));
         const appliedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
         currentValues = { ...state };
         renderSettings();
         updateSummary();
-        setServerStatus(`Settings applied at ${appliedAt}.`, "ok");
-        showToast("Server settings applied");
+        setServerStatus(data.warning ? `Settings saved locally at ${appliedAt}. ${data.warning}` : `Settings applied at ${appliedAt}.`, data.warning ? "warn" : "ok");
+        showToast(data.warning ? "Server settings saved locally" : "Server settings applied");
       } catch (error) {
         setServerStatus(`Could not apply settings: ${error.message}`, "error");
         showToast("Server apply failed");
@@ -1504,7 +1509,7 @@
         currentValues = { ...defaults, ...refreshed };
         renderSettings();
         updateSummary();
-        setServerStatus("Current values refreshed.", "ok");
+        setServerStatus(profile.warning ? `Current values refreshed from local cache. ${profile.warning}` : "Current values refreshed.", profile.warning ? "warn" : "ok");
       } catch (error) {
         setServerStatus(`Could not refresh current values: ${error.message}`, "error");
       }

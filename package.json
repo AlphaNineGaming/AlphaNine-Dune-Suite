@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "0.1.0-beta",
+  "version": "0.2.0-beta",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -13,7 +13,8 @@
     "receiver:give-item": "node receivers/dune-live-give-receiver.js"
   },
   "dependencies": {
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "leaflet": "^1.9.4"
   },
   "devDependencies": {
     "electron": "^38.3.0",
@@ -30,13 +31,17 @@
       "!node_modules/.cache/**",
       "!installer-output/**",
       "!dist/**",
+      "!work/**",
       "!config.json",
       "!test-http-json.js",
+      "!*.backup-*",
+      "!*.backup*",
       "!*.log",
       "!*.tmp"
     ],
     "asarUnpack": [
-      "manager/**"
+      "manager/**",
+      "receivers/**"
     ],
     "extraMetadata": {
       "main": "electron/main.js"

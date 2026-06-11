@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, shell, utilityProcess } = require("electron");
+const { app, BrowserWindow, Menu, Tray, dialog, shell, utilityProcess } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -16,8 +16,10 @@ app.setAppUserModelId("com.alphanine.dunesuite");
 let mainWindow = null;
 let serverProcess = null;
 let receiverProcess = null;
+let tray = null;
 let shuttingDown = false;
 const childErrors = new Map();
+const ALREADY_RUNNING_MESSAGE = "AlphaNine Dune Suite is already running. Close the existing elevated instance first.";
 
 function appPath(...parts) {
   return path.join(app.getAppPath(), ...parts);
@@ -103,12 +105,28 @@ function createFirstRunFiles() {
       fs.copyFileSync(example, configPath);
     } else {
       fs.writeFileSync(configPath, JSON.stringify({
+        setupComplete: false,
+        serverType: "local-hyperv",
         host: "127.0.0.1",
         port: APP_PORT,
         vmName: "dune-awakening",
         vmIp: "",
         sshUser: "dune",
         sshKey: "",
+        databaseHost: "",
+        databasePort: 15432,
+        databaseName: "dune",
+        databaseUser: "postgres",
+        databasePassword: "",
+        receiverHost: "127.0.0.1",
+        receiverPort: RECEIVER_DEFAULT_PORT,
+        receiverToken: "",
+        receiverSshHost: "",
+        receiverSshUser: "dune",
+        receiverSshKey: "",
+        mapDefault: "HaggaBasin",
+        logLevel: "info",
+        updateRepo: "AlphaNineGaming/alphanine-dune-suite",
         panelTitle: "AlphaNine Dune Suite",
         panelSubtitle: "Unified local tools for your self-hosted server",
         serverInstallPath: "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server"
@@ -118,11 +136,34 @@ function createFirstRunFiles() {
   process.env.ALPHANINE_CONFIG_PATH = configPath;
 }
 
+function readAppConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(userPath("config.json"), "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return {};
+  }
+}
+
 function loadEnvironment() {
   readEnvFile(appPath(".env"));
   readEnvFile(appPath(".env.local"), true);
   readEnvFile(userPath(".env"));
   readEnvFile(userPath(".env.local"), true);
+  const cfg = readAppConfig();
+  if (cfg.vmIp && !process.env.DUNE_RECEIVER_SSH_HOST) process.env.DUNE_RECEIVER_SSH_HOST = cfg.vmIp;
+  if (cfg.receiverSshHost) process.env.DUNE_RECEIVER_SSH_HOST = cfg.receiverSshHost;
+  if (cfg.receiverSshUser) process.env.DUNE_RECEIVER_SSH_USER = cfg.receiverSshUser;
+  if (cfg.receiverSshKey) process.env.DUNE_RECEIVER_SSH_KEY = cfg.receiverSshKey;
+  if (cfg.receiverHost) process.env.DUNE_RECEIVER_HOST = cfg.receiverHost;
+  if (cfg.receiverPort) process.env.DUNE_RECEIVER_PORT = String(cfg.receiverPort);
+  if (cfg.receiverToken) {
+    process.env.DUNE_RECEIVER_TOKEN = cfg.receiverToken;
+    process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || cfg.receiverToken;
+  }
+  const receiverHost = process.env.DUNE_RECEIVER_HOST || RECEIVER_DEFAULT_HOST;
+  const receiverPort = process.env.DUNE_RECEIVER_PORT || String(RECEIVER_DEFAULT_PORT);
+  process.env.DUNE_ADMIN_GIVE_ITEM_URL = process.env.DUNE_ADMIN_GIVE_ITEM_URL || `http://${receiverHost}:${receiverPort}/api/give-item`;
+  process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL = process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL || `http://${receiverHost}:${receiverPort}/health`;
   process.env.PORT = String(APP_PORT);
 }
 
@@ -240,8 +281,6 @@ function receiverConfig() {
 }
 
 function shouldStartReceiver() {
-  const transport = String(process.env.DUNE_ADMIN_GIVE_ITEM_TRANSPORT || "").toLowerCase();
-  if (transport !== "http-json") return false;
   if (String(process.env.DUNE_RECEIVER_DISABLED || "").toLowerCase() === "true") return false;
   return Boolean(process.env.DUNE_RECEIVER_SSH_HOST);
 }
@@ -297,6 +336,51 @@ function cleanupChildren() {
   killTree(receiverProcess);
 }
 
+function focusMainWindow(reason = "focus-request") {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    appendLog("desktop", `Could not focus window for ${reason}: main window is not available.`);
+    return false;
+  }
+  try {
+    if (!mainWindow.isVisible()) mainWindow.show();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.moveTop();
+    mainWindow.focus();
+    app.focus({ steal: true });
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFocused()) {
+        appendLog("desktop", ALREADY_RUNNING_MESSAGE);
+      }
+    }, 750);
+    return true;
+  } catch (error) {
+    appendLog("desktop", `${ALREADY_RUNNING_MESSAGE} ${error.stack || error.message}`);
+    return false;
+  }
+}
+
+function quitSuite() {
+  cleanupChildren();
+  app.quit();
+}
+
+function createTray() {
+  if (tray) return;
+  const iconPath = appPath("assets", "alphanine-logo.jpg");
+  if (!fs.existsSync(iconPath)) {
+    appendLog("desktop", `Tray icon was not found: ${iconPath}`);
+    return;
+  }
+  tray = new Tray(iconPath);
+  tray.setToolTip("AlphaNine Dune Suite");
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "Show AlphaNine Dune Suite", click: () => focusMainWindow("tray-show") },
+    { type: "separator" },
+    { label: "Quit", click: quitSuite }
+  ]));
+  tray.on("double-click", () => focusMainWindow("tray-double-click"));
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1380,
@@ -317,6 +401,9 @@ function createWindow() {
     shell.openExternal(url);
     return { action: "deny" };
   });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
   mainWindow.loadURL(`http://127.0.0.1:${APP_PORT}/`);
 }
 
@@ -327,17 +414,22 @@ async function boot() {
   await startReceiverIfNeeded();
   await startServer();
   createWindow();
+  createTray();
 }
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
-  app.quit();
+  app.whenReady().then(() => {
+    appendLog("desktop", ALREADY_RUNNING_MESSAGE);
+    dialog.showMessageBox({
+      type: "warning",
+      title: "AlphaNine Dune Suite already running",
+      message: ALREADY_RUNNING_MESSAGE
+    }).finally(() => app.quit());
+  });
 } else {
   app.on("second-instance", () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    focusMainWindow("second-instance");
   });
 
   app.whenReady().then(() => {
@@ -350,5 +442,5 @@ if (!gotLock) {
   });
 
   app.on("before-quit", cleanupChildren);
-  app.on("window-all-closed", () => app.quit());
+  app.on("window-all-closed", quitSuite);
 }

@@ -1,227 +1,171 @@
-# AlphaNine Dune Suite Beta
+# AlphaNine Dune Suite
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/E1W220NMPA)
+AlphaNine Dune Suite is a Windows desktop control center for self-hosted Dune: Awakening servers. It is built for server owners who want an installer, a setup wizard, and clear buttons instead of command-line setup.
 
-One local app for Dune: Awakening self-hosted server tools.
+## Overview
 
-This is a beta release. Use it for testing before replacing your separate tools.
+The suite runs as a local desktop app and opens an Operations Center for server status, players, give-item tools, Live Map, diagnostics, receiver management, and settings.
 
-## Included
+Normal users should not need to install Node.js, run npm commands, edit JSON files, manually launch the receiver, or use PowerShell for daily operation.
 
-- Server Control dashboard and actions
-- Manager page and internal manager backend
-- Gear Codex with local icons
-- Shared Dune banner and Ko-fi link
-- One local URL: `http://127.0.0.1:8810`
+## Features
 
-## Run
-
-Double-click:
-
-```text
-Start AlphaNine Dune Suite.bat
-```
-
-Accept the Administrator prompt so the suite can read Hyper-V.
-
-For live give-item, keep the configuration in `.env` or `.env.local`, then use the same one-click start. The launcher will load `.env`, then `.env.local`, start the give-item receiver in a separate window, wait for `http://127.0.0.1:5055/health`, and then start the main suite with live give-item enabled.
-
-Minimum `.env.local` example:
-
-```text
-DUNE_RECEIVER_SSH_HOST=192.168.1.11
-DUNE_RECEIVER_SSH_USER=dune
-DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\DuneAwakeningServer\sshKey
-DUNE_RECEIVER_TOKEN=your_receiver_token
-
-DUNE_ADMIN_GIVE_ITEM_TRANSPORT=http-json
-DUNE_ADMIN_GIVE_ITEM_URL=http://127.0.0.1:5055/api/give-item
-DUNE_ADMIN_GIVE_ITEM_HEALTH_URL=http://127.0.0.1:5055/health
-DUNE_ADMIN_GIVE_ITEM_TOKEN=your_receiver_token
-```
-
-To stop both the suite and the receiver, double-click:
-
-```text
-Stop AlphaNine Dune Suite.bat
-```
-
-Do not commit `.env` or `.env.local`.
-
-## Desktop App / Windows Installer
-
-The Suite can also run as a Windows desktop app. The Electron app starts the local Suite server automatically, starts the live give-item receiver when `DUNE_ADMIN_GIVE_ITEM_TRANSPORT=http-json` and receiver SSH settings are configured, then opens the dashboard in a desktop window.
-
-Development run:
-
-```text
-npm install
-npm run app
-```
-
-Build the Windows installer:
-
-```text
-npm run build:win
-```
-
-Build all configured desktop targets:
-
-```text
-npm run dist
-```
-
-The Windows installer `.exe` is written to:
-
-```text
-installer-output\
-```
-
-The installer creates:
-
-- Start Menu shortcut: `AlphaNine Dune Suite`
-- Desktop shortcut: `AlphaNine Dune Suite`
-
-Installed desktop configuration is loaded from:
-
-```text
-%APPDATA%\AlphaNine Dune Suite\.env
-%APPDATA%\AlphaNine Dune Suite\.env.local
-```
-
-On first run, the desktop app creates a starter `.env.local` in that app data folder if one does not exist. Keep live give tokens, SSH host, and receiver settings there. The app also creates a writable `config.json` in the same app data folder for local machine settings.
-
-Run the desktop app as Administrator when you need Hyper-V status, VM controls, or other server-management features that require elevated Windows access.
+- Dashboard with server, database, receiver, and VM health
+- First-launch setup wizard
+- Integrated receiver start, stop, restart, and status
+- Player feed and player management
+- Give Item with Dry-Run and Live Give modes
+- Live Map with player, vehicle, and base markers when position data is available
+- Server Management view
+- Gear Codex
+- Environment and setup checks
+- Diagnostics tab with log viewer
+- Settings export and import
+- GitHub update check
 
 ## Requirements
 
-- Windows 10/11 Pro
-- Hyper-V enabled
-- Official Dune: Awakening self-hosted server installed and configured
-- OpenSSH client available in Windows
-- Node.js 18 or newer, unless you run it from the Codex-bundled environment on this PC
+- Windows 10 or Windows 11
+- Dune: Awakening self-hosted server installed
+- Administrator launch when using Hyper-V or VM controls
+- Network access from this PC to the Dune server VM
+- Database access through the configured Dune server environment
 
-## Beta Notes
+Node.js is only required for developers running from source. Installed users should use the Windows installer.
 
-- The Manager backend is started internally by the suite on `127.0.0.1:8812`.
-- The suite itself runs on `127.0.0.1:8810`.
-- Keep the suite window open while using the tool.
-- Run as Administrator for Hyper-V status and VM controls.
+## Installation
 
-## Enable Live Give Item
+1. Download the latest `AlphaNine Dune Suite Setup` installer.
+2. Run the installer.
+3. Keep the default shortcuts selected.
+4. Launch `AlphaNine Dune Suite` from the Start Menu or Desktop.
+5. Run as Administrator if you need VM or Hyper-V controls.
 
-Admin Tools stays in dry-run mode unless a live transport is configured with environment variables. Start with `.env.example`, and do not commit real secrets.
+The installer includes the suite app and receiver files. Settings are stored in the Windows app data folder so they survive updates.
 
-Dry-run mode:
+## First-Time Setup
 
-```text
-DUNE_ADMIN_GIVE_ITEM_TRANSPORT=dry-run
-DUNE_ADMIN_GIVE_ITEM_TIMEOUT_MS=15000
-```
+On first launch, the Setup Wizard opens automatically.
 
-HTTP JSON transport posts a give-item JSON payload to your own backend:
+Setup steps:
 
-```text
-DUNE_ADMIN_GIVE_ITEM_TRANSPORT=http-json
-DUNE_ADMIN_GIVE_ITEM_URL=http://127.0.0.1:8080/api/give-item
-DUNE_ADMIN_GIVE_ITEM_HEALTH_URL=http://127.0.0.1:8080/health
-DUNE_ADMIN_GIVE_ITEM_TOKEN=optional_bearer_token
-```
+1. Welcome
+2. Server Type
+3. Database connection test
+4. Receiver configuration
+5. Save configuration
+6. Finish setup
 
-RabbitMQ HTTP transport publishes your configured command envelope through RabbitMQ Management HTTP API:
+Recommended flow:
 
-```text
-DUNE_ADMIN_GIVE_ITEM_TRANSPORT=rabbitmq-http
-DUNE_ADMIN_RABBITMQ_PUBLISH_URL=http://127.0.0.1:15672/api/exchanges/%2F/amq.default/publish
-DUNE_ADMIN_RABBITMQ_HEALTH_URL=http://127.0.0.1:15672/api/overview
-DUNE_ADMIN_RABBITMQ_USER=admin_user
-DUNE_ADMIN_RABBITMQ_PASSWORD=admin_password
-DUNE_ADMIN_RABBITMQ_ROUTING_KEY=your.routing.key
-DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE={"playerId":"{{playerId}}","template":"{{template}}","qty":{{qty}},"quality":{{quality}},"requestId":"{{requestId}}"}
-```
+1. Choose your server type.
+2. Let Auto Discovery fill what it can.
+3. Enter database details if needed.
+4. Click `Test Database`.
+5. Configure the receiver.
+6. Click `Start Receiver`.
+7. Click `Test Receiver`.
+8. Save configuration.
 
-Live grants become available only when the transport is configured and reachable. If anything is missing, the button remains in dry-run mode with a clear message.
+You can reopen the wizard later from Settings.
 
-### Real http-json Receiver
+## Receiver Configuration
 
-The Suite sender only posts JSON. To turn that JSON into a real in-game item grant, run the standalone receiver:
+The receiver is the bridge used for Live Give operations. AlphaNine Dune Suite can manage it from the UI.
 
-```text
-npm run receiver
-```
+Receiver controls are available in Settings and Diagnostics:
 
-Configure the Suite sender to call it:
+- Start
+- Stop
+- Restart
+- Test Receiver
+- Status indicator
 
-```text
-DUNE_ADMIN_GIVE_ITEM_TRANSPORT=http-json
-DUNE_ADMIN_GIVE_ITEM_URL=http://127.0.0.1:5055/api/give-item
-DUNE_ADMIN_GIVE_ITEM_HEALTH_URL=http://127.0.0.1:5055/health
-DUNE_ADMIN_GIVE_ITEM_TOKEN=optional_bearer_token
-```
+If the receiver is offline, Live Give will stay unavailable. Dry-Run remains available for safe testing.
 
-Configure the receiver side:
+## Live Give Modes
 
-```text
-DUNE_RECEIVER_HOST=127.0.0.1
-DUNE_RECEIVER_PORT=5055
-DUNE_RECEIVER_TOKEN=optional_same_bearer_token
-DUNE_RECEIVER_SSH_HOST=192.168.1.11
-DUNE_RECEIVER_SSH_USER=dune
-DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\DuneAwakeningServer\sshKey
-```
+Give Item has two operating modes:
 
-The receiver accepts:
+- Dry-Run: Builds and previews the request without sending a live grant.
+- Live Give: Sends the request to the configured receiver when the server and receiver are online.
 
-```json
-{
-  "playerId": "FLS_OR_FUNCOM_PLAYER_ID",
-  "template": "AluminiumBar",
-  "qty": 5,
-  "quality": 0,
-  "requestId": "optional-id"
-}
-```
+Safety notes:
 
-If `playerId` is numeric, the receiver treats it as a Dune account/actor id and resolves it through the Dune Postgres database to the FLS/Funcom id required by live server commands. If the battlegroup cannot be auto-detected, set:
+- Dry-Run is the default.
+- Live Give requires the server to be online.
+- Live Give requires the receiver to be reachable.
+- Some item qualities or grades may not be supported by the live receiver path.
 
-```text
-DUNE_RECEIVER_BG_NAMESPACE=your-namespace
-DUNE_RECEIVER_BG_NAME=your-battlegroup-name
-```
+## Live Map
 
-It converts that payload into the Dune server command:
+The Live Map tab uses a Leaflet map view for tactical server data.
 
-```json
-{
-  "ServerCommand": "AddItemToInventory",
-  "PlayerId": "FLS_OR_FUNCOM_PLAYER_ID",
-  "ItemName": "AluminiumBar",
-  "Quantity": 5,
-  "Durability": 1.0
-}
-```
+Live Map can show:
 
-Then it publishes the command inside the game RabbitMQ broker with `rabbitmqctl eval`, using the `heartbeats` exchange and `notifications` routing key. The receiver auto-detects the `mq-game` pod over SSH. If auto-detect fails, set:
+- Player markers when coordinates are available
+- Vehicle markers when discovered
+- Base markers when discovered
+- Clicked map coordinates
+- Coordinate search
+- Debug details for marker and player position sources
 
-```text
-DUNE_RECEIVER_MQ_NAMESPACE=your-namespace
-DUNE_RECEIVER_MQ_POD=your-mq-game-pod
-```
+If the map says `Loaded 1 player, 0 with coordinates`, the suite found player identity data but did not find a usable live position source yet.
 
-Known limit: the live RabbitMQ `AddItemToInventory` command has no item grade/quality field. The receiver rejects `quality > 0` instead of pretending it worked. Grade-sensitive items need a DB-backed grant path.
+## Database Tab
 
-Test the local Admin Tools endpoints while the suite is running:
+Database-related checks are available through Settings, Diagnostics, Admin Tools, and Live Map debug output.
 
-```text
-npm run test:admin
-```
+Use `Test Database` to confirm the suite can reach the Dune database. If the test fails, check:
 
-## Notes
+- The Dune server VM is running
+- The database port is reachable
+- The configured host/IP is correct
+- The app is running with the permissions needed for VM access
 
-This is a real suite build, but still version `0.1.0-beta`. The Manager backend is started internally by the suite so users do not need to open the old Manager app separately.
+## Troubleshooting
 
-## Disclaimer
+Start with the Diagnostics tab.
 
-This is an unofficial community tool. It is not affiliated with Funcom, Legendary, or Dune: Awakening.
+Common checks:
 
-Dune Awakening names, images, icons, and related game assets belong to their respective rights holders, including Funcom and Legendary where applicable. This fan-made tool is not affiliated with, endorsed by, sponsored by, or approved by Funcom, Legendary, or the official Dune Awakening team. Images and icons are included only to help players identify in-game items. Do not redistribute, sell, or reuse the bundled game artwork outside this tool unless you have permission from the rights holder.
+- `Test Database`
+- `Test Receiver`
+- `Test Server`
+- Receiver status
+- Suite logs
+- Receiver logs
+- Version info
+
+Common fixes:
+
+- Restart the receiver from Settings.
+- Run the suite as Administrator.
+- Confirm the Dune server VM is running.
+- Confirm the configured VM IP is correct.
+- Reopen Setup Wizard and save configuration again.
+- Export settings before reinstalling or moving to another PC.
+
+## Safety
+
+- Do not share receiver tokens, database passwords, SSH keys, or exported settings publicly.
+- Use Dry-Run before Live Give.
+- Keep backups of settings before major changes.
+- Only run Live Give on servers you own or are authorized to administer.
+- Do not commit local config files containing secrets.
+
+## Legal Notice
+
+AlphaNine Dune Suite is an independent fan-made server administration tool.
+
+Dune: Awakening, Arrakis, Deep Desert, Hagga Basin, and all related game assets, trademarks, logos, names, artwork, and intellectual property are owned by Funcom and their respective rights holders.
+
+This project is not affiliated with, endorsed by, sponsored by, or approved by Funcom.
+
+Any game-related assets used within the project remain the property of their respective owners and are used solely for community administration and informational purposes.
+
+## Credits
+
+AlphaNine Dune Suite is maintained by AlphaNineGaming.
+
+Thanks to the Dune: Awakening self-hosting community for discovery work, testing, and operational feedback.

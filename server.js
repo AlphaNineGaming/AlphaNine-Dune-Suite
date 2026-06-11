@@ -1028,9 +1028,78 @@ function playerDiagnosticLines(diagnostics) {
   return lines;
 }
 
+async function liveGiveServerAvailability() {
+  const vm = await vmInfo();
+  let status = null;
+  let raw = "";
+  if (vm.exists && vm.state === "Running") {
+    const result = await battlegroup("status");
+    raw = result.stdout || result.stderr || result.error || "";
+    status = parseStatus(raw);
+  }
+  const summaryStatus = String(status?.summary?.status || "");
+  const online = Boolean(vm.exists && vm.state === "Running" && /Healthy|Ready|Running/i.test(summaryStatus));
+  return { online, vm, status: status?.summary || null, raw };
+}
+
 async function adminGiveItem(payload) {
   const command = validateGiveItemPayload(payload);
-  return sendLiveGiveItem(command);
+  const mode = String(payload?.mode || "dry-run").toLowerCase();
+  const auditBase = {
+    playerId: command.playerId,
+    template: command.template,
+    qty: command.qty,
+    quality: command.quality,
+    requestId: command.requestId
+  };
+  if (mode !== "execute") {
+    const result = {
+      ok: true,
+      dryRun: true,
+      status: "dry-run-passed",
+      command,
+      requestId: command.requestId,
+      stdout: `Dry-run passed. Command validated for ${command.template} x${command.qty} -> ${command.playerId}.`,
+      stderr: "",
+      note: "Dry-run does not require the Dune server to be online and did not execute a live grant."
+    };
+    appendAdminAudit("give_item_dry_run", { ...auditBase, result: { ok: result.ok, status: result.status } });
+    return result;
+  }
+
+  if (payload?.allowLiveExecution !== true && payload?.allowLiveExecution !== "true") {
+    const error = new Error("Enable Live Give before real execution.");
+    appendAdminAudit("give_item_live_blocked", { ...auditBase, reason: error.message });
+    throw error;
+  }
+  if (payload?.confirmed !== true && payload?.confirmed !== "true") {
+    const error = new Error("Confirm real Live Give execution before sending the command.");
+    appendAdminAudit("give_item_live_blocked", { ...auditBase, reason: error.message });
+    throw error;
+  }
+
+  const server = await liveGiveServerAvailability();
+  if (!server.online) {
+    const error = new Error("Server is offline. Real Live Give requires the server to be running.");
+    appendAdminAudit("give_item_live_blocked", { ...auditBase, reason: error.message, server });
+    throw error;
+  }
+
+  appendAdminAudit("give_item_live_started", { ...auditBase, dryRunRequestId: payload?.dryRunRequestId || "", server: server.status });
+  try {
+    const live = await sendLiveGiveItem(command);
+    if (!live.ok || live.dryRun) {
+      const result = { ...live, ok: false, dryRun: false, status: "live-execution-failed", stdout: "", stderr: live.error || "Live execution failed." };
+      appendAdminAudit("give_item_live_failed", { ...auditBase, result: { ok: result.ok, status: result.status, error: result.error || result.stderr } });
+      return result;
+    }
+    const result = { ...live, dryRun: false, status: "live-execution-completed", stdout: "Live Give command completed.", stderr: "" };
+    appendAdminAudit("give_item_live_completed", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport } });
+    return result;
+  } catch (error) {
+    appendAdminAudit("give_item_live_failed", { ...auditBase, error: error.message });
+    throw error;
+  }
 }
 
 function sqlString(value) {
@@ -1925,12 +1994,18 @@ function appPage() {
           <div class="field-grid mt">
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
             <label>Item Template Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
-            <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
+            <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1" oninput="invalidateLiveGiveDryRun('Quantity changed.')"></label>
             <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0" oninput="syncQualityWarning()"></label>
             <div id="qualityWarning" class="warning hidden">Quality/grade is unsupported by the live RabbitMQ grant path. Set quality back to 0 before sending a live grant.</div>
-            <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Prepare Give Item</button>
+            <div id="liveGiveServerStatus" class="warning">Server Status: Checking</div>
+            <label class="check-row"><input id="enableLiveGive" type="checkbox" onchange="syncLiveGiveControls()">Enable Live Give</label>
+            <button id="adminDryRunButton" class="primary" onclick="runLiveGiveDryRun()">Run Dry-Run</button>
+            <button id="adminExecuteButton" class="danger" onclick="executeLiveGive()" disabled>Execute Live Give</button>
             <button onclick="refreshAdmin()">Refresh Admin Data</button>
           </div>
+          <div class="label mt">Live Give Safety State</div>
+          <div id="liveGiveState" class="empty mt">Pending dry-run.</div>
+          <pre id="liveGivePreview" class="mt">Dry-run command preview will appear here.</pre>
         </div>
         <div class="panel pad">
           <div class="label">Item Templates</div>
@@ -2185,11 +2260,12 @@ const viewCopy={
   settings:["Settings","Manager, Gear Codex, and local runtime details."],
   environment:["Environment Settings","Edit the installed app .env.local values and test receiver connectivity."]
 };
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(name==="logs")syncLogs();if(name==="environment")loadEnvironmentSettings();}
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(name==="logs")syncLogs();if(name==="environment")loadEnvironmentSettings();if(name==="give")startLiveGiveTool();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-if(location.hash.slice(1)) setView(location.hash.slice(1));
+const initialView=location.hash.slice(1);
 let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[];
+let liveGiveBusy=false,liveGiveLastDryRun=null,liveGiveServerOnline=false,liveGiveServerStarting=false;
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function statusClass(value){const text=String(value||"");if(/healthy|ready|running|online|enabled|reachable|true/i.test(text))return"ok";if(/offline|failed|error|missing|not|false|unavailable/i.test(text))return"bad";return"warn";}
 function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");}
@@ -2216,14 +2292,14 @@ async function openDirector(){try{const data=await getJson("/api/director");if(d
 async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>'<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td></tr>').join(""):'<tr><td colspan="5">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
 async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";addActivity("maps","Map deployment updated",map+" -> "+replicas);setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);}}
 function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Enabled":"Guarded");tone("adminLiveMirror",adminLiveGiveAvailable?"Enabled":"Guarded");tone("receiverState",probe.giveTransport?.reachable?"Online":(probe.giveTransport?.configured?"Warning":"Dry-run"));tone("rabbitState",probe.giveTransport?.mode||probe.transport||"Unknown");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";document.getElementById("adminGiveButton").textContent=adminLiveGiveAvailable?"Give Item":"Prepare Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give enabled":"Live give guarded");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Guarded");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Guarded");tone("receiverState",probe.giveTransport?.reachable?"Online":(probe.giveTransport?.configured?"Warning":"Dry-run"));tone("rabbitState",probe.giveTransport?.mode||probe.transport||"Unknown");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give guarded");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);syncLiveGiveControls();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available but disabled":"Live give guarded");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function renderPlayerSelect(){const select=document.getElementById("adminPlayer");select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
-function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;invalidateLiveGiveDryRun("Player changed.");renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;invalidateLiveGiveDryRun("Player changed.");renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
 function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
@@ -2250,12 +2326,22 @@ function setReputation(){runReputationAction("set");}
 function jumpToGive(){setView("give");renderPlayerSelect();}
 function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td><span class="badge '+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</span></td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
 function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,90);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<div class="avatar">IT</div>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join(""):'<div class="empty">No matching item templates.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
-function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
-function syncQualityWarning(){const warning=document.getElementById("qualityWarning");if(!warning)return;const quality=Number(document.getElementById("adminQuality")?.value||0);warning.classList.toggle("hidden",!(quality>0));}
-async function giveAdminItem(){const log=document.getElementById("adminLog");if(!selectedAdminItem){log.textContent="Choose an item first.";addActivity("warning","Give item blocked","No item selected.");return;}const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};if(!payload.playerId){log.textContent="Choose a player first.";addActivity("warning","Give item blocked","No player selected.");return;}log.textContent=adminLiveGiveAvailable?"Giving item...":"Preparing dry-run item grant...";addActivity("grant",adminLiveGiveAvailable?"Sending live item grant":"Preparing dry-run",payload.template+" x"+payload.qty);try{const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});const status=data.dryRun?"Dry run only.":"Live item grant sent.";log.textContent=status+"\\n"+(data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);}}
+function invalidateLiveGiveDryRun(reason){if(liveGiveLastDryRun){liveGiveLastDryRun=null;setLiveGiveState("Pending dry-run. "+(reason||"Command input changed."));syncLiveGiveControls();}}
+function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;invalidateLiveGiveDryRun("Item template changed.");renderAdminItems();}
+function syncQualityWarning(){const warning=document.getElementById("qualityWarning");if(!warning)return;const quality=Number(document.getElementById("adminQuality")?.value||0);warning.classList.toggle("hidden",!(quality>0));invalidateLiveGiveDryRun("Quality changed.");}
+function liveGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const playerId=document.getElementById("adminPlayer").value;const qty=Number(document.getElementById("adminQty").value||1);const quality=Number(document.getElementById("adminQuality").value||0);if(!playerId)throw new Error("Choose a player first.");if(!Number.isInteger(qty)||qty<1)throw new Error("Quantity must be greater than 0.");return{playerId,template:selectedAdminItem.id,qty,quality};}
+function setLiveGiveState(message,data){const state=document.getElementById("liveGiveState");if(state)state.textContent=message;const preview=document.getElementById("liveGivePreview");if(preview&&data)preview.textContent=typeof data==="string"?data:JSON.stringify(data,null,2);}
+function liveGiveStatusLabel(){if(liveGiveServerStarting)return"Server Status: Starting Server";return liveGiveServerOnline?"Server Status: Online":"Server Status: Offline";}
+function syncLiveGiveControls(){const dry=document.getElementById("adminDryRunButton");const execute=document.getElementById("adminExecuteButton");const toggle=document.getElementById("enableLiveGive");const status=document.getElementById("liveGiveServerStatus");const enabled=Boolean(toggle&&toggle.checked);if(status){status.textContent=liveGiveStatusLabel()+(liveGiveServerOnline?" / Live Give is available but disabled until enabled.":" / Dry-run is available. Real Live Give requires the server to be running.");status.className=liveGiveServerOnline?"empty mt":"warning mt";}if(dry)dry.disabled=liveGiveBusy;if(execute)execute.disabled=liveGiveBusy||!liveGiveLastDryRun?.ok||!enabled||!liveGiveServerOnline;if(toggle)toggle.disabled=!liveGiveServerOnline||liveGiveBusy;}
+function isServerOnlineStatus(data){const vmState=String(data?.vm?.state||"");const status=String(data?.status?.summary?.status||"");return /^Running$/i.test(vmState)&&/Healthy|Ready|Running/i.test(status);}
+async function checkLiveGiveServerStatus(){const data=await getJson("/api/status");liveGiveServerOnline=isServerOnlineStatus(data);liveGiveServerStarting=false;syncLiveGiveControls();return data;}
+async function startServerForLiveGiveIfNeeded(){try{const status=await checkLiveGiveServerStatus();if(liveGiveServerOnline)return status;liveGiveServerStarting=true;syncLiveGiveControls();setLiveGiveState("Server Offline → Starting Server. Dry-run remains available while the server starts.");addActivity("server","Starting server for Live Give","Real Live Give will remain disabled until online and explicitly enabled.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok){throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");}setLiveGiveState("Starting Server. Waiting for Server Online...",data.stdout||data.stderr||data);setTimeout(checkLiveGiveServerStatus,2500);return data;}catch(e){liveGiveServerStarting=false;liveGiveServerOnline=false;const toggle=document.getElementById("enableLiveGive");if(toggle)toggle.checked=false;syncLiveGiveControls();setLiveGiveState("Server start failed. Live Give remains disabled.",betterError(e));addActivity("error","Server start failed",e.message);return null;}}
+async function startLiveGiveTool(){const toggle=document.getElementById("enableLiveGive");if(toggle)toggle.checked=false;liveGiveLastDryRun=null;syncLiveGiveControls();setLiveGiveState("Pending dry-run. Dry-run mode is the default.");await startServerForLiveGiveIfNeeded();}
+async function runLiveGiveDryRun(){const log=document.getElementById("adminLog");if(liveGiveBusy)return;liveGiveBusy=true;liveGiveLastDryRun=null;syncLiveGiveControls();try{const payload=liveGivePayload();setLiveGiveState("Dry-run running...",payload);addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});liveGiveLastDryRun=data;const status=data.ok?"Dry-run passed.":"Dry-run failed.";setLiveGiveState(status,{status:data.status,command:data.command,stdout:data.stdout,stderr:data.stderr,error:data.error||""});log.textContent=status+"\\n"+(data.stderr||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);await checkLiveGiveServerStatus();}catch(e){liveGiveLastDryRun={ok:false,error:e.message};setLiveGiveState("Dry-run failed.",betterError(e));log.textContent=betterError(e);addActivity("error","Dry-run failed",e.message);}finally{liveGiveBusy=false;syncLiveGiveControls();}}
+async function executeLiveGive(){const log=document.getElementById("adminLog");if(liveGiveBusy)return;try{if(!liveGiveLastDryRun?.ok)throw new Error("Run a successful dry-run before live execution.");await checkLiveGiveServerStatus();if(!liveGiveServerOnline)throw new Error("Server is offline. Real Live Give requires the server to be running.");const toggle=document.getElementById("enableLiveGive");if(!toggle?.checked)throw new Error("Enable Live Give before real execution.");const payload=liveGivePayload();const ok=confirm("Execute real Live Give now?\\n\\nPlayer: "+payload.playerId+"\\nItem: "+payload.template+"\\nQuantity: "+payload.qty);if(!ok){addActivity("grant","Live Give cancelled","Confirmation was declined.");return;}liveGiveBusy=true;syncLiveGiveControls();setLiveGiveState("Live execution running...",payload);addActivity("grant","Live execution running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",allowLiveExecution:true,confirmed:true,dryRunRequestId:liveGiveLastDryRun.requestId||""})});const status=data.ok?"Live execution completed.":"Live execution failed.";setLiveGiveState(status,{status:data.status,transport:data.transport,command:data.command,stdout:data.stdout,stderr:data.stderr,response:data.response,error:data.error||""});log.textContent=status+"\\n"+(data.stderr||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);}catch(e){setLiveGiveState("Live execution failed.",betterError(e));log.textContent=betterError(e);addActivity("error","Live execution failed",e.message);}finally{liveGiveBusy=false;syncLiveGiveControls();}}
 function showToolFrame(src){document.getElementById("toolFrame").src=src;}
 function refreshAll(){refresh();refreshMaps();refreshAdmin();}
-renderActivity();syncQualityWarning();refreshAll();setInterval(refresh,30000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();refreshAll();if(initialView)setView(initialView);setInterval(refresh,30000);setInterval(refreshMaps,30000);
 </script>
 </body>
 </html>`;

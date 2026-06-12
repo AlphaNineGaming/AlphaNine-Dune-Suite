@@ -286,7 +286,10 @@ function shouldStartReceiver() {
 }
 
 async function startReceiverIfNeeded() {
-  if (!shouldStartReceiver()) return;
+  if (!shouldStartReceiver()) {
+    appendLog("desktop", "Receiver auto-start skipped. Suite will start in degraded/Dry Run mode until receiver is configured and online.");
+    return { ok: false, degraded: true, skipped: true, reason: "Receiver auto-start is not configured." };
+  }
   const cfg = receiverConfig();
   process.env.DUNE_ADMIN_GIVE_ITEM_URL = process.env.DUNE_ADMIN_GIVE_ITEM_URL || cfg.giveUrl;
   process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL = process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL || cfg.healthUrl;
@@ -294,15 +297,30 @@ async function startReceiverIfNeeded() {
     process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = process.env.DUNE_RECEIVER_TOKEN;
   }
 
-  if (await requestOk(cfg.healthUrl)) return;
+  if (await requestOk(cfg.healthUrl)) {
+    appendLog("desktop", `Receiver already healthy at ${cfg.healthUrl}.`);
+    return { ok: true, degraded: false, healthUrl: cfg.healthUrl };
+  }
 
   const receiverFile = appPath("receivers", "dune-live-give-receiver.js");
-  receiverProcess = spawnNodeScript(receiverFile, "receiver");
+  try {
+    receiverProcess = spawnNodeScript(receiverFile, "receiver");
+  } catch (error) {
+    const message = `Receiver offline. Suite will continue in degraded/Dry Run mode. ${error.message}`;
+    appendLog("desktop", message);
+    appendLog("receiver", message);
+    return { ok: false, degraded: true, healthUrl: cfg.healthUrl, reason: error.message };
+  }
   const ready = await waitForUrl(cfg.healthUrl, START_TIMEOUT_MS);
   if (!ready) {
     const reason = childErrors.get("receiver") || "No child-process error was reported.";
-    throw new Error(`Give-item receiver did not become healthy at ${cfg.healthUrl}.\n${reason}\nSee ${logPath("receiver")}`);
+    const message = `Receiver offline at ${cfg.healthUrl}. Suite will continue in degraded/Dry Run mode. ${reason}`;
+    appendLog("desktop", message);
+    appendLog("receiver", message);
+    return { ok: false, degraded: true, healthUrl: cfg.healthUrl, reason };
   }
+  appendLog("desktop", `Receiver became healthy at ${cfg.healthUrl}.`);
+  return { ok: true, degraded: false, healthUrl: cfg.healthUrl };
 }
 
 async function startServer() {
@@ -411,7 +429,10 @@ async function boot() {
   appendLog("desktop", `Booting AlphaNine Dune Suite. packaged=${app.isPackaged} appPath=${app.getAppPath()} resourcesPath=${process.resourcesPath || ""}`);
   createFirstRunFiles();
   loadEnvironment();
-  await startReceiverIfNeeded();
+  const receiverStartup = await startReceiverIfNeeded();
+  if (receiverStartup?.degraded) {
+    appendLog("desktop", `Starting dashboard with receiver degraded: ${receiverStartup.reason || receiverStartup.healthUrl || "receiver offline"}`);
+  }
   await startServer();
   createWindow();
   createTray();

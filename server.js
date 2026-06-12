@@ -6,7 +6,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const APP_VERSION = "0.2.0-beta";
+const APP_VERSION = "0.2.1-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -3029,6 +3029,11 @@ function appPage() {
     .sound-slider { display:grid; grid-template-columns:auto minmax(120px,1fr) 46px; gap:10px; align-items:center; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.1em; }
     .sound-slider input[type="range"] { min-height:30px; padding:0; accent-color:var(--gold-bright); }
     .sound-volume-readout { color:var(--gold-bright); text-align:right; font-weight:900; }
+    .dashboard-footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid rgba(214,166,69,.16); color:var(--muted); font-size:12px; }
+    .dashboard-footer a, .support-links a { color:var(--gold-bright); overflow-wrap:anywhere; }
+    .about-overlay { position:fixed; inset:0; z-index:5100; background:rgba(3,4,5,.76); backdrop-filter:blur(8px); display:grid; place-items:center; padding:20px; }
+    .about-card { width:min(560px,100%); border:1px solid rgba(214,166,69,.42); background:linear-gradient(180deg,rgba(16,14,10,.98),rgba(7,8,8,.98)); box-shadow:0 24px 80px rgba(0,0,0,.55); padding:20px; }
+    .support-links { display:grid; gap:8px; margin-top:12px; color:var(--muted); font-size:13px; }
     .field-grid { display:grid; gap:10px; }
     label { display:grid; gap:6px; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
     select, input { width:100%; min-height:44px; border:1px solid rgba(214,166,69,.34); border-radius:0; background:rgba(6,8,5,.9); color:var(--text); padding:0 12px; outline:none; }
@@ -3116,6 +3121,24 @@ function appPage() {
   </style>
 </head>
 <body>
+<div id="aboutDialog" class="about-overlay hidden" role="dialog" aria-modal="true" aria-label="About AlphaNine Dune Suite">
+  <div class="about-card">
+    <div class="panel-head">
+      <div>
+        <div class="kicker">About</div>
+        <h2>AlphaNine Dune Suite</h2>
+        <div class="subtle">Version 0.2.1-beta</div>
+      </div>
+      <button type="button" onclick="closeAboutDialog()">Close</button>
+    </div>
+    <div class="support-links">
+      <strong>Community &amp; Support</strong>
+      <div>Discord: <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">https://discord.gg/tuUv3hYTv</a></div>
+      <div>YouTube: <a href="https://www.youtube.com/@AlphanineGaming" target="_blank" rel="noopener">https://www.youtube.com/@AlphanineGaming</a></div>
+    </div>
+    <div class="legal-notice mt">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
+  </div>
+</div>
 <div id="setupWizard" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-label="AlphaNine Dune Suite setup wizard">
   <div class="setup-card">
     <div class="panel-head">
@@ -3200,7 +3223,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.2.0-beta</span>
+        <span>Version 0.2.1-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -3219,6 +3242,7 @@ function appPage() {
       <button class="tab" data-view="settings">Settings</button>
     </nav>
     <div class="sidebar-foot">
+      <button type="button" onclick="openAboutDialog()">About</button>
       <div class="kofi-widget"><script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'E1W220NMPA');kofiwidget2.draw();</script></div>
       <div class="legal-notice">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
     </div>
@@ -3332,6 +3356,7 @@ function appPage() {
             <button data-open="players">Players</button>
             <button data-open="server">Server Status</button>
             <button onclick="refreshAll()">Refresh All</button>
+            <button type="button" onclick="openSupportDiscord()">💬 Discord Support</button>
           </div>
           <div class="sound-widget" aria-label="UI sound controls">
             <div class="sound-widget-head">
@@ -3341,6 +3366,9 @@ function appPage() {
             <label class="sound-slider">Volume <input id="dashboardSoundVolume" type="range" min="0" max="100" value="100"><span id="dashboardSoundVolumeLabel" class="sound-volume-readout">100%</span></label>
           </div>
           <pre id="dashboardLog" class="mt">Awaiting telemetry.</pre>
+          <div class="dashboard-footer">
+            <span>Need help? Join our Discord: <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">https://discord.gg/tuUv3hYTv</a></span>
+          </div>
         </div>
       </div>
     </section>
@@ -3684,7 +3712,7 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.0-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.1-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
@@ -3876,6 +3904,9 @@ function setupNext(){setupStep=Math.min(4,setupStep+1);updateSetupStep();}
 function setupPrev(){setupStep=Math.max(0,setupStep-1);updateSetupStep();}
 function openSetupWizard(){setupStep=0;updateSetupStep();document.getElementById("setupWizard")?.classList.remove("hidden");}
 function closeSetupWizard(){document.getElementById("setupWizard")?.classList.add("hidden");}
+function openAboutDialog(){document.getElementById("aboutDialog")?.classList.remove("hidden");playUiSound("click");}
+function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.add("hidden");playUiSound("click");}
+function openSupportDiscord(){window.open("https://discord.gg/tuUv3hYTv","_blank","noopener");playUiSound("click");}
 async function initSetup(){try{const data=await getJson("/api/setup/status");const config=data.config||{};fillSetup(config);fillSettings(config);if(!data.setupComplete)openSetupWizard();if(data.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(data.discovery,null,2);refreshReceiverStatus();}catch(e){addActivity("error","Setup status failed",e.message);}}
 async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.installPath)setValue("setupServerInstallPath",data.server.installPath);if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}

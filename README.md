@@ -154,6 +154,26 @@ Common fixes:
 - Only run Live Give on servers you own or are authorized to administer.
 - Do not commit local config files containing secrets.
 
+## Community & Support
+
+Need help with AlphaNine Dune Suite?
+
+Join the AlphaNine Gaming Discord community:
+
+[https://discord.gg/tuUv3hYTv](https://discord.gg/tuUv3hYTv)
+
+Support includes:
+
+- Installation assistance
+- Configuration help
+- Bug reports
+- Feature requests
+- Dune Awakening server discussions
+- AlphaNine Dune Suite updates
+
+YouTube:
+[https://www.youtube.com/@AlphanineGaming](https://www.youtube.com/@AlphanineGaming)
+
 ## Legal Notice
 
 AlphaNine Dune Suite is an independent fan-made server administration tool.

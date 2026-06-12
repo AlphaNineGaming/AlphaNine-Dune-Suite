@@ -1,5 +1,6 @@
-const { contextBridge } = require("electron");
+const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("alphaNineSuite", {
-  desktop: true
+  desktop: true,
+  chooseSshKey: () => ipcRenderer.invoke("choose-ssh-key")
 });

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, dialog, shell, utilityProcess } = require("electron");
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell, utilityProcess } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -398,6 +398,19 @@ function createTray() {
   ]));
   tray.on("double-click", () => focusMainWindow("tray-double-click"));
 }
+
+ipcMain.handle("choose-ssh-key", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select SSH key",
+    properties: ["openFile"],
+    filters: [
+      { name: "SSH keys", extensions: ["pem", "key", "ppk", "*"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  return { canceled: false, filePath: result.filePaths[0] };
+});
 
 function createWindow() {
   mainWindow = new BrowserWindow({

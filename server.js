@@ -6,7 +6,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const APP_VERSION = "0.2.1-beta";
+const APP_VERSION = "0.2.2-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -110,9 +110,19 @@ function publicConfig(configValue = loadConfig()) {
   const copy = { ...configValue };
   copy.databasePasswordSet = Boolean(copy.databasePassword);
   copy.receiverTokenSet = Boolean(copy.receiverToken);
+  copy.sshKeyStatus = sshKeyStatus(copy.sshKey || defaultSshKeyPath());
+  copy.receiverSshKeyStatus = sshKeyStatus(copy.receiverSshKey || copy.sshKey || defaultSshKeyPath());
   copy.databasePassword = copy.databasePassword ? "********" : "";
   copy.receiverToken = copy.receiverToken ? "********" : "";
   return copy;
+}
+
+function configWithSshDiagnostics(configValue = loadConfig()) {
+  return {
+    ...configValue,
+    sshKeyStatus: sshKeyStatus(configValue.sshKey || defaultSshKeyPath()),
+    receiverSshKeyStatus: sshKeyStatus(configValue.receiverSshKey || configValue.sshKey || defaultSshKeyPath())
+  };
 }
 
 function readBody(req) {
@@ -136,6 +146,18 @@ function expandEnvPath(value) {
 
 function defaultSshKeyPath() {
   return path.join(os.homedir(), "AppData", "Local", "DuneAwakeningServer", "sshKey");
+}
+
+function sshKeyStatus(value) {
+  const configured = String(value || "").trim();
+  const resolved = expandEnvPath(configured || defaultSshKeyPath());
+  const exists = Boolean(resolved && fs.existsSync(resolved));
+  return {
+    configured,
+    path: resolved,
+    exists,
+    message: exists ? "SSH key file found." : "SSH key file not found."
+  };
 }
 
 const config = loadConfig();
@@ -484,9 +506,10 @@ function configuredPortFromUrl(value) {
 }
 
 function configuredMonitorPorts() {
+  const receiver = receiverUrls();
   const ports = [
     { key: "suite", label: "8810 (Suite Backend)", host: HOST, port: PORT },
-    { key: "receiver", label: "5055 (Live Give Receiver)", port: configuredPortFromUrl(LIVE_GIVE_ENV.httpHealthUrl || LIVE_GIVE_ENV.httpUrl) || 5055 },
+    { key: "receiver", label: `${receiver.port} (Live Give Receiver)`, host: receiver.host, port: receiver.port },
     { key: "ssh", label: "22 (SSH)", port: 22 }
   ];
   const rabbitPort = configuredPortFromUrl(LIVE_GIVE_ENV.rabbitHealthUrl || LIVE_GIVE_ENV.rabbitPublishUrl) || envNumber("DUNE_ADMIN_RABBITMQ_PORT", 0);
@@ -632,10 +655,12 @@ async function sshCommand(command, timeout = 180000) {
   if (!info.exists && !ip) return { ok: false, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
   if (info.exists && info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running." };
   if (!ip) return { ok: false, stdout: "", stderr: "VM IP address was not found.", error: "VM IP address was not found." };
+  const key = sshKeyStatus(SSH_KEY);
+  if (!key.exists) return { ok: false, stdout: "", stderr: key.message, error: key.message, sshKey: key };
   return run("ssh", [
     "-o", "StrictHostKeyChecking=no",
     "-o", "LogLevel=QUIET",
-    "-i", SSH_KEY,
+    "-i", key.path,
     `${SSH_USER}@${ip}`,
     command
   ], { timeout });
@@ -646,16 +671,45 @@ function parseStatus(text) {
   const summary = {};
   const servers = [];
   let inServers = false;
+  let statusColumns = [];
   for (const line of lines) {
     if (/^Battlegroup:/.test(line)) summary.battlegroup = line.replace(/^Battlegroup:\s*/, "");
-    if (/^Status\s+Database\s+Gateway\s+Director\s+Uptime/i.test(line)) continue;
-    if (/^(Healthy|Starting|Unhealthy|Ready|Pending)\s+/i.test(line) && !summary.status) {
+    const keyValues = [...line.matchAll(/\b(PHASE|SERVERGROUP|GATEWAY|DIRECTOR)\s*[:=]\s*([A-Za-z-]+)/gi)];
+    for (const match of keyValues) {
+      const key = match[1].toLowerCase();
+      const value = match[2];
+      if (key === "phase") {
+        summary.phase = value;
+        summary.status = value;
+      } else if (key === "servergroup") {
+        summary.servergroup = value;
+      } else {
+        summary[key] = value;
+      }
+    }
+    if (/^(Status|Phase)\s+/i.test(line) && /(Gateway|Director)/i.test(line)) {
+      statusColumns = line.split(/\s+/).map((part) => part.toLowerCase());
+      continue;
+    }
+    if (/^(Healthy|Starting|Unhealthy|Ready|Pending)\s+/i.test(line) && (!summary.status || !summary.gateway || !summary.director || !summary.servergroup)) {
       const parts = line.split(/\s+/);
       summary.status = parts[0];
-      summary.database = parts[1];
-      summary.gateway = parts[2];
-      summary.director = parts[3];
-      summary.uptime = parts.slice(4).join(" ");
+      summary.phase = parts[0];
+      if (statusColumns.length) {
+        for (let index = 1; index < statusColumns.length && index < parts.length; index += 1) {
+          const column = statusColumns[index];
+          if (column === "servergroup" || column === "server-group") summary.servergroup = parts[index];
+          else if (column === "database") summary.database = parts[index];
+          else if (column === "gateway") summary.gateway = parts[index];
+          else if (column === "director") summary.director = parts[index];
+          else if (column === "uptime") summary.uptime = parts.slice(index).join(" ");
+        }
+      } else {
+        summary.database = parts[1];
+        summary.gateway = parts[2];
+        summary.director = parts[3];
+        summary.uptime = parts.slice(4).join(" ");
+      }
     }
     if (/^Game Servers/i.test(line)) {
       inServers = true;
@@ -1085,12 +1139,21 @@ function transportDisplayName(mode) {
 }
 
 function statusSummaryIsOnline(summary) {
-  const summaryStatus = String(summary?.status || "");
-  return /Healthy|Ready|Running/i.test(summaryStatus);
+  const phase = String(summary?.phase || summary?.status || "");
+  const servergroup = String(summary?.servergroup || "");
+  const gateway = String(summary?.gateway || "");
+  const director = String(summary?.director || "");
+  const servergroupOk = servergroup ? /^Running$/i.test(servergroup) : true;
+  const gatewayOk = gateway ? /^Healthy$/i.test(gateway) : true;
+  const directorOk = director ? /^Healthy$/i.test(director) : true;
+  return /^Healthy$/i.test(phase)
+    && servergroupOk
+    && gatewayOk
+    && directorOk;
 }
 
 function serverSnapshotIsOnline(snapshot) {
-  return Boolean(snapshot?.vm?.exists && snapshot.vm.state === "Running" && statusSummaryIsOnline(snapshot?.status?.summary || snapshot?.status));
+  return Boolean(statusSummaryIsOnline(snapshot?.status?.summary || snapshot?.status));
 }
 
 function runtimeTransportAuditAction(nextMode, startup) {
@@ -2175,12 +2238,13 @@ async function liveGiveServerAvailability() {
   const vm = await vmInfo();
   let status = null;
   let raw = "";
-  if (vm.exists && vm.state === "Running") {
+  const canCheckBattlegroup = Boolean((vm.exists && vm.state === "Running") || VM_IP);
+  if (canCheckBattlegroup) {
     const result = await battlegroup("status");
     raw = result.stdout || result.stderr || result.error || "";
     status = parseStatus(raw);
   }
-  const online = Boolean(vm.exists && vm.state === "Running" && statusSummaryIsOnline(status?.summary));
+  const online = Boolean(statusSummaryIsOnline(status?.summary));
   return { online, vm, status: status?.summary || null, raw };
 }
 
@@ -3009,10 +3073,10 @@ function appPage() {
     button, input, select { font:inherit; }
     button { cursor:pointer; }
     .shell { min-height:100vh; display:grid; grid-template-columns:300px minmax(0,1fr); }
-    .sidebar { position:sticky; top:0; height:100vh; padding:26px 18px; border-right:1px solid var(--line); background:
+    .sidebar { position:sticky; top:0; height:100vh; display:flex; flex-direction:column; overflow:hidden; box-sizing:border-box; padding:26px 18px; border-right:1px solid var(--line); background:
       linear-gradient(180deg, rgba(13,14,9,.98), rgba(4,6,4,.96)),
       radial-gradient(circle at 70% 12%, rgba(214,166,69,.16), transparent 30%); box-shadow:var(--shadow), inset -18px 0 40px rgba(0,0,0,.35); }
-    .brand { position:relative; padding:22px 18px 28px; border:1px solid rgba(214,166,69,.26); background:linear-gradient(135deg, rgba(214,166,69,.09), rgba(255,255,255,.015)); clip-path:polygon(0 0, 88% 0, 100% 18px, 100% 100%, 12px 100%, 0 calc(100% - 12px)); }
+    .brand { flex:0 0 auto; position:relative; padding:22px 18px 28px; border:1px solid rgba(214,166,69,.26); background:linear-gradient(135deg, rgba(214,166,69,.09), rgba(255,255,255,.015)); clip-path:polygon(0 0, 88% 0, 100% 18px, 100% 100%, 12px 100%, 0 calc(100% - 12px)); }
     .brand::before { content:""; display:block; width:58px; height:58px; margin-bottom:14px; border:1px solid var(--line-strong); background:
       linear-gradient(30deg, transparent 45%, rgba(240,201,106,.65) 46% 54%, transparent 55%),
       radial-gradient(circle, rgba(240,201,106,.22), rgba(4,6,4,.65)); box-shadow:0 0 28px rgba(240,201,106,.18); }
@@ -3020,12 +3084,16 @@ function appPage() {
     .brand p { margin:9px 0 0; color:var(--sand); font-size:14px; text-transform:uppercase; letter-spacing:.18em; }
     .build-info { display:grid; gap:3px; margin-top:14px; padding-top:12px; border-top:1px solid rgba(214,166,69,.18); color:rgba(208,164,78,.72); font-size:11px; line-height:1.25; letter-spacing:.08em; text-transform:uppercase; }
     .build-info span { display:block; }
-    .nav { display:grid; gap:5px; margin-top:18px; }
+    .nav { flex:1 1 auto; min-height:0; display:grid; align-content:start; gap:5px; margin-top:18px; padding-right:7px; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-color:rgba(240,201,106,.58) rgba(5,7,5,.68); scrollbar-width:thin; }
+    .nav::-webkit-scrollbar { width:9px; }
+    .nav::-webkit-scrollbar-track { background:rgba(5,7,5,.68); border:1px solid rgba(214,166,69,.1); }
+    .nav::-webkit-scrollbar-thumb { background:linear-gradient(180deg, rgba(240,201,106,.72), rgba(111,80,30,.74)); border:1px solid rgba(240,201,106,.34); }
+    .nav::-webkit-scrollbar-thumb:hover { background:linear-gradient(180deg, rgba(255,222,129,.88), rgba(154,107,41,.82)); }
     .tab { width:100%; min-height:43px; display:flex; align-items:center; justify-content:flex-start; gap:10px; border:1px solid rgba(214,166,69,.08); border-radius:0; padding:0 14px; background:rgba(255,255,255,.01); color:var(--sand); text-align:left; text-transform:uppercase; letter-spacing:.065em; font-size:12px; line-height:1.1; font-weight:760; clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
     .tab::before { content:""; flex:0 0 auto; width:8px; height:8px; border:1px solid currentColor; transform:rotate(45deg); box-shadow:0 0 8px currentColor; opacity:.72; }
     .tab.active, .tab:hover { color:var(--gold-bright); border-color:rgba(240,201,106,.58); background:linear-gradient(90deg, rgba(214,166,69,.22), rgba(214,166,69,.045)); box-shadow:inset 0 0 22px rgba(240,201,106,.075), 0 0 14px rgba(214,166,69,.1); }
     .tab.active { font-size:12.5px; font-weight:850; }
-    .sidebar-foot { position:absolute; left:16px; right:16px; bottom:18px; color:var(--muted); font-size:12px; line-height:1.5; }
+    .sidebar-foot { flex:0 0 auto; margin-top:16px; color:var(--muted); font-size:12px; line-height:1.5; }
     .legal-notice { margin-top:12px; padding-top:10px; border-top:1px solid rgba(214,166,69,.16); color:rgba(214,196,151,.68); font-size:10px; line-height:1.35; }
     .content { min-width:0; padding:18px 24px 30px; }
     .topbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(260px,1fr) auto; gap:16px; align-items:center; margin:-18px -24px 18px; padding:16px 24px; backdrop-filter:blur(18px); background:linear-gradient(90deg, rgba(7,8,4,.94), rgba(23,19,10,.88)); border-bottom:1px solid var(--line); box-shadow:0 14px 42px rgba(0,0,0,.36); }
@@ -3245,7 +3313,7 @@ function appPage() {
     .diagnostic-log { min-height:220px; max-height:420px; overflow:auto; white-space:pre-wrap; }
     .mt { margin-top:12px; } .mb { margin-bottom:12px; }
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
-    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.sidebar-foot{position:static;margin-top:16px}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists{grid-template-columns:1fr}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists{grid-template-columns:1fr}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
   </style>
 </head>
 <body>
@@ -3255,7 +3323,7 @@ function appPage() {
       <div>
         <div class="kicker">About</div>
         <h2>AlphaNine Dune Suite</h2>
-        <div class="subtle">Version 0.2.1-beta</div>
+        <div class="subtle">Version 0.2.2-beta</div>
       </div>
       <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
@@ -3351,7 +3419,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.2.1-beta</span>
+        <span>Version 0.2.2-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -3840,7 +3908,7 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.1-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.2-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
@@ -3900,6 +3968,8 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
             <label>SSH Host<input id="settingsReceiverSshHost"></label>
             <label>SSH User<input id="settingsReceiverSshUser"></label>
             <label>SSH Key<input id="settingsReceiverSshKey"></label>
+            <div class="action-row"><button type="button" onclick="browseSshKey('settingsReceiverSshKey','settingsReceiverSshKeyWarning')">Browse SSH Key</button></div>
+            <div id="settingsReceiverSshKeyWarning" class="warning">SSH key file not checked.</div>
           </div>
           <div class="action-row mt">
             <button type="button" onclick="receiverAction('start')">Start</button>
@@ -3915,6 +3985,8 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
             <label>VM IP<input id="settingsVmIp"></label>
             <label>SSH User<input id="settingsSshUser"></label>
             <label>SSH Key<input id="settingsSshKey"></label>
+            <div class="action-row"><button type="button" onclick="browseSshKey('settingsSshKey','settingsSshKeyWarning')">Browse SSH Key</button></div>
+            <div id="settingsSshKeyWarning" class="warning">SSH key file not checked.</div>
             <label>Dune Server Path<input id="settingsServerInstallPath"></label>
           </div>
         </div>
@@ -4025,7 +4097,10 @@ function setChecked(id,value){const el=document.getElementById(id);if(el)el.chec
 function resultBox(id,data){const el=document.getElementById(id);if(!el)return;el.className="test-result "+(data.ok?"ok":"bad");el.textContent=(data.message||data.status||data.error||"Done")+(data.error?"\\n"+data.error:"");}
 function configPayload(prefix){const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),serverInstallPath:getValue(prefix+"ServerInstallPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey")};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");if(dbPass&&dbPass!=="********")payload.databasePassword=dbPass;if(token&&token!=="********")payload.receiverToken=token;return payload;}
 function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);setValue("setupReceiverSshHost",config.receiverSshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");}
-function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);setValue("settingsReceiverSshHost",config.receiverSshHost||"");setValue("settingsReceiverSshUser",config.receiverSshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setText("settingsConfigPath",config.configPath||"App data");}
+function setSshKeyWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.exists);el.className=ok?"empty mt":"warning mt";el.textContent=status?.message||"SSH key file not found.";if(status?.path)el.textContent+=" "+status.path;}
+async function refreshSshKeyWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/ssh-key/status?path="+encodeURIComponent(path));setSshKeyWarning(warningId,data.sshKey);}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
+async function browseSshKey(inputId,warningId){try{if(!window.alphaNineSuite?.chooseSshKey)throw new Error("File picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseSshKey();if(result?.filePath){setValue(inputId,result.filePath);await refreshSshKeyWarning(inputId,warningId);}}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
+function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);setValue("settingsReceiverSshHost",config.receiverSshHost||"");setValue("settingsReceiverSshUser",config.receiverSshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);}
 function collectSettings(){const payload=configPayload("settings");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.setupComplete=true;return payload;}
 function updateSetupStep(){document.querySelectorAll(".setup-page").forEach((p,i)=>p.classList.toggle("active",i===setupStep));document.querySelectorAll(".setup-step").forEach((p,i)=>p.classList.toggle("active",i===setupStep));}
 function setupNext(){setupStep=Math.min(4,setupStep+1);updateSetupStep();}
@@ -4119,7 +4194,7 @@ function renderAdminItems(){const q=(document.getElementById("adminSearch")?.val
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");if(!warning)return;const quality=Number(document.getElementById("adminQuality")?.value||0);warning.classList.toggle("hidden",!(quality>0));}
 function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
-function isServerOnlineStatus(data){const vmState=String(data?.vm?.state||"");const status=String(data?.status?.summary?.status||"");return /^Running$/i.test(vmState)&&/Healthy|Ready|Running/i.test(status);}
+function isServerOnlineStatus(data){if(data?.runtimeTransport&&typeof data.runtimeTransport.serverOnline==="boolean")return data.runtimeTransport.serverOnline;const s=data?.status?.summary||{};const servergroup=String(s.servergroup||"");const gateway=String(s.gateway||"");const director=String(s.director||"");return /^Healthy$/i.test(String(s.phase||s.status||""))&&(!servergroup||/^Running$/i.test(servergroup))&&(!gateway||/^Healthy$/i.test(gateway))&&(!director||/^Healthy$/i.test(director));}
 function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";syncLiveGiveTransportStatus();syncGiveItemControls();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=kind==="ok"?"empty mt":"warning mt";}
 function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(give)give.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||!liveGiveServerOnline||(mode==="execute"&&!adminLiveGiveAvailable);if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
@@ -4155,13 +4230,14 @@ async function route(req, res) {
     const vm = await vmInfo();
     let status = null;
     let raw = "";
-    if (vm.exists && vm.state === "Running") {
+    const canCheckBattlegroup = Boolean((vm.exists && vm.state === "Running") || VM_IP);
+    if (canCheckBattlegroup) {
       const result = await battlegroup("status");
       raw = result.stdout || result.stderr || result.error || "";
       status = parseStatus(raw);
     }
     const runtimeTransport = await updateRuntimeGiveTransport({ vm, status, raw }, "status");
-    await json(res, { vm, status, directorUrl: lastDirectorUrl, runtimeTransport });
+    await json(res, { vm, status, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
     return;
   }
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {
@@ -4170,12 +4246,16 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/config" && req.method === "GET") {
-    await json(res, loadConfig());
+    await json(res, configWithSshDiagnostics());
     return;
   }
   if (url.pathname === "/api/config" && req.method === "POST") {
-    try { await json(res, { ok: true, config: saveConfig(JSON.parse(await readBody(req) || "{}")), restartRequired: true }); }
+    try { await json(res, { ok: true, config: configWithSshDiagnostics(saveConfig(JSON.parse(await readBody(req) || "{}"))), restartRequired: true }); }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/ssh-key/status" && req.method === "GET") {
+    await json(res, { ok: true, sshKey: sshKeyStatus(url.searchParams.get("path") || loadConfig().sshKey || defaultSshKeyPath()) });
     return;
   }
   if (url.pathname === "/api/setup/status" && req.method === "GET") {

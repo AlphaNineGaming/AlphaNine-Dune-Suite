@@ -676,7 +676,41 @@ function parseStatus(text) {
 async function battlegroup(action) {
   const allowed = new Set(["status", "start", "restart", "stop", "update", "backup", "logs-export", "operator-logs-export"]);
   if (!allowed.has(action)) return { ok: false, error: "Unsupported action." };
+  if (action !== "status") {
+    const readiness = serverControlConfigured();
+    if (!readiness.configured) {
+      appendAdminAudit(`server_${action}_skipped`, {
+        action,
+        reason: readiness.reason,
+        config: readiness.summary
+      });
+      return { ok: false, skipped: true, stdout: "", stderr: readiness.reason, error: readiness.reason };
+    }
+    appendAdminAudit(`server_${action}_requested`, {
+      action,
+      config: readiness.summary
+    });
+  }
   return sshCommand(`/home/dune/.dune/bin/battlegroup ${action}`, action === "update" ? 600000 : 240000);
+}
+
+function serverControlConfigured() {
+  const cfg = loadConfig();
+  const root = expandEnvPath(cfg.serverInstallPath || "");
+  const rootExists = Boolean(root && fs.existsSync(root));
+  const hasAddress = Boolean(String(cfg.vmIp || VM_IP || "").trim());
+  const configured = Boolean(cfg.setupComplete || hasAddress || rootExists);
+  return {
+    configured,
+    reason: configured ? "Server control is configured." : "Server start skipped: complete Setup or configure VM IP/server install path first.",
+    summary: {
+      setupComplete: Boolean(cfg.setupComplete),
+      vmName: cfg.vmName || VM_NAME || "",
+      vmIpSet: hasAddress,
+      serverInstallPathSet: Boolean(root),
+      serverInstallPathExists: rootExists
+    }
+  };
 }
 
 function shQuote(value) {
@@ -989,7 +1023,11 @@ function httpRequestJson(urlValue, options = {}) {
       });
     });
     req.on("timeout", () => req.destroy(new Error("Give-item transport timed out.")));
-    req.on("error", reject);
+    req.on("error", (error) => {
+      const target = redactUrl(urlValue);
+      const detail = error.code ? `${error.code}: ${error.message}` : error.message;
+      reject(new Error(`Give-item transport request failed for ${target}: ${detail}`));
+    });
     if (body) req.write(body);
     req.end();
   });
@@ -1056,6 +1094,20 @@ function runtimeTransportAuditAction(nextMode, startup) {
   return nextMode === "http-json" ? "transport_changed_http_json" : "transport_changed_dry_run";
 }
 
+function appendRuntimeSafetyAudit(online, nextMode, source, reason) {
+  appendAdminAudit(online ? "online_detected" : "offline_detected", {
+    source,
+    serverOnline: online,
+    reason
+  });
+  appendAdminAudit(nextMode === "http-json" ? "live_give_enabled" : "dry_run_enabled", {
+    source,
+    transport: nextMode,
+    serverOnline: online,
+    reason
+  });
+}
+
 async function updateRuntimeGiveTransport(snapshot = null, source = "status") {
   let checked = snapshot;
   if (!checked) {
@@ -1080,6 +1132,7 @@ async function updateRuntimeGiveTransport(snapshot = null, source = "status") {
       serverStatus: runtimeGiveTransport.serverStatus,
       reason: nextReason
     });
+    appendRuntimeSafetyAudit(online, nextMode, source, nextReason);
   }
   return { ...runtimeGiveTransport };
 }
@@ -1309,9 +1362,14 @@ async function adminProbe() {
     order by table_schema, table_name
     limit 80
   `;
-  const output = await dbQuery(tablesSql);
   const transport = await checkGiveTransport();
   const liveGiveAvailable = Boolean(transport.configured && transport.reachable);
+  let output = "";
+  try {
+    output = await dbQuery(tablesSql);
+  } catch (error) {
+    return adminProbeUnavailable(error, transport);
+  }
   return {
     ok: true,
     transport: transportDisplayName(transport.mode),
@@ -1337,33 +1395,35 @@ async function adminProbe() {
   };
 }
 
-function adminProbeUnavailable(error) {
-  const transport = giveTransportConfig();
+function adminProbeUnavailable(error, transportOverride = null) {
+  const transport = transportOverride || giveTransportConfig();
   const checked = {
     ...transport,
-    reachable: false,
-    error: error?.message || transport.reason || "Admin probe failed."
+    reachable: Boolean(transport.reachable),
+    error: transport.error || transport.reason || ""
   };
   const reason = dryRunReason(checked);
   return {
     ok: false,
+    databaseReachable: false,
     transport: transportDisplayName(checked.mode),
     configured: Boolean(checked.configured),
-    reachable: false,
+    reachable: Boolean(checked.reachable),
     missingEnv: checked.missingEnv || [],
-    liveGiveAvailable: false,
-    dryRunReason: reason,
+    liveGiveAvailable: Boolean(checked.configured && checked.reachable),
+    dryRunReason: checked.configured && checked.reachable ? "" : reason,
     giveTransport: {
       mode: checked.mode,
       configured: Boolean(checked.configured),
-      reachable: false,
+      reachable: Boolean(checked.reachable),
       statusCode: checked.statusCode || null,
       target: checked.url ? redactUrl(checked.url) : "",
       missingEnv: checked.missingEnv || [],
       reason: checked.reason || checked.error || "",
-      dryRunReason: reason
+      dryRunReason: checked.configured && checked.reachable ? "" : reason
     },
-    error: checked.error
+    error: error?.message || "Admin probe failed.",
+    note: `Database/admin probe is offline: ${error?.message || "unknown error"}`
   };
 }
 
@@ -2192,8 +2252,8 @@ function requireConfirmed(value) {
 function appendAdminAudit(action, payload) {
   const entry = {
     at: new Date().toISOString(),
-    action,
-    ...payload
+    ...payload,
+    action
   };
   fs.mkdirSync(path.dirname(ADMIN_AUDIT_LOG), { recursive: true });
   fs.appendFileSync(ADMIN_AUDIT_LOG, `${JSON.stringify(entry)}\n`, "utf8");
@@ -3890,7 +3950,7 @@ async function refreshLiveMap(){if(!liveMap)return;try{const data=await getJson(
 async function previewTeleport(){const payload={playerId:document.getElementById("teleportPlayerId").value,x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value};try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("teleportLog").textContent=data.message+"\\n"+JSON.stringify(data.request,null,2);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
-async function getJson(url, options){const r=await fetch(url,options);const t=await r.text();let d={};try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||t||"Request failed");return d;}
+async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
 function setValue(id,value){const el=document.getElementById(id);if(el)el.value=value==null?"":String(value);}
 function getValue(id){return document.getElementById(id)?.value||"";}
 function setChecked(id,value){const el=document.getElementById(id);if(el)el.checked=Boolean(value);}
@@ -4146,7 +4206,7 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/admin/probe" && req.method === "GET") {
     try { await json(res, await adminProbe()); }
-    catch (error) { await json(res, adminProbeUnavailable(error), 500); }
+    catch (error) { await json(res, adminProbeUnavailable(error)); }
     return;
   }
   if (url.pathname === "/api/live-give/env" && req.method === "GET") {

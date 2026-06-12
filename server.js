@@ -184,6 +184,10 @@ const runtimeGiveTransport = {
   reason: "Server status has not been checked yet.",
   initialized: false
 };
+const liveGiveAvailability = {
+  initialized: false,
+  available: false
+};
 
 const LIVE_GIVE_SECRET_ENV_NAMES = new Set([
   "DUNE_ADMIN_GIVE_ITEM_TOKEN",
@@ -1095,15 +1099,47 @@ function runtimeTransportAuditAction(nextMode, startup) {
 }
 
 function appendRuntimeSafetyAudit(online, nextMode, source, reason) {
-  appendAdminAudit(online ? "online_detected" : "offline_detected", {
+  if (nextMode === "http-json") {
+    appendAdminAudit("server_online_detected", {
+      source,
+      serverOnline: online,
+      transport: nextMode,
+      reason
+    });
+    return;
+  }
+  appendAdminAudit("offline_detected", {
     source,
     serverOnline: online,
     reason
   });
-  appendAdminAudit(nextMode === "http-json" ? "live_give_enabled" : "dry_run_enabled", {
+  appendAdminAudit("dry_run_enabled", {
     source,
     transport: nextMode,
     serverOnline: online,
+    reason
+  });
+}
+
+function appendLiveGiveAvailabilityAudit(liveGiveAvailable, transport, source) {
+  const changed = !liveGiveAvailability.initialized || liveGiveAvailability.available !== liveGiveAvailable;
+  liveGiveAvailability.initialized = true;
+  liveGiveAvailability.available = liveGiveAvailable;
+  if (!changed) return;
+  const reason = liveGiveAvailable
+    ? "Server and receiver transport are online."
+    : (transport?.dryRunReason || transport?.reason || transport?.error || runtimeGiveTransport.reason || "Live Give unavailable.");
+  appendAdminAudit(liveGiveAvailable ? "online_detected" : "offline_detected", {
+    source,
+    serverOnline: Boolean(runtimeGiveTransport.serverOnline),
+    receiverReachable: Boolean(transport?.reachable),
+    reason
+  });
+  appendAdminAudit(liveGiveAvailable ? "live_give_enabled" : "dry_run_enabled", {
+    source,
+    transport: transport?.mode || runtimeGiveTransport.mode || "dry-run",
+    serverOnline: Boolean(runtimeGiveTransport.serverOnline),
+    receiverReachable: Boolean(transport?.reachable),
     reason
   });
 }
@@ -1431,6 +1467,7 @@ async function liveGiveEnvStatus() {
   await updateRuntimeGiveTransport(null, "env");
   const transport = await checkGiveTransport();
   const liveGiveAvailable = Boolean(transport.configured && transport.reachable);
+  appendLiveGiveAvailabilityAudit(liveGiveAvailable, transport, "live-give-env");
   return {
     ok: true,
     liveGiveAvailable,
@@ -2594,6 +2631,37 @@ function logLiveGiveStartupValidation() {
     return;
   }
   console.log(`Live give-item dry-run: ${config.reason || "transport is not configured"}`);
+}
+
+function attemptConfiguredServerStart(source = "startup") {
+  const readiness = serverControlConfigured();
+  if (runtimeGiveTransport.serverOnline) return;
+  if (!readiness.configured) {
+    appendAdminAudit("server_start_skipped", {
+      source,
+      reason: readiness.reason,
+      config: readiness.summary
+    });
+    return;
+  }
+  appendAdminAudit("server_start_requested", {
+    source,
+    config: readiness.summary
+  });
+  battlegroup("start").then((result) => {
+    appendAdminAudit(result.ok ? "server_start_request_completed" : "server_start_request_failed", {
+      source,
+      ok: Boolean(result.ok),
+      skipped: Boolean(result.skipped),
+      error: result.error || result.stderr || ""
+    });
+  }).catch((error) => {
+    appendAdminAudit("server_start_request_failed", {
+      source,
+      ok: false,
+      error: error.message
+    });
+  });
 }
 
 async function directorUrl() {
@@ -3973,7 +4041,7 @@ async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,me
 async function finishSetup(){try{const payload={...configPayload("setup"),setupComplete:true};const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("setupFinishResult").textContent="Setup saved. Restart the suite if receiver or environment values changed.";fillSettings(data.config||payload);closeSetupWizard();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
 async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);refreshReceiverStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
 async function saveSettings(){try{const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...appConfig,...collectSettings()})});fillSettings(data.config||{});setText("settingsSaveStatus","Settings saved. Restart the suite for receiver startup environment changes.");playUiSound("success");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
-async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");setText("receiverManagerStatus",data.status+" / "+data.healthUrl);setText("settingsReceiver",data.status);tone("receiverState",data.status);return data;}catch(e){setText("receiverManagerStatus",betterError(e));}}
+async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");const label=data.ok?"Receiver Online":"Receiver Offline";setText("receiverManagerStatus",label+" / "+data.healthUrl);setText("settingsReceiver",label);tone("receiverState",label);if(!data.ok)tone("rabbitState","Dry Run Active");return data;}catch(e){setText("receiverManagerStatus",betterError(e));tone("receiverState","Receiver Offline");tone("rabbitState","Dry Run Active");}}
 async function receiverAction(action){try{if(action==="start")await saveSettings();const data=await getJson("/api/receiver/"+action,{method:"POST"});setText("receiverManagerStatus",data.message||data.status||"Receiver action complete");await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){setText("receiverManagerStatus",betterError(e));playUiSound("warning");}}
 async function exportSettings(){try{const data=await getJson("/api/settings/export");const text=JSON.stringify(data,null,2);document.getElementById("settingsBackupStatus").textContent=text;const blob=new Blob([text],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="alphanine-settings-"+new Date().toISOString().slice(0,10)+".json";a.click();URL.revokeObjectURL(a.href);playUiSound("success");}catch(e){setText("settingsBackupStatus",betterError(e));playUiSound("warning");}}
 async function importSettings(){try{const raw=getValue("settingsImportText");if(!raw.trim())throw new Error("Paste exported settings JSON first.");const data=await getJson("/api/settings/import",{method:"POST",headers:{"Content-Type":"application/json"},body:raw});fillSettings(data.config||{});setText("settingsBackupStatus","Settings imported. Restart the suite if receiver or environment values changed.");playUiSound("success");}catch(e){setText("settingsBackupStatus",betterError(e));playUiSound("warning");}}
@@ -4014,7 +4082,7 @@ function liveGiveTransportMessage(transport){const missing=transport?.missingEnv
 function renderEnvSetup(){const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong>'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}}
 function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=adminLiveGiveAvailable?"empty mt":"warning mt";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
 async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();}}
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Online":(probe.giveTransport?.configured?"Warning":"Dry-run"));tone("rabbitState",probe.giveTransport?.mode||probe.transport||"Unknown");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function renderPlayerSelect(){const select=document.getElementById("adminPlayer");select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;}
@@ -4060,8 +4128,8 @@ async function startGiveItemTool(){const mode=document.getElementById("liveGiveM
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking server status...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server)){log.textContent="Server is offline. Start the server before using Give Item.";addActivity("grant","Give Item blocked","Server is offline.");playUiSound("warning");return;}const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}const confirmed=confirm("Server is online. This will publish a real Live Give command. Inventory is not verified unless the backend reports live-verified.");if(!confirmed){addActivity("grant","Live Give cancelled","Confirmation was declined.");playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
-function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();}
-renderActivity();syncQualityWarning();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshMaps,30000);
+function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
+renderActivity();syncQualityWarning();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active"))refreshLiveMap();},12000);
 </script>
@@ -4359,6 +4427,7 @@ server.listen(PORT, HOST, async () => {
     runtimeGiveTransport.initialized = true;
     appendAdminAudit("startup_transport_dry_run", { source: "startup", transport: "dry-run", serverOnline: false, reason: runtimeGiveTransport.reason });
   }
+  setTimeout(() => attemptConfiguredServerStart("startup"), 1000);
   logLiveGiveStartupValidation();
 });
 

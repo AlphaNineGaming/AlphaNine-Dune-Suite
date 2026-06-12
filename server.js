@@ -1,26 +1,61 @@
 const http = require("http");
-const { execFile, spawn } = require("child_process");
+const https = require("https");
+const net = require("net");
+const { execFile, spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const APP_VERSION = "0.1.0-beta";
+const APP_VERSION = "0.2.1-beta";
 const HOST = "127.0.0.1";
-const PORT = 8810;
+const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
-const CONFIG_PATH = path.join(__dirname, "config.json");
-const MANAGER_DIR = path.join(__dirname, "manager");
+const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || path.join(__dirname, "config.json");
+const ADMIN_AUDIT_LOG = process.env.APPDATA
+  ? path.join(process.env.APPDATA, "AlphaNine Dune Suite", "admin-audit.log")
+  : path.join(__dirname, "admin-audit.log");
+function packagedUnpackedPath(...parts) {
+  if (!String(__dirname).includes("app.asar")) return path.join(__dirname, ...parts);
+  return path.join(__dirname.replace("app.asar", "app.asar.unpacked"), ...parts);
+}
+
+const MANAGER_DIR = packagedUnpackedPath("manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
+const APPDATA_DIR = process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "";
+const LOCALAPPDATA_DIR = process.env.LOCALAPPDATA || process.env.APPDATA || "";
+const MANAGER_DATA_DIR = LOCALAPPDATA_DIR ? path.join(LOCALAPPDATA_DIR, "AlphaNine Dune Awakening Manager") : MANAGER_DIR;
+const MANAGER_CONFIG_PATH = path.join(MANAGER_DATA_DIR, "manager-config.json");
+const MANAGER_APPLIED_PROFILE_PATH = path.join(MANAGER_DATA_DIR, "applied-profile.json");
+const MANAGER_APPLIED_SETTINGS_PATH = path.join(MANAGER_DATA_DIR, "applied-server-settings.json");
 
 const defaultConfig = {
+  setupComplete: false,
+  serverType: "local-hyperv",
   host: "127.0.0.1",
   port: 8810,
   vmName: "dune-awakening",
+  vmIp: "",
   sshUser: "dune",
   sshKey: "",
+  databaseHost: "",
+  databasePort: 15432,
+  databaseName: "dune",
+  databaseUser: "postgres",
+  databasePassword: "",
+  receiverHost: "127.0.0.1",
+  receiverPort: 5055,
+  receiverToken: "",
+  receiverSshHost: "",
+  receiverSshUser: "dune",
+  receiverSshKey: "",
+  mapDefault: "HaggaBasin",
+  logLevel: "info",
+  updateRepo: "AlphaNineGaming/alphanine-dune-suite",
   panelTitle: "AlphaNine Dune Suite",
   panelSubtitle: "Unified local tools for your self-hosted server",
-  serverInstallPath: "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server"
+  serverInstallPath: "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server",
+  uiSoundsEnabled: true,
+  uiSoundVolume: 100
 };
 
 function loadConfig() {
@@ -28,26 +63,56 @@ function loadConfig() {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig, null, 2));
     return defaultConfig;
   }
-  return { ...defaultConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")) };
+  return { ...defaultConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")) };
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["host", "port", "vmName", "sshUser", "sshKey", "panelTitle", "panelSubtitle", "serverInstallPath"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "uiSoundsEnabled", "uiSoundVolume"];
   const clean = {};
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(nextConfig, key)) clean[key] = nextConfig[key];
   }
+  clean.setupComplete = clean.setupComplete === true || clean.setupComplete === "true";
+  clean.serverType = String(clean.serverType || "local-hyperv").trim();
   clean.host = String(clean.host || "127.0.0.1").trim();
   clean.port = Number(clean.port) || PORT;
   clean.vmName = String(clean.vmName || "dune-awakening").trim();
+  clean.vmIp = String(clean.vmIp || "").trim();
   clean.sshUser = String(clean.sshUser || "dune").trim();
   clean.sshKey = String(clean.sshKey || "").trim();
+  clean.databaseHost = String(clean.databaseHost || "").trim();
+  clean.databasePort = Number(clean.databasePort) || 15432;
+  clean.databaseName = String(clean.databaseName || "dune").trim();
+  clean.databaseUser = String(clean.databaseUser || "postgres").trim();
+  clean.databasePassword = String(clean.databasePassword || "");
+  clean.receiverHost = String(clean.receiverHost || "127.0.0.1").trim();
+  clean.receiverPort = Number(clean.receiverPort) || 5055;
+  clean.receiverToken = String(clean.receiverToken || "");
+  clean.receiverSshHost = String(clean.receiverSshHost || "").trim();
+  clean.receiverSshUser = String(clean.receiverSshUser || "dune").trim();
+  clean.receiverSshKey = String(clean.receiverSshKey || "").trim();
+  clean.mapDefault = String(clean.mapDefault || "HaggaBasin").trim();
+  clean.logLevel = String(clean.logLevel || "info").trim();
+  clean.updateRepo = String(clean.updateRepo || "AlphaNineGaming/alphanine-dune-suite").trim();
   clean.panelTitle = String(clean.panelTitle || "AlphaNine Dune Suite").trim();
   clean.panelSubtitle = String(clean.panelSubtitle || "Unified local tools for your self-hosted server").trim();
   clean.serverInstallPath = String(clean.serverInstallPath || "").trim();
+  clean.uiSoundsEnabled = clean.uiSoundsEnabled === true || clean.uiSoundsEnabled === "true";
+  clean.uiSoundVolume = Math.max(0, Math.min(100, Number(clean.uiSoundVolume) || 0));
   if (clean.port < 1 || clean.port > 65535) throw new Error("Port must be between 1 and 65535.");
+  if (clean.databasePort < 1 || clean.databasePort > 65535) throw new Error("Database port must be between 1 and 65535.");
+  if (clean.receiverPort < 1 || clean.receiverPort > 65535) throw new Error("Receiver port must be between 1 and 65535.");
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(clean, null, 2));
   return clean;
+}
+
+function publicConfig(configValue = loadConfig()) {
+  const copy = { ...configValue };
+  copy.databasePasswordSet = Boolean(copy.databasePassword);
+  copy.receiverTokenSet = Boolean(copy.receiverToken);
+  copy.databasePassword = copy.databasePassword ? "********" : "";
+  copy.receiverToken = copy.receiverToken ? "********" : "";
+  return copy;
 }
 
 function readBody(req) {
@@ -75,11 +140,292 @@ function defaultSshKeyPath() {
 
 const config = loadConfig();
 const VM_NAME = config.vmName;
+const VM_IP = String(config.vmIp || "").trim();
 const SSH_USER = config.sshUser || "dune";
 const SSH_KEY = expandEnvPath(config.sshKey || defaultSshKeyPath());
 const DEFAULT_SERVER_ROOT = expandEnvPath(config.serverInstallPath);
 let lastDirectorUrl = null;
 let managerProcess = null;
+let managerStartError = "";
+let loggedPythonCommand = "";
+let managerSpawnDiagnostics = null;
+let receiverManagedProcess = null;
+const vmMonitorPingHistory = [];
+let vmMonitorLastSuccess = "";
+
+function envFlag(name, fallback = "") {
+  return String(process.env[name] || fallback).trim();
+}
+
+function envNumber(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const LIVE_GIVE_ENV = {
+  transport: envFlag("DUNE_ADMIN_GIVE_ITEM_TRANSPORT").toLowerCase(),
+  httpUrl: envFlag("DUNE_ADMIN_GIVE_ITEM_URL"),
+  httpHealthUrl: envFlag("DUNE_ADMIN_GIVE_ITEM_HEALTH_URL"),
+  httpToken: envFlag("DUNE_ADMIN_GIVE_ITEM_TOKEN"),
+  rabbitPublishUrl: envFlag("DUNE_ADMIN_RABBITMQ_PUBLISH_URL"),
+  rabbitHealthUrl: envFlag("DUNE_ADMIN_RABBITMQ_HEALTH_URL"),
+  rabbitUser: envFlag("DUNE_ADMIN_RABBITMQ_USER"),
+  rabbitPassword: envFlag("DUNE_ADMIN_RABBITMQ_PASSWORD"),
+  rabbitRoutingKey: envFlag("DUNE_ADMIN_RABBITMQ_ROUTING_KEY"),
+  rabbitMessageTemplate: envFlag("DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE"),
+  timeoutMs: envNumber("DUNE_ADMIN_GIVE_ITEM_TIMEOUT_MS", 15000)
+};
+const LIVE_GIVE_DEFAULT_HTTP_URL = "http://127.0.0.1:5055/api/give-item";
+const LIVE_GIVE_DEFAULT_HEALTH_URL = "http://127.0.0.1:5055/health";
+const runtimeGiveTransport = {
+  mode: "dry-run",
+  serverOnline: false,
+  serverStatus: "",
+  reason: "Server status has not been checked yet.",
+  initialized: false
+};
+
+const LIVE_GIVE_SECRET_ENV_NAMES = new Set([
+  "DUNE_ADMIN_GIVE_ITEM_TOKEN",
+  "DUNE_ADMIN_RABBITMQ_PASSWORD"
+]);
+
+function localIps() {
+  return Object.values(os.networkInterfaces()).flat().filter(Boolean)
+    .filter((entry) => entry.family === "IPv4" && !entry.internal)
+    .map((entry) => entry.address);
+}
+
+function receiverUrls(configValue = loadConfig()) {
+  const host = configValue.receiverHost || envFlag("DUNE_RECEIVER_HOST", "127.0.0.1");
+  const port = Number(configValue.receiverPort || envNumber("DUNE_RECEIVER_PORT", 5055));
+  return {
+    host,
+    port,
+    healthUrl: envFlag("DUNE_ADMIN_GIVE_ITEM_HEALTH_URL", `http://${host}:${port}/health`),
+    giveUrl: envFlag("DUNE_ADMIN_GIVE_ITEM_URL", `http://${host}:${port}/api/give-item`)
+  };
+}
+
+function requestStatus(urlValue, timeout = 2500) {
+  return new Promise((resolve) => {
+    let parsed;
+    try { parsed = new URL(urlValue); }
+    catch { resolve({ ok: false, statusCode: 0, error: "Invalid URL" }); return; }
+    const client = parsed.protocol === "https:" ? https : http;
+    const started = Date.now();
+    const req = client.get(parsed, { timeout }, (res) => {
+      res.resume();
+      resolve({ ok: res.statusCode >= 200 && res.statusCode < 500, statusCode: res.statusCode, responseMs: Date.now() - started });
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ ok: false, statusCode: 0, responseMs: Date.now() - started, error: "Timed out" });
+    });
+    req.on("error", (error) => resolve({ ok: false, statusCode: 0, responseMs: Date.now() - started, error: error.message }));
+  });
+}
+
+async function receiverStatus() {
+  const cfg = receiverUrls();
+  const health = await requestStatus(cfg.healthUrl);
+  return {
+    ok: health.ok,
+    status: health.ok ? "Online" : "Offline",
+    managed: Boolean(receiverManagedProcess && !receiverManagedProcess.killed),
+    pid: receiverManagedProcess?.pid || null,
+    ...cfg,
+    health
+  };
+}
+
+async function waitForReceiver(urlValue, timeout = 12000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const status = await requestStatus(urlValue, 1500);
+    if (status.ok) return status;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return requestStatus(urlValue, 1500);
+}
+
+async function startManagedReceiver() {
+  const before = await receiverStatus();
+  if (before.ok) return { ok: true, message: "Receiver is already online.", receiver: before };
+  const receiverFile = packagedUnpackedPath("receivers", "dune-live-give-receiver.js");
+  if (!fs.existsSync(receiverFile)) throw new Error(`Receiver was not found: ${receiverFile}`);
+  const cfg = loadConfig();
+  const urls = receiverUrls(cfg);
+  const env = {
+    ...process.env,
+    DUNE_RECEIVER_HOST: urls.host,
+    DUNE_RECEIVER_PORT: String(urls.port),
+    DUNE_RECEIVER_TOKEN: cfg.receiverToken || process.env.DUNE_RECEIVER_TOKEN || "",
+    DUNE_RECEIVER_SSH_HOST: cfg.receiverSshHost || cfg.vmIp || process.env.DUNE_RECEIVER_SSH_HOST || "",
+    DUNE_RECEIVER_SSH_USER: cfg.receiverSshUser || cfg.sshUser || process.env.DUNE_RECEIVER_SSH_USER || "",
+    DUNE_RECEIVER_SSH_KEY: expandEnvPath(cfg.receiverSshKey || cfg.sshKey || process.env.DUNE_RECEIVER_SSH_KEY || ""),
+    DUNE_ADMIN_GIVE_ITEM_URL: urls.giveUrl,
+    DUNE_ADMIN_GIVE_ITEM_HEALTH_URL: urls.healthUrl,
+    DUNE_ADMIN_GIVE_ITEM_TOKEN: cfg.receiverToken || process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || ""
+  };
+  receiverManagedProcess = spawn(process.execPath, [receiverFile], {
+    cwd: __dirname,
+    env,
+    stdio: "ignore",
+    windowsHide: true,
+    detached: false
+  });
+  receiverManagedProcess.on("exit", () => { receiverManagedProcess = null; });
+  const ready = await waitForReceiver(urls.healthUrl);
+  return { ok: ready.ok, message: ready.ok ? "Receiver started." : "Receiver did not become healthy.", receiver: await receiverStatus() };
+}
+
+function stopManagedReceiver() {
+  if (receiverManagedProcess && !receiverManagedProcess.killed) {
+    try {
+      if (process.platform === "win32" && receiverManagedProcess.pid) spawn("taskkill", ["/pid", String(receiverManagedProcess.pid), "/T", "/F"], { windowsHide: true });
+      else receiverManagedProcess.kill("SIGTERM");
+    } catch {}
+    receiverManagedProcess = null;
+    return { ok: true, message: "Receiver stop requested." };
+  }
+  return { ok: true, message: "No suite-managed receiver process was running." };
+}
+
+async function autoDiscovery() {
+  const cfg = loadConfig();
+  const ips = localIps();
+  const serverPath = expandEnvPath(cfg.serverInstallPath || "");
+  const receiver = await receiverStatus();
+  const dbPort = Number(cfg.databasePort || envNumber("PGPORT", 15432));
+  return {
+    ok: true,
+    localIps: ips,
+    receiver,
+    database: {
+      host: cfg.databaseHost || cfg.vmIp || VM_IP || "Auto via Dune VM",
+      port: dbPort,
+      name: cfg.databaseName || "dune",
+      configured: Boolean(cfg.databaseHost || cfg.vmIp || VM_IP)
+    },
+    server: {
+      installPath: serverPath,
+      installPathExists: Boolean(serverPath && fs.existsSync(serverPath)),
+      vmName: cfg.vmName || VM_NAME,
+      vmIp: cfg.vmIp || VM_IP
+    }
+  };
+}
+
+async function connectionTest(target) {
+  if (target === "database") {
+    try {
+      const output = await dbQuery("select 1 as ok", 20000);
+      return { ok: /1/.test(output), target, message: "Database connection passed.", detail: output || "select 1 completed" };
+    } catch (error) {
+      return { ok: false, target, message: "Database connection failed.", error: error.message };
+    }
+  }
+  if (target === "receiver") {
+    const receiver = await receiverStatus();
+    return { ok: receiver.ok, target, message: receiver.ok ? "Receiver is online." : "Receiver is offline.", receiver };
+  }
+  if (target === "server") {
+    try {
+      const vm = await vmInfo();
+      return { ok: Boolean(vm.exists), target, message: vm.exists ? `Server VM detected: ${vm.state || "Unknown"}` : "Server VM was not detected.", vm };
+    } catch (error) {
+      return { ok: false, target, message: "Server test failed.", error: error.message };
+    }
+  }
+  return { ok: false, target, message: "Unknown connection test." };
+}
+
+function readRecentLog(filePath, maxBytes = 90000) {
+  try {
+    if (!fs.existsSync(filePath)) return "";
+    const stat = fs.statSync(filePath);
+    const fd = fs.openSync(filePath, "r");
+    const size = Math.min(maxBytes, stat.size);
+    const buffer = Buffer.alloc(size);
+    fs.readSync(fd, buffer, 0, size, Math.max(0, stat.size - size));
+    fs.closeSync(fd);
+    return buffer.toString("utf8");
+  } catch (error) {
+    return `Could not read log: ${error.message}`;
+  }
+}
+
+async function diagnosticsSnapshot() {
+  const [database, receiver, server] = await Promise.all([
+    connectionTest("database"),
+    connectionTest("receiver"),
+    connectionTest("server")
+  ]);
+  const logDir = APPDATA_DIR ? path.join(APPDATA_DIR, "logs") : __dirname;
+  return {
+    ok: true,
+    version: APP_VERSION,
+    configPath: CONFIG_PATH,
+    appData: APPDATA_DIR || __dirname,
+    database,
+    receiver,
+    server,
+    api: { status: "Online", url: `http://${HOST}:${PORT}` },
+    logs: {
+      suite: readRecentLog(path.join(logDir, "suite.log")),
+      receiver: readRecentLog(path.join(logDir, "receiver.log")),
+      desktop: readRecentLog(path.join(logDir, "desktop.log")),
+      audit: readRecentLog(ADMIN_AUDIT_LOG)
+    }
+  };
+}
+
+function importSettings(payload) {
+  const configPayload = payload?.config || payload;
+  if (!configPayload || typeof configPayload !== "object") throw new Error("Import file did not contain settings.");
+  return saveConfig({ ...loadConfig(), ...configPayload });
+}
+
+function checkGitHubUpdates(repo) {
+  return new Promise((resolve) => {
+    const targetRepo = String(repo || loadConfig().updateRepo || "").trim();
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(targetRepo)) {
+      resolve({ ok: false, currentVersion: APP_VERSION, error: "Set a GitHub owner/repo in Settings first." });
+      return;
+    }
+    const options = {
+      hostname: "api.github.com",
+      path: `/repos/${targetRepo}/releases/latest`,
+      headers: { "User-Agent": "AlphaNine-Dune-Suite" },
+      timeout: 7000
+    };
+    const req = https.get(options, (res) => {
+      let body = "";
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body || "{}");
+          if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(data.message || `GitHub returned ${res.statusCode}`);
+          resolve({
+            ok: true,
+            currentVersion: APP_VERSION,
+            latestVersion: String(data.tag_name || data.name || ""),
+            releaseName: data.name || "",
+            url: data.html_url || `https://github.com/${targetRepo}/releases/latest`
+          });
+        } catch (error) {
+          resolve({ ok: false, currentVersion: APP_VERSION, error: error.message });
+        }
+      });
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ ok: false, currentVersion: APP_VERSION, error: "GitHub update check timed out." });
+    });
+    req.on("error", (error) => resolve({ ok: false, currentVersion: APP_VERSION, error: error.message }));
+  });
+}
 
 function run(command, args, options = {}) {
   return new Promise((resolve) => {
@@ -118,16 +464,175 @@ async function vmInfo() {
   try { return JSON.parse(result.stdout.trim() || "{}"); } catch { return { exists: false, error: result.stdout || result.stderr }; }
 }
 
+function vmMonitorHost(vm = null) {
+  return String(vm?.ip || VM_IP || "").trim();
+}
+
+function configuredPortFromUrl(value) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.port) return Number(parsed.port);
+    if (parsed.protocol === "https:") return 443;
+    if (parsed.protocol === "http:") return 80;
+  } catch {}
+  return null;
+}
+
+function configuredMonitorPorts() {
+  const ports = [
+    { key: "suite", label: "8810 (Suite Backend)", host: HOST, port: PORT },
+    { key: "receiver", label: "5055 (Live Give Receiver)", port: configuredPortFromUrl(LIVE_GIVE_ENV.httpHealthUrl || LIVE_GIVE_ENV.httpUrl) || 5055 },
+    { key: "ssh", label: "22 (SSH)", port: 22 }
+  ];
+  const rabbitPort = configuredPortFromUrl(LIVE_GIVE_ENV.rabbitHealthUrl || LIVE_GIVE_ENV.rabbitPublishUrl) || envNumber("DUNE_ADMIN_RABBITMQ_PORT", 0);
+  const dbPort = envNumber("DUNE_ADMIN_DATABASE_PORT", 0) || envNumber("PGPORT", 0) || configuredPortFromUrl(process.env.DATABASE_URL || "");
+  if (rabbitPort) ports.push({ key: "rabbitmq", label: `${rabbitPort} (RabbitMQ)`, port: rabbitPort });
+  if (dbPort) ports.push({ key: "database", label: `${dbPort} (Database)`, port: dbPort });
+  return ports;
+}
+
+function checkPort(host, port, timeout = 1200) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const socket = new net.Socket();
+    let settled = false;
+    const done = (open, error = "") => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({ open, responseMs: Date.now() - started, error });
+    };
+    socket.setTimeout(timeout);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false, "Timed out"));
+    socket.once("error", (error) => done(false, error.code || error.message));
+    socket.connect(port, host);
+  });
+}
+
+async function pingHost(host) {
+  if (!host) return { ok: false, ms: null, error: "VM address unavailable" };
+  const script = `
+    $r = Test-Connection -ComputerName ${JSON.stringify(host)} -Count 1 -ErrorAction SilentlyContinue
+    if ($r) { [int]$r.ResponseTime } else { "offline" }
+  `;
+  const result = await ps(script, 2500);
+  const text = String(result.stdout || "").trim();
+  const ms = Number(text);
+  if (Number.isFinite(ms)) return { ok: true, ms, error: "" };
+  return { ok: false, ms: null, error: result.stderr || result.error || "Ping failed" };
+}
+
+function recordVmPing(ping) {
+  const now = Date.now();
+  vmMonitorPingHistory.push({ t: now, ms: ping.ok ? ping.ms : null });
+  while (vmMonitorPingHistory.length && now - vmMonitorPingHistory[0].t > 60000) vmMonitorPingHistory.shift();
+  const values = vmMonitorPingHistory.map((row) => row.ms).filter((value) => Number.isFinite(value));
+  return {
+    current: ping.ok ? ping.ms : null,
+    average: values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null,
+    min: values.length ? Math.min(...values) : null,
+    max: values.length ? Math.max(...values) : null,
+    history: vmMonitorPingHistory.slice(-60)
+  };
+}
+
+async function vmMonitorServiceChecks(host, ports) {
+  const byKey = Object.fromEntries(ports.map((row) => [row.key, row]));
+  const services = {
+    ssh: { label: "SSH Reachable", reachable: Boolean(byKey.ssh?.open), responseMs: byKey.ssh?.responseMs ?? null, error: byKey.ssh?.error || "" },
+    receiver: { label: "Receiver Reachable", reachable: Boolean(byKey.receiver?.open), responseMs: byKey.receiver?.responseMs ?? null, error: byKey.receiver?.error || "" },
+    database: { label: "Database Reachable", reachable: byKey.database ? Boolean(byKey.database.open) : null, responseMs: byKey.database?.responseMs ?? null, error: byKey.database?.error || "Not configured" },
+    rabbitmq: { label: "RabbitMQ Reachable", reachable: byKey.rabbitmq ? Boolean(byKey.rabbitmq.open) : null, responseMs: byKey.rabbitmq?.responseMs ?? null, error: byKey.rabbitmq?.error || "Not configured" },
+    kubernetes: { label: "Kubernetes Reachable", reachable: null, responseMs: null, error: "SSH unavailable" }
+  };
+  if (services.ssh.reachable && host) {
+    const started = Date.now();
+    const result = await sshCommand("sudo kubectl get nodes --request-timeout=3s --no-headers 2>/dev/null | head -n 1", 8000);
+    services.kubernetes = {
+      label: "Kubernetes Reachable",
+      reachable: result.ok && Boolean(String(result.stdout || "").trim()),
+      responseMs: Date.now() - started,
+      error: result.ok ? "" : (result.stderr || result.error || "kubectl check failed")
+    };
+  }
+  return services;
+}
+
+function vmMonitorHealthScore(vm, pingStats, ports, services) {
+  let score = 0;
+  const serviceValues = Object.values(services).filter((service) => service.reachable !== null);
+  if (vm.exists && String(vm.state || "").toLowerCase() === "running") score += 25;
+  if (Number.isFinite(pingStats.current)) score += pingStats.current < 120 ? 20 : pingStats.current < 250 ? 12 : 6;
+  const openPorts = ports.filter((port) => port.open).length;
+  if (ports.length) score += Math.round((openPorts / ports.length) * 25);
+  const reachableServices = serviceValues.filter((service) => service.reachable).length;
+  if (serviceValues.length) score += Math.round((reachableServices / serviceValues.length) * 30);
+  return Math.max(0, Math.min(100, score));
+}
+
+function vmMonitorKind(score, online) {
+  if (!online || score < 45) return "bad";
+  if (score < 75) return "warn";
+  return "ok";
+}
+
+async function vmConnectionMonitor() {
+  const checkedAt = new Date().toISOString();
+  const vm = await vmInfo();
+  const host = vmMonitorHost(vm);
+  const ping = await pingHost(host);
+  const pingStats = recordVmPing(ping);
+  const portTargets = configuredMonitorPorts().map((row) => ({ ...row, host: row.host || host }));
+  const ports = await Promise.all(portTargets.map(async (target) => {
+    if (!target.host) return { ...target, open: false, responseMs: null, error: "VM address unavailable" };
+    const result = await checkPort(target.host, target.port);
+    return { ...target, ...result };
+  }));
+  const services = await vmMonitorServiceChecks(host, ports);
+  const hasReachablePort = ports.some((port) => port.open);
+  const hasReachableService = Object.values(services).some((service) => service.reachable === true);
+  const online = Boolean(ping.ok || hasReachablePort || hasReachableService || (vm.exists && String(vm.state || "").toLowerCase() === "running"));
+  const score = vmMonitorHealthScore(vm, pingStats, ports, services);
+  const errors = [
+    vm.error,
+    ping.error,
+    ...ports.filter((port) => !port.open).map((port) => `${port.label}: ${port.error || "Closed"}`),
+    ...Object.values(services).filter((service) => service.reachable === false).map((service) => `${service.label}: ${service.error || "Unavailable"}`)
+  ].filter(Boolean).slice(0, 8);
+  if (online) vmMonitorLastSuccess = checkedAt;
+  return {
+    checkedAt,
+    status: online ? "Online" : "Offline",
+    kind: vmMonitorKind(score, online),
+    vm: {
+      exists: Boolean(vm.exists),
+      state: vm.state || "Unknown",
+      hostname: VM_NAME,
+      address: host || "Unknown",
+      uptime: vm.uptime || "Unknown"
+    },
+    latency: pingStats,
+    ports,
+    services,
+    healthScore: score,
+    lastErrors: errors,
+    lastSuccessfulConnection: vmMonitorLastSuccess || "None yet"
+  };
+}
+
 async function sshCommand(command, timeout = 180000) {
   const info = await vmInfo();
-  if (!info.exists) return { ok: false, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
-  if (info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running." };
-  if (!info.ip) return { ok: false, stdout: "", stderr: "VM IP address was not found.", error: "VM IP address was not found." };
+  const ip = info.ip || VM_IP;
+  if (!info.exists && !ip) return { ok: false, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
+  if (info.exists && info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running." };
+  if (!ip) return { ok: false, stdout: "", stderr: "VM IP address was not found.", error: "VM IP address was not found." };
   return run("ssh", [
     "-o", "StrictHostKeyChecking=no",
     "-o", "LogLevel=QUIET",
     "-i", SSH_KEY,
-    `${SSH_USER}@${info.ip}`,
+    `${SSH_USER}@${ip}`,
     command
   ], { timeout });
 }
@@ -174,6 +679,1863 @@ async function battlegroup(action) {
   return sshCommand(`/home/dune/.dune/bin/battlegroup ${action}`, action === "update" ? 600000 : 240000);
 }
 
+function shQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+async function battlegroupResource() {
+  const result = await sshCommand("sudo kubectl get igwbg -A -o json", 30000);
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Could not read battlegroup resource.");
+  let data = null;
+  try { data = JSON.parse(result.stdout || "{}"); }
+  catch { throw new Error("Could not parse battlegroup resource."); }
+  const item = data.items && data.items[0];
+  if (!item) throw new Error("No battlegroup resource was found.");
+  return item;
+}
+
+function mapRowsFromResource(item) {
+  const active = new Map();
+  for (const server of item.status?.servers || []) {
+    const key = server.partitionMap || server.map;
+    if (!key) continue;
+    active.set(key, (active.get(key) || 0) + 1);
+  }
+  return (item.spec?.serverGroup?.template?.spec?.sets || []).map((set, index) => ({
+    index,
+    map: set.map || `Map ${index + 1}`,
+    replicas: Number(set.replicas || 0),
+    running: active.get(set.map) || 0,
+    memory: set.resources?.limits?.memory || "",
+    dedicatedScaling: Boolean(set.dedicatedScaling),
+    deploymentMode: set.dedicatedScaling ? "Dedicated" : "Standard"
+  }));
+}
+
+async function mapDeploymentList() {
+  const item = await battlegroupResource();
+  return {
+    battlegroup: item.metadata?.name || "",
+    namespace: item.metadata?.namespace || "",
+    maps: mapRowsFromResource(item)
+  };
+}
+
+async function worldMapMetadata() {
+  const [item, mapNamesRaw, partitionsRaw, markerCountsRaw, mapAreasRaw, resetSeedsRaw, spiceRaw] = await Promise.all([
+    battlegroupResource(),
+    dbQuery(`
+      select map_name_id::text, map_name
+      from dune.map_names
+      order by map_name_id
+    `),
+    dbQuery(`
+      select
+        wp.map,
+        coalesce(wp.label, '') as label,
+        wp.dimension_index::text,
+        coalesce(wp.blocked, false)::text,
+        coalesce(wp.server_id, '') as server_id,
+        coalesce(wp.partition_definition::text, '') as partition_definition
+      from dune.world_partition wp
+      order by wp.partition_id
+    `),
+    dbQuery(`
+      select coalesce(mn.map_name, 'Unknown') as map_name, count(*)::text as marker_count
+      from dune.markers m
+      left join dune.map_names mn on mn.map_name_id = m.map_name_id
+      group by mn.map_name
+      order by count(*) desc, map_name
+    `),
+    dbQuery(`
+      select coalesce(map_name, 'Unknown') as map_name, count(*)::text as area_count
+      from dune.map_areas
+      group by map_name
+      order by count(*) desc, map_name
+    `),
+    dbQuery(`
+      select map, world_reset_seed::text
+      from dune.world_map_reset_seed
+      order by map
+    `),
+    dbQuery(`
+      select
+        coalesce(server_id, 'Unknown') as server_id,
+        spicefield_type_id::text,
+        inactive_fields_of_type::text,
+        requested_spawned_of_type::text
+      from dune.spicefield_server_availability
+      order by server_id, spicefield_type_id
+    `)
+  ]);
+
+  const serverRows = mapRowsFromResource(item);
+  const serverByMap = new Map(serverRows.map((row) => [row.map, row]));
+  const namesById = new Map();
+  const mapNames = mapNamesRaw ? mapNamesRaw.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [id = "", name = ""] = line.split("\t");
+    namesById.set(id, name);
+    return { id: Number(id) || null, name };
+  }).filter((row) => row.name) : [];
+
+  const markerCounts = new Map();
+  const markerRows = markerCountsRaw ? markerCountsRaw.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [mapName = "Unknown", count = "0"] = line.split("\t");
+    const row = { mapName, count: Number(count) || 0 };
+    markerCounts.set(mapName, row.count);
+    return row;
+  }) : [];
+
+  const areaCounts = new Map();
+  const areaRows = mapAreasRaw ? mapAreasRaw.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [mapName = "Unknown", count = "0"] = line.split("\t");
+    const row = { mapName, count: Number(count) || 0 };
+    areaCounts.set(mapName, row.count);
+    return row;
+  }) : [];
+
+  const resetSeeds = resetSeedsRaw ? resetSeedsRaw.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [map = "", seed = ""] = line.split("\t");
+    return { map, worldResetSeed: seed === "" ? null : Number(seed) };
+  }).filter((row) => row.map) : [];
+
+  const partitions = partitionsRaw ? partitionsRaw.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [map = "", label = "", dimensionIndex = "", blocked = "false", serverId = "", definition = ""] = line.split("\t");
+    const server = serverByMap.get(map) || null;
+    return {
+      map,
+      label,
+      dimensionIndex: Number(dimensionIndex) || 0,
+      blocked: /^true$/i.test(blocked),
+      serverId,
+      serverRunning: Boolean(server && Number(server.running) > 0),
+      serverReplicas: server ? Number(server.replicas) || 0 : 0,
+      deploymentMode: server?.deploymentMode || "",
+      definition
+    };
+  }).filter((row) => row.map) : [];
+
+  const partitionSummary = partitions.reduce((summary, row) => {
+    summary.total += 1;
+    if (row.blocked) summary.blocked += 1;
+    else summary.unblocked += 1;
+    if (row.serverRunning) summary.running += 1;
+    return summary;
+  }, { total: 0, blocked: 0, unblocked: 0, running: 0 });
+
+  const spicefieldAvailability = spiceRaw ? spiceRaw.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [serverId = "", spicefieldTypeId = "", inactive = "0", requested = "0"] = line.split("\t");
+    return {
+      serverId,
+      spicefieldTypeId: Number(spicefieldTypeId) || 0,
+      inactiveFieldsOfType: Number(inactive) || 0,
+      requestedSpawnedOfType: Number(requested) || 0
+    };
+  }) : [];
+
+  const relevantNames = new Set(["HaggaBasin", "DeepDesert", "Arrakeen", "HarkoVillage", "Overland"]);
+  const regionCards = mapNames
+    .filter((row) => relevantNames.has(row.name))
+    .map((row) => {
+      const normalized = row.name.replace(/\s+/g, "");
+      const relatedPartitions = partitions.filter((partition) => (
+        partition.map.toLowerCase().includes(normalized.toLowerCase()) ||
+        partition.label.toLowerCase().includes(normalized.toLowerCase()) ||
+        (row.name === "HaggaBasin" && partition.map === "Survival_1") ||
+        (row.name === "Overland" && partition.map === "Overmap")
+      ));
+      return {
+        name: row.name,
+        mapNameId: row.id,
+        partitionCount: relatedPartitions.length,
+        blockedPartitions: relatedPartitions.filter((partition) => partition.blocked).length,
+        runningPartitions: relatedPartitions.filter((partition) => partition.serverRunning).length,
+        markerCount: markerCounts.get(row.name) || 0,
+        discoveredAreaCount: areaCounts.get(row.name) || 0,
+        worldResetSeed: resetSeeds.find((seed) => seed.map === row.name)?.worldResetSeed ?? null
+      };
+    });
+
+  return {
+    ok: true,
+    sourceTables: [
+      "dune.map_names",
+      "dune.world_partition",
+      "dune.map_areas",
+      "dune.markers",
+      "dune.world_map_reset_seed",
+      "dune.spicefield_server_availability"
+    ],
+    excludedTables: ["dune.overmap_players", "dune.player_markers"],
+    battlegroup: item.metadata?.name || "",
+    namespace: item.metadata?.namespace || "",
+    serverRegionStatus: {
+      configuredRegion: "",
+      battlegroupPhase: item.status?.phase || "",
+      serverGroupPhase: item.status?.serverGroupPhase || "",
+      namespace: item.metadata?.namespace || ""
+    },
+    mapNames,
+    regions: regionCards,
+    partitions,
+    partitionSummary,
+    markerCounts: markerRows,
+    markerCount: markerRows.reduce((sum, row) => sum + row.count, 0),
+    mapAreas: areaRows,
+    resetSeeds,
+    spicefieldAvailability
+  };
+}
+
+async function setMapReplicas(mapName, replicas) {
+  const cleanMap = String(mapName || "").trim();
+  const count = Number(replicas);
+  if (!/^[A-Za-z0-9_]+$/.test(cleanMap)) throw new Error("Choose a valid map.");
+  if (!Number.isInteger(count) || count < 0 || count > 3) throw new Error("Replica count must be between 0 and 3.");
+
+  const item = await battlegroupResource();
+  const rows = mapRowsFromResource(item);
+  const row = rows.find((entry) => entry.map === cleanMap);
+  if (!row) throw new Error("Map was not found in the battlegroup.");
+  if (row.dedicatedScaling && count > 0) {
+    throw new Error(`${cleanMap} is a dedicated-scaling map. The current safe deploy button can only start standard maps; dedicated maps need battlegroup director scaling first.`);
+  }
+
+  const namespace = item.metadata?.namespace;
+  const name = item.metadata?.name;
+  const patch = JSON.stringify([{ op: "replace", path: `/spec/serverGroup/template/spec/sets/${row.index}/replicas`, value: count }]);
+  const command = [
+    "sudo kubectl patch igwbg",
+    shQuote(name),
+    "-n",
+    shQuote(namespace),
+    "--type=json",
+    `-p=${shQuote(patch)}`
+  ].join(" ");
+  const result = await sshCommand(command, 120000);
+  return { ...result, map: cleanMap, replicas: count };
+}
+
+function gearCatalog() {
+  const filePath = path.join(CODEX_DIR, "index.html");
+  if (!fs.existsSync(filePath)) return [];
+  const html = fs.readFileSync(filePath, "utf8");
+  const match = html.match(/<script id="catalogData" type="application\/json">([\s\S]*?)<\/script>/);
+  if (!match) return [];
+  try {
+    const data = JSON.parse(match[1]);
+    return (data.items || []).map((item) => ({
+      id: String(item.id || ""),
+      name: String(item.name || item.id || ""),
+      category: String(item.category || ""),
+      detail: String(item.detail || ""),
+      tier: String(item.tier || ""),
+      rarity: String(item.rarity || ""),
+      maxStack: String(item.maxStack || ""),
+      icon: item.icon ? `/gear-codex/${item.icon}` : ""
+    })).filter((item) => item.id && item.name);
+  } catch {
+    return [];
+  }
+}
+
+async function dbQuery(sql, timeout = 45000) {
+  const item = await battlegroupResource();
+  const namespace = item.metadata?.namespace;
+  const dbPod = `${item.metadata?.name}-db-dbdepl-sts-0`;
+  const dbSvc = `${item.metadata?.name}-db-dbdepl-svc`;
+  const command = [
+    `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
+    `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" psql -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -c ${shQuote(sql)}`
+  ].join("; ");
+  const result = await sshCommand(command, timeout);
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Database query failed.");
+  return result.stdout.trim();
+}
+
+function redactUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.password) parsed.password = "****";
+    if (parsed.username) parsed.username = "****";
+    return parsed.toString();
+  } catch {
+    return String(value || "");
+  }
+}
+
+function httpRequestJson(urlValue, options = {}) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try { parsed = new URL(urlValue); }
+    catch { reject(new Error("Give-item transport URL is invalid.")); return; }
+    const client = parsed.protocol === "https:" ? https : http;
+    const body = options.body == null ? null : Buffer.from(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
+    const req = client.request(parsed, {
+      method: options.method || (body ? "POST" : "GET"),
+      headers: {
+        ...(body ? { "Content-Type": "application/json", "Content-Length": body.length } : {}),
+        ...(options.headers || {})
+      },
+      timeout: options.timeout || LIVE_GIVE_ENV.timeoutMs
+    }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { text += chunk; });
+      res.on("end", () => {
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, statusCode: res.statusCode, data, text });
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error("Give-item transport timed out.")));
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+function basicAuthHeader(user, password) {
+  return `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`;
+}
+
+function jsonPathEscape(value) {
+  return JSON.stringify(String(value)).slice(1, -1);
+}
+
+function renderGiveItemTemplate(template, command) {
+  return String(template || "").replace(/\{\{\s*(playerId|template|qty|quality|requestId)\s*\}\}/g, (_match, key) => {
+    const value = key === "requestId" ? command.requestId : command[key];
+    return jsonPathEscape(value);
+  });
+}
+
+function liveGiveRequiredEnv(mode = LIVE_GIVE_ENV.transport) {
+  if (mode === "http-json") {
+    return [];
+  }
+  if (mode === "rabbitmq-http") {
+    return [
+      "DUNE_ADMIN_RABBITMQ_PUBLISH_URL",
+      "DUNE_ADMIN_RABBITMQ_USER",
+      "DUNE_ADMIN_RABBITMQ_PASSWORD",
+      "DUNE_ADMIN_RABBITMQ_ROUTING_KEY",
+      "DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE"
+    ];
+  }
+  return [];
+}
+
+function liveGiveMissingEnv(mode = LIVE_GIVE_ENV.transport) {
+  const values = {
+    DUNE_ADMIN_GIVE_ITEM_URL: LIVE_GIVE_ENV.httpUrl,
+    DUNE_ADMIN_RABBITMQ_PUBLISH_URL: LIVE_GIVE_ENV.rabbitPublishUrl,
+    DUNE_ADMIN_RABBITMQ_USER: LIVE_GIVE_ENV.rabbitUser,
+    DUNE_ADMIN_RABBITMQ_PASSWORD: LIVE_GIVE_ENV.rabbitPassword,
+    DUNE_ADMIN_RABBITMQ_ROUTING_KEY: LIVE_GIVE_ENV.rabbitRoutingKey,
+    DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE: LIVE_GIVE_ENV.rabbitMessageTemplate
+  };
+  return liveGiveRequiredEnv(mode).filter((name) => !values[name]);
+}
+
+function transportDisplayName(mode) {
+  return mode || "dry-run";
+}
+
+function statusSummaryIsOnline(summary) {
+  const summaryStatus = String(summary?.status || "");
+  return /Healthy|Ready|Running/i.test(summaryStatus);
+}
+
+function serverSnapshotIsOnline(snapshot) {
+  return Boolean(snapshot?.vm?.exists && snapshot.vm.state === "Running" && statusSummaryIsOnline(snapshot?.status?.summary || snapshot?.status));
+}
+
+function runtimeTransportAuditAction(nextMode, startup) {
+  if (startup) return nextMode === "http-json" ? "startup_transport_http_json" : "startup_transport_dry_run";
+  return nextMode === "http-json" ? "transport_changed_http_json" : "transport_changed_dry_run";
+}
+
+async function updateRuntimeGiveTransport(snapshot = null, source = "status") {
+  let checked = snapshot;
+  if (!checked) {
+    const availability = await liveGiveServerAvailability();
+    checked = { vm: availability.vm, status: { summary: availability.status }, raw: availability.raw };
+  }
+  const online = serverSnapshotIsOnline(checked);
+  const nextMode = online ? "http-json" : "dry-run";
+  const nextReason = online ? "Server Online/Healthy." : "Server Offline or Not Healthy.";
+  const changed = !runtimeGiveTransport.initialized || runtimeGiveTransport.mode !== nextMode || runtimeGiveTransport.serverOnline !== online;
+  const startup = !runtimeGiveTransport.initialized || source === "startup";
+  runtimeGiveTransport.mode = nextMode;
+  runtimeGiveTransport.serverOnline = online;
+  runtimeGiveTransport.serverStatus = String(checked?.status?.summary?.status || checked?.status?.status || "");
+  runtimeGiveTransport.reason = nextReason;
+  runtimeGiveTransport.initialized = true;
+  if (changed) {
+    appendAdminAudit(runtimeTransportAuditAction(nextMode, startup), {
+      source,
+      transport: nextMode,
+      serverOnline: online,
+      serverStatus: runtimeGiveTransport.serverStatus,
+      reason: nextReason
+    });
+  }
+  return { ...runtimeGiveTransport };
+}
+
+function dryRunReason(transport) {
+  if (!transport.configured) {
+    if (transport.missingEnv?.length) return `Missing required env vars: ${transport.missingEnv.join(", ")}.`;
+    return transport.reason || "Live give-item transport is not configured.";
+  }
+  if (!transport.reachable) {
+    return transport.error ? `Transport is not reachable: ${transport.error}` : "Transport is configured but not reachable.";
+  }
+  return "";
+}
+
+function liveGiveUnavailableMessage(transport) {
+  if ((transport?.mode || runtimeGiveTransport.mode) === "dry-run" && runtimeGiveTransport.reason) {
+    return `Live Give Unavailable: ${runtimeGiveTransport.serverOnline ? runtimeGiveTransport.reason : "Server Offline"}.`;
+  }
+  const missing = transport?.missingEnv || [];
+  if (missing.includes("DUNE_ADMIN_GIVE_ITEM_TRANSPORT")) {
+    return "Live Give unavailable: missing DUNE_ADMIN_GIVE_ITEM_TRANSPORT.";
+  }
+  if (missing.length) return `Live Give unavailable: missing ${missing.join(", ")}.`;
+  return `Live Give unavailable: ${transport?.dryRunReason || transport?.reason || transport?.error || "transport is not configured."}`;
+}
+
+function validateGiveItemPayload(payload) {
+  const playerId = String(payload.playerId || "").trim();
+  const template = String(payload.template || "").trim();
+  const qty = Number(payload.qty || 1);
+  const quality = Number(payload.quality || 0);
+  if (!playerId) throw new Error("Choose a player first.");
+  if (playerId.length > 128 || !/^[A-Za-z0-9_:.+\-# @]+$/.test(playerId)) throw new Error("Player name/id contains unsupported characters.");
+  if (!template || template.length > 160 || !/^[A-Za-z0-9_:.+-]+$/.test(template)) throw new Error("Choose a valid item template.");
+  const catalogMatch = gearCatalog().some((item) => item.id === template);
+  if (!catalogMatch) throw new Error("Item template was not found in the local Gear Codex catalog.");
+  if (!Number.isInteger(qty) || qty < 1 || qty > 9999) throw new Error("Quantity must be a whole number between 1 and 9999.");
+  if (!Number.isInteger(quality) || quality < 0 || quality > 100) throw new Error("Quality must be a whole number between 0 and 100.");
+  return {
+    playerId,
+    template,
+    qty,
+    quality,
+    requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  };
+}
+
+function giveTransportConfig() {
+  const runtimeMode = runtimeGiveTransport.mode || "dry-run";
+  if (runtimeMode === "dry-run" || runtimeMode === "disabled") {
+    return {
+      mode: "dry-run",
+      configured: false,
+      missingEnv: [],
+      runtime: { ...runtimeGiveTransport },
+      reason: runtimeGiveTransport.reason || "Server Offline or Not Healthy."
+    };
+  }
+  if (runtimeMode === "http-json") {
+    const url = LIVE_GIVE_ENV.httpUrl || LIVE_GIVE_DEFAULT_HTTP_URL;
+    const missingEnv = liveGiveMissingEnv("http-json");
+    if (missingEnv.length) return { mode: "http-json", configured: false, missingEnv, reason: `${missingEnv.join(", ")} required for http-json transport.` };
+    return {
+      mode: "http-json",
+      configured: true,
+      missingEnv: [],
+      url,
+      healthUrl: LIVE_GIVE_ENV.httpHealthUrl || LIVE_GIVE_DEFAULT_HEALTH_URL,
+      token: LIVE_GIVE_ENV.httpToken,
+      runtime: { ...runtimeGiveTransport }
+    };
+  }
+  if (runtimeMode === "rabbitmq-http") {
+    const url = LIVE_GIVE_ENV.rabbitPublishUrl;
+    const user = LIVE_GIVE_ENV.rabbitUser;
+    const password = LIVE_GIVE_ENV.rabbitPassword;
+    const routingKey = LIVE_GIVE_ENV.rabbitRoutingKey;
+    const messageTemplate = LIVE_GIVE_ENV.rabbitMessageTemplate;
+    const missing = liveGiveMissingEnv("rabbitmq-http");
+    if (missing.length) return { mode: "rabbitmq-http", configured: false, missingEnv: missing, reason: `${missing.join(", ")} required for rabbitmq-http transport.` };
+    let overviewUrl = LIVE_GIVE_ENV.rabbitHealthUrl;
+    if (!overviewUrl) {
+      try {
+        const parsed = new URL(url);
+        parsed.pathname = "/api/overview";
+        parsed.search = "";
+        overviewUrl = parsed.toString();
+      } catch {
+        overviewUrl = "";
+      }
+    }
+    return { mode: "rabbitmq-http", configured: true, missingEnv: [], url, user, password, routingKey, messageTemplate, overviewUrl };
+  }
+  return {
+    mode: runtimeMode,
+    configured: false,
+    missingEnv: [],
+    reason: `Unsupported runtime Give Item transport '${runtimeMode}'. Use http-json or dry-run.`
+  };
+}
+
+async function checkGiveTransport() {
+  const config = giveTransportConfig();
+  if (!config.configured) return { ...config, reachable: false, dryRunReason: dryRunReason({ ...config, reachable: false }) };
+  try {
+    if (config.mode === "http-json") {
+      const headers = config.token ? { Authorization: `Bearer ${config.token}` } : {};
+      const response = await httpRequestJson(config.healthUrl, { method: "GET", headers, timeout: LIVE_GIVE_ENV.timeoutMs });
+      const checked = { ...config, reachable: response.statusCode >= 200 && response.statusCode < 500, statusCode: response.statusCode };
+      return { ...checked, dryRunReason: dryRunReason(checked) };
+    }
+    if (config.mode === "rabbitmq-http") {
+      const response = await httpRequestJson(config.overviewUrl, {
+        method: "GET",
+        headers: { Authorization: basicAuthHeader(config.user, config.password) },
+        timeout: LIVE_GIVE_ENV.timeoutMs
+      });
+      const checked = { ...config, reachable: response.ok, statusCode: response.statusCode };
+      return { ...checked, dryRunReason: dryRunReason(checked) };
+    }
+  } catch (error) {
+    const checked = { ...config, reachable: false, error: error.message };
+    return { ...checked, dryRunReason: dryRunReason(checked) };
+  }
+  const checked = { ...config, reachable: false, error: "Transport reachability check is not implemented." };
+  return { ...checked, dryRunReason: dryRunReason(checked) };
+}
+
+async function sendLiveGiveItem(command, checkedConfig = null) {
+  const config = checkedConfig || await checkGiveTransport();
+  if (!config.configured) {
+    return {
+      ok: false,
+      dryRun: false,
+      status: "live-unavailable",
+      command,
+      transport: config.mode,
+      missingEnv: config.missingEnv || [],
+      error: liveGiveUnavailableMessage(config)
+    };
+  }
+  if (!config.reachable) {
+    return {
+      ok: false,
+      dryRun: false,
+      status: "live-unavailable",
+      command,
+      transport: config.mode,
+      missingEnv: config.missingEnv || [],
+      error: liveGiveUnavailableMessage(config)
+    };
+  }
+  if (config.mode === "http-json") {
+    const headers = config.token ? { Authorization: `Bearer ${config.token}` } : {};
+    const response = await httpRequestJson(config.url, {
+      method: "POST",
+      headers,
+      body: {
+        playerId: command.playerId,
+        itemId: command.template,
+        template: command.template,
+        quantity: command.qty,
+        qty: command.qty,
+        quality: command.quality,
+        requestId: command.requestId
+      },
+      timeout: LIVE_GIVE_ENV.timeoutMs
+    });
+    if (!response.ok) throw new Error(`Give-item HTTP transport returned ${response.statusCode}: ${response.text || "no response body"}`);
+    const verified = Boolean(response.data?.verified || response.data?.inventoryVerified || response.data?.grantVerified);
+    return {
+      ok: true,
+      dryRun: false,
+      verified,
+      status: verified ? "live-verified" : "live-published",
+      transport: "http-json",
+      command,
+      response: response.data,
+      stdout: verified ? "Live Give verified by receiver inventory check." : "Live Give published/queued. Inventory verification is not available."
+    };
+  }
+  if (config.mode === "rabbitmq-http") {
+    const payload = renderGiveItemTemplate(config.messageTemplate, command);
+    try { JSON.parse(payload); }
+    catch (error) { throw new Error(`DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE did not render valid JSON: ${error.message}`); }
+    const response = await httpRequestJson(config.url, {
+      method: "POST",
+      headers: { Authorization: basicAuthHeader(config.user, config.password) },
+      body: {
+        properties: {},
+        routing_key: config.routingKey,
+        payload,
+        payload_encoding: "string"
+      },
+      timeout: LIVE_GIVE_ENV.timeoutMs
+    });
+    if (!response.ok || response.data?.routed === false) {
+      throw new Error(`RabbitMQ publish failed${response.statusCode ? ` (${response.statusCode})` : ""}: ${response.text || "message was not routed"}`);
+    }
+    return {
+      ok: true,
+      dryRun: false,
+      verified: false,
+      status: "live-published",
+      transport: "rabbitmq-http",
+      command,
+      response: { routed: response.data?.routed !== false },
+      stdout: "Live Give published/queued. Inventory verification is not available."
+    };
+  }
+  return { ok: false, dryRun: false, status: "live-unavailable", command, error: `Live Give unavailable: unsupported transport '${config.mode}'.` };
+}
+
+async function adminProbe() {
+  const tablesSql = `
+    select table_schema || '.' || table_name
+    from information_schema.tables
+    where table_type = 'BASE TABLE'
+      and table_schema not in ('pg_catalog', 'information_schema')
+      and (
+        lower(table_name) like '%player%' or
+        lower(table_name) like '%character%' or
+        lower(table_name) like '%inventory%' or
+        lower(table_name) like '%item%'
+      )
+    order by table_schema, table_name
+    limit 80
+  `;
+  const output = await dbQuery(tablesSql);
+  const transport = await checkGiveTransport();
+  const liveGiveAvailable = Boolean(transport.configured && transport.reachable);
+  return {
+    ok: true,
+    transport: transportDisplayName(transport.mode),
+    configured: Boolean(transport.configured),
+    reachable: Boolean(transport.reachable),
+    missingEnv: transport.missingEnv || [],
+    liveGiveAvailable,
+    dryRunReason: liveGiveAvailable ? "" : (transport.dryRunReason || transport.reason || transport.error || "Live give-item transport is unavailable."),
+    giveTransport: {
+      mode: transport.mode,
+      configured: Boolean(transport.configured),
+      reachable: Boolean(transport.reachable),
+      statusCode: transport.statusCode || null,
+      target: transport.url ? redactUrl(transport.url) : "",
+      missingEnv: transport.missingEnv || [],
+      reason: transport.reason || transport.error || "",
+      dryRunReason: liveGiveAvailable ? "" : (transport.dryRunReason || transport.reason || transport.error || "Live give-item transport is unavailable.")
+    },
+    tables: output ? output.split(/\r?\n/).filter(Boolean) : [],
+    note: liveGiveAvailable
+      ? `Live item grants are enabled through ${transport.mode}.`
+      : `Player/item database access is reachable. Live item grants are dry-run only: ${transport.dryRunReason || transport.reason || transport.error || "transport is not reachable."}`
+  };
+}
+
+function adminProbeUnavailable(error) {
+  const transport = giveTransportConfig();
+  const checked = {
+    ...transport,
+    reachable: false,
+    error: error?.message || transport.reason || "Admin probe failed."
+  };
+  const reason = dryRunReason(checked);
+  return {
+    ok: false,
+    transport: transportDisplayName(checked.mode),
+    configured: Boolean(checked.configured),
+    reachable: false,
+    missingEnv: checked.missingEnv || [],
+    liveGiveAvailable: false,
+    dryRunReason: reason,
+    giveTransport: {
+      mode: checked.mode,
+      configured: Boolean(checked.configured),
+      reachable: false,
+      statusCode: checked.statusCode || null,
+      target: checked.url ? redactUrl(checked.url) : "",
+      missingEnv: checked.missingEnv || [],
+      reason: checked.reason || checked.error || "",
+      dryRunReason: reason
+    },
+    error: checked.error
+  };
+}
+
+async function liveGiveEnvStatus() {
+  await updateRuntimeGiveTransport(null, "env");
+  const transport = await checkGiveTransport();
+  const liveGiveAvailable = Boolean(transport.configured && transport.reachable);
+  return {
+    ok: true,
+    liveGiveAvailable,
+    transport: transportDisplayName(transport.mode),
+    configured: Boolean(transport.configured),
+    reachable: Boolean(transport.reachable),
+    missingEnv: transport.missingEnv || [],
+    dryRunReason: liveGiveAvailable ? "" : (transport.dryRunReason || transport.reason || transport.error || "Live give-item transport is unavailable."),
+    message: liveGiveAvailable ? "Live Give transport is configured and reachable." : liveGiveUnavailableMessage(transport),
+    runtimeTransport: { ...runtimeGiveTransport },
+    giveTransport: {
+      mode: transport.mode,
+      configured: Boolean(transport.configured),
+      reachable: Boolean(transport.reachable),
+      statusCode: transport.statusCode || null,
+      target: transport.url ? redactUrl(transport.url) : "",
+      missingEnv: transport.missingEnv || [],
+      reason: transport.reason || transport.error || "",
+      dryRunReason: liveGiveAvailable ? "" : (transport.dryRunReason || transport.reason || transport.error || "Live give-item transport is unavailable.")
+    }
+  };
+}
+
+async function adminPlayers() {
+  const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  const diagnostics = {
+    serverPath: DEFAULT_SERVER_ROOT || "",
+    sshTarget: VM_IP ? `${SSH_USER}@${VM_IP}` : `${SSH_USER}@auto-vm-ip`,
+    sourcesChecked: [],
+    filesChecked: [],
+    sourceTableUsed: "",
+    joinPathUsed: "",
+    characterNamesResolved: 0,
+    playersFound: 0,
+    reason: "",
+    errors: []
+  };
+  const characterQuery = `
+    with account_ids as (
+      select account_id from dune.communinet_player where account_id is not null
+      union
+      select account_id from dune.player_state where account_id is not null
+    )
+    select
+      a.account_id::text,
+      coalesce(ac.funcom_id, ac.user, '') as funcom_id,
+      coalesce(ps.player_controller_id::text, '') as player_controller_id,
+      coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
+      coalesce(nullif(ps.character_name, ''), a.account_id::text) as character_name,
+      case when nullif(ps.character_name, '') is null then 'false' else 'true' end as resolved
+    from account_ids a
+    left join dune.player_state ps on ps.account_id = a.account_id
+    left join dune.accounts ac on ac.id = a.account_id
+    order by a.account_id, ps.last_avatar_activity desc nulls last, ps.player_state_id
+    limit 200
+  `;
+  try {
+    const output = await dbQuery(characterQuery);
+    const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
+      const [accountId = "", funcomId = "", playerControllerId = "", characterId = "", characterName = "", resolved = "false"] = line.split("\t");
+      return {
+        id: accountId,
+        name: characterName || accountId || "Unknown",
+        account_id: accountId,
+        funcom_id: funcomId,
+        player_controller_id: playerControllerId,
+        character_id: characterId,
+        character_name: characterName || accountId || "Unknown",
+        characterNameResolved: /^true$/i.test(resolved)
+      };
+    }).filter((player) => player.id) : [];
+    const resolvedCount = players.filter((player) => player.characterNameResolved).length;
+    diagnostics.sourcesChecked.push({
+      type: "database",
+      source: "dune.communinet_player + dune.player_state",
+      idColumn: "communinet_player.account_id / player_state.account_id",
+      nameColumn: "player_state.character_name",
+      rows: players.length,
+      resolvedNames: resolvedCount,
+      ok: true,
+      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id"
+    });
+    diagnostics.sourceTableUsed = "dune.player_state";
+    diagnostics.joinPathUsed = "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id";
+    diagnostics.characterNamesResolved = resolvedCount;
+    diagnostics.playersFound = players.length;
+    if (players.length) {
+      if (!resolvedCount) diagnostics.reason = "Player rows were found, but none had a character_name in dune.player_state.";
+      return {
+        ok: true,
+        source: "dune.player_state",
+        joinPath: diagnostics.joinPathUsed,
+        characterNamesResolved: resolvedCount,
+        players,
+        diagnostics,
+        error: resolvedCount ? "" : diagnostics.reason,
+        details: playerDiagnosticLines(diagnostics)
+      };
+    }
+    diagnostics.reason = "No account/player rows were found in dune.communinet_player or dune.player_state.";
+  } catch (error) {
+    diagnostics.sourcesChecked.push({
+      type: "database",
+      source: "dune.communinet_player + dune.player_state",
+      idColumn: "communinet_player.account_id / player_state.account_id",
+      nameColumn: "player_state.character_name",
+      rows: 0,
+      resolvedNames: 0,
+      ok: false,
+      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id",
+      error: error.message
+    });
+    diagnostics.errors.push(`dune.player_state character query: ${error.message}`);
+  }
+  const metaSql = `
+    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
+    from information_schema.columns
+    where table_schema = 'dune'
+      and (
+        lower(table_name) like '%player%' or
+        lower(table_name) like '%character%'
+      )
+    group by table_name
+    order by
+      case
+        when table_name = 'communinet_player' then 0
+        when table_name = 'overmap_players' then 1
+        when table_name like '%player%' then 2
+        else 3
+      end,
+      table_name
+    limit 40
+  `;
+  let metaOutput = "";
+  try {
+    metaOutput = await dbQuery(metaSql);
+  } catch (error) {
+    diagnostics.reason = "Could not read Dune database metadata.";
+    diagnostics.errors.push(error.message);
+    return {
+      ok: false,
+      source: "",
+      players: [],
+      diagnostics,
+      error: diagnostics.reason,
+      details: playerDiagnosticLines(diagnostics)
+    };
+  }
+  const idNames = ["player_id", "playerid", "account_id", "accountid", "character_id", "characterid", "id", "uid", "uuid"];
+  const nameNames = ["display_name", "displayname", "player_name", "playername", "character_name", "charactername", "name", "username", "nickname"];
+  const candidates = metaOutput.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [table, columnsRaw = ""] = line.split("\t");
+    const columns = columnsRaw.split(",").filter(Boolean);
+    const lower = new Map(columns.map((column) => [column.toLowerCase(), column]));
+    const idCol = idNames.map((name) => lower.get(name)).find(Boolean) || columns.find((column) => /player.*id|id.*player|character.*id|id$/i.test(column));
+    const nameCol = nameNames.map((name) => lower.get(name)).find(Boolean) || columns.find((column) => /display/i.test(column) || (/name/i.test(column) && !/channel|guild|clan|faction|session|server|map/i.test(column)));
+    if (!table || !idCol) return null;
+    const idExpr = quoteIdent(idCol);
+    const nameExpr = nameCol ? `coalesce(${quoteIdent(nameCol)}::text, ${idExpr}::text)` : `${idExpr}::text`;
+    return {
+      table: `dune.${table}`,
+      idColumn: idCol,
+      nameColumn: nameCol || "",
+      sql: `select distinct ${idExpr}::text, ${nameExpr} from dune.${quoteIdent(table)} where ${idExpr} is not null order by 2 limit 100`
+    };
+  }).filter(Boolean);
+
+  if (!candidates.length) {
+    diagnostics.reason = "No Dune database tables with player-like or character-like columns were found.";
+    return {
+      ok: true,
+      source: "",
+      players: [],
+      diagnostics,
+      error: diagnostics.reason,
+      details: playerDiagnosticLines(diagnostics)
+    };
+  }
+
+  let best = { source: "", players: [] };
+  for (const candidate of candidates) {
+    const check = {
+      type: "database",
+      source: candidate.table,
+      idColumn: candidate.idColumn,
+      nameColumn: candidate.nameColumn || "(id only)",
+      rows: 0,
+      ok: false
+    };
+    try {
+      const output = await dbQuery(candidate.sql);
+      const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
+        const [id, name] = line.split("\t");
+        return { id: id || "", name: name || id || "Unknown" };
+      }) : [];
+      check.rows = players.length;
+      check.ok = true;
+      diagnostics.sourcesChecked.push(check);
+      if (players.length > 0) {
+        best = { source: candidate.table, players };
+        break;
+      }
+    } catch (error) {
+      check.error = error.message;
+      diagnostics.sourcesChecked.push(check);
+      diagnostics.errors.push(`${candidate.table}: ${error.message}`);
+    }
+  }
+
+  diagnostics.playersFound = best.players.length;
+  if (!best.players.length) {
+    diagnostics.reason = "No player rows were found in the checked Dune database tables. Players may need to join once, or their records may be stored in another table not yet recognized.";
+  }
+
+  return {
+    ok: true,
+    source: best.source,
+    players: best.players,
+    diagnostics,
+    error: best.players.length ? "" : diagnostics.reason,
+    details: playerDiagnosticLines(diagnostics)
+  };
+}
+
+async function playersFeed() {
+  const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  const columnOutput = await dbQuery(`
+    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
+    from information_schema.columns
+    where table_schema = 'dune'
+      and table_name in ('player_state', 'communinet_player', 'accounts')
+    group by table_name
+  `);
+  const tableColumns = new Map(columnOutput.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [table = "", columnsRaw = ""] = line.split("\t");
+    return [table, new Set(columnsRaw.split(",").filter(Boolean).map((column) => column.toLowerCase()))];
+  }));
+  const psColumns = tableColumns.get("player_state") || new Set();
+  const hasPs = (column) => psColumns.has(column.toLowerCase());
+  const firstPsColumn = (columns) => columns.find((column) => hasPs(column));
+  const levelColumn = firstPsColumn(["level", "character_level", "player_level", "current_level"]);
+  const onlineColumn = firstPsColumn(["is_online", "online", "is_connected", "connected"]);
+  const statusColumn = firstPsColumn(["status", "connection_status", "online_status", "presence_status"]);
+  const lastSeenColumn = firstPsColumn(["last_avatar_activity", "last_seen", "last_login", "updated_at"]);
+  const levelExpr = levelColumn ? `coalesce(ps.${quoteIdent(levelColumn)}::text, '')` : `''`;
+  const onlineExpr = onlineColumn
+    ? `case
+        when ps.${quoteIdent(onlineColumn)} is null then ''
+        when lower(ps.${quoteIdent(onlineColumn)}::text) in ('true','t','1','yes','online','connected','active') then 'online'
+        when lower(ps.${quoteIdent(onlineColumn)}::text) in ('false','f','0','no','offline','disconnected','inactive') then 'offline'
+        else ps.${quoteIdent(onlineColumn)}::text
+      end`
+    : `''`;
+  const statusExpr = statusColumn ? `coalesce(ps.${quoteIdent(statusColumn)}::text, '')` : `''`;
+  const lastSeenExpr = lastSeenColumn ? `coalesce(ps.${quoteIdent(lastSeenColumn)}::text, '')` : `''`;
+  const playerStateOrder = lastSeenColumn ? `ps.${quoteIdent(lastSeenColumn)} desc nulls last,` : "";
+  const feedQuery = `
+    with account_ids as (
+      select account_id from dune.communinet_player where account_id is not null
+      union
+      select account_id from dune.player_state where account_id is not null
+    )
+    select
+      a.account_id::text,
+      coalesce(ac.funcom_id, ac.user, '') as funcom_id,
+      coalesce(ps.player_controller_id::text, '') as player_controller_id,
+      coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
+      coalesce(nullif(ps.character_name, ''), a.account_id::text) as character_name,
+      ${levelExpr} as level,
+      ${onlineExpr} as online_state,
+      ${statusExpr} as status_text,
+      ${lastSeenExpr} as last_seen
+    from account_ids a
+    left join dune.player_state ps on ps.account_id = a.account_id
+    left join dune.accounts ac on ac.id = a.account_id
+    order by a.account_id, ${playerStateOrder} ps.player_state_id
+    limit 120
+  `;
+  const output = await dbQuery(feedQuery);
+  const seen = new Set();
+  const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [accountId = "", funcomId = "", playerControllerId = "", characterId = "", characterName = "", level = "", onlineState = "", statusText = "", lastSeen = ""] = line.split("\t");
+    const rawStatus = String(onlineState || statusText || "").toLowerCase();
+    let status = "unknown";
+    if (/online|connected|active|true|1/.test(rawStatus)) status = "online";
+    else if (/offline|disconnected|inactive|false|0/.test(rawStatus)) status = "offline";
+    return {
+      id: accountId,
+      name: characterName || accountId || "Unknown",
+      account_id: accountId,
+      funcom_id: funcomId,
+      player_controller_id: playerControllerId,
+      character_id: characterId,
+      level: level || null,
+      status,
+      statusSource: onlineColumn || statusColumn || "",
+      last_seen: lastSeen || null
+    };
+  }).filter((player) => {
+    const key = player.account_id || player.id;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }) : [];
+  return {
+    ok: true,
+    source: "dune.communinet_player + dune.player_state",
+    players,
+    fields: {
+      level: levelColumn || "",
+      status: onlineColumn || statusColumn || "",
+      lastSeen: lastSeenColumn || ""
+    }
+  };
+}
+
+function liveMapPickColumn(columns, patterns) {
+  return columns.find((column) => patterns.some((pattern) => pattern.test(column))) || "";
+}
+
+function liveMapPlayerIdentityKeys(player) {
+  return [
+    player.account_id,
+    player.player_controller_id,
+    player.character_id,
+    player.id
+  ].filter(Boolean).map((value) => String(value));
+}
+
+function liveMapNormalizeStatus(value) {
+  const raw = String(value || "").toLowerCase();
+  if (/online|connected|active|true|1/.test(raw)) return "online";
+  if (/offline|disconnected|inactive|false|0/.test(raw)) return "offline";
+  return raw || "unknown";
+}
+
+function liveMapNumericExpr(alias, column, quoteIdent) {
+  const ref = `${alias}.${quoteIdent(column)}`;
+  return `case when ${ref} is not null and ${ref}::text ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' then ${ref}::double precision else null end`;
+}
+
+function liveMapTextExpr(alias, column, quoteIdent) {
+  return column ? `coalesce(${alias}.${quoteIdent(column)}::text, '')` : `''`;
+}
+
+function liveMapColumnDiscoveryRows(output) {
+  return output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [table = "", raw = ""] = line.split("\t");
+    const columns = raw.split(",").filter(Boolean);
+    return { table, columns, lower: columns.map((column) => column.toLowerCase()) };
+  });
+}
+
+async function liveMapDiscoverPositionTables(quoteIdent) {
+  const output = await dbQuery(`
+    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
+    from information_schema.columns
+    where table_schema = 'dune'
+    group by table_name
+    having bool_or(lower(column_name) ~ '(x|y|z|pos|position|transform|location|map|world|level|pawn|entity|actor|character|player_state|controller)')
+       or lower(table_name) ~ '(player|character|pawn|entity|actor|controller|position|location|transform|vehicle|base|building)'
+    order by table_name
+    limit 260
+  `, 45000);
+  const rows = liveMapColumnDiscoveryRows(output);
+  return rows.map((row) => {
+    const xCol = liveMapPickColumn(row.lower, [/^x$/, /(^|_)pos.*x/, /position.*x/, /location.*x/, /world.*x/, /coord.*x/, /translate.*x/]);
+    const yCol = liveMapPickColumn(row.lower, [/^y$/, /(^|_)pos.*y/, /position.*y/, /location.*y/, /world.*y/, /coord.*y/, /translate.*y/]);
+    const zCol = liveMapPickColumn(row.lower, [/^z$/, /(^|_)pos.*z/, /position.*z/, /location.*z/, /world.*z/, /coord.*z/, /translate.*z/, /height/, /altitude/]);
+    const accountCol = liveMapPickColumn(row.lower, [/^account_id$/, /account.*id/]);
+    const controllerCol = liveMapPickColumn(row.lower, [/player.*controller.*id/, /^controller_id$/]);
+    const characterCol = liveMapPickColumn(row.lower, [/character.*id/, /player_state.*id/, /player.*state.*id/]);
+    const pawnCol = liveMapPickColumn(row.lower, [/pawn.*id/, /entity.*id/, /actor.*id/]);
+    const nameCol = liveMapPickColumn(row.lower, [/character.*name/, /^name$/, /display.*name/, /label/]);
+    const mapCol = liveMapPickColumn(row.lower, [/^map$/, /map.*name/, /world/, /level/, /zone/, /partition/]);
+    const onlineCol = liveMapPickColumn(row.lower, [/online/, /connected/, /status/, /presence/]);
+    const timeCol = liveMapPickColumn(row.lower, [/time/, /timestamp/, /created/, /updated/, /event.*id/, /^id$/]);
+    const hasPosition = Boolean(xCol && yCol);
+    const hasPositionBlob = row.lower.some((column) => /pos|position|transform|location/.test(column));
+    const lowerToReal = new Map(row.columns.map((column) => [column.toLowerCase(), column]));
+    return {
+      table: row.table,
+      columns: row.columns,
+      hasPosition,
+      hasPositionBlob,
+      x: xCol ? lowerToReal.get(xCol) : "",
+      y: yCol ? lowerToReal.get(yCol) : "",
+      z: zCol ? lowerToReal.get(zCol) : "",
+      account: accountCol ? lowerToReal.get(accountCol) : "",
+      controller: controllerCol ? lowerToReal.get(controllerCol) : "",
+      character: characterCol ? lowerToReal.get(characterCol) : "",
+      pawn: pawnCol ? lowerToReal.get(pawnCol) : "",
+      name: nameCol ? lowerToReal.get(nameCol) : "",
+      map: mapCol ? lowerToReal.get(mapCol) : "",
+      online: onlineCol ? lowerToReal.get(onlineCol) : "",
+      time: timeCol ? lowerToReal.get(timeCol) : "",
+      playerish: /player|character|pawn|controller|actor|entity|state/i.test(row.table)
+    };
+  });
+}
+
+async function liveMapPlayerPositions(players, discovery, quoteIdent) {
+  const identityByKey = new Map();
+  for (const player of players) {
+    for (const key of liveMapPlayerIdentityKeys(player)) identityByKey.set(key, player);
+  }
+  const candidates = discovery
+    .filter((row) => row.hasPosition && (row.playerish || row.account || row.controller || row.character || row.pawn || row.name))
+    .sort((a, b) => Number(b.playerish) - Number(a.playerish))
+    .slice(0, 18);
+  const rawPlayerRecords = [];
+  const positionSourceTried = [];
+  const matched = [];
+  const matchedKeys = new Set();
+  for (const candidate of candidates) {
+    const source = {
+      table: `dune.${candidate.table}`,
+      x: candidate.x,
+      y: candidate.y,
+      z: candidate.z,
+      account: candidate.account,
+      controller: candidate.controller,
+      character: candidate.character,
+      pawn: candidate.pawn,
+      map: candidate.map,
+      time: candidate.time,
+      rows: 0,
+      validRows: 0,
+      matchedRows: 0
+    };
+    positionSourceTried.push(source);
+    const select = [
+      `${liveMapTextExpr("p", candidate.account, quoteIdent)} as account_id`,
+      `${liveMapTextExpr("p", candidate.name, quoteIdent)} as character_name`,
+      `${liveMapTextExpr("p", candidate.controller, quoteIdent)} as player_controller_id`,
+      `${liveMapTextExpr("p", candidate.pawn, quoteIdent)} as pawn_entity_id`,
+      `${liveMapTextExpr("p", candidate.character, quoteIdent)} as character_id`,
+      `${liveMapNumericExpr("p", candidate.x, quoteIdent)} as x`,
+      `${liveMapNumericExpr("p", candidate.y, quoteIdent)} as y`,
+      `${candidate.z ? liveMapNumericExpr("p", candidate.z, quoteIdent) : "null"} as z`,
+      `${liveMapTextExpr("p", candidate.map, quoteIdent)} as map`,
+      `${liveMapTextExpr("p", candidate.online, quoteIdent)} as online_status`,
+      `${liveMapTextExpr("p", candidate.time, quoteIdent)} as source_time`
+    ].join(", ");
+    const orderBy = candidate.time ? `order by p.${quoteIdent(candidate.time)} desc nulls last` : "";
+    const sql = `
+      select ${select}
+      from dune.${quoteIdent(candidate.table)} p
+      where p.${quoteIdent(candidate.x)} is not null
+        and p.${quoteIdent(candidate.y)} is not null
+      ${orderBy}
+      limit 500
+    `;
+    try {
+      const output = await dbQuery(sql, 30000);
+      const rows = output.split(/\r?\n/).filter(Boolean).map((line) => {
+        const [accountId = "", characterName = "", controllerId = "", pawnEntityId = "", characterId = "", xRaw = "", yRaw = "", zRaw = "", map = "", onlineRaw = "", sourceTime = ""] = line.split("\t");
+        return {
+          account_id: accountId,
+          character_name: characterName,
+          player_controller_id: controllerId,
+          pawn_entity_id: pawnEntityId,
+          character_id: characterId,
+          x: Number(xRaw),
+          y: Number(yRaw),
+          z: zRaw === "" ? null : Number(zRaw),
+          map,
+          online_status: onlineRaw,
+          source_time: sourceTime,
+          source: source.table
+        };
+      });
+      source.rows = rows.length;
+      for (const row of rows.slice(0, 12)) rawPlayerRecords.push(row);
+      const valid = rows.filter((row) => Number.isFinite(row.x) && Number.isFinite(row.y));
+      source.validRows = valid.length;
+      for (const row of valid) {
+        const keys = [row.account_id, row.player_controller_id, row.character_id, row.pawn_entity_id].filter(Boolean).map(String);
+        const identity = keys.map((key) => identityByKey.get(key)).find(Boolean) || null;
+        if (!identity && players.length) continue;
+        const matchKey = identity?.player_controller_id || identity?.character_id || identity?.account_id || row.player_controller_id || row.character_id || row.pawn_entity_id || row.account_id;
+        if (matchKey && matchedKeys.has(String(matchKey))) continue;
+        if (matchKey) matchedKeys.add(String(matchKey));
+        matched.push({
+          id: row.player_controller_id || row.character_id || row.account_id || row.pawn_entity_id || `player-${matched.length + 1}`,
+          fls_id: row.player_controller_id || "",
+          name: row.character_name || identity?.name || identity?.character_name || row.account_id || "Player",
+          character_name: row.character_name || identity?.name || "",
+          account_id: row.account_id || identity?.account_id || "",
+          player_controller_id: row.player_controller_id || identity?.player_controller_id || "",
+          pawn_entity_id: row.pawn_entity_id || "",
+          online: liveMapNormalizeStatus(row.online_status || identity?.status),
+          x: row.x,
+          y: row.y,
+          z: Number.isFinite(row.z) ? row.z : null,
+          map: row.map || "HaggaBasin",
+          hasPosition: true,
+          source_time: row.source_time || "",
+          source: source.table
+        });
+      }
+      source.matchedRows = matchedKeys.size;
+      if (matched.length) break;
+    } catch (error) {
+      source.error = error.message;
+    }
+  }
+  console.log("[AlphaNine Live Map] raw player position records", JSON.stringify(rawPlayerRecords.slice(0, 10)));
+  return { players: matched, rawPlayerRecords, positionSourceTried };
+}
+
+async function liveMapEntities() {
+  const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  const result = {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    layers: { players: [], vehicles: [], bases: [] },
+    sources: [],
+    errors: [],
+    bounds: null,
+    debug: {
+      playersLoaded: 0,
+      playersWithIdentity: 0,
+      playersWithPosition: 0,
+      playersWithCoordinates: 0,
+      playerPositionUnavailable: false,
+      positionSourceTried: [],
+      positionSourceTable: "",
+      rawPlayerRecords: [],
+      positionDiscovery: [],
+      missingReason: "",
+      markerCount: 0
+    }
+  };
+  let identityPlayers = [];
+  try {
+    const feed = await playersFeed();
+    identityPlayers = Array.isArray(feed.players) ? feed.players : [];
+    result.debug.playersLoaded = identityPlayers.length;
+    result.debug.playersWithIdentity = identityPlayers.length;
+    result.sources.push({ kind: "players", table: "api/players/feed", rows: result.debug.playersLoaded, coordinateRows: 0 });
+    console.log("[AlphaNine Live Map] player identities", JSON.stringify(identityPlayers.slice(0, 10).map((player) => ({
+      account_id: player.account_id,
+      character_name: player.name || player.character_name,
+      player_controller_id: player.player_controller_id,
+      character_id: player.character_id,
+      online: player.status
+    }))));
+  } catch (error) {
+    result.errors.push(`api/players/feed: ${error.message}`);
+  }
+  let discovery = [];
+  try {
+    discovery = await liveMapDiscoverPositionTables(quoteIdent);
+    result.debug.positionDiscovery = discovery.map((row) => ({
+      table: `dune.${row.table}`,
+      hasPosition: row.hasPosition,
+      hasPositionBlob: row.hasPositionBlob,
+      x: row.x,
+      y: row.y,
+      z: row.z,
+      account: row.account,
+      controller: row.controller,
+      character: row.character,
+      pawn: row.pawn,
+      map: row.map,
+      online: row.online,
+      time: row.time
+    })).slice(0, 80);
+    const positions = await liveMapPlayerPositions(identityPlayers, discovery, quoteIdent);
+    result.layers.players = positions.players;
+    result.debug.rawPlayerRecords = positions.rawPlayerRecords;
+    result.debug.positionSourceTried = positions.positionSourceTried;
+    result.debug.playersWithPosition = positions.players.length;
+    result.debug.playersWithCoordinates = positions.players.length;
+    result.debug.positionSourceTable = positions.players[0]?.source || "";
+  } catch (error) {
+    result.errors.push(`player position discovery: ${error.message}`);
+  }
+  const metaOutput = await dbQuery(`
+    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
+    from information_schema.columns
+    where table_schema = 'dune'
+      and (
+        lower(table_name) like '%vehicle%' or
+        lower(table_name) like '%base%' or
+        lower(table_name) like '%building%' or
+        lower(table_name) like '%marker%' or
+        lower(table_name) like '%poi%'
+      )
+    group by table_name
+    order by table_name
+    limit 90
+  `, 45000);
+  const tables = metaOutput.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [table = "", raw = ""] = line.split("\t");
+    const columns = raw.split(",").filter(Boolean);
+    return { table, columns, lower: columns.map((column) => column.toLowerCase()) };
+  });
+  const kinds = [
+    { kind: "vehicles", label: "Vehicles", table: /vehicle|sandbike|buggy|ornithopter/i },
+    { kind: "bases", label: "Bases", table: /base|building|structure|claim/i }
+  ];
+  const allPoints = [...result.layers.players];
+  for (const spec of kinds) {
+    const candidates = tables.filter((row) => spec.table.test(row.table));
+    for (const candidate of candidates) {
+      const lowerToReal = new Map(candidate.columns.map((column) => [column.toLowerCase(), column]));
+      const xCol = liveMapPickColumn(candidate.lower, [/^x$/, /pos.*x/, /position.*x/, /location.*x/, /world.*x/, /coord.*x/]);
+      const yCol = liveMapPickColumn(candidate.lower, [/^y$/, /^z$/, /pos.*y/, /pos.*z/, /position.*y/, /position.*z/, /location.*y/, /location.*z/, /world.*y/, /world.*z/, /coord.*y/]);
+      if (!xCol || !yCol) continue;
+      const zCol = liveMapPickColumn(candidate.lower, [/^z$/, /height/, /altitude/]);
+      const idCol = liveMapPickColumn(candidate.lower, [/^id$/, /player.*id/, /vehicle.*id/, /base.*id/, /building.*id/, /account.*id/]);
+      const nameCol = liveMapPickColumn(candidate.lower, [/name/, /label/, /display/]);
+      const x = quoteIdent(lowerToReal.get(xCol));
+      const y = quoteIdent(lowerToReal.get(yCol));
+      const z = zCol ? quoteIdent(lowerToReal.get(zCol)) : "null";
+      const id = idCol ? quoteIdent(lowerToReal.get(idCol)) : "null";
+      const name = nameCol ? quoteIdent(lowerToReal.get(nameCol)) : "null";
+      const sql = `select coalesce(${id}::text, '') as id, coalesce(${name}::text, '') as name, ${x}::double precision as x, ${y}::double precision as y, ${z}::text as z from dune.${quoteIdent(candidate.table)} where ${x} is not null and ${y} is not null limit 200`;
+      const source = { kind: spec.kind, table: `dune.${candidate.table}`, x: lowerToReal.get(xCol), y: lowerToReal.get(yCol), z: zCol ? lowerToReal.get(zCol) : "", rows: 0, coordinateRows: 0 };
+      try {
+        const output = await dbQuery(sql, 30000);
+        const loadedRows = output.split(/\r?\n/).filter(Boolean).map((line, index) => {
+          const [id = "", name = "", xRaw = "", yRaw = "", zRaw = ""] = line.split("\t");
+          const entity = { id: id || `${spec.kind}-${index + 1}`, name: name || `${spec.label} ${index + 1}`, x: Number(xRaw), y: Number(yRaw), z: zRaw || null, source: source.table };
+          if (Number.isFinite(entity.x) && Number.isFinite(entity.y)) allPoints.push(entity);
+          return entity;
+        });
+        const rows = loadedRows.filter((row) => Number.isFinite(row.x) && Number.isFinite(row.y));
+        source.rows = loadedRows.length;
+        source.coordinateRows = rows.length;
+        result.sources.push(source);
+        result.layers[spec.kind] = rows;
+        if (rows.length) break;
+      } catch (error) {
+        source.error = error.message;
+        result.sources.push(source);
+        result.errors.push(`${source.table}: ${error.message}`);
+      }
+    }
+  }
+  if (allPoints.length) {
+    const xs = allPoints.map((row) => row.x);
+    const ys = allPoints.map((row) => row.y);
+    result.bounds = { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+  }
+  result.debug.markerCount = result.layers.players.length + result.layers.vehicles.length + result.layers.bases.length;
+  result.debug.playerPositionUnavailable = result.debug.playersLoaded > 0 && result.debug.playersWithPosition === 0;
+  if (result.debug.playerPositionUnavailable) {
+    result.debug.missingReason = result.debug.positionSourceTried.length
+      ? "Player identity rows were loaded, but no discovered position table produced coordinates that could be joined to those players."
+      : "Player identity rows were loaded, but no Dune table with usable x/y position columns was discovered.";
+    result.errors.push("Player position unavailable");
+  }
+  if (!result.sources.length) result.errors.push("No player, vehicle, or base tables with coordinate-like columns were discovered.");
+  return result;
+}
+
+async function liveMapTeleportPreview(payload) {
+  const playerId = String(payload.playerId || "").trim();
+  const x = Number(payload.x);
+  const y = Number(payload.y);
+  const z = Number(payload.z || 0);
+  if (!playerId) throw new Error("Choose or enter a player/controller id first.");
+  if (![x, y, z].every(Number.isFinite)) throw new Error("Teleport coordinates must be numeric.");
+  return {
+    ok: true,
+    status: "preview",
+    message: "Teleport-to-coordinate mode is armed as a safe preview. A server-specific teleport command hook can be connected later.",
+    request: { playerId, x, y, z }
+  };
+}
+
+function playerDiagnosticLines(diagnostics) {
+  const lines = [
+    `Server path: ${diagnostics.serverPath || "Not configured"}`,
+    `SSH target: ${diagnostics.sshTarget || "Not configured"}`,
+    `Source table used: ${diagnostics.sourceTableUsed || "Auto-detect fallback"}`,
+    `Join path used: ${diagnostics.joinPathUsed || "No join path selected"}`,
+    `Character names resolved: ${diagnostics.characterNamesResolved || 0}`,
+    `Sources checked: ${diagnostics.sourcesChecked.length}`,
+    `Players found: ${diagnostics.playersFound}`
+  ];
+  if (diagnostics.filesChecked.length) {
+    lines.push(`Files/logs checked: ${diagnostics.filesChecked.join(", ")}`);
+  } else {
+    lines.push("Files/logs checked: none; current player discovery uses the Dune database.");
+  }
+  for (const source of diagnostics.sourcesChecked.slice(0, 10)) {
+    const status = source.ok ? `${source.rows} row(s)` : `error: ${source.error || "unknown"}`;
+    const resolved = typeof source.resolvedNames === "number" ? `, resolved=${source.resolvedNames}` : "";
+    const join = source.joinPath ? `, join=${source.joinPath}` : "";
+    lines.push(`${source.source} [id=${source.idColumn}, name=${source.nameColumn}${resolved}${join}] -> ${status}`);
+  }
+  if (diagnostics.sourcesChecked.length > 10) {
+    lines.push(`...${diagnostics.sourcesChecked.length - 10} more source(s) checked.`);
+  }
+  if (diagnostics.reason) lines.push(`Reason: ${diagnostics.reason}`);
+  for (const error of diagnostics.errors.slice(0, 5)) lines.push(`Parse/check error: ${error}`);
+  return lines;
+}
+
+async function liveGiveServerAvailability() {
+  const vm = await vmInfo();
+  let status = null;
+  let raw = "";
+  if (vm.exists && vm.state === "Running") {
+    const result = await battlegroup("status");
+    raw = result.stdout || result.stderr || result.error || "";
+    status = parseStatus(raw);
+  }
+  const online = Boolean(vm.exists && vm.state === "Running" && statusSummaryIsOnline(status?.summary));
+  return { online, vm, status: status?.summary || null, raw };
+}
+
+async function adminGiveItem(payload) {
+  const command = validateGiveItemPayload(payload);
+  const mode = String(payload?.mode || "dry-run").toLowerCase();
+  const auditBase = {
+    playerId: command.playerId,
+    template: command.template,
+    qty: command.qty,
+    quality: command.quality,
+    requestId: command.requestId
+  };
+  const server = await liveGiveServerAvailability();
+  await updateRuntimeGiveTransport({ vm: server.vm, status: { summary: server.status }, raw: server.raw }, "give-item");
+  if (!server.online) {
+    const error = new Error("Server is offline. Start the server before using Give Item.");
+    appendAdminAudit("give_item_blocked", { ...auditBase, mode, reason: error.message, server });
+    throw error;
+  }
+  if (mode !== "execute") {
+    const result = {
+      ok: true,
+      dryRun: true,
+      status: "dry-run-passed",
+      command,
+      requestId: command.requestId,
+      stdout: `Dry-run passed. Command validated for ${command.template} x${command.qty} -> ${command.playerId}.`,
+      stderr: "",
+      note: "Dry-run validated the command while the server was online. No live grant was executed."
+    };
+    appendAdminAudit("give_item_dry_run", { ...auditBase, result: { ok: result.ok, status: result.status } });
+    return result;
+  }
+  if (payload?.confirmed !== true && payload?.confirmed !== "true") {
+    const error = new Error("Confirm real Live Give execution before sending the command.");
+    appendAdminAudit("give_item_live_blocked", { ...auditBase, reason: error.message });
+    throw error;
+  }
+  const transport = await checkGiveTransport();
+  if (!transport.configured || !transport.reachable) {
+    const result = { ok: false, dryRun: false, status: "live-unavailable", command, transport: transport.mode, missingEnv: transport.missingEnv || [], stdout: "", stderr: liveGiveUnavailableMessage(transport), error: liveGiveUnavailableMessage(transport) };
+    appendAdminAudit("give_item_live_unavailable", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv, error: result.error } });
+    return result;
+  }
+  appendAdminAudit("give_item_live_started", { ...auditBase, server: server.status });
+  try {
+    const live = await sendLiveGiveItem(command, transport);
+    if (live.status === "live-unavailable") {
+      const result = { ...live, ok: false, dryRun: false, stdout: "", stderr: live.error || "Live Give unavailable." };
+      appendAdminAudit("give_item_live_unavailable", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv || [], error: result.error || result.stderr } });
+      return result;
+    }
+    if (!live.ok || live.dryRun) {
+      const result = { ...live, ok: false, dryRun: false, status: "live-execution-failed", stdout: "", stderr: live.error || "Live execution failed." };
+      appendAdminAudit("give_item_live_failed", { ...auditBase, result: { ok: result.ok, status: result.status, error: result.error || result.stderr } });
+      return result;
+    }
+    if (live.status === "live-verified") {
+      const result = { ...live, dryRun: false, status: "live-verified", stderr: "" };
+      appendAdminAudit("give_item_live_verified", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null } });
+      return result;
+    }
+    const result = { ...live, dryRun: false, status: "live-published", stderr: "" };
+    appendAdminAudit("give_item_live_published", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null } });
+    return result;
+  } catch (error) {
+    appendAdminAudit("give_item_live_failed", { ...auditBase, error: error.message });
+    throw error;
+  }
+}
+
+function sqlString(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function requireInteger(value, name, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const text = String(value ?? "").trim();
+  if (!/^-?\d+$/.test(text)) throw new Error(`${name} must be a whole number.`);
+  const number = Number(text);
+  if (!Number.isSafeInteger(number) || number < min || number > max) {
+    throw new Error(`${name} must be between ${min} and ${max}.`);
+  }
+  return number;
+}
+
+function optionalInteger(value, name, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  return requireInteger(value, name, min, max);
+}
+
+function requireReal(value, name, min = 0, max = 1000) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max) {
+    throw new Error(`${name} must be between ${min} and ${max}.`);
+  }
+  return number;
+}
+
+function requireConfirmed(value) {
+  if (value !== true && value !== "true" && value !== 1 && value !== "1") {
+    throw new Error("Confirm the exact function call before running this permission action.");
+  }
+}
+
+function appendAdminAudit(action, payload) {
+  const entry = {
+    at: new Date().toISOString(),
+    action,
+    ...payload
+  };
+  fs.mkdirSync(path.dirname(ADMIN_AUDIT_LOG), { recursive: true });
+  fs.appendFileSync(ADMIN_AUDIT_LOG, `${JSON.stringify(entry)}\n`, "utf8");
+}
+
+async function adminPermissions(playerControllerIdValue) {
+  const playerControllerId = optionalInteger(playerControllerIdValue, "player_controller_id", 0);
+  const selectedWhere = playerControllerId === null ? "" : `where gm.player_id = ${playerControllerId}`;
+  const rankWhere = playerControllerId === null ? "" : `where par.player_id = ${playerControllerId}`;
+  const accessWhere = playerControllerId === null ? "" : `where pac.account_id in (select account_id from dune.player_state where player_controller_id = ${playerControllerId})`;
+  const sql = `
+    select
+      'guild' as row_type,
+      gm.player_id::text,
+      gm.guild_id::text,
+      gm.role_id::text,
+      coalesce(ps.account_id::text, ''),
+      coalesce(ps.character_name, ''),
+      coalesce(ac.funcom_id, ac.user, ''),
+      case when gm.role_id = 100 then 'true' else 'false' end
+    from dune.guild_members gm
+    left join dune.player_state ps on ps.player_controller_id = gm.player_id
+    left join dune.accounts ac on ac.id = ps.account_id
+    ${selectedWhere}
+    order by gm.guild_id, gm.role_id desc, gm.player_id
+    limit 300;
+
+    select
+      'actor_rank' as row_type,
+      par.player_id::text,
+      par.permission_actor_id::text,
+      par.rank::text,
+      coalesce(pa.actor_name, ''),
+      coalesce(pa.actor_type::text, ''),
+      coalesce(pa.access_level::text, '')
+    from dune.permission_actor_rank par
+    left join dune.permission_actor pa on pa.actor_id = par.permission_actor_id
+    ${rankWhere}
+    order by par.permission_actor_id, par.player_id
+    limit 300;
+
+    select
+      'access_code' as row_type,
+      pac.account_id::text,
+      pac.access_code::text,
+      pac.access_code_type::text,
+      pac.is_resettable::text
+    from dune.player_access_codes pac
+    ${accessWhere}
+    order by pac.account_id, pac.access_code_type, pac.access_code
+    limit 300;
+  `;
+  const output = await dbQuery(sql);
+  const guildMembers = [];
+  const objectPermissions = [];
+  const accessCodes = [];
+  for (const line of output.split(/\r?\n/).filter(Boolean)) {
+    const parts = line.split("\t");
+    if (parts[0] === "guild") {
+      guildMembers.push({
+        player_id: parts[1] || "",
+        guild_id: parts[2] || "",
+        role_id: parts[3] || "",
+        account_id: parts[4] || "",
+        character_name: parts[5] || "",
+        funcom_id: parts[6] || "",
+        is_guild_admin: /^true$/i.test(parts[7] || "")
+      });
+    } else if (parts[0] === "actor_rank") {
+      objectPermissions.push({
+        player_id: parts[1] || "",
+        actor_id: parts[2] || "",
+        rank: parts[3] || "",
+        actor_name: parts[4] || "",
+        actor_type: parts[5] || "",
+        access_level: parts[6] || ""
+      });
+    } else if (parts[0] === "access_code") {
+      accessCodes.push({
+        account_id: parts[1] || "",
+        access_code: parts[2] || "",
+        access_code_type: parts[3] || "",
+        is_resettable: parts[4] || ""
+      });
+    }
+  }
+  return {
+    ok: true,
+    playerControllerId: playerControllerId === null ? "" : String(playerControllerId),
+    guildMembers,
+    objectPermissions,
+    accessCodes,
+    isGuildAdmin: guildMembers.some((row) => row.is_guild_admin),
+    diagnostics: {
+      sourceTables: ["dune.guild_members", "dune.permission_actor_rank", "dune.permission_actor", "dune.player_access_codes", "dune.player_state", "dune.accounts"],
+      selectedPlayerControllerId: playerControllerId === null ? "" : String(playerControllerId),
+      guildMembersFound: guildMembers.length,
+      objectPermissionsFound: objectPermissions.length,
+      accessCodesFound: accessCodes.length,
+      writePolicy: "Writes call confirmed Dune functions only; no direct permission table insert/update."
+    }
+  };
+}
+
+function previewPermissionRankCall(payload) {
+  const actorId = requireInteger(payload.actorId, "actor_id", 0);
+  const playerControllerId = requireInteger(payload.playerControllerId, "player_controller_id", 0);
+  const rank = requireInteger(payload.rank, "rank", 0, 100);
+  const mapId = String(payload.mapId || "").trim();
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(mapId)) throw new Error("map_id must use letters, numbers, underscore, or dash.");
+  return {
+    actorId,
+    playerControllerId,
+    rank,
+    mapId,
+    sql: `select dune.permission_set_player_rank(${actorId}, ${playerControllerId}, ${rank}, ${sqlString(mapId)});`
+  };
+}
+
+async function adminSetPermissionRank(payload) {
+  const call = previewPermissionRankCall(payload || {});
+  requireConfirmed(payload?.confirmed);
+  await dbQuery(call.sql);
+  return {
+    ok: true,
+    action: "permission_set_player_rank",
+    sql: call.sql,
+    message: "Object permission rank function executed."
+  };
+}
+
+function previewAccessCodeCall(payload) {
+  const accountId = requireInteger(payload.accountId, "account_id", 0);
+  const accessCode = requireInteger(payload.accessCode, "access_code", 0, 2147483647);
+  const accessCodeType = requireInteger(payload.accessCodeType, "access_code_type", 0, 2147483647);
+  const isResettable = payload.isResettable === true || payload.isResettable === "true" || payload.isResettable === 1 || payload.isResettable === "1";
+  return {
+    accountId,
+    accessCode,
+    accessCodeType,
+    isResettable,
+    sql: `select dune.create_server_player_access_codes(${accountId}, ${accessCode}, ${accessCodeType}, ${isResettable ? "true" : "false"});`
+  };
+}
+
+async function adminCreateAccessCode(payload) {
+  const call = previewAccessCodeCall(payload || {});
+  requireConfirmed(payload?.confirmed);
+  await dbQuery(call.sql);
+  return {
+    ok: true,
+    action: "create_server_player_access_codes",
+    sql: call.sql,
+    message: "Access code function executed."
+  };
+}
+
+const SPECIALIZATION_TRACKS = ["Crafting", "Gathering", "Exploration", "Combat", "Sabotage"];
+
+function requireTrack(value) {
+  const clean = String(value || "").trim();
+  if (!SPECIALIZATION_TRACKS.includes(clean)) {
+    throw new Error(`Track must be one of: ${SPECIALIZATION_TRACKS.join(", ")}.`);
+  }
+  return clean;
+}
+
+async function adminSkillReputation(playerControllerIdValue) {
+  const playerControllerId = optionalInteger(playerControllerIdValue, "player_controller_id", 0);
+  const trackWhere = playerControllerId === null ? "" : `where st.player_id = ${playerControllerId}`;
+  const repWhere = playerControllerId === null ? "" : `where pfr.actor_id = ${playerControllerId}`;
+  const factionWhere = playerControllerId === null ? "" : `where pf.actor_id = ${playerControllerId}`;
+  const sql = `
+    select 'track', st.player_id::text, st.track_type::text, st.xp_amount::text, st.level::text
+    from dune.specialization_tracks st
+    ${trackWhere}
+    order by st.player_id, st.track_type;
+
+    select 'reputation', pfr.actor_id::text, pfr.faction_id::text, coalesce(f.name, ''), pfr.reputation_amount::text
+    from dune.player_faction_reputation pfr
+    left join dune.factions f on f.id = pfr.faction_id
+    ${repWhere}
+    order by pfr.actor_id, pfr.faction_id;
+
+    select 'current_faction', pf.actor_id::text, pf.faction_id::text, coalesce(f.name, ''), coalesce(pf.utc_time_faction_change::text, '')
+    from dune.player_faction pf
+    left join dune.factions f on f.id = pf.faction_id
+    ${factionWhere}
+    order by pf.actor_id;
+
+    select 'faction', id::text, name, '', '' from dune.factions order by id;
+  `;
+  const output = await dbQuery(sql);
+  const tracks = [];
+  const reputation = [];
+  const currentFactions = [];
+  const factions = [];
+  for (const line of output.split(/\r?\n/).filter(Boolean)) {
+    const parts = line.split("\t");
+    if (parts[0] === "track") {
+      tracks.push({ player_id: parts[1] || "", track_type: parts[2] || "", xp_amount: parts[3] || "0", level: parts[4] || "0" });
+    } else if (parts[0] === "reputation") {
+      reputation.push({ actor_id: parts[1] || "", faction_id: parts[2] || "", faction_name: parts[3] || "", reputation_amount: parts[4] || "0" });
+    } else if (parts[0] === "current_faction") {
+      currentFactions.push({ actor_id: parts[1] || "", faction_id: parts[2] || "", faction_name: parts[3] || "", changed_at: parts[4] || "" });
+    } else if (parts[0] === "faction") {
+      factions.push({ id: parts[1] || "", name: parts[2] || "" });
+    }
+  }
+  return {
+    ok: true,
+    playerControllerId: playerControllerId === null ? "" : String(playerControllerId),
+    availableTracks: SPECIALIZATION_TRACKS,
+    tracks,
+    reputation,
+    currentFactions,
+    factions,
+    warning: "Live pickup is not confirmed for specialization XP/level or reputation. A player relog or server restart may be required."
+  };
+}
+
+async function currentTrackRow(playerControllerId, track) {
+  const sql = `
+    select xp_amount::text, level::text
+    from dune.specialization_tracks
+    where player_id = ${playerControllerId}
+      and track_type = ${sqlString(track)}::dune.specializationtracktype
+  `;
+  const output = await dbQuery(sql);
+  if (!output) return null;
+  const [xp = "0", level = "0"] = output.split(/\t/);
+  return { xp_amount: Number(xp) || 0, level: Number(level) || 0 };
+}
+
+function specializationCall(playerControllerId, track, xpAmount, level) {
+  return `select dune.set_specialization_xp_and_level(${playerControllerId}, ${sqlString(track)}::dune.specializationtracktype, ${xpAmount}, ${level});`;
+}
+
+async function adminSpecializationAction(payload, mode) {
+  const playerControllerId = requireInteger(payload?.playerControllerId, "player_controller_id", 0);
+  const track = requireTrack(payload?.trackType);
+  const previous = await currentTrackRow(playerControllerId, track);
+  const amount = requireInteger(payload?.xpAmount, mode === "add" ? "xp_to_add" : "xp_amount", 0, 2147483647);
+  const levelInput = payload?.level === undefined || payload?.level === null || String(payload.level).trim() === "" ? null : requireReal(payload.level, "level", 0, 1000);
+  const nextXp = mode === "add" ? (previous?.xp_amount || 0) + amount : amount;
+  const nextLevel = levelInput === null ? (previous?.level || 0) : levelInput;
+  const sql = specializationCall(playerControllerId, track, nextXp, nextLevel);
+  requireConfirmed(payload?.confirmed);
+  await dbQuery(sql);
+  const result = {
+    ok: true,
+    action: mode === "add" ? "give_skill_points" : "set_skill_points",
+    sql,
+    previous,
+    next: { xp_amount: nextXp, level: nextLevel },
+    rollbackSql: previous
+      ? specializationCall(playerControllerId, track, previous.xp_amount, previous.level)
+      : `delete from dune.specialization_tracks where player_id = ${playerControllerId} and track_type = ${sqlString(track)}::dune.specializationtracktype;`,
+    warning: "Live pickup is not confirmed. Player relog or server restart may be required."
+  };
+  appendAdminAudit(result.action, { playerControllerId, track, previous, next: result.next, sql, rollbackSql: result.rollbackSql });
+  return result;
+}
+
+async function currentReputationRow(playerControllerId, factionId) {
+  const sql = `
+    select reputation_amount::text
+    from dune.player_faction_reputation
+    where actor_id = ${playerControllerId}
+      and faction_id = ${factionId}
+  `;
+  const output = await dbQuery(sql);
+  if (!output) return null;
+  return { reputation_amount: Number(output.trim()) || 0 };
+}
+
+function reputationCall(playerControllerId, factionId, amount) {
+  return `select dune.set_player_faction_reputation(${playerControllerId}, ${factionId}, ${amount});`;
+}
+
+async function adminReputationAction(payload, mode) {
+  const playerControllerId = requireInteger(payload?.playerControllerId, "player_controller_id", 0);
+  const factionId = requireInteger(payload?.factionId, "faction_id", 1, 32767);
+  const previous = await currentReputationRow(playerControllerId, factionId);
+  const amount = mode === "add"
+    ? requireInteger(payload?.reputationAmount, "reputation_to_add", 0, 2147483647)
+    : requireInteger(payload?.reputationAmount, "reputation_amount", 0, 2147483647);
+  const nextAmount = mode === "add" ? (previous?.reputation_amount || 0) + amount : amount;
+  const sql = reputationCall(playerControllerId, factionId, nextAmount);
+  requireConfirmed(payload?.confirmed);
+  await dbQuery(sql);
+  const result = {
+    ok: true,
+    action: mode === "add" ? "add_reputation" : "set_reputation",
+    sql,
+    previous,
+    next: { reputation_amount: nextAmount },
+    rollbackSql: previous
+      ? reputationCall(playerControllerId, factionId, previous.reputation_amount)
+      : `delete from dune.player_faction_reputation where actor_id = ${playerControllerId} and faction_id = ${factionId};`,
+    warning: "Live pickup is not confirmed. Player relog or server restart may be required."
+  };
+  appendAdminAudit(result.action, { playerControllerId, factionId, previous, next: result.next, sql, rollbackSql: result.rollbackSql });
+  return result;
+}
+
+async function adminTunedChannels() {
+  const sql = `
+    select
+      coalesce(p.account_id::text, c.account_id::text) as account_id,
+      coalesce(p.selected_channel_name::text, '') as selected_channel,
+      coalesce(c.channel_name::text, '') as channel_name,
+      coalesce(c.is_tuned::text, '') as is_tuned
+    from dune.communinet_player p
+    full outer join dune.communinet_player_channels c on c.account_id = p.account_id
+    order by account_id, channel_name
+    limit 300
+  `;
+  const output = await dbQuery(sql);
+  const rows = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [accountId = "", selectedChannel = "", channelName = "", isTuned = ""] = line.split("\t");
+    return { accountId, selectedChannel, channelName, isTuned };
+  }) : [];
+  return { ok: true, rows };
+}
+
+function logLiveGiveStartupValidation() {
+  const config = giveTransportConfig();
+  const selected = transportDisplayName(config.mode);
+  const missing = config.missingEnv || [];
+  console.log(`Live give-item transport: ${selected}`);
+  if (config.configured) {
+    console.log("Live give-item env: configured");
+    return;
+  }
+  if (missing.length) {
+    console.log(`Live give-item dry-run: missing ${missing.map((name) => LIVE_GIVE_SECRET_ENV_NAMES.has(name) ? `${name}=<secret missing>` : name).join(", ")}`);
+    return;
+  }
+  console.log(`Live give-item dry-run: ${config.reason || "transport is not configured"}`);
+}
+
 async function directorUrl() {
   const info = await vmInfo();
   if (!info.exists || info.state !== "Running" || !info.ip) return { ok: false, error: "VM is not running or has no IP." };
@@ -196,6 +2558,210 @@ function contentTypeFor(filePath) {
   if (ext === ".webp") return "image/webp";
   if (ext === ".ico") return "image/x-icon";
   return "application/octet-stream";
+}
+
+function unquoteEnvValue(value) {
+  const trimmed = String(value || "").trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function normalizeExecutablePath(value) {
+  let executable = unquoteEnvValue(value).trim();
+  executable = executable.replace(/^\uFEFF/, "");
+  executable = unquoteEnvValue(executable).trim();
+  if (process.platform === "win32") {
+    executable = executable.replace(/\//g, "\\");
+  }
+  if (!executable) return "";
+  return path.normalize(executable);
+}
+
+function readEnvValue(filePath, name) {
+  if (!filePath || !fs.existsSync(filePath)) return "";
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (match && match[1] === name) return normalizeExecutablePath(expandEnvPath(match[2]));
+  }
+  return "";
+}
+
+function envFilesByName(fileName) {
+  return [
+    APPDATA_DIR ? path.join(APPDATA_DIR, fileName) : "",
+    path.join(__dirname, fileName)
+  ].filter(Boolean);
+}
+
+function commandAvailable(command) {
+  const result = spawnSync(command, ["--version"], {
+    windowsHide: true,
+    stdio: "ignore",
+    timeout: 5000
+  });
+  return !result.error && result.status === 0;
+}
+
+function configuredPythonPath() {
+  for (const filePath of envFilesByName(".env.local")) {
+    const pythonPath = readEnvValue(filePath, "PYTHON_PATH");
+    if (pythonPath) return { command: pythonPath, source: filePath };
+  }
+  for (const filePath of envFilesByName(".env")) {
+    const pythonPath = readEnvValue(filePath, "PYTHON_PATH");
+    if (pythonPath) return { command: pythonPath, source: filePath };
+  }
+  return null;
+}
+
+function findPython() {
+  const configured = configuredPythonPath();
+  if (configured) {
+    const exists = fs.existsSync(configured.command);
+    console.log(`Manager service PYTHON_PATH: ${configured.command} (${configured.source}) exists=${exists}`);
+    if (exists || isWindowsAppsAlias(configured.command)) {
+      return { command: configured.command, source: `PYTHON_PATH from ${configured.source}`, exists };
+    }
+    console.warn(`Configured PYTHON_PATH was not found: ${configured.command} (${configured.source})`);
+  }
+  if (commandAvailable("python")) return { command: "python", source: "PATH", exists: true };
+  if (commandAvailable("py")) return { command: "py", source: "PATH", exists: true };
+  return null;
+}
+
+function isWindowsAppsAlias(command) {
+  return process.platform === "win32" && /\\WindowsApps\\/i.test(String(command || ""));
+}
+
+function managerSpawnDetails(resolved, args, useShell, reason = "") {
+  const executable = resolved?.command || "";
+  return {
+    reason,
+    command: executable,
+    source: resolved?.source || "",
+    cwd: MANAGER_DIR,
+    args,
+    shell: Boolean(useShell),
+    executableExists: executable ? fs.existsSync(executable) : false,
+    isWindowsAppsAlias: isWindowsAppsAlias(executable),
+    PATH: process.env.PATH || "",
+    PYTHONPATH: process.env.PYTHONPATH || ""
+  };
+}
+
+function logManagerSpawnDetails(details) {
+  const attempts = Array.isArray(managerSpawnDiagnostics?.attempts) ? managerSpawnDiagnostics.attempts : [];
+  managerSpawnDiagnostics = { ...details, attempts: [...attempts, details] };
+  console.log(`Manager service spawn diagnostics: ${JSON.stringify(details)}`);
+}
+
+function managerErrorPayload(error) {
+  return {
+    ok: false,
+    error: error || managerFallbackWarning(),
+    spawnDiagnostics: managerSpawnDiagnostics
+  };
+}
+
+function logPythonResolution(resolved) {
+  const message = resolved
+    ? `Manager service Python command resolved: ${resolved.command} (${resolved.source}) exists=${resolved.exists}`
+    : "Manager service warning: Python was not found. Set PYTHON_PATH in .env.local or install python/py.";
+  if (message === loggedPythonCommand) return;
+  loggedPythonCommand = message;
+  console.log(message);
+}
+
+function defaultManagerConfig() {
+  const sshKeyPath = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "DuneAwakeningServer", "sshKey") : "";
+  return { vmIp: "", sshKeyPath, battlegroup: "" };
+}
+
+function readManagerConfigFallback() {
+  const config = defaultManagerConfig();
+  if (!fs.existsSync(MANAGER_CONFIG_PATH)) return config;
+  try {
+    const saved = JSON.parse(fs.readFileSync(MANAGER_CONFIG_PATH, "utf8"));
+    if (saved && typeof saved === "object") {
+      for (const key of Object.keys(config)) {
+        if (Object.prototype.hasOwnProperty.call(saved, key)) config[key] = String(saved[key] || "").trim();
+      }
+    }
+  } catch {}
+  return config;
+}
+
+function writeManagerConfigFallback(payload) {
+  const config = readManagerConfigFallback();
+  for (const key of ["vmIp", "sshKeyPath", "battlegroup"]) {
+    if (Object.prototype.hasOwnProperty.call(payload || {}, key)) config[key] = String(payload[key] || "").trim();
+  }
+  fs.mkdirSync(MANAGER_DATA_DIR, { recursive: true });
+  fs.writeFileSync(MANAGER_CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  return config;
+}
+
+function managerFallbackWarning() {
+  return managerStartError || "Manager service is unavailable because Python was not found.";
+}
+
+async function handleManagerFallback(req, res, managerPath) {
+  if (managerPath === "/api/server/config" && req.method === "GET") {
+    await json(res, { config: readManagerConfigFallback(), configFile: MANAGER_CONFIG_PATH, warning: managerFallbackWarning(), spawnDiagnostics: managerSpawnDiagnostics });
+    return true;
+  }
+  if (managerPath === "/api/server/config" && req.method === "POST") {
+    try {
+      const config = writeManagerConfigFallback(JSON.parse(await readBody(req) || "{}"));
+      await json(res, { ok: true, config, configFile: MANAGER_CONFIG_PATH, warning: managerFallbackWarning(), spawnDiagnostics: managerSpawnDiagnostics });
+    } catch {
+      await json(res, { ok: false, error: "Invalid server setup payload" }, 400);
+    }
+    return true;
+  }
+  if (managerPath === "/api/server/discover" && req.method === "GET") {
+    await json(res, managerErrorPayload(`Battlegroup discovery could not start the manager service. ${managerFallbackWarning()}`), 502);
+    return true;
+  }
+  if (managerPath === "/api/server/settings" && req.method === "GET") {
+    let payload = { profileName: "No applied profile", settings: {} };
+    try {
+      if (fs.existsSync(MANAGER_APPLIED_PROFILE_PATH)) payload = JSON.parse(fs.readFileSync(MANAGER_APPLIED_PROFILE_PATH, "utf8"));
+    } catch {}
+    await json(res, { ...payload, warning: managerFallbackWarning(), spawnDiagnostics: managerSpawnDiagnostics });
+    return true;
+  }
+  if (managerPath === "/api/server/settings" && req.method === "POST") {
+    try {
+      const payload = JSON.parse(await readBody(req) || "{}");
+      const flatSettings = {};
+      for (const [sectionName, sectionSettings] of Object.entries(payload.settings || {})) {
+        if (!sectionSettings || typeof sectionSettings !== "object" || Array.isArray(sectionSettings)) continue;
+        for (const [key, value] of Object.entries(sectionSettings)) flatSettings[`${sectionName}.${key}`] = value;
+      }
+      fs.mkdirSync(MANAGER_DATA_DIR, { recursive: true });
+      fs.writeFileSync(MANAGER_APPLIED_PROFILE_PATH, JSON.stringify(payload, null, 2), "utf8");
+      fs.writeFileSync(MANAGER_APPLIED_SETTINGS_PATH, JSON.stringify(flatSettings, null, 2), "utf8");
+      await json(res, {
+        ok: true,
+        message: "Settings saved locally. Install Python or set PYTHON_PATH to apply them to the server.",
+        profileFile: MANAGER_APPLIED_PROFILE_PATH,
+        settingsFile: MANAGER_APPLIED_SETTINGS_PATH,
+        settingCount: Object.keys(flatSettings).length,
+        warning: managerFallbackWarning(),
+        spawnDiagnostics: managerSpawnDiagnostics
+      });
+    } catch {
+      await json(res, { ok: false, error: "Invalid JSON payload" }, 400);
+    }
+    return true;
+  }
+  return false;
 }
 
 function safeFile(baseDir, requestPath) {
@@ -224,26 +2790,50 @@ function serveStatic(res, baseDir, requestPath) {
   return true;
 }
 
-function findPython() {
-  const bundled = path.join(os.homedir(), ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "python", "python.exe");
-  if (fs.existsSync(bundled)) return bundled;
-  return "python";
-}
-
 function startManagerService() {
   if (managerProcess) return;
-  const python = findPython();
-  managerProcess = spawn(python, ["manager-server.py", "--no-open"], {
+  if (managerStartError) return;
+  const resolved = findPython();
+  logPythonResolution(resolved);
+  if (!resolved) {
+    managerStartError = "Manager service failed to start: Python was not found. Set PYTHON_PATH in .env.local or install python/py.";
+    console.warn(managerStartError);
+    return;
+  }
+  spawnManagerProcess(resolved, isWindowsAppsAlias(resolved.command), isWindowsAppsAlias(resolved.command) ? "WindowsApps alias requires shell fallback" : "direct spawn");
+}
+
+function spawnManagerProcess(resolved, useShell, reason) {
+  const args = ["manager-server.py", "--no-open"];
+  const details = managerSpawnDetails(resolved, args, useShell, reason);
+  logManagerSpawnDetails(details);
+  managerProcess = spawn(resolved.command, args, {
     cwd: MANAGER_DIR,
+    shell: useShell,
     windowsHide: true,
     stdio: "ignore"
+  });
+  managerProcess.on("error", (error) => {
+    if (error.code === "ENOENT" && !useShell && resolved.source.startsWith("PYTHON_PATH")) {
+      managerSpawnDiagnostics = { ...managerSpawnDiagnostics, errorCode: error.code || "", errorMessage: error.message || String(error) };
+      console.warn(`Manager service direct spawn failed with ENOENT for ${resolved.command}; retrying with shell:true.`);
+      managerProcess = null;
+      spawnManagerProcess(resolved, true, "direct spawn ENOENT; retrying with shell:true");
+      return;
+    }
+    managerSpawnDiagnostics = { ...managerSpawnDiagnostics, errorCode: error.code || "", errorMessage: error.message || String(error) };
+    managerStartError = `Manager service failed to start with ${resolved.command}: ${error.message}`;
+    console.error(managerStartError);
+    managerProcess = null;
   });
   managerProcess.on("exit", () => { managerProcess = null; });
 }
 
 async function proxyToManager(req, res, pathname) {
   startManagerService();
-  const target = `http://127.0.0.1:${MANAGER_PORT}${pathname.replace(/^\/manager-api/, "")}`;
+  const managerPath = pathname.replace(/^\/manager-api/, "");
+  if (managerStartError && await handleManagerFallback(req, res, managerPath)) return;
+  const target = `http://127.0.0.1:${MANAGER_PORT}${managerPath}`;
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : await readBody(req);
   try {
     const response = await fetch(target, {
@@ -255,7 +2845,8 @@ async function proxyToManager(req, res, pathname) {
     res.writeHead(response.status, { "Content-Type": response.headers.get("content-type") || "application/json; charset=utf-8" });
     res.end(text);
   } catch (error) {
-    await json(res, { ok: false, error: `Manager service is not ready: ${error.message}` }, 502);
+    if (await handleManagerFallback(req, res, managerPath)) return;
+    await json(res, managerErrorPayload(managerStartError || `Manager service is not ready: ${error.message}`), 502);
   }
 }
 
@@ -266,120 +2857,1153 @@ function appPage() {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AlphaNine Dune Suite</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <script src="/vendor/leaflet/leaflet.js"></script>
   <style>
-    :root { --bg:#101114; --panel:#1b1d21; --panel-2:#23262b; --text:#f2eee7; --muted:#a9b0b9; --line:#343941; --good:#5bd19a; --warn:#f0c46b; --bad:#ff7878; --accent:#d8a24c; --blue:#72a4f2; color-scheme:dark; font-family:"Segoe UI",system-ui,sans-serif; }
+    :root {
+      --bg:#050603; --bg-2:#090b07; --panel:rgba(15,17,11,.92); --panel-2:rgba(27,24,14,.84);
+      --glass:rgba(245,199,93,.055); --line:rgba(214,166,69,.46); --line-strong:rgba(240,201,106,.72); --line-blue:rgba(143,197,219,.45);
+      --text:#eee5d2; --muted:#a99b77; --sand:#d0a44e; --gold:#d7a84c; --gold-bright:#f3cf73; --blue:#8fc5db;
+      --good:#66d17a; --warn:#f0b95c; --bad:#ff6262; --shadow:0 28px 90px rgba(0,0,0,.62);
+      color-scheme:dark; font-family:"Rajdhani","Segoe UI",system-ui,sans-serif;
+    }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; background:radial-gradient(circle at 12% 0%, rgba(216,162,76,.18), transparent 32%), var(--bg); color:var(--text); }
-    button { font:inherit; }
-    main { width:min(1440px, calc(100% - 32px)); margin:0 auto; padding:24px 0 30px; }
-    header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:16px; }
-    h1 { margin:0; font-size:30px; letter-spacing:0; }
-    .sub { margin-top:5px; color:var(--muted); line-height:1.45; }
-    .header-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
-    .kofi { display:inline-flex; align-items:center; min-height:40px; padding:0 14px; border:1px solid #a9c9ff; border-radius:4px; background:var(--blue); color:#08111f; text-decoration:none; font-weight:800; }
-    .pill { border:1px solid var(--line); color:var(--muted); background:rgba(255,255,255,.04); padding:6px 10px; border-radius:999px; font-size:13px; }
-    .dune-banner { position:relative; overflow:hidden; min-height:150px; margin:0 0 16px; border:1px solid rgba(216,162,76,.36); border-radius:8px; background:radial-gradient(circle at 78% 18%, rgba(255,220,140,.5) 0 7%, rgba(255,220,140,.16) 8% 15%, transparent 16%), linear-gradient(180deg, rgba(20,25,30,.1), rgba(16,17,20,.88)), linear-gradient(120deg, rgba(216,162,76,.32), rgba(123,183,255,.12) 54%, rgba(0,0,0,.28)); box-shadow:inset 0 0 85px rgba(0,0,0,.42), 0 18px 46px rgba(0,0,0,.2); }
-    .dune-banner::before { content:""; position:absolute; inset:0; background:linear-gradient(168deg, transparent 0 42%, rgba(227,157,70,.54) 43%, rgba(227,157,70,.14) 56%, transparent 57%), linear-gradient(8deg, rgba(67,45,29,.74) 0 31%, transparent 32%), linear-gradient(350deg, transparent 0 54%, rgba(245,195,111,.34) 55%, rgba(245,195,111,.08) 68%, transparent 69%); opacity:.96; }
-    .dune-banner::after { content:""; position:absolute; inset:auto -8% 0 -8%; height:48%; background:linear-gradient(170deg, transparent 0 28%, rgba(164,92,39,.62) 29%, rgba(164,92,39,.18) 58%, transparent 59%), linear-gradient(7deg, rgba(35,26,19,.84), rgba(147,84,37,.42) 52%, transparent 53%); }
-    .banner-content { position:relative; z-index:1; min-height:150px; display:grid; align-content:end; max-width:760px; padding:24px; }
-    .banner-kicker { color:#f4d19a; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; margin-bottom:7px; }
-    .banner-title { margin:0; font-size:25px; line-height:1.08; text-shadow:0 2px 18px rgba(0,0,0,.56); }
-    .banner-copy { margin:8px 0 0; color:#e7dcc8; line-height:1.45; }
-    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; border-bottom:1px solid var(--line); padding-bottom:10px; }
-    .tab { min-height:40px; border:1px solid var(--line); border-radius:7px; background:var(--panel-2); color:var(--text); padding:0 13px; cursor:pointer; }
-    .tab.active { background:#8f6729; border-color:#c8903f; color:#fff6e6; }
-    .view { display:none; }
+    body { margin:0; min-height:100vh; color:var(--text); background:
+      radial-gradient(circle at 75% 7%, rgba(214,166,69,.22), transparent 25%),
+      radial-gradient(circle at 18% 0%, rgba(111,80,30,.24), transparent 28%),
+      linear-gradient(160deg, #050603 0%, #0d0f08 48%, #060704 100%); }
+    body::before { content:""; position:fixed; inset:0; pointer-events:none; opacity:.2; background:
+      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px); background-size:42px 42px; }
+    body::after { content:""; position:fixed; inset:0; pointer-events:none; opacity:.13; mix-blend-mode:screen; background:
+      repeating-linear-gradient(0deg, rgba(255,255,255,.06) 0 1px, transparent 1px 4px),
+      radial-gradient(circle at 86% 19%, rgba(240,201,106,.3), transparent 12%); }
+    button, input, select { font:inherit; }
+    button { cursor:pointer; }
+    .shell { min-height:100vh; display:grid; grid-template-columns:300px minmax(0,1fr); }
+    .sidebar { position:sticky; top:0; height:100vh; padding:26px 18px; border-right:1px solid var(--line); background:
+      linear-gradient(180deg, rgba(13,14,9,.98), rgba(4,6,4,.96)),
+      radial-gradient(circle at 70% 12%, rgba(214,166,69,.16), transparent 30%); box-shadow:var(--shadow), inset -18px 0 40px rgba(0,0,0,.35); }
+    .brand { position:relative; padding:22px 18px 28px; border:1px solid rgba(214,166,69,.26); background:linear-gradient(135deg, rgba(214,166,69,.09), rgba(255,255,255,.015)); clip-path:polygon(0 0, 88% 0, 100% 18px, 100% 100%, 12px 100%, 0 calc(100% - 12px)); }
+    .brand::before { content:""; display:block; width:58px; height:58px; margin-bottom:14px; border:1px solid var(--line-strong); background:
+      linear-gradient(30deg, transparent 45%, rgba(240,201,106,.65) 46% 54%, transparent 55%),
+      radial-gradient(circle, rgba(240,201,106,.22), rgba(4,6,4,.65)); box-shadow:0 0 28px rgba(240,201,106,.18); }
+    .brand h1 { margin:0; font-size:28px; line-height:.95; letter-spacing:.09em; text-transform:uppercase; color:var(--gold-bright); }
+    .brand p { margin:9px 0 0; color:var(--sand); font-size:14px; text-transform:uppercase; letter-spacing:.18em; }
+    .build-info { display:grid; gap:3px; margin-top:14px; padding-top:12px; border-top:1px solid rgba(214,166,69,.18); color:rgba(208,164,78,.72); font-size:11px; line-height:1.25; letter-spacing:.08em; text-transform:uppercase; }
+    .build-info span { display:block; }
+    .nav { display:grid; gap:5px; margin-top:18px; }
+    .tab { width:100%; min-height:43px; display:flex; align-items:center; justify-content:flex-start; gap:10px; border:1px solid rgba(214,166,69,.08); border-radius:0; padding:0 14px; background:rgba(255,255,255,.01); color:var(--sand); text-align:left; text-transform:uppercase; letter-spacing:.065em; font-size:12px; line-height:1.1; font-weight:760; clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+    .tab::before { content:""; flex:0 0 auto; width:8px; height:8px; border:1px solid currentColor; transform:rotate(45deg); box-shadow:0 0 8px currentColor; opacity:.72; }
+    .tab.active, .tab:hover { color:var(--gold-bright); border-color:rgba(240,201,106,.58); background:linear-gradient(90deg, rgba(214,166,69,.22), rgba(214,166,69,.045)); box-shadow:inset 0 0 22px rgba(240,201,106,.075), 0 0 14px rgba(214,166,69,.1); }
+    .tab.active { font-size:12.5px; font-weight:850; }
+    .sidebar-foot { position:absolute; left:16px; right:16px; bottom:18px; color:var(--muted); font-size:12px; line-height:1.5; }
+    .legal-notice { margin-top:12px; padding-top:10px; border-top:1px solid rgba(214,166,69,.16); color:rgba(214,196,151,.68); font-size:10px; line-height:1.35; }
+    .content { min-width:0; padding:18px 24px 30px; }
+    .topbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(260px,1fr) auto; gap:16px; align-items:center; margin:-18px -24px 18px; padding:16px 24px; backdrop-filter:blur(18px); background:linear-gradient(90deg, rgba(7,8,4,.94), rgba(23,19,10,.88)); border-bottom:1px solid var(--line); box-shadow:0 14px 42px rgba(0,0,0,.36); }
+    .title h2 { margin:0; font-size:24px; letter-spacing:.12em; text-transform:uppercase; color:var(--gold-bright); }
+    .title p { margin:5px 0 0; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-size:12px; }
+    .status-strip { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+    .badge { display:inline-flex; min-height:32px; align-items:center; gap:8px; border:1px solid var(--line); border-radius:0; padding:0 12px; background:rgba(0,0,0,.28); color:var(--muted); font-size:12px; white-space:nowrap; text-transform:uppercase; letter-spacing:.07em; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .badge::before { content:""; width:7px; height:7px; border-radius:999px; background:currentColor; box-shadow:0 0 10px currentColor; }
+    .badge.ok { color:var(--good); border-color:rgba(86,214,143,.35); }
+    .badge.warn { color:var(--warn); border-color:rgba(234,191,98,.35); }
+    .badge.bad { color:var(--bad); border-color:rgba(255,102,102,.35); }
+    .view { display:none; animation:fade .16s ease-out; }
     .view.active { display:block; }
-    .grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
-    .card { background:rgba(27,29,33,.92); border:1px solid var(--line); border-radius:8px; padding:16px; min-height:92px; }
-    .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
-    .value { margin-top:7px; font-size:20px; font-weight:800; overflow-wrap:anywhere; }
-    .ok { color:var(--good); } .warn { color:var(--warn); } .bad { color:var(--bad); }
-    .controls { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }
-    .button, .controls button { display:inline-flex; align-items:center; justify-content:center; min-height:40px; border:1px solid #4a4f58; border-radius:7px; background:var(--panel-2); color:var(--text); text-decoration:none; padding:0 13px; cursor:pointer; }
-    .primary { background:#8f6729 !important; border-color:#c8903f !important; }
-    .danger { background:#6e2c2c !important; border-color:#a04c4c !important; }
-    .tool-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:12px; }
-    .tool-card { min-height:148px; display:grid; align-content:space-between; gap:12px; }
-    .tool-card p { margin:0; color:var(--muted); line-height:1.45; }
-    .frame-wrap { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#0b0c0e; min-height:720px; }
-    iframe { width:100%; height:78vh; min-height:720px; border:0; display:block; background:#0b0c0e; }
-    pre { white-space:pre-wrap; background:#0b0c0e; border:1px solid var(--line); border-radius:8px; padding:14px; max-height:300px; overflow:auto; }
-    @media (max-width:900px) { header{display:block}.header-actions{justify-content:flex-start;margin-top:12px}.grid,.tool-grid{grid-template-columns:1fr}.banner-title{font-size:21px}.frame-wrap,iframe{min-height:620px} }
+    @keyframes fade { from { opacity:.2; transform:translateY(4px); } to { opacity:1; transform:none; } }
+    .hero { position:relative; overflow:hidden; min-height:190px; margin-bottom:16px; border:1px solid var(--line-strong); border-radius:0; background:
+      linear-gradient(90deg, rgba(5,6,3,.88), rgba(5,6,3,.42) 50%, rgba(5,6,3,.84)),
+      linear-gradient(180deg, rgba(5,6,3,.08), rgba(5,6,3,.88)),
+      url("/manager/assets/desert-command.png") center / cover; box-shadow:var(--shadow), inset 0 0 120px rgba(0,0,0,.55), 0 0 36px rgba(214,166,69,.18); clip-path:polygon(0 0, calc(100% - 24px) 0, 100% 24px, 100% 100%, 24px 100%, 0 calc(100% - 24px)); }
+    .hero::before { content:""; position:absolute; inset:0; background:
+      radial-gradient(ellipse at 76% 14%, rgba(240,201,106,.26), transparent 26%),
+      radial-gradient(ellipse at 34% 82%, rgba(215,168,76,.2), transparent 36%),
+      linear-gradient(164deg, transparent 0 52%, rgba(214,166,69,.24) 53%, rgba(214,166,69,.06) 66%, transparent 67%); }
+    .hero-body { position:relative; min-height:190px; display:grid; align-content:center; max-width:820px; padding:30px; }
+    .kicker, .label { color:var(--gold-bright); font-size:13px; text-transform:uppercase; letter-spacing:.11em; font-weight:900; }
+    .hero h3 { margin:9px 0 0; font-size:42px; line-height:1.02; letter-spacing:.09em; text-transform:uppercase; color:var(--gold-bright); text-shadow:0 0 28px rgba(240,201,106,.18); }
+    .hero p { margin:10px 0 0; color:#ded3c1; line-height:1.45; }
+    .grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; }
+    .grid.four { grid-template-columns:repeat(4,minmax(0,1fr)); }
+    .panel { position:relative; border:1px solid var(--line); border-radius:0; background:linear-gradient(180deg, rgba(19,19,12,.94), rgba(5,7,5,.88)); box-shadow:inset 0 0 0 1px rgba(240,201,106,.05), inset 0 -42px 70px rgba(0,0,0,.34), 0 18px 54px rgba(0,0,0,.32); clip-path:polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px)); }
+    .panel::before { content:""; position:absolute; left:12px; right:12px; top:8px; height:1px; background:linear-gradient(90deg, transparent, rgba(240,201,106,.42), transparent); pointer-events:none; }
+    .panel::after { content:""; position:absolute; inset:0; pointer-events:none; box-shadow:inset 0 0 38px rgba(240,201,106,.06), 0 0 18px rgba(214,166,69,.08); }
+    .panel.pad { padding:18px; }
+    .value { margin-top:10px; font-size:29px; font-weight:850; color:var(--gold-bright); overflow-wrap:anywhere; letter-spacing:.03em; }
+    .subtle { color:var(--muted); font-size:13px; line-height:1.45; }
+    .dashboard-grid { display:grid; grid-template-columns:minmax(280px,.82fr) minmax(420px,1.2fr) minmax(320px,.92fr); gap:12px; align-items:start; margin-top:12px; }
+    .panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid rgba(214,166,69,.14); padding-bottom:10px; margin-bottom:12px; }
+    .micro { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.12em; }
+    .resource-bars { display:grid; gap:14px; }
+    .resource-row { display:grid; grid-template-columns:92px minmax(0,1fr) 42px; gap:10px; align-items:center; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+    .bar { position:relative; height:17px; border:1px solid rgba(214,166,69,.22); background:repeating-linear-gradient(90deg, rgba(0,0,0,.36) 0 13px, rgba(214,166,69,.12) 13px 15px); overflow:hidden; box-shadow:inset 0 0 20px rgba(0,0,0,.45); }
+    .bar span { display:block; height:100%; background:linear-gradient(90deg, rgba(148,101,32,.95), rgba(240,201,106,.9)); box-shadow:0 0 18px rgba(240,201,106,.28); }
+    .world-map-panel { margin-top:12px; }
+    .map-explorer { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:12px; align-items:start; }
+    .world-map { position:relative; min-height:380px; overflow:hidden; border:1px solid rgba(214,166,69,.34); background:#070604; box-shadow:inset 0 0 110px rgba(0,0,0,.66), inset 0 0 0 1px rgba(240,201,106,.05); touch-action:none; }
+    .map-workspace { display:grid; gap:12px; }
+    .world-map.full { min-height:calc(100vh - 130px); }
+    .world-map:fullscreen { width:100vw; height:100vh; min-height:100vh; background:#050503; }
+    .overland-layer { position:absolute; inset:0; z-index:2; overflow:hidden; cursor:grab; }
+    .overland-layer.dragging { cursor:grabbing; }
+    .map-camera { position:absolute; left:0; top:0; width:100%; height:100%; transform-origin:50% 50%; will-change:transform; }
+    .world-map-image { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; user-select:none; pointer-events:none; filter:saturate(.95) contrast(1.04) brightness(.92); }
+    .metadata-overlay { position:absolute; inset:0; pointer-events:none; background:linear-gradient(180deg, rgba(5,6,3,.1), rgba(5,6,3,.2)); }
+    .region-boundaries { position:absolute; inset:0; width:100%; height:100%; z-index:4; pointer-events:none; }
+    .region-boundary { fill:rgba(240,201,106,.08); stroke:rgba(240,201,106,.48); stroke-width:2; stroke-dasharray:8 7; opacity:.72; filter:drop-shadow(0 0 8px rgba(240,201,106,.18)); }
+    .region-boundary.active { fill:rgba(240,201,106,.18); stroke:var(--gold-bright); stroke-width:3; opacity:1; filter:drop-shadow(0 0 14px rgba(240,201,106,.42)); }
+    .map-controls { position:absolute; z-index:15; right:14px; top:14px; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; max-width:min(390px, calc(100% - 28px)); }
+    .map-controls button { min-height:34px; padding:0 10px; font-size:11px; border-color:rgba(143,197,219,.38); background:rgba(5,7,5,.72); color:var(--gold-bright); }
+    .map-subnav { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+    .map-subnav button { min-height:34px; padding:0 11px; font-size:11px; border-color:rgba(214,166,69,.25); background:rgba(255,255,255,.025); }
+    .map-subnav button.active { border-color:var(--gold-bright); color:var(--gold-bright); background:rgba(214,166,69,.14); box-shadow:0 0 16px rgba(240,201,106,.1); }
+    .map-routes { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:5; opacity:.34; }
+    .contour { fill:none; stroke:rgba(240,201,106,.16); stroke-width:1.2; }
+    .contour.major { stroke:rgba(240,201,106,.28); stroke-width:1.8; }
+    .map-route { fill:none; stroke:rgba(240,201,106,.28); stroke-width:1; stroke-dasharray:1 13; filter:drop-shadow(0 0 2px rgba(240,201,106,.12)); }
+    .map-route.secondary { stroke:rgba(159,146,118,.18); stroke-width:.8; stroke-dasharray:1 16; }
+    .map-region { position:absolute; z-index:7; border:1px solid rgba(240,201,106,.28); background:rgba(5,7,5,.48); color:var(--gold-bright); padding:7px 9px; min-width:122px; min-height:auto; justify-content:flex-start; display:block; text-align:left; text-transform:uppercase; letter-spacing:.09em; font-size:12px; box-shadow:0 0 18px rgba(214,166,69,.1), inset 0 0 18px rgba(214,166,69,.05); clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .map-region:hover, .map-region.active { border-color:var(--gold-bright); background:rgba(214,166,69,.18); box-shadow:0 0 24px rgba(240,201,106,.22), inset 0 0 22px rgba(240,201,106,.08); }
+    .map-region strong { display:block; font-size:13px; color:var(--gold-bright); }
+    .map-region span { display:block; margin-top:3px; color:var(--muted); font-size:10px; letter-spacing:.08em; }
+    .map-node { position:absolute; z-index:8; width:12px; height:12px; border:1px solid var(--gold-bright); border-radius:999px; background:#070806; box-shadow:0 0 12px rgba(240,201,106,.28); }
+    .map-node.entry { width:11px; height:11px; border-radius:0; transform:rotate(45deg); border-color:rgba(240,201,106,.62); }
+    .map-node.unknown { border-color:var(--warn); box-shadow:0 0 12px rgba(255,184,77,.22); }
+    .map-poi { position:absolute; z-index:8; width:8px; height:8px; border:1px solid rgba(240,201,106,.74); background:rgba(240,201,106,.28); box-shadow:0 0 10px rgba(240,201,106,.2); }
+    .map-poi::after { content:attr(data-label); position:absolute; left:12px; top:-5px; min-width:max-content; color:var(--sand); font-size:10px; text-transform:uppercase; letter-spacing:.08em; background:rgba(0,0,0,.42); border:1px solid rgba(214,166,69,.18); padding:3px 5px; }
+    .map-legend { position:absolute; z-index:5; right:16px; bottom:14px; display:flex; flex-wrap:wrap; gap:8px; max-width:420px; padding:9px 10px; border:1px solid rgba(214,166,69,.24); background:rgba(0,0,0,.48); color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+    .legend-item { display:inline-flex; align-items:center; gap:6px; }
+    .legend-dot { width:9px; height:9px; border-radius:999px; background:var(--good); box-shadow:0 0 10px var(--good); }
+    .legend-dot.offline { background:var(--muted); box-shadow:none; }
+    .legend-dot.unknown { background:var(--warn); box-shadow:0 0 10px rgba(255,184,77,.35); }
+    .legend-line { width:22px; height:0; border-top:2px dashed rgba(240,201,106,.72); }
+    .legend-entry { width:9px; height:9px; border:1px solid rgba(240,201,106,.75); transform:rotate(45deg); }
+    .map-intel-overlay { position:absolute; z-index:9; left:18px; top:18px; width:min(360px, calc(100% - 36px)); display:grid; gap:8px; pointer-events:none; }
+    .map-intel-card { border:1px solid rgba(214,166,69,.34); background:linear-gradient(180deg, rgba(6,8,5,.78), rgba(19,15,8,.7)); box-shadow:0 0 24px rgba(214,166,69,.1), inset 0 0 24px rgba(0,0,0,.36); padding:10px 12px; clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+    .map-intel-card strong { display:block; color:var(--gold-bright); font-size:18px; letter-spacing:.04em; }
+    .map-intel-card span { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.1em; }
+    .map-intel-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }
+    .map-intel-tile { min-height:92px; border:1px solid rgba(214,166,69,.24); background:rgba(255,255,255,.025); padding:12px; clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
+    .map-intel-tile strong { display:block; color:var(--gold-bright); font-size:22px; margin-top:5px; }
+    .map-region-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }
+    .operations-intel { position:sticky; top:86px; display:grid; gap:12px; }
+    .intel-stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .intel-stat { border:1px solid rgba(214,166,69,.22); background:rgba(255,255,255,.025); padding:10px; min-height:72px; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .intel-stat span { display:block; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
+    .intel-stat strong { display:block; margin-top:6px; color:var(--gold-bright); font-size:19px; overflow-wrap:anywhere; }
+    .region-detail-panel { border:1px solid rgba(143,197,219,.3); background:linear-gradient(180deg, rgba(143,197,219,.055), rgba(0,0,0,.22)); padding:12px; clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+    .region-detail-panel h4 { margin:0 0 9px; color:var(--gold-bright); text-transform:uppercase; letter-spacing:.08em; }
+    .map-region-card { border:1px solid rgba(214,166,69,.22); background:linear-gradient(180deg, rgba(19,18,11,.72), rgba(5,7,5,.68)); padding:12px; min-height:126px; display:block; text-align:left; color:var(--text); clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+    .map-region-card:hover, .map-region-card.active { border-color:var(--gold-bright); background:rgba(217,178,111,.12); box-shadow:0 0 20px rgba(240,201,106,.1); }
+    .map-region-card h4 { margin:0 0 9px; color:var(--gold-bright); text-transform:uppercase; letter-spacing:.08em; font-size:13px; }
+    .map-region-card .line { display:flex; justify-content:space-between; gap:8px; border-top:1px solid rgba(214,166,69,.1); padding-top:6px; margin-top:6px; color:var(--muted); font-size:12px; }
+    .map-region-card .line strong { color:var(--sand); font-size:12px; }
+    .map-metadata-note { margin-top:10px; color:var(--muted); font-size:12px; line-height:1.45; }
+    .live-map-layout { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:12px; align-items:start; }
+    .live-map-canvas { position:relative; min-height:calc(100vh - 190px); border:1px solid rgba(214,166,69,.34); background:#070604; overflow:hidden; }
+    .live-map-canvas .leaflet-container { background:#070604; font:inherit; }
+    .live-map-canvas .leaflet-control-attribution { display:none; }
+    .live-map-marker { border:1px solid currentColor; background:rgba(5,7,5,.88); box-shadow:0 0 14px currentColor; }
+    .live-map-marker.player { color:var(--good); border-radius:999px; }
+    .live-map-marker.vehicle { color:var(--blue); transform:rotate(45deg); }
+    .live-map-marker.base { color:var(--gold-bright); }
+    .live-map-panel { display:grid; gap:12px; }
+    .live-map-layer-row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(214,166,69,.1); }
+    .live-map-log { max-height:180px; overflow:auto; }
+    .live-map-coordinate-readout { position:absolute; z-index:600; right:12px; bottom:12px; border:1px solid rgba(214,166,69,.34); background:rgba(0,0,0,.62); color:var(--gold-bright); padding:7px 9px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; pointer-events:none; }
+    .coordinate-card { display:grid; gap:7px; }
+    .coordinate-pair { display:grid; grid-template-columns:44px minmax(0,1fr); gap:8px; align-items:center; color:var(--muted); }
+    .coordinate-pair strong { color:var(--gold-bright); overflow-wrap:anywhere; }
+    .ops-list { display:grid; gap:10px; }
+    .ops-row { display:grid; grid-template-columns:34px minmax(0,1fr) auto; gap:10px; align-items:center; padding:10px 0; border-bottom:1px solid rgba(214,166,69,.11); }
+    .ops-icon { width:30px; height:30px; display:grid; place-items:center; border:1px solid rgba(214,166,69,.42); color:var(--gold-bright); background:rgba(214,166,69,.07); box-shadow:0 0 16px rgba(214,166,69,.08); }
+    .metric-tile { min-height:138px; }
+    .metric-tile .label { min-height:31px; }
+    .layout-2 { display:grid; grid-template-columns:minmax(300px,390px) minmax(0,1fr); gap:12px; align-items:start; }
+    .layout-3 { display:grid; grid-template-columns:1.1fr .9fr; gap:12px; align-items:start; }
+    .controls, .action-row { display:flex; flex-wrap:wrap; gap:10px; }
+    .sound-widget { display:grid; gap:9px; margin-top:14px; padding:12px; border:1px solid rgba(214,166,69,.28); background:linear-gradient(180deg, rgba(240,201,106,.055), rgba(0,0,0,.18)); clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+    .sound-widget-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .sound-toggle { min-height:34px; padding:0 11px; border-color:rgba(143,197,219,.42); color:var(--gold-bright); }
+    .sound-slider { display:grid; grid-template-columns:auto minmax(120px,1fr) 46px; gap:10px; align-items:center; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.1em; }
+    .sound-slider input[type="range"] { min-height:30px; padding:0; accent-color:var(--gold-bright); }
+    .sound-volume-readout { color:var(--gold-bright); text-align:right; font-weight:900; }
+    .dashboard-footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid rgba(214,166,69,.16); color:var(--muted); font-size:12px; }
+    .dashboard-footer a, .support-links a { color:var(--gold-bright); overflow-wrap:anywhere; }
+    .about-overlay { position:fixed; inset:0; z-index:5100; background:rgba(3,4,5,.76); backdrop-filter:blur(8px); display:grid; place-items:center; padding:20px; }
+    .about-card { width:min(560px,100%); border:1px solid rgba(214,166,69,.42); background:linear-gradient(180deg,rgba(16,14,10,.98),rgba(7,8,8,.98)); box-shadow:0 24px 80px rgba(0,0,0,.55); padding:20px; }
+    .support-links { display:grid; gap:8px; margin-top:12px; color:var(--muted); font-size:13px; }
+    .field-grid { display:grid; gap:10px; }
+    label { display:grid; gap:6px; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
+    select, input { width:100%; min-height:44px; border:1px solid rgba(214,166,69,.34); border-radius:0; background:rgba(6,8,5,.9); color:var(--text); padding:0 12px; outline:none; }
+    select:focus, input:focus { border-color:var(--blue); box-shadow:0 0 0 3px rgba(114,164,242,.12); }
+    .button, .controls button, button { display:inline-flex; align-items:center; justify-content:center; min-height:42px; border:1px solid rgba(214,166,69,.38); border-radius:0; background:linear-gradient(180deg, rgba(30,29,18,.95), rgba(10,12,8,.95)); color:var(--sand); padding:0 14px; text-decoration:none; text-transform:uppercase; letter-spacing:.06em; font-weight:800; }
+    .primary { background:linear-gradient(180deg, rgba(159,111,38,.98), rgba(78,55,22,.98)) !important; border-color:rgba(240,201,106,.78) !important; color:#fff1c8 !important; box-shadow:0 0 24px rgba(240,201,106,.16); }
+    .danger { background:linear-gradient(180deg, rgba(112,42,42,.98), rgba(63,25,25,.98)) !important; border-color:rgba(255,102,102,.5) !important; }
+    .player-list, .admin-items { display:grid; gap:8px; max-height:520px; overflow:auto; padding-right:4px; }
+    .player-card, .admin-item { display:grid; grid-template-columns:46px minmax(0,1fr); gap:10px; align-items:center; width:100%; border:1px solid rgba(214,166,69,.24); border-radius:0; padding:10px; background:rgba(255,255,255,.025); color:var(--text); text-align:left; clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
+    .player-card.active, .admin-item.active { border-color:var(--gold); background:rgba(217,178,111,.13); box-shadow:0 0 18px rgba(240,197,107,.08); }
+    .avatar { width:46px; height:46px; display:grid; place-items:center; border:1px solid var(--line-blue); border-radius:6px; background:linear-gradient(135deg, rgba(114,164,242,.18), rgba(217,178,111,.08)); color:var(--blue); font-weight:900; }
+    .admin-item img { width:46px; height:46px; object-fit:contain; border-radius:6px; background:#0b0e12; }
+    .admin-item span, .player-card span { color:var(--muted); font-size:12px; display:block; overflow-wrap:anywhere; }
+    .detail-list { display:grid; gap:8px; margin-top:12px; }
+    .detail-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:8px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); }
+    .warning { border:1px solid rgba(234,191,98,.42); color:#f4d99c; background:rgba(234,191,98,.08); border-radius:0; padding:10px; font-size:13px; line-height:1.4; }
+    .warning.hidden { display:none; }
+    .hidden { display:none !important; }
+    .check-row { display:flex; align-items:center; gap:9px; color:var(--muted); font-size:13px; text-transform:none; letter-spacing:0; }
+    .check-row input { width:auto; min-height:0; }
+    .activity { display:grid; gap:8px; max-height:380px; overflow:auto; }
+    .activity-item { border-left:2px solid var(--gold); padding:9px 11px; background:rgba(255,255,255,.025); border-radius:0; }
+    .activity-time { color:var(--muted); font-size:12px; margin-bottom:3px; }
+    .vm-monitor { grid-column:1/-1; }
+    .vm-monitor-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .health-score { min-width:86px; text-align:right; }
+    .health-score strong { display:block; color:var(--gold-bright); font-size:30px; line-height:1; }
+    .vm-status-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }
+    .vm-status-card { min-height:82px; border:1px solid rgba(214,166,69,.22); background:rgba(255,255,255,.025); padding:10px; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .vm-status-card span { display:block; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
+    .vm-status-card strong { display:block; margin-top:6px; color:var(--gold-bright); font-size:18px; overflow-wrap:anywhere; }
+    .vm-status-card.ok { border-color:rgba(89,213,139,.46); }
+    .vm-status-card.warn { border-color:rgba(255,184,77,.5); }
+    .vm-status-card.bad { border-color:rgba(255,102,102,.52); }
+    .vm-monitor-lists { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; }
+    .vm-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); }
+    .vm-row strong { overflow-wrap:anywhere; }
+    .vm-row small { display:block; color:var(--muted); margin-top:2px; }
+    .status-pill { min-width:72px; text-align:center; border:1px solid rgba(214,166,69,.28); padding:5px 8px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+    .status-pill.ok { color:var(--good); border-color:rgba(89,213,139,.46); background:rgba(89,213,139,.08); }
+    .status-pill.warn { color:var(--warn); border-color:rgba(255,184,77,.5); background:rgba(255,184,77,.08); }
+    .status-pill.bad { color:var(--bad); border-color:rgba(255,102,102,.52); background:rgba(255,102,102,.08); }
+    .vm-details { margin-top:12px; border-top:1px solid rgba(214,166,69,.14); padding-top:10px; }
+    .vm-details summary { cursor:pointer; color:var(--sand); text-transform:uppercase; letter-spacing:.08em; font-size:12px; font-weight:900; }
+    .ping-graph { display:flex; align-items:end; gap:3px; min-height:70px; margin-top:10px; padding:8px; border:1px solid rgba(214,166,69,.16); background:rgba(0,0,0,.22); }
+    .ping-bar { flex:1; min-width:3px; max-width:9px; height:8px; background:var(--bad); opacity:.78; }
+    .ping-bar.ok { background:var(--good); }
+    .ping-bar.warn { background:var(--warn); }
+    .vm-error-list { display:grid; gap:6px; margin-top:10px; color:var(--muted); font-size:12px; }
+    .player-feed { display:grid; gap:8px; max-height:260px; overflow:auto; padding-right:4px; }
+    .feed-row { display:grid; grid-template-columns:16px minmax(160px,1fr) auto auto; gap:10px; align-items:center; padding:10px 11px; border:1px solid rgba(214,166,69,.18); background:rgba(255,255,255,.022); clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
+    .feed-dot { width:9px; height:9px; border-radius:999px; background:var(--warn); box-shadow:0 0 12px currentColor; color:var(--warn); }
+    .feed-dot.online { background:var(--good); color:var(--good); }
+    .feed-dot.offline { background:rgba(159,146,118,.62); color:rgba(159,146,118,.62); box-shadow:none; }
+    .feed-name { min-width:0; }
+    .feed-name strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .feed-id { color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .feed-level, .feed-status { color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.06em; white-space:nowrap; }
+    .feed-status.online { color:var(--good); }
+    .feed-status.offline { color:var(--muted); }
+    .feed-status.unknown { color:var(--warn); }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { text-align:left; border-bottom:1px solid rgba(255,255,255,.08); padding:9px 8px; overflow-wrap:anywhere; }
+    th { color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.07em; }
+    pre { white-space:pre-wrap; background:rgba(3,5,4,.78); border:1px solid rgba(214,166,69,.28); border-radius:0; padding:14px; max-height:430px; overflow:auto; color:#e8dfc8; }
+    .frame-wrap { overflow:hidden; min-height:720px; }
+    iframe { width:100%; height:78vh; min-height:720px; border:0; display:block; background:#080a0d; }
+    .empty { padding:18px; border:1px dashed rgba(217,178,111,.35); border-radius:8px; color:var(--muted); background:rgba(255,255,255,.025); }
+    .setup-overlay { position:fixed; inset:0; z-index:5000; background:rgba(3,4,5,.92); backdrop-filter:blur(10px); display:grid; place-items:center; padding:20px; }
+    .setup-card { width:min(980px,100%); max-height:92vh; overflow:auto; border:1px solid rgba(214,166,69,.42); background:linear-gradient(180deg,rgba(16,14,10,.98),rgba(7,8,8,.98)); box-shadow:0 24px 80px rgba(0,0,0,.55); padding:22px; }
+    .setup-steps { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0; }
+    .setup-step { border:1px solid rgba(214,166,69,.24); color:var(--muted); padding:7px 10px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+    .setup-step.active { color:var(--gold-bright); border-color:rgba(214,166,69,.6); background:rgba(214,166,69,.08); }
+    .setup-page { display:none; }
+    .setup-page.active { display:block; }
+    .test-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+    .test-result { min-height:74px; border:1px solid rgba(214,166,69,.2); padding:10px; background:rgba(255,255,255,.025); color:var(--muted); font-size:12px; }
+    .test-result.ok { color:var(--good); border-color:rgba(89,213,139,.46); }
+    .test-result.bad { color:var(--bad); border-color:rgba(255,102,102,.52); }
+    .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .diagnostic-log { min-height:220px; max-height:420px; overflow:auto; white-space:pre-wrap; }
+    .mt { margin-top:12px; } .mb { margin-bottom:12px; }
+    @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.sidebar-foot{position:static;margin-top:16px}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists{grid-template-columns:1fr}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
   </style>
 </head>
 <body>
-<main>
-  <header>
-    <div>
-      <h1>AlphaNine Dune Suite</h1>
-      <div class="sub">One local app for Server Control, Manager, and Gear Codex.</div>
+<div id="aboutDialog" class="about-overlay hidden" role="dialog" aria-modal="true" aria-label="About AlphaNine Dune Suite">
+  <div class="about-card">
+    <div class="panel-head">
+      <div>
+        <div class="kicker">About</div>
+        <h2>AlphaNine Dune Suite</h2>
+        <div class="subtle">Version 0.2.1-beta</div>
+      </div>
+      <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
-    <div class="header-actions">
-      <a class="kofi" href="https://ko-fi.com/E1W220NMPA" target="_blank" rel="noopener noreferrer">Support me on Ko-fi</a>
-      <span class="pill">v${APP_VERSION}</span>
+    <div class="support-links">
+      <strong>Community &amp; Support</strong>
+      <div>Discord: <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">https://discord.gg/tuUv3hYTv</a></div>
+      <div>YouTube: <a href="https://www.youtube.com/@AlphanineGaming" target="_blank" rel="noopener">https://www.youtube.com/@AlphanineGaming</a></div>
     </div>
-  </header>
-  <div class="dune-banner">
-    <div class="banner-content">
-      <div class="banner-kicker">Unified command deck</div>
-      <h2 class="banner-title">One console for your Arrakis server tools.</h2>
-      <p class="banner-copy">Control the self-hosted server, tune manager settings, and browse the Gear Codex from a single application.</p>
+    <div class="legal-notice mt">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
+  </div>
+</div>
+<div id="setupWizard" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-label="AlphaNine Dune Suite setup wizard">
+  <div class="setup-card">
+    <div class="panel-head">
+      <div>
+        <div class="kicker">First Launch</div>
+        <h2>AlphaNine Dune Suite Setup</h2>
+        <div class="subtle">Configure the suite once, then manage your server from the app.</div>
+      </div>
+      <button type="button" onclick="closeSetupWizard()">Skip For Now</button>
+    </div>
+    <div id="setupSteps" class="setup-steps">
+      <div class="setup-step active">Welcome</div>
+      <div class="setup-step">Server</div>
+      <div class="setup-step">Database</div>
+      <div class="setup-step">Receiver</div>
+      <div class="setup-step">Finish</div>
+    </div>
+    <div id="setupPage0" class="setup-page active">
+      <div class="empty">This wizard stores settings in your Windows app data folder. You do not need Node.js, npm commands, PowerShell, SSH, JSON editing, or manual receiver launching for normal use.</div>
+    </div>
+    <div id="setupPage1" class="setup-page">
+      <div class="field-grid">
+        <label>Server Type<select id="setupServerType"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
+        <label>Dune Server Install Path<input id="setupServerInstallPath" placeholder="D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server"></label>
+        <label>VM Name<input id="setupVmName" placeholder="dune-awakening"></label>
+        <label>VM / Server IP<input id="setupVmIp" placeholder="192.168.1.50"></label>
+        <button type="button" onclick="runDiscovery()">Auto Discover</button>
+      </div>
+      <pre id="setupDiscoveryLog" class="mt">Discovery has not run yet.</pre>
+    </div>
+    <div id="setupPage2" class="setup-page">
+      <div class="field-grid">
+        <label>Database Host<input id="setupDatabaseHost" placeholder="Auto via Dune VM or host/IP"></label>
+        <label>Database Port<input id="setupDatabasePort" type="number" value="15432"></label>
+        <label>Database Name<input id="setupDatabaseName" value="dune"></label>
+        <label>Database User<input id="setupDatabaseUser" value="postgres"></label>
+        <label>Database Password<input id="setupDatabasePassword" type="password" placeholder="Optional when using VM auto-detect"></label>
+        <button type="button" onclick="runConnectionTest('database','setupDatabaseResult')">Test Database</button>
+      </div>
+      <div id="setupDatabaseResult" class="test-result mt">Not tested.</div>
+    </div>
+    <div id="setupPage3" class="setup-page">
+      <div class="field-grid">
+        <label>Receiver Host<input id="setupReceiverHost" value="127.0.0.1"></label>
+        <label>Receiver Port<input id="setupReceiverPort" type="number" value="5055"></label>
+        <label>Receiver Token<input id="setupReceiverToken" type="password" placeholder="Optional bearer token"></label>
+        <label>Receiver SSH Host<input id="setupReceiverSshHost" placeholder="Dune VM IP"></label>
+        <label>Receiver SSH User<input id="setupReceiverSshUser" value="dune"></label>
+        <label>Receiver SSH Key<input id="setupReceiverSshKey" placeholder="%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey"></label>
+        <div class="action-row">
+          <button type="button" onclick="receiverAction('start')">Start Receiver</button>
+          <button type="button" onclick="runConnectionTest('receiver','setupReceiverResult')">Test Receiver</button>
+        </div>
+      </div>
+      <div id="setupReceiverResult" class="test-result mt">Not tested.</div>
+    </div>
+    <div id="setupPage4" class="setup-page">
+      <div class="test-grid">
+        <button type="button" onclick="runConnectionTest('database','finishDbResult')">Test Database</button>
+        <button type="button" onclick="runConnectionTest('receiver','finishReceiverResult')">Test Receiver</button>
+        <button type="button" onclick="runConnectionTest('server','finishServerResult')">Test Server</button>
+      </div>
+      <div class="test-grid mt">
+        <div id="finishDbResult" class="test-result">Database not tested.</div>
+        <div id="finishReceiverResult" class="test-result">Receiver not tested.</div>
+        <div id="finishServerResult" class="test-result">Server not tested.</div>
+      </div>
+      <div class="action-row mt">
+        <button type="button" class="primary" onclick="finishSetup()">Save Configuration</button>
+      </div>
+      <div id="setupFinishResult" class="empty mt">Ready to save.</div>
+    </div>
+    <div class="action-row mt">
+      <button type="button" onclick="setupPrev()">Back</button>
+      <button type="button" class="primary" onclick="setupNext()">Next</button>
     </div>
   </div>
-  <nav class="tabs">
-    <button class="tab active" data-view="dashboard">Dashboard</button>
-    <button class="tab" data-view="server">Server Control</button>
-    <button class="tab" data-view="manager">Manager</button>
-    <button class="tab" data-view="codex">Gear Codex</button>
-  </nav>
-  <section id="dashboard" class="view active">
-    <div class="grid">
-      <div class="card"><div class="label">VM</div><div id="vm" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Battlegroup</div><div id="battlegroup" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Players</div><div id="players" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Manager</div><div id="managerState" class="value">Starting...</div></div>
+</div>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1>AlphaNine Dune Suite</h1>
+      <p>Dune Operations Center</p>
+      <div class="build-info" aria-label="Application version and build">
+        <span>Version 0.2.1-beta</span>
+        <span>Build b92e5a3</span>
+      </div>
     </div>
-    <div class="tool-grid">
-      <div class="card tool-card"><div><div class="label">Server Control</div><div class="value">Actions and status</div><p>Start, stop, restart, update, backup, logs, Director link, and battlegroup status.</p></div><button class="button primary" data-open="server">Open Server Control</button></div>
-      <div class="card tool-card"><div><div class="label">Manager</div><div class="value">Settings and profiles</div><p>Server settings interface and admin/player tools through the suite backend.</p></div><button class="button primary" data-open="manager">Open Manager</button></div>
-      <div class="card tool-card"><div><div class="label">Gear Codex</div><div class="value">Items and notes</div><p>Search weapons, armor, vehicles, tools, and resources with local icons and notes.</p></div><button class="button primary" data-open="codex">Open Gear Codex</button></div>
+    <nav class="nav">
+      <button class="tab active" data-view="dashboard">Dashboard</button>
+      <button class="tab" data-view="players">Players</button>
+      <button class="tab" data-view="give">Give Item</button>
+      <button class="tab" data-view="admin">Admin Tools</button>
+      <button class="tab" data-view="server">Server Status</button>
+      <button class="tab" data-view="live-map">Live Map</button>
+      <button class="tab" data-view="management">Server Management</button>
+      <button class="tab" data-view="codex">Gear Codex</button>
+      <button class="tab" data-view="env">Env Setup</button>
+      <button class="tab" data-view="logs">Logs</button>
+      <button class="tab" data-view="diagnostics">Diagnostics</button>
+      <button class="tab" data-view="settings">Settings</button>
+    </nav>
+    <div class="sidebar-foot">
+      <button type="button" onclick="openAboutDialog()">About</button>
+      <div class="kofi-widget"><script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'E1W220NMPA');kofiwidget2.draw();</script></div>
+      <div class="legal-notice">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
     </div>
-  </section>
-  <section id="server" class="view">
-    <div class="grid">
-      <div class="card"><div class="label">VM</div><div id="svm" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Battlegroup</div><div id="sbg" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Database</div><div id="sdb" class="value">Checking...</div></div>
-      <div class="card"><div class="label">Uptime</div><div id="suptime" class="value">Checking...</div></div>
+  </aside>
+  <main class="content">
+    <div class="topbar">
+      <div class="title">
+        <h2 id="viewTitle">Dashboard</h2>
+        <p id="viewSubtitle">Dune Awakening Server Operations Center.</p>
+      </div>
+      <div class="status-strip">
+        <span id="topServer" class="badge warn">Server checking</span>
+        <span id="topDb" class="badge warn">DB checking</span>
+        <span id="topLive" class="badge warn">Live give checking</span>
+        <span id="topPlayers" class="badge warn">Players 0</span>
+        <span id="topSsh" class="badge warn">SSH unknown</span>
+      </div>
     </div>
-    <div class="controls">
-      <button onclick="refresh()">Refresh</button>
-      <button class="primary" onclick="act('start')">Start Server</button>
-      <button onclick="act('restart')">Restart Server</button>
-      <button class="danger" onclick="act('stop')">Stop Server</button>
-      <button onclick="act('backup')">Backup</button>
-      <button onclick="act('update')">Update</button>
-      <button onclick="openDirector()">Open Director</button>
-      <button onclick="act('logs-export')">Export Logs</button>
-    </div>
-    <pre id="serverLog">Ready.</pre>
-  </section>
-  <section id="manager" class="view"><div class="frame-wrap"><iframe src="/manager/" title="AlphaNine Dune Manager"></iframe></div></section>
-  <section id="codex" class="view"><div class="frame-wrap"><iframe src="/gear-codex/" title="Dune Gear Codex"></iframe></div></section>
-</main>
+
+    <section id="dashboard" class="view active">
+      <div class="hero">
+        <div class="hero-body">
+          <div class="kicker">Server operations command</div>
+          <h3>Dune Awakening Server Operations Center</h3>
+          <p>Live status, VM control, player telemetry, grant transport, database health, receiver bridge, and audit visibility for SH-HAGGA BASIN.</p>
+        </div>
+      </div>
+      <div class="grid">
+        <div class="panel pad metric-tile"><div class="label">Server Population</div><div id="players" class="value">Checking...</div><div class="subtle">Current known player state.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Database Link</div><div id="adminDb" class="value">Checking...</div><div class="subtle">Postgres/admin probe.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Give Transport</div><div id="adminLive" class="value">Checking...</div><div class="subtle">Runtime grant route.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Receiver Bridge</div><div id="receiverState" class="value">Checking...</div><div class="subtle">HTTP JSON receiver health.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Queue Bridge</div><div id="rabbitState" class="value">Checking...</div><div class="subtle">RabbitMQ command target.</div></div>
+      </div>
+      <div class="dashboard-grid">
+        <div class="panel pad">
+          <div class="panel-head"><div class="label">Server Resources</div><div class="micro">Telemetry probe</div></div>
+          <div class="resource-bars">
+            <div class="resource-row"><span>CPU</span><div class="bar"><span style="width:72%"></span></div><strong>72%</strong></div>
+            <div class="resource-row"><span>Memory</span><div class="bar"><span style="width:63%"></span></div><strong>63%</strong></div>
+            <div class="resource-row"><span>Disk</span><div class="bar"><span style="width:31%"></span></div><strong>31%</strong></div>
+            <div class="resource-row"><span>Network</span><div class="bar"><span style="width:58%"></span></div><strong>58%</strong></div>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div class="label">Player Feed</div><div id="playerFeedStamp" class="micro">Loading</div></div>
+          <div id="playerFeed" class="player-feed"><div class="empty">Loading players...</div></div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div class="label">Activity Feed</div><div class="micro">All events</div></div>
+          <div id="activityFeed" class="activity"><div class="empty">Activity will appear after probes, refreshes, grants, and errors.</div></div>
+        </div>
+        <div class="panel pad vm-monitor">
+          <div class="vm-monitor-head">
+            <div>
+              <div class="label">VM Connection Monitor</div>
+              <div id="vmMonitorStamp" class="micro">Checking connectivity</div>
+            </div>
+            <div class="health-score"><span class="micro">Health</span><strong id="vmHealthScore">--</strong></div>
+          </div>
+          <div class="vm-status-grid">
+            <div id="vmStatusCard" class="vm-status-card warn"><span>VM Status</span><strong id="vmMonitorStatus">Checking</strong></div>
+            <div class="vm-status-card"><span>VM Address</span><strong id="vmMonitorAddress">Unknown</strong></div>
+            <div class="vm-status-card"><span>Hostname</span><strong id="vmMonitorHost">Unknown</strong></div>
+            <div id="vmLatencyCard" class="vm-status-card warn"><span>Current Ping</span><strong id="vmPingCurrent">-- ms</strong></div>
+            <div class="vm-status-card"><span>Average Ping</span><strong id="vmPingAverage">-- ms</strong></div>
+            <div class="vm-status-card"><span>Min Ping</span><strong id="vmPingMin">-- ms</strong></div>
+            <div class="vm-status-card"><span>Max Ping</span><strong id="vmPingMax">-- ms</strong></div>
+            <div id="vmUptimeCard" class="vm-status-card"><span>VM Uptime</span><strong id="vmUptime">Unknown</strong></div>
+          </div>
+          <div class="vm-monitor-lists">
+            <div>
+              <div class="label">Ports</div>
+              <div id="vmPortList" class="mt"><div class="empty">Checking ports...</div></div>
+            </div>
+            <div>
+              <div class="label">Services</div>
+              <div id="vmServiceList" class="mt"><div class="empty">Checking services...</div></div>
+            </div>
+          </div>
+          <details class="vm-details">
+            <summary>Connection Details</summary>
+            <div class="ping-graph" id="vmPingGraph" aria-label="Ping history graph"></div>
+            <div class="vm-monitor-lists">
+              <div>
+                <div class="label">Port Status List</div>
+                <div id="vmPortDetailList" class="vm-error-list"></div>
+              </div>
+              <div>
+                <div class="label">Last Errors</div>
+                <div id="vmErrorList" class="vm-error-list"></div>
+                <div class="detail-row"><span class="subtle">Last Success</span><strong id="vmLastSuccess">None yet</strong></div>
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="layout-3 mt">
+        <div class="panel pad">
+          <div class="panel-head"><div class="label">System Alerts</div><div class="micro">Operations</div></div>
+          <div class="ops-list">
+            <div class="ops-row"><div class="ops-icon">!</div><div><strong>Permission and elevation checks</strong><div class="subtle">Server Status reports admin and VM diagnostics when required.</div></div><span class="micro">Active</span></div>
+            <div class="ops-row"><div class="ops-icon">Q</div><div><strong>Live Give queue wording</strong><div class="subtle">Live execution reports published/queued until inventory verification exists.</div></div><span class="micro">Guarded</span></div>
+            <div class="ops-row"><div class="ops-icon">D</div><div><strong>Dry-Run default</strong><div class="subtle">Give Item opens in Dry-Run mode and requires manual Live Give selection.</div></div><span class="micro">Safe</span></div>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div class="label">Quick Actions</div><div class="micro">Command deck</div></div>
+          <div class="action-row mt">
+            <button class="primary" data-open="give">Give Item</button>
+            <button data-open="players">Players</button>
+            <button data-open="server">Server Status</button>
+            <button onclick="refreshAll()">Refresh All</button>
+            <button type="button" onclick="openSupportDiscord()">💬 Discord Support</button>
+          </div>
+          <div class="sound-widget" aria-label="UI sound controls">
+            <div class="sound-widget-head">
+              <div class="label">Interface Audio</div>
+              <button id="dashboardSoundToggle" class="sound-toggle" type="button">🔊 Sounds ON</button>
+            </div>
+            <label class="sound-slider">Volume <input id="dashboardSoundVolume" type="range" min="0" max="100" value="100"><span id="dashboardSoundVolumeLabel" class="sound-volume-readout">100%</span></label>
+          </div>
+          <pre id="dashboardLog" class="mt">Awaiting telemetry.</pre>
+          <div class="dashboard-footer">
+            <span>Need help? Join our Discord: <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">https://discord.gg/tuUv3hYTv</a></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="live-map" class="view">
+      <div class="live-map-layout">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Live Map</div><div id="liveMapStamp" class="micro">Leaflet tactical overlay</div></div><button type="button" onclick="refreshLiveMap()">Refresh</button></div>
+          <div id="liveMapCanvas" class="live-map-canvas"></div>
+        </div>
+        <div class="live-map-panel">
+          <div class="panel pad">
+            <div class="label">Layers</div>
+            <label class="live-map-layer-row"><span>Players</span><input id="liveLayerPlayers" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
+            <label class="live-map-layer-row"><span>Vehicles</span><input id="liveLayerVehicles" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
+            <label class="live-map-layer-row"><span>Bases</span><input id="liveLayerBases" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
+            <div id="livePlayerPositionWarning" class="warning mt hidden">Player position unavailable</div>
+            <div class="warning mt">Resource and POI filters are reserved for the next layer pass.</div>
+          </div>
+          <div class="panel pad">
+            <div class="label">Clicked Coordinates</div>
+            <div class="coordinate-card mt">
+              <div class="coordinate-pair"><span>X</span><strong id="liveClickedX">--</strong></div>
+              <div class="coordinate-pair"><span>Y</span><strong id="liveClickedY">--</strong></div>
+              <button type="button" onclick="copyLiveCoordinates()">Copy Coordinates</button>
+            </div>
+          </div>
+          <div class="panel pad">
+            <div class="label">Coordinate Search</div>
+            <div class="field-grid mt">
+              <label>X<input id="liveSearchX" type="number" step="0.01"></label>
+              <label>Y<input id="liveSearchY" type="number" step="0.01"></label>
+              <button type="button" class="primary" onclick="goToLiveCoordinates()">Go To</button>
+            </div>
+          </div>
+          <div class="panel pad">
+            <div class="label">Teleport To Coordinate</div>
+            <div class="field-grid mt">
+              <label>Player / Controller ID<input id="teleportPlayerId" placeholder="player_controller_id or account id"></label>
+              <label>X<input id="teleportX" type="number" step="0.01"></label>
+              <label>Y<input id="teleportY" type="number" step="0.01"></label>
+              <label>Z<input id="teleportZ" type="number" step="0.01" value="0"></label>
+              <button type="button" class="primary" onclick="previewTeleport()">Preview Teleport</button>
+            </div>
+            <pre id="teleportLog" class="mt">Teleport mode is safe-preview only until a server-specific command hook is configured.</pre>
+          </div>
+          <div class="panel pad">
+            <div class="label">Live Map Diagnostics</div>
+            <div class="detail-list mt">
+              <div class="detail-row"><span class="subtle">Zoom</span><strong id="liveDebugZoom">--</strong></div>
+              <div class="detail-row"><span class="subtle">Leaflet</span><strong id="liveDebugLatLng">--</strong></div>
+              <div class="detail-row"><span class="subtle">Dune X/Y</span><strong id="liveDebugDune">--</strong></div>
+              <div class="detail-row"><span class="subtle">Players</span><strong id="liveDebugPlayers">0</strong></div>
+              <div class="detail-row"><span class="subtle">Markers</span><strong id="liveDebugMarkers">0</strong></div>
+              <div class="detail-row"><span class="subtle">Position Source</span><strong id="liveDebugPositionSource">--</strong></div>
+            </div>
+            <pre id="liveMapLog" class="live-map-log mt">Awaiting live map data.</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="players" class="view">
+      <div class="layout-2">
+        <div class="panel pad">
+          <div class="label">Player Management</div>
+          <label class="mt">Search Player<input id="playerSearch" placeholder="Search name, account, character id" oninput="renderPlayers()"></label>
+          <div id="playerCards" class="player-list mt"><div class="empty">Loading players...</div></div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Selected Player Details</div>
+          <div id="playerDetails" class="empty mt">Select a player to inspect account and character details.</div>
+          <div class="label mt">Quick Actions</div>
+          <div class="action-row mt">
+            <button class="primary" onclick="jumpToGive()">Give Item</button>
+            <button onclick="refreshAdmin()">Refresh Players</button>
+            <button data-open="logs">View Diagnostics</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="give" class="view">
+      <div class="layout-2">
+        <div class="panel pad">
+          <div class="label">Give Item</div>
+          <div class="field-grid mt">
+            <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
+            <label>Item Template Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
+            <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
+            <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0" oninput="syncQualityWarning()"></label>
+            <div id="qualityWarning" class="warning hidden">Quality/grade is unsupported by the live RabbitMQ grant path. Set quality back to 0 before sending a live grant.</div>
+            <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute">Live Give</option></select></label>
+            <div id="liveGiveServerStatus" class="warning">Server Status: Checking</div>
+            <div id="liveGiveTransportStatus" class="warning">Live Give transport: Checking</div>
+            <button id="liveGiveStartServerButton" onclick="startServerForGiveItem()">Start Server</button>
+            <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
+            <button onclick="refreshAdmin()">Refresh Admin Data</button>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Item Templates</div>
+          <div id="adminItems" class="admin-items mt"><div class="empty">Loading item templates...</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="env" class="view">
+      <div class="layout-2">
+        <div class="panel pad">
+          <div class="label">Live Give Env Setup</div>
+          <div id="envLiveStatus" class="warning mt">Loading live-give environment status...</div>
+          <div id="envMissingVars" class="detail-list mt"></div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Required Modes</div>
+          <pre id="envLiveGuide">Dry-run mode does not require live transport variables.
+
+For local receiver live mode:
+DUNE_ADMIN_GIVE_ITEM_URL=http://127.0.0.1:5055/api/give-item
+DUNE_ADMIN_GIVE_ITEM_HEALTH_URL=http://127.0.0.1:5055/health
+DUNE_ADMIN_GIVE_ITEM_TOKEN=...
+
+Receiver variables:
+DUNE_RECEIVER_TOKEN=...
+DUNE_RECEIVER_SSH_HOST=192.168.1.11
+DUNE_RECEIVER_SSH_USER=dune
+DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
+          <div class="action-row mt"><button class="primary" onclick="refreshLiveGiveEnv()">Refresh Env Status</button></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="admin" class="view">
+      <div class="grid four">
+        <div class="panel pad"><div class="label">DB</div><div id="adminDbMirror" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Players Found</div><div id="adminPlayersFound" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Items Loaded</div><div id="adminItemsFound" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Live Grants</div><div id="adminLiveMirror" class="value">Checking...</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Permission Tools</div>
+        <div class="subtle mt">Confirmed systems only: Guild Admin / Object Permissions / Access Codes. This panel does not grant global server admin.</div>
+        <div class="layout-2 mt">
+          <div class="field-grid">
+            <label>Selected Character<select id="permissionPlayer" onchange="syncPermissionPlayer()"></select></label>
+            <div id="permissionSummary" class="empty">Select a player to inspect permission state.</div>
+            <button onclick="refreshPermissions()">Refresh Permission Views</button>
+          </div>
+          <div>
+            <div class="label">Selected Player Identity</div>
+            <div id="permissionIdentity" class="detail-list"><div class="empty">No player selected.</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="layout-3 mt">
+        <div class="panel pad">
+          <div class="label">Guild Admin / Object Permissions</div>
+          <div class="subtle mt">Guild admin is read from <strong>guild_members.role_id = 100</strong>. Object ranks come from permission_actor_rank.</div>
+          <table class="mt">
+            <thead><tr><th>Guild Player</th><th>Guild</th><th>Role ID</th><th>Guild Admin</th></tr></thead>
+            <tbody id="guildRows"><tr><td colspan="4">Loading guild members...</td></tr></tbody>
+          </table>
+          <table class="mt">
+            <thead><tr><th>Actor</th><th>Name</th><th>Player</th><th>Rank</th></tr></thead>
+            <tbody id="permissionRows"><tr><td colspan="4">Loading object permissions...</td></tr></tbody>
+          </table>
+        </div>
+        <div class="panel pad">
+          <div class="label">Access Codes</div>
+          <table class="mt">
+            <thead><tr><th>Account</th><th>Code</th><th>Type</th><th>Resettable</th></tr></thead>
+            <tbody id="accessCodeRows"><tr><td colspan="4">Loading access codes...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="layout-3 mt">
+        <div class="panel pad">
+          <div class="label">Set Object Permission Rank</div>
+          <div class="field-grid mt">
+            <label>Actor ID<input id="permActorId" placeholder="permission_actor.actor_id"></label>
+            <label>Player Controller ID<input id="permControllerId" placeholder="player_controller_id"></label>
+            <label>Rank<input id="permRank" type="number" min="0" max="100" value="1"></label>
+            <label>Map ID<input id="permMapId" value="Survival_1"></label>
+            <pre id="permRankPreview">select dune.permission_set_player_rank(actor_id, player_controller_id, rank, 'Survival_1');</pre>
+            <label class="check-row"><input id="permRankConfirm" type="checkbox">I confirm this exact function call.</label>
+            <button class="primary" onclick="setPermissionRank()">Run Permission Function</button>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Create Server Player Access Code</div>
+          <div class="field-grid mt">
+            <label>Account ID<input id="accessAccountId" placeholder="accounts.id"></label>
+            <label>Access Code<input id="accessCodeValue" type="number" min="0" value="0"></label>
+            <label>Access Code Type<input id="accessCodeType" type="number" min="0" value="0"></label>
+            <label class="check-row"><input id="accessResettable" type="checkbox" checked>Resettable access code</label>
+            <pre id="accessCodePreview">select dune.create_server_player_access_codes(account_id, access_code, access_code_type, true);</pre>
+            <label class="check-row"><input id="accessCodeConfirm" type="checkbox">I confirm this exact function call.</label>
+            <button class="primary" onclick="createAccessCode()">Run Access Code Function</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Skill Points and Reputation</div>
+        <div class="warning mt">Confirmed safe path uses specialization XP/level and faction reputation functions. Live pickup is not confirmed; a player relog or server restart may be required.</div>
+        <div class="layout-3 mt">
+          <div>
+            <div class="label">Current Specialization Tracks</div>
+            <table class="mt">
+              <thead><tr><th>Track</th><th>XP</th><th>Level</th></tr></thead>
+              <tbody id="skillRows"><tr><td colspan="3">Loading specialization tracks...</td></tr></tbody>
+            </table>
+          </div>
+          <div>
+            <div class="label">Current Reputation</div>
+            <table class="mt">
+              <thead><tr><th>Faction</th><th>Reputation</th><th>Current</th></tr></thead>
+              <tbody id="reputationRows"><tr><td colspan="3">Loading reputation...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="layout-3 mt">
+          <div class="panel pad">
+            <div class="label">Give / Set Skill Points</div>
+            <div class="field-grid mt">
+              <label>Track<select id="skillTrack"></select></label>
+              <label>XP Amount<input id="skillXpAmount" type="number" min="0" value="0"></label>
+              <label>Level<input id="skillLevel" type="number" min="0" step="0.1" placeholder="Leave blank to keep current"></label>
+              <pre id="skillPreview">select dune.set_specialization_xp_and_level(player_controller_id, 'Combat'::dune.specializationtracktype, xp_amount, level);</pre>
+              <label class="check-row"><input id="skillConfirm" type="checkbox">I confirm this exact function call.</label>
+              <div class="action-row"><button class="primary" onclick="giveSkillPoints()">Give Skill Points</button><button onclick="setSkillPoints()">Set Skill Points</button></div>
+            </div>
+          </div>
+          <div class="panel pad">
+            <div class="label">Add / Set Reputation</div>
+            <div class="field-grid mt">
+              <label>Faction<select id="reputationFaction"></select></label>
+              <label>Reputation Amount<input id="reputationAmount" type="number" min="0" value="0"></label>
+              <pre id="reputationPreview">select dune.set_player_faction_reputation(player_controller_id, faction_id, reputation_amount);</pre>
+              <label class="check-row"><input id="reputationConfirm" type="checkbox">I confirm this exact function call.</label>
+              <div class="action-row"><button class="primary" onclick="addReputation()">Add Reputation</button><button onclick="setReputation()">Set Reputation</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Tuned Channels</div>
+        <table class="mt">
+          <thead><tr><th>Account</th><th>Selected Channel</th><th>Channel</th><th>Tuned</th></tr></thead>
+          <tbody id="adminChannels"><tr><td colspan="4">Loading tuned channels...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="server" class="view">
+      <div class="grid four">
+        <div class="panel pad"><div class="label">VM</div><div id="vm" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Battlegroup</div><div id="battlegroup" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Database</div><div id="sdb" class="value">Checking...</div></div>
+        <div class="panel pad"><div class="label">Uptime</div><div id="suptime" class="value">Checking...</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Battlegroup Actions</div>
+        <div class="controls mt">
+          <button onclick="refresh()">Refresh</button>
+          <button class="primary" onclick="act('start')">Start Server</button>
+          <button onclick="act('restart')">Restart Server</button>
+          <button class="danger" onclick="act('stop')">Stop Server</button>
+          <button onclick="act('backup')">Backup</button>
+          <button onclick="act('update')">Update</button>
+          <button onclick="openDirector()">Open Director</button>
+          <button onclick="act('logs-export')">Export Logs</button>
+          <button onclick="act('operator-logs-export')">Export Operator Logs</button>
+        </div>
+        <pre id="serverLog" class="mt">Ready.</pre>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Map Deployment</div>
+        <div class="layout-2 mt">
+          <div class="field-grid">
+            <label>Map<select id="mapSelect"></select></label>
+            <label>Replicas<input id="mapReplicas" type="number" min="0" max="3" value="1"></label>
+            <div class="action-row"><button class="primary" onclick="deployMap()">Set Map</button><button onclick="stopSelectedMap()">Stop Map</button></div>
+          </div>
+          <div>
+            <div class="grid four">
+              <div class="panel pad"><div class="label">Map Group</div><div id="mapBattlegroup" class="value">Checking...</div></div>
+              <div class="panel pad"><div class="label">Active</div><div id="activeMaps" class="value">Checking...</div></div>
+              <div class="panel pad"><div class="label">Wanted</div><div id="wantedMaps" class="value">Checking...</div></div>
+              <div class="panel pad"><div class="label">Memory</div><div id="mapMemory" class="value">Plan</div></div>
+            </div>
+          </div>
+        </div>
+        <table class="mt">
+          <thead><tr><th>Map</th><th>Type</th><th>Wanted</th><th>Running</th><th>Memory</th></tr></thead>
+          <tbody id="mapRows"><tr><td colspan="5">Loading maps...</td></tr></tbody>
+        </table>
+        <pre id="mapLog" class="mt">Ready.</pre>
+      </div>
+    </section>
+
+    <section id="logs" class="view">
+      <div class="layout-3">
+        <div class="panel pad"><div class="label">Recent Activity</div><div id="activityFeedLogs" class="activity mt"></div></div>
+        <div class="panel pad"><div class="label">Admin Probe and Errors</div><pre id="adminLog">Ready.</pre></div>
+      </div>
+      <div class="panel pad mt"><div class="label">Server Log</div><pre id="serverLogMirror">Ready.</pre></div>
+    </section>
+
+    <section id="management" class="view">
+      <div class="panel pad">
+        <div class="panel-head">
+          <div>
+            <div class="label">Server Management</div>
+            <div class="subtle mt">Embedded AlphaNine manager tools for server operations.</div>
+          </div>
+          <button onclick="document.getElementById('managerFrame').contentWindow.location.reload()">Reload Manager</button>
+        </div>
+      </div>
+      <div class="panel frame-wrap mt"><iframe id="managerFrame" src="/manager/" title="AlphaNine Server Management"></iframe></div>
+    </section>
+
+    <section id="codex" class="view">
+      <div class="panel pad">
+        <div class="panel-head">
+          <div>
+            <div class="label">Gear Codex</div>
+            <div class="subtle mt">Operational item reference for templates, categories, and grant preparation.</div>
+          </div>
+          <button onclick="document.getElementById('gearCodexFrame').contentWindow.location.reload()">Reload Codex</button>
+        </div>
+      </div>
+      <div class="panel frame-wrap mt"><iframe id="gearCodexFrame" src="/gear-codex/" title="AlphaNine Gear Codex"></iframe></div>
+    </section>
+
+    <section id="diagnostics" class="view">
+      <div class="layout-3">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Diagnostics</div><div class="subtle">Database, receiver, API, version, and logs.</div></div><button type="button" onclick="refreshDiagnostics()">Refresh</button></div>
+          <div class="detail-list">
+            <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
+            <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
+            <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.1-beta</strong></div>
+          </div>
+          <div class="test-grid mt">
+            <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
+            <button type="button" onclick="runConnectionTest('receiver','diagTestReceiver')">Test Receiver</button>
+            <button type="button" onclick="runConnectionTest('server','diagTestServer')">Test Server</button>
+          </div>
+          <div class="test-grid mt">
+            <div id="diagTestDb" class="test-result">Database not tested.</div>
+            <div id="diagTestReceiver" class="test-result">Receiver not tested.</div>
+            <div id="diagTestServer" class="test-result">Server not tested.</div>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Log Viewer</div>
+          <select id="diagnosticLogSelect" class="mt" onchange="renderDiagnosticLog()">
+            <option value="suite">Suite</option>
+            <option value="receiver">Receiver</option>
+            <option value="desktop">Desktop Launcher</option>
+            <option value="audit">Admin Audit</option>
+          </select>
+          <pre id="diagnosticLog" class="diagnostic-log mt">Diagnostics not loaded.</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="settings" class="view">
+      <div class="settings-grid">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Setup</div><div class="subtle">First-launch wizard and connection tests.</div></div><button type="button" onclick="openSetupWizard()">Open Wizard</button></div>
+          <div class="test-grid mt">
+            <button type="button" onclick="runConnectionTest('database','settingsDbTest')">Test Database</button>
+            <button type="button" onclick="runConnectionTest('receiver','settingsReceiverTest')">Test Receiver</button>
+            <button type="button" onclick="runConnectionTest('server','settingsServerTest')">Test Server</button>
+          </div>
+          <div class="test-grid mt">
+            <div id="settingsDbTest" class="test-result">Database not tested.</div>
+            <div id="settingsReceiverTest" class="test-result">Receiver not tested.</div>
+            <div id="settingsServerTest" class="test-result">Server not tested.</div>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Database</div>
+          <div class="field-grid mt">
+            <label>Host<input id="settingsDatabaseHost"></label>
+            <label>Port<input id="settingsDatabasePort" type="number"></label>
+            <label>Database<input id="settingsDatabaseName"></label>
+            <label>User<input id="settingsDatabaseUser"></label>
+            <label>Password<input id="settingsDatabasePassword" type="password" placeholder="Leave blank to keep saved password"></label>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Receiver Management</div><div id="receiverManagerStatus" class="micro">Checking receiver</div></div><button type="button" onclick="refreshReceiverStatus()">Refresh</button></div>
+          <div class="field-grid mt">
+            <label>Host<input id="settingsReceiverHost"></label>
+            <label>Port<input id="settingsReceiverPort" type="number"></label>
+            <label>Token<input id="settingsReceiverToken" type="password" placeholder="Leave blank to keep saved token"></label>
+            <label>SSH Host<input id="settingsReceiverSshHost"></label>
+            <label>SSH User<input id="settingsReceiverSshUser"></label>
+            <label>SSH Key<input id="settingsReceiverSshKey"></label>
+          </div>
+          <div class="action-row mt">
+            <button type="button" onclick="receiverAction('start')">Start</button>
+            <button type="button" onclick="receiverAction('stop')">Stop</button>
+            <button type="button" onclick="receiverAction('restart')">Restart</button>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Network & Server</div>
+          <div class="field-grid mt">
+            <label>Server Type<select id="settingsServerType"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
+            <label>VM Name<input id="settingsVmName"></label>
+            <label>VM IP<input id="settingsVmIp"></label>
+            <label>SSH User<input id="settingsSshUser"></label>
+            <label>SSH Key<input id="settingsSshKey"></label>
+            <label>Dune Server Path<input id="settingsServerInstallPath"></label>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Map & Logging</div>
+          <div class="field-grid mt">
+            <label>Default Map<select id="settingsMapDefault"><option value="HaggaBasin">Hagga Basin</option><option value="DeepDesert">Deep Desert</option><option value="Arrakeen">Arrakeen</option><option value="HarkoVillage">Harko Village</option></select></label>
+            <label>Log Level<select id="settingsLogLevel"><option value="info">Info</option><option value="debug">Debug</option><option value="warn">Warnings</option></select></label>
+            <label>GitHub Update Repo<input id="settingsUpdateRepo" placeholder="owner/repo"></label>
+          </div>
+          <div class="action-row mt">
+            <button type="button" onclick="checkUpdates()">Check Updates</button>
+            <button type="button" onclick="saveSettings()">Save Settings</button>
+          </div>
+          <div id="settingsSaveStatus" class="empty mt">Settings load automatically.</div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Backup & Restore</div>
+          <div class="action-row mt">
+            <button type="button" onclick="exportSettings()">Export Settings</button>
+            <button type="button" onclick="importSettings()">Import Settings</button>
+          </div>
+          <textarea id="settingsImportText" rows="8" placeholder="Paste exported settings JSON here"></textarea>
+          <pre id="settingsBackupStatus" class="mt">No backup action yet.</pre>
+        </div>
+        <div class="panel pad">
+          <div class="label">App Preferences</div>
+          <div class="field-grid mt">
+            <label class="check-row"><input id="uiSoundsEnabled" type="checkbox">Enable UI Sounds</label>
+            <label>UI Sound Volume <span id="uiSoundVolumeLabel" class="micro">100%</span><input id="uiSoundVolume" type="range" min="0" max="100" value="100"></label>
+            <div id="uiSoundStatus" class="empty">Sounds ON. Volume 100%.</div>
+          </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Runtime</div>
+          <div class="detail-list">
+            <div class="detail-row"><span class="subtle">Suite URL</span><strong>http://127.0.0.1:8810</strong></div>
+            <div class="detail-row"><span class="subtle">Receiver</span><strong id="settingsReceiver">Checking...</strong></div>
+            <div class="detail-row"><span class="subtle">SSH Target</span><strong id="settingsSsh">Unknown</strong></div>
+            <div class="detail-row"><span class="subtle">Config</span><strong id="settingsConfigPath">App data</strong></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
 <script>
 const tabs=[...document.querySelectorAll(".tab")], views=[...document.querySelectorAll(".view")];
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));location.hash=name;}
+const viewCopy={
+  dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
+  players:["Players","Search, inspect, and select characters for admin actions."],
+  give:["Give Item","Live item grants through the configured receiver."],
+  admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
+  server:["Server Status","Battlegroup controls, maps, and live server telemetry."],
+  "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
+  management:["Server Management","Embedded server management console."],
+  codex:["Gear Codex","Item template reference and operations catalog."],
+  env:["Env Setup","Live Give environment requirements and missing variables."],
+  logs:["Logs","Recent grants, probe results, and errors."],
+  diagnostics:["Diagnostics","Connection health, version info, and log viewer."],
+  settings:["Settings","App-level preferences and local runtime details."]
+};
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-function tone(id,value){const el=document.getElementById(id);el.className="value";const text=String(value||"Unknown");if(/healthy|ready|running|online|true/i.test(text))el.classList.add("ok");else if(/offline|failed|error|missing|not|false/i.test(text))el.classList.add("bad");else el.classList.add("warn");el.textContent=text;}
+let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,setupStep=0,appConfig=null,diagnosticsData=null;
+function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
+function statusClass(value){const text=String(value||"");if(/healthy|ready|running|online|enabled|reachable|true/i.test(text))return"ok";if(/offline|failed|error|missing|not|false|unavailable/i.test(text))return"bad";return"warn";}
+function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");}
+function badge(id,value){const el=document.getElementById(id);if(!el)return;el.className="badge "+statusClass(value);el.textContent=String(value||"Unknown");}
+function addActivity(type,message,detail){const item={time:new Date().toLocaleTimeString(),type,message,detail:detail||""};activity.unshift(item);activity=activity.slice(0,40);renderActivity();}
+const LIVE_MAP_IMAGE={width:4096,height:4096};
+const LIVE_MAP_CONFIGS={
+  HaggaBasin:{key:"HaggaBasin",label:"Hagga Basin",minX:-437871,maxX:350539,minY:-462011,maxY:376267,flipY:true},
+  DeepDesert:{key:"DeepDesert",label:"Deep Desert",minX:-1300000,maxX:1200000,minY:-1300000,maxY:1200000},
+  Arrakeen:{key:"Arrakeen",label:"Arrakeen",minX:-32000,maxX:17000,minY:-10000,maxY:9500,flipY:true},
+  HarkoVillage:{key:"HarkoVillage",label:"Harko Village",minX:-5000,maxX:14500,minY:-5500,maxY:32000}
+};
+let liveMapKey="HaggaBasin";
+function liveMapConfig(){return LIVE_MAP_CONFIGS[liveMapKey]||LIVE_MAP_CONFIGS.HaggaBasin;}
+function liveMapBounds(){return [[0,0],[LIVE_MAP_IMAGE.height,LIVE_MAP_IMAGE.width]];}
+function clampLiveUnit(value){if(value<0)return 0;if(value>1)return 1;return value;}
+function worldToLiveLatLng(x,y,cfg=liveMapConfig()){const nx=(Number(x)-cfg.minX)/(cfg.maxX-cfg.minX);const ny=(Number(y)-cfg.minY)/(cfg.maxY-cfg.minY);const fx=clampLiveUnit(cfg.flipX?1-nx:nx);const fy=clampLiveUnit(cfg.flipY?1-ny:ny);return [fy*LIVE_MAP_IMAGE.height,fx*LIVE_MAP_IMAGE.width];}
+function liveLatLngToWorld(latlng,cfg=liveMapConfig()){const fx=Number(latlng.lng)/LIVE_MAP_IMAGE.width;const fy=Number(latlng.lat)/LIVE_MAP_IMAGE.height;const rx=cfg.flipX?1-fx:fx;const ry=cfg.flipY?1-fy:fy;return {x:rx*(cfg.maxX-cfg.minX)+cfg.minX,y:ry*(cfg.maxY-cfg.minY)+cfg.minY};}
+function leafletToDune(latlng){return liveLatLngToWorld(latlng);}
+function duneToLeaflet(x,y){return worldToLiveLatLng(x,y);}
+function formatLiveCoord(value){const number=Number(value);return Number.isFinite(number)?number.toFixed(2):"--";}
+function initLiveMap(){if(!window.L){setText("liveMapStamp","Leaflet unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});const bounds=liveMapBounds();L.imageOverlay("/assets/world-map-overland.png",bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);liveMap.fitBounds(bounds);liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);refreshLiveMap();}
+function liveMapChecked(id){const el=document.getElementById(id);return !el||el.checked;}
+function liveMapProject(entity){const x=Number(entity.x),y=Number(entity.y);if(!Number.isFinite(x)||!Number.isFinite(y))return null;return duneToLeaflet(x,y);}
+function liveMapIcon(kind){return L.divIcon({className:"",html:'<div class="live-map-marker '+kind+'" style="width:14px;height:14px"></div>',iconSize:[14,14],iconAnchor:[7,7]});}
+function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point)return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(kind.slice(0,-1)||kind),draggable:kind==="players"}).bindPopup('<strong>'+esc(row.name||row.id||kind)+'</strong><br>'+esc(row.source||"DB")+'<br>X '+esc(formatLiveCoord(row.x))+' / Y '+esc(formatLiveCoord(row.y))+(row.z!=null?' / Z '+esc(row.z):'')+(kind==="players"?'<br>Drag marker to preview teleport.':''));marker.on("click",()=>{if(kind==="players"){const playerId=row.fls_id||row.id||row.name||"";const input=document.getElementById("teleportPlayerId");if(input&&!input.value)input.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});});if(kind==="players")marker.on("dragend",event=>{const dragged=event.target;const next=dragged.getLatLng();dragged.setLatLng(point);const coords=leafletToDune(next);const playerId=row.fls_id||row.id||row.name||"";const input=document.getElementById("teleportPlayerId");if(input)input.value=playerId;const tx=document.getElementById("teleportX");const ty=document.getElementById("teleportY");const tz=document.getElementById("teleportZ");if(tx)tx.value=String(Math.round(coords.x));if(ty)ty.value=String(Math.round(coords.y));if(tz&&!tz.value)tz.value="5000";selectLiveCoordinates(next,{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Drag teleport preview armed. Marker snapped back until Preview Teleport is sent.\\nPlayer: "+playerId+"\\nX "+Math.round(coords.x)+" / Y "+Math.round(coords.y)+" / Z "+(tz?.value||"5000");playUiSound("click");});marker.addTo(liveMapLayerGroup);});return count;}
+function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;liveMapLayerGroup.clearLayers();liveMarkerCount=0;liveMarkerCount+=addLiveMapMarkers("players",liveMapData.layers?.players);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapData.layers?.vehicles);liveMarkerCount+=addLiveMapMarkers("bases",liveMapData.layers?.bases);updateLiveMapDebug();}
+function updateLiveMouseCoordinates(latlng){const coords=leafletToDune(latlng);const readout=document.getElementById("liveMouseReadout");if(readout)readout.textContent="X "+formatLiveCoord(coords.x)+" / Y "+formatLiveCoord(coords.y);}
+function selectLiveCoordinates(latlng,options={}){const coords=leafletToDune(latlng);liveSelectedCoordinates={...coords,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(coords.x));setText("liveClickedY",formatLiveCoord(coords.y));const searchX=document.getElementById("liveSearchX");const searchY=document.getElementById("liveSearchY");if(searchX)searchX.value=formatLiveCoord(coords.x);if(searchY)searchY.value=formatLiveCoord(coords.y);if(options.fillTeleport){const teleportX=document.getElementById("teleportX");const teleportY=document.getElementById("teleportY");if(teleportX)teleportX.value=String(Math.round(coords.x));if(teleportY)teleportY.value=String(Math.round(coords.y));}updateLiveMapDebug(latlng);}
+async function copyLiveCoordinates(){if(!liveSelectedCoordinates){playUiSound("warning");return;}const text="X "+formatLiveCoord(liveSelectedCoordinates.x)+", Y "+formatLiveCoord(liveSelectedCoordinates.y);try{await navigator.clipboard.writeText(text);playUiSound("success");addActivity("maps","Coordinates copied",text);}catch{playUiSound("warning");}}
+function goToLiveCoordinates(){if(!liveMap)return;const x=Number(document.getElementById("liveSearchX")?.value);const y=Number(document.getElementById("liveSearchY")?.value);if(!Number.isFinite(x)||!Number.isFinite(y)){playUiSound("warning");return;}const point=duneToLeaflet(x,y);liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:true});playUiSound("click");}
+function updateLiveMapDebug(latlng){const selected=latlng?leafletToDune(latlng):liveSelectedCoordinates;setText("liveDebugZoom",liveMap?String(liveMap.getZoom().toFixed(2)):"--");if(latlng)setText("liveDebugLatLng",formatLiveCoord(latlng.lat)+", "+formatLiveCoord(latlng.lng));else if(liveSelectedCoordinates)setText("liveDebugLatLng",formatLiveCoord(liveSelectedCoordinates.lat)+", "+formatLiveCoord(liveSelectedCoordinates.lng));else setText("liveDebugLatLng","--");setText("liveDebugDune",selected?("X "+formatLiveCoord(selected.x)+" / Y "+formatLiveCoord(selected.y)):"--");const debug=liveMapData?.debug||{};const loaded=Number(debug.playersLoaded??(liveMapData?.layers?.players||[]).length)||0;const positioned=Number(debug.playersWithPosition??debug.playersWithCoordinates??0)||0;setText("liveDebugPlayers","Loaded "+loaded+", positioned "+positioned);setText("liveDebugMarkers",String(liveMarkerCount));setText("liveDebugPositionSource",debug.positionSourceTable||"--");}
+async function refreshLiveMap(){if(!liveMap)return;try{const data=await getJson("/api/live-map/entities");liveMapData=data;renderLiveMapLayers();const counts={players:(data.layers?.players||[]).length,vehicles:(data.layers?.vehicles||[]).length,bases:(data.layers?.bases||[]).length};const debug=data.debug||{};const loaded=Number(debug.playersLoaded??counts.players)||0;const valid=Number(debug.playersWithPosition??debug.playersWithCoordinates??counts.players)||0;const warning=document.getElementById("livePlayerPositionWarning");const playerWord=loaded===1?"player":"players";if(warning){warning.classList.toggle("hidden",!(loaded>0&&valid===0));warning.textContent="Loaded "+loaded+" "+playerWord+", "+valid+" with coordinates";}console.debug("[AlphaNine Live Map] players loaded:",loaded,"with coordinates:",valid,"source:",debug.positionSourceTable||"none");setText("liveMapStamp","Loaded "+loaded+" "+playerWord+", "+valid+" with coordinates / Vehicles "+counts.vehicles+" / Bases "+counts.bases);document.getElementById("liveMapLog").textContent=JSON.stringify({counts,debug,sources:data.sources||[],errors:data.errors||[],raw:data},null,2);updateLiveMapDebug();addActivity("maps","Live map refreshed",loaded+" players / "+valid+" positioned / "+liveMarkerCount+" markers");}catch(e){setText("liveMapStamp","Live map error");document.getElementById("liveMapLog").textContent=betterError(e);addActivity("error","Live map failed",e.message);}}
+async function previewTeleport(){const payload={playerId:document.getElementById("teleportPlayerId").value,x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value};try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("teleportLog").textContent=data.message+"\\n"+JSON.stringify(data.request,null,2);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
+function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
+function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 async function getJson(url, options){const r=await fetch(url,options);const t=await r.text();let d={};try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||t||"Request failed");return d;}
-async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);tone("vm",data.vm?.state||"Unknown");tone("battlegroup",s.status||"Unknown");tone("players",String(total));tone("managerState","Online");tone("svm",data.vm?.state||"Unknown");tone("sbg",s.status||"Unknown");tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";}catch(e){tone("vm","Status error");tone("battlegroup","Offline");tone("players","0");document.getElementById("serverLog").textContent=e.message;}}
-async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";try{const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=e.message;}}
-async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=e.message;}}
-refresh();setInterval(refresh,30000);
+function setValue(id,value){const el=document.getElementById(id);if(el)el.value=value==null?"":String(value);}
+function getValue(id){return document.getElementById(id)?.value||"";}
+function setChecked(id,value){const el=document.getElementById(id);if(el)el.checked=Boolean(value);}
+function resultBox(id,data){const el=document.getElementById(id);if(!el)return;el.className="test-result "+(data.ok?"ok":"bad");el.textContent=(data.message||data.status||data.error||"Done")+(data.error?"\\n"+data.error:"");}
+function configPayload(prefix){const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),serverInstallPath:getValue(prefix+"ServerInstallPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey")};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");if(dbPass&&dbPass!=="********")payload.databasePassword=dbPass;if(token&&token!=="********")payload.receiverToken=token;return payload;}
+function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);setValue("setupReceiverSshHost",config.receiverSshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");}
+function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);setValue("settingsReceiverSshHost",config.receiverSshHost||"");setValue("settingsReceiverSshUser",config.receiverSshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setText("settingsConfigPath",config.configPath||"App data");}
+function collectSettings(){const payload=configPayload("settings");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.setupComplete=true;return payload;}
+function updateSetupStep(){document.querySelectorAll(".setup-page").forEach((p,i)=>p.classList.toggle("active",i===setupStep));document.querySelectorAll(".setup-step").forEach((p,i)=>p.classList.toggle("active",i===setupStep));}
+function setupNext(){setupStep=Math.min(4,setupStep+1);updateSetupStep();}
+function setupPrev(){setupStep=Math.max(0,setupStep-1);updateSetupStep();}
+function openSetupWizard(){setupStep=0;updateSetupStep();document.getElementById("setupWizard")?.classList.remove("hidden");}
+function closeSetupWizard(){document.getElementById("setupWizard")?.classList.add("hidden");}
+function openAboutDialog(){document.getElementById("aboutDialog")?.classList.remove("hidden");playUiSound("click");}
+function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.add("hidden");playUiSound("click");}
+function openSupportDiscord(){window.open("https://discord.gg/tuUv3hYTv","_blank","noopener");playUiSound("click");}
+async function initSetup(){try{const data=await getJson("/api/setup/status");const config=data.config||{};fillSetup(config);fillSettings(config);if(!data.setupComplete)openSetupWizard();if(data.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(data.discovery,null,2);refreshReceiverStatus();}catch(e){addActivity("error","Setup status failed",e.message);}}
+async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.installPath)setValue("setupServerInstallPath",data.server.installPath);if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
+async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}
+async function finishSetup(){try{const payload={...configPayload("setup"),setupComplete:true};const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("setupFinishResult").textContent="Setup saved. Restart the suite if receiver or environment values changed.";fillSettings(data.config||payload);closeSetupWizard();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
+async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);refreshReceiverStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
+async function saveSettings(){try{const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...appConfig,...collectSettings()})});fillSettings(data.config||{});setText("settingsSaveStatus","Settings saved. Restart the suite for receiver startup environment changes.");playUiSound("success");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
+async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");setText("receiverManagerStatus",data.status+" / "+data.healthUrl);setText("settingsReceiver",data.status);tone("receiverState",data.status);return data;}catch(e){setText("receiverManagerStatus",betterError(e));}}
+async function receiverAction(action){try{if(action==="start")await saveSettings();const data=await getJson("/api/receiver/"+action,{method:"POST"});setText("receiverManagerStatus",data.message||data.status||"Receiver action complete");await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){setText("receiverManagerStatus",betterError(e));playUiSound("warning");}}
+async function exportSettings(){try{const data=await getJson("/api/settings/export");const text=JSON.stringify(data,null,2);document.getElementById("settingsBackupStatus").textContent=text;const blob=new Blob([text],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="alphanine-settings-"+new Date().toISOString().slice(0,10)+".json";a.click();URL.revokeObjectURL(a.href);playUiSound("success");}catch(e){setText("settingsBackupStatus",betterError(e));playUiSound("warning");}}
+async function importSettings(){try{const raw=getValue("settingsImportText");if(!raw.trim())throw new Error("Paste exported settings JSON first.");const data=await getJson("/api/settings/import",{method:"POST",headers:{"Content-Type":"application/json"},body:raw});fillSettings(data.config||{});setText("settingsBackupStatus","Settings imported. Restart the suite if receiver or environment values changed.");playUiSound("success");}catch(e){setText("settingsBackupStatus",betterError(e));playUiSound("warning");}}
+async function checkUpdates(){try{const repo=getValue("settingsUpdateRepo");const data=await getJson("/api/updates/check"+(repo?"?repo="+encodeURIComponent(repo):""));setText("settingsSaveStatus",data.ok?("Current "+data.currentVersion+" / Latest "+data.latestVersion+"\\n"+data.url):("Update check failed: "+data.error));if(data.ok&&data.url)window.open(data.url,"_blank");playUiSound(data.ok?"success":"warning");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
+async function refreshDiagnostics(){try{const data=await getJson("/api/diagnostics");diagnosticsData=data;setText("diagDatabase",data.database?.ok?"Reachable":"Failed");setText("diagReceiver",data.receiver?.ok?"Online":"Offline");setText("diagApi",data.api?.status||"Unknown");setText("diagVersion",data.version||"Unknown");renderDiagnosticLog();}catch(e){setText("diagnosticLog",betterError(e));}}
+function renderDiagnosticLog(){const key=getValue("diagnosticLogSelect")||"suite";const text=diagnosticsData?.logs?.[key]||"No log data loaded.";setText("diagnosticLog",text);}
+const UI_SOUND_DEFAULTS={enabled:true,volume:100};
+let uiSoundPrefs={...UI_SOUND_DEFAULTS},uiSoundContext=null,lastHoverSound=0,uiSoundSaveTimer=null;
+function clampSoundVolume(value){return Math.max(0,Math.min(100,Number(value)||0));}
+function uiSoundGain(scale=1){return Math.min(.18,(clampSoundVolume(uiSoundPrefs.volume)/100)*scale);}
+function ensureUiSoundContext(){if(!uiSoundContext){const AudioCtor=window.AudioContext||window.webkitAudioContext;if(!AudioCtor)return null;uiSoundContext=new AudioCtor();}if(uiSoundContext.state==="suspended")uiSoundContext.resume().catch(()=>{});return uiSoundContext;}
+function playTone(freq,duration=70,type="sine",delay=0,gainScale=.8,endFreq){const ctx=ensureUiSoundContext();if(!ctx||!uiSoundPrefs.enabled||uiSoundPrefs.volume<=0)return;const osc=ctx.createOscillator();const gain=ctx.createGain();const now=ctx.currentTime+delay;const level=uiSoundGain(gainScale);osc.type=type;osc.frequency.setValueAtTime(freq,now);if(endFreq)osc.frequency.exponentialRampToValueAtTime(Math.max(1,endFreq),now+duration/1000);gain.gain.setValueAtTime(0.0001,now);gain.gain.exponentialRampToValueAtTime(Math.max(0.0002,level),now+.012);gain.gain.exponentialRampToValueAtTime(0.0001,now+duration/1000);osc.connect(gain);gain.connect(ctx.destination);osc.start(now);osc.stop(now+duration/1000+.025);}
+function playUiSound(kind){if(!uiSoundPrefs.enabled||uiSoundPrefs.volume<=0)return;try{if(kind==="hover")playTone(880,45,"sine",0,.26,1040);else if(kind==="click")playTone(520,65,"triangle",0,.42,420);else if(kind==="tab"){playTone(360,55,"sine",0,.36,480);playTone(760,65,"sine",.055,.26,920);}else if(kind==="success"){playTone(520,70,"triangle",0,.38,680);playTone(920,90,"sine",.075,.28,1180);}else if(kind==="warning"){playTone(320,95,"triangle",0,.34,220);playTone(180,110,"sine",.09,.24,150);}}catch{}}
+function syncUiSoundSettings(){const enabled=document.getElementById("uiSoundsEnabled");const volume=document.getElementById("uiSoundVolume");const label=document.getElementById("uiSoundVolumeLabel");const status=document.getElementById("uiSoundStatus");const dashToggle=document.getElementById("dashboardSoundToggle");const dashVolume=document.getElementById("dashboardSoundVolume");const dashLabel=document.getElementById("dashboardSoundVolumeLabel");const pct=clampSoundVolume(uiSoundPrefs.volume);if(enabled)enabled.checked=Boolean(uiSoundPrefs.enabled);if(volume)volume.value=String(pct);if(label)label.textContent=pct+"%";if(dashToggle){dashToggle.textContent=uiSoundPrefs.enabled?"🔊 Sounds ON":"🔇 Sounds OFF";dashToggle.classList.toggle("primary",Boolean(uiSoundPrefs.enabled));}if(dashVolume)dashVolume.value=String(pct);if(dashLabel)dashLabel.textContent=pct+"%";if(status){status.className=uiSoundPrefs.enabled?"empty":"warning";status.textContent=(uiSoundPrefs.enabled?"Sounds ON. ":"Sounds OFF. ")+"Volume "+pct+"%.";}}
+async function saveUiSoundSettings(){try{const current=await getJson("/api/config");const config={...current,uiSoundsEnabled:Boolean(uiSoundPrefs.enabled),uiSoundVolume:clampSoundVolume(uiSoundPrefs.volume)};await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(config)});syncUiSoundSettings();}catch(e){const status=document.getElementById("uiSoundStatus");if(status){status.className="warning";status.textContent="Could not save UI sound preference: "+betterError(e);}playUiSound("warning");}}
+function scheduleUiSoundSave(){clearTimeout(uiSoundSaveTimer);uiSoundSaveTimer=setTimeout(saveUiSoundSettings,300);}
+async function loadUiSoundSettings(){try{const cfg=await getJson("/api/config");uiSoundPrefs.enabled=cfg.uiSoundsEnabled===true;uiSoundPrefs.volume=clampSoundVolume(cfg.uiSoundVolume ?? UI_SOUND_DEFAULTS.volume);}catch{}syncUiSoundSettings();}
+function wireUiSounds(){document.addEventListener("pointerover",(event)=>{const target=event.target.closest("button,.tab,select,input[type='checkbox'],input[type='range']");if(!target||target.disabled)return;const now=Date.now();if(now-lastHoverSound<160)return;lastHoverSound=now;playUiSound("hover");},true);document.addEventListener("click",(event)=>{const target=event.target.closest("button,select,input[type='checkbox'],input[type='range']");if(!target||target.disabled)return;if(target.classList.contains("tab"))return;playUiSound("click");},true);const enabled=document.getElementById("uiSoundsEnabled");const volume=document.getElementById("uiSoundVolume");const dashToggle=document.getElementById("dashboardSoundToggle");const dashVolume=document.getElementById("dashboardSoundVolume");if(enabled)enabled.addEventListener("change",()=>{uiSoundPrefs.enabled=enabled.checked;syncUiSoundSettings();saveUiSoundSettings();});if(dashToggle)dashToggle.addEventListener("click",()=>{uiSoundPrefs.enabled=!uiSoundPrefs.enabled;syncUiSoundSettings();saveUiSoundSettings();});[volume,dashVolume].forEach(control=>{if(!control)return;control.addEventListener("input",()=>{uiSoundPrefs.volume=clampSoundVolume(control.value);syncUiSoundSettings();scheduleUiSoundSave();});control.addEventListener("change",()=>{uiSoundPrefs.volume=clampSoundVolume(control.value);saveUiSoundSettings();});});}
+function relativeTime(value){if(!value)return"";const date=new Date(value);if(Number.isNaN(date.getTime()))return value;const seconds=Math.max(0,Math.floor((Date.now()-date.getTime())/1000));if(seconds<60)return"just now";const minutes=Math.floor(seconds/60);if(minutes<60)return minutes+"m ago";const hours=Math.floor(minutes/60);if(hours<24)return hours+"h ago";const days=Math.floor(hours/24);return days+"d ago";}
+function renderPlayerFeed(players){const wrap=document.getElementById("playerFeed");if(!wrap)return;if(!players.length){wrap.innerHTML='<div class="empty">No players discovered yet.</div>';return;}wrap.innerHTML=players.map(p=>{const status=["online","offline","unknown"].includes(p.status)?p.status:"unknown";const level=p.level?"Level "+esc(p.level):"Level: Unknown";const id=p.character_id||p.player_controller_id||p.account_id||p.id||"";const offline=status==="offline"&&p.last_seen?(" - Last seen "+relativeTime(p.last_seen)):"";const statusText=status.charAt(0).toUpperCase()+status.slice(1)+offline;return '<div class="feed-row"><span class="feed-dot '+esc(status)+'"></span><div class="feed-name"><strong>'+esc(p.name||p.character_name||p.account_id||"Unknown")+'</strong><div class="feed-id">'+(id?"ID "+esc(id):"ID unavailable")+'</div></div><div class="feed-level">'+level+'</div><div class="feed-status '+esc(status)+'">'+esc(statusText)+'</div></div>';}).join("");}
+async function refreshPlayerFeed(){const stamp=document.getElementById("playerFeedStamp");try{const data=await getJson("/api/players/feed");renderPlayerFeed(data.players||[]);if(stamp)stamp.textContent="Updated "+new Date().toLocaleTimeString();}catch(e){const wrap=document.getElementById("playerFeed");if(wrap)wrap.innerHTML='<div class="empty">'+esc(betterError(e))+'</div>';if(stamp)stamp.textContent="Feed error";}}
+async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);tone("vm",data.vm?.state||"Unknown");tone("battlegroup",s.status||"Unknown");tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer",s.status?"Server "+s.status:"Server offline");document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity("status","Server telemetry refreshed",s.status||"Unknown");await refreshLiveGiveEnv();}catch(e){tone("vm","Status error");tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);}}
+function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
+function monitorStatusLabel(open){if(open===null||open===undefined)return"Not Configured";return open?"Open":"Closed";}
+function monitorMs(value){return Number.isFinite(Number(value))?Math.round(Number(value))+" ms":"-- ms";}
+function renderMonitorRows(rows){return rows.length?rows.map(row=>'<div class="vm-row"><div><strong>'+esc(row.label)+'</strong><small>'+esc(row.host?row.host+":"+row.port:(row.responseMs!=null?monitorMs(row.responseMs):row.error||""))+'</small></div><span class="status-pill '+monitorKindClass(row.open?"ok":"bad")+'">'+esc(monitorStatusLabel(row.open))+'</span></div>').join(""):'<div class="empty">No configured ports.</div>';}
+function renderServiceRows(services){const rows=Object.values(services||{});return rows.length?rows.map(row=>'<div class="vm-row"><div><strong>'+esc(row.label)+'</strong><small>'+esc(row.responseMs!=null?monitorMs(row.responseMs):(row.error||""))+'</small></div><span class="status-pill '+monitorKindClass(row.reachable===null?"warn":row.reachable?"ok":"bad")+'">'+esc(row.reachable===null?"N/A":row.reachable?"Reachable":"Offline")+'</span></div>').join(""):'<div class="empty">No service checks.</div>';}
+function renderPingGraph(history){const graph=document.getElementById("vmPingGraph");if(!graph)return;const values=(history||[]).slice(-60);const max=Math.max(80,...values.map(row=>Number(row.ms)||0));graph.innerHTML=values.length?values.map(row=>{const ms=Number(row.ms);const ok=Number.isFinite(ms);const h=ok?Math.max(8,Math.round((ms/max)*64)):8;const kind=!ok?"bad":ms<120?"ok":ms<250?"warn":"bad";return '<span class="ping-bar '+kind+'" title="'+(ok?ms+' ms':'offline')+'" style="height:'+h+'px"></span>';}).join(""):'<div class="empty">Ping history will appear after checks.</div>';}
+async function refreshVmMonitor(){try{const data=await getJson("/api/vm-monitor");const kind=monitorKindClass(data.kind);setText("vmMonitorStatus",data.status||"Unknown");setText("vmMonitorAddress",data.vm?.address||"Unknown");setText("vmMonitorHost",data.vm?.hostname||"Unknown");setText("vmUptime",data.vm?.uptime||"Unknown");setText("vmHealthScore",Number.isFinite(Number(data.healthScore))?Math.round(Number(data.healthScore))+"%":"--");setText("vmPingCurrent",monitorMs(data.latency?.current));setText("vmPingAverage",monitorMs(data.latency?.average));setText("vmPingMin",monitorMs(data.latency?.min));setText("vmPingMax",monitorMs(data.latency?.max));setText("vmMonitorStamp","Last check "+new Date(data.checkedAt||Date.now()).toLocaleTimeString());setText("vmLastSuccess",data.lastSuccessfulConnection&&data.lastSuccessfulConnection!=="None yet"?new Date(data.lastSuccessfulConnection).toLocaleString():data.lastSuccessfulConnection||"None yet");["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card "+kind;});const ports=data.ports||[];const services=data.services||{};document.getElementById("vmPortList").innerHTML=renderMonitorRows(ports);document.getElementById("vmServiceList").innerHTML=renderServiceRows(services);document.getElementById("vmPortDetailList").innerHTML=ports.length?ports.map(row=>'<div>'+esc(row.label)+": "+esc(monitorStatusLabel(row.open))+" / "+esc(row.responseMs!=null?monitorMs(row.responseMs):row.error||"No response")+'</div>').join(""):'<div>No configured ports.</div>';document.getElementById("vmErrorList").innerHTML=(data.lastErrors||[]).length?data.lastErrors.map(error=>'<div>'+esc(error)+'</div>').join(""):'<div>No recent connection errors.</div>';renderPingGraph(data.latency?.history||[]);badge("topSsh",services.ssh?.reachable?"SSH reachable":"SSH offline");addActivity("vm","VM connection monitor",(data.status||"Unknown")+" / "+Math.round(Number(data.healthScore)||0)+"%");}catch(e){setText("vmMonitorStatus","Monitor error");setText("vmMonitorStamp",betterError(e));const card=document.getElementById("vmStatusCard");if(card)card.className="vm-status-card bad";addActivity("error","VM monitor failed",e.message);}}
+function betterError(e){return e&&e.message?e.message:"Command failed. Check that the suite is running as Administrator and the Dune VM is reachable.";}
+async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";syncLogs();addActivity("action",action+" completed",(data.error||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
+async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
+async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>'<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td></tr>').join(""):'<tr><td colspan="5">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
+function setText(id,value){const el=document.getElementById(id);if(el)el.textContent=String(value);}
+async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";addActivity("maps","Map deployment updated",map+" -> "+replicas);playUiSound("success");setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);playUiSound("warning");}}
+function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
+function liveGiveTransportMessage(transport){const missing=transport?.missingEnv||[];if(missing.includes("DUNE_ADMIN_GIVE_ITEM_TRANSPORT"))return"Live Give unavailable: missing DUNE_ADMIN_GIVE_ITEM_TRANSPORT.";if(missing.length)return"Live Give unavailable: missing "+missing.join(", ")+".";return"Live Give unavailable: "+(transport?.dryRunReason||transport?.reason||"transport is not configured.");}
+function renderEnvSetup(){const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong>'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}}
+function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=adminLiveGiveAvailable?"empty mt":"warning mt";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
+async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Online":(probe.giveTransport?.configured?"Warning":"Dry-run"));tone("rabbitState",probe.giveTransport?.mode||probe.transport||"Unknown");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
+function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
+function renderPlayerSelect(){const select=document.getElementById("adminPlayer");select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;}
+function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
+function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
+function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
+function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
+function permissionQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
+async function refreshPermissions(){const summary=document.getElementById("permissionSummary");if(summary)summary.textContent="Loading permission views...";try{permissionState=await getJson("/api/admin/permissions"+permissionQuery());renderPermissions();addActivity("permissions","Permission views refreshed",permissionState.playerControllerId?("controller "+permissionState.playerControllerId):"all players");}catch(e){if(summary)summary.textContent=betterError(e);addActivity("error","Permission refresh failed",e.message);}}
+function renderPermissions(){const data=permissionState||{};const summary=document.getElementById("permissionSummary");if(summary){summary.className=data.isGuildAdmin?"warning mt":"empty mt";summary.innerHTML=data.playerControllerId?('Controller '+esc(data.playerControllerId)+' / Guild admin: <strong>'+esc(data.isGuildAdmin?"yes":"no")+'</strong>'):'All permission rows. Select a player for focused views.';}const guild=document.getElementById("guildRows");if(guild)guild.innerHTML=(data.guildMembers||[]).length?(data.guildMembers||[]).map(row=>'<tr><td>'+esc(row.player_id)+'</td><td>'+esc(row.guild_id)+'</td><td>'+esc(row.role_id)+'</td><td><span class="badge '+(row.is_guild_admin?'ok':'warn')+'">'+esc(row.is_guild_admin?'role_id 100':'no')+'</span></td></tr>').join(""):'<tr><td colspan="4">No guild member rows found for this selection.</td></tr>';const perms=document.getElementById("permissionRows");if(perms)perms.innerHTML=(data.objectPermissions||[]).length?(data.objectPermissions||[]).map(row=>'<tr><td>'+esc(row.actor_id)+'</td><td>'+esc(row.actor_name||"-")+'</td><td>'+esc(row.player_id)+'</td><td>'+esc(row.rank)+'</td></tr>').join(""):'<tr><td colspan="4">No object permission rows found for this selection.</td></tr>';const codes=document.getElementById("accessCodeRows");if(codes)codes.innerHTML=(data.accessCodes||[]).length?(data.accessCodes||[]).map(row=>'<tr><td>'+esc(row.account_id)+'</td><td>'+esc(row.access_code)+'</td><td>'+esc(row.access_code_type)+'</td><td>'+esc(row.is_resettable)+'</td></tr>').join(""):'<tr><td colspan="4">No access codes found for this selection.</td></tr>';syncPermissionForms();}
+function updatePermissionPreviews(){const actor=document.getElementById("permActorId")?.value||"actor_id";const ctrl=document.getElementById("permControllerId")?.value||"player_controller_id";const rank=document.getElementById("permRank")?.value||"rank";const map=document.getElementById("permMapId")?.value||"map_id";const p1=document.getElementById("permRankPreview");if(p1)p1.textContent="select dune.permission_set_player_rank("+actor+", "+ctrl+", "+rank+", '"+map.replace(/'/g,"''")+"');";const account=document.getElementById("accessAccountId")?.value||"account_id";const code=document.getElementById("accessCodeValue")?.value||"access_code";const type=document.getElementById("accessCodeType")?.value||"access_code_type";const reset=document.getElementById("accessResettable")?.checked?"true":"false";const p2=document.getElementById("accessCodePreview");if(p2)p2.textContent="select dune.create_server_player_access_codes("+account+", "+code+", "+type+", "+reset+");";}
+["permActorId","permControllerId","permRank","permMapId","accessAccountId","accessCodeValue","accessCodeType","accessResettable"].forEach(id=>setTimeout(()=>{const el=document.getElementById(id);if(el)el.addEventListener("input",updatePermissionPreviews);if(el)el.addEventListener("change",updatePermissionPreviews);},0));
+async function setPermissionRank(){updatePermissionPreviews();const payload={actorId:document.getElementById("permActorId").value,playerControllerId:document.getElementById("permControllerId").value,rank:document.getElementById("permRank").value,mapId:document.getElementById("permMapId").value,confirmed:document.getElementById("permRankConfirm").checked};try{const data=await getJson("/api/admin/permissions/set-rank",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.message+"\\n"+data.sql;document.getElementById("permRankConfirm").checked=false;addActivity("permissions","Object permission function executed",data.sql);playUiSound("success");await refreshPermissions();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("permRankPreview").textContent;addActivity("error","Object permission function blocked",e.message);playUiSound("warning");}}
+async function createAccessCode(){updatePermissionPreviews();const payload={accountId:document.getElementById("accessAccountId").value,accessCode:document.getElementById("accessCodeValue").value,accessCodeType:document.getElementById("accessCodeType").value,isResettable:document.getElementById("accessResettable").checked,confirmed:document.getElementById("accessCodeConfirm").checked};try{const data=await getJson("/api/admin/permissions/create-access-code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.message+"\\n"+data.sql;document.getElementById("accessCodeConfirm").checked=false;addActivity("permissions","Access code function executed",data.sql);playUiSound("success");await refreshPermissions();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("accessCodePreview").textContent;addActivity("error","Access code function blocked",e.message);playUiSound("warning");}}
+function skillRepQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
+async function refreshSkillReputation(){try{skillRepState=await getJson("/api/admin/skill-reputation"+skillRepQuery());renderSkillReputation();addActivity("progression","Skill/reputation refreshed",skillRepState.playerControllerId?("controller "+skillRepState.playerControllerId):"all players");}catch(e){const skill=document.getElementById("skillRows");const rep=document.getElementById("reputationRows");if(skill)skill.innerHTML='<tr><td colspan="3">'+esc(e.message)+'</td></tr>';if(rep)rep.innerHTML='<tr><td colspan="3">'+esc(e.message)+'</td></tr>';addActivity("error","Skill/reputation refresh failed",e.message);}}
+function renderSkillReputation(){const data=skillRepState||{};const trackSelect=document.getElementById("skillTrack");if(trackSelect){const selected=trackSelect.value;trackSelect.innerHTML=(data.availableTracks||[]).map(t=>'<option value="'+esc(t)+'">'+esc(t)+'</option>').join("")||'<option value="">No tracks found</option>';if(selected)trackSelect.value=selected;}const factionSelect=document.getElementById("reputationFaction");if(factionSelect){const selected=factionSelect.value;factionSelect.innerHTML=(data.factions||[]).filter(f=>f.name!=="None").map(f=>'<option value="'+esc(f.id)+'">'+esc(f.name)+' ('+esc(f.id)+')</option>').join("")||'<option value="">No factions found</option>';if(selected)factionSelect.value=selected;}const skillRows=document.getElementById("skillRows");if(skillRows)skillRows.innerHTML=(data.tracks||[]).length?(data.tracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this selection.</td></tr>';const repRows=document.getElementById("reputationRows");if(repRows){const current=new Map((data.currentFactions||[]).map(row=>[String(row.faction_id),row]));repRows.innerHTML=(data.reputation||[]).length?(data.reputation||[]).map(row=>'<tr><td>'+esc(row.faction_name||row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td><td>'+esc(current.has(String(row.faction_id))?'yes':'no')+'</td></tr>').join(""):'<tr><td colspan="3">No reputation rows found for this selection.</td></tr>';}updateSkillReputationPreviews();}
+function currentSkillRow(track){return (skillRepState?.tracks||[]).find(row=>row.track_type===track)||null;}
+function currentRepRow(factionId){return (skillRepState?.reputation||[]).find(row=>String(row.faction_id)===String(factionId))||null;}
+function updateSkillReputationPreviews(){const p=selectedPlayer();const ctrl=p?.player_controller_id||"player_controller_id";const track=document.getElementById("skillTrack")?.value||"Combat";const xp=Number(document.getElementById("skillXpAmount")?.value||0);const levelRaw=document.getElementById("skillLevel")?.value||"";const current=currentSkillRow(track);const level=levelRaw===""?(current?.level||0):levelRaw;const escapedTrack=String(track).replace(/'/g,"''");const giveXp=(Number(current?.xp_amount)||0)+xp;const skillPreview=document.getElementById("skillPreview");if(skillPreview)skillPreview.textContent="Give Skill Points will execute:\\nselect dune.set_specialization_xp_and_level("+ctrl+", '"+escapedTrack+"'::dune.specializationtracktype, "+giveXp+", "+level+");\\n\\nSet Skill Points will execute:\\nselect dune.set_specialization_xp_and_level("+ctrl+", '"+escapedTrack+"'::dune.specializationtracktype, "+xp+", "+level+");";const faction=document.getElementById("reputationFaction")?.value||"faction_id";const rep=Number(document.getElementById("reputationAmount")?.value||0);const currentRep=Number(currentRepRow(faction)?.reputation_amount)||0;const repPreview=document.getElementById("reputationPreview");if(repPreview)repPreview.textContent="Add Reputation will execute:\\nselect dune.set_player_faction_reputation("+ctrl+", "+faction+", "+(currentRep+rep)+");\\n\\nSet Reputation will execute:\\nselect dune.set_player_faction_reputation("+ctrl+", "+faction+", "+rep+");";}
+["skillTrack","skillXpAmount","skillLevel","reputationFaction","reputationAmount"].forEach(id=>setTimeout(()=>{const el=document.getElementById(id);if(el)el.addEventListener("input",updateSkillReputationPreviews);if(el)el.addEventListener("change",updateSkillReputationPreviews);},0));
+async function runSkillAction(mode){updateSkillReputationPreviews();const p=selectedPlayer();const payload={playerControllerId:p?.player_controller_id||"",trackType:document.getElementById("skillTrack").value,xpAmount:document.getElementById("skillXpAmount").value,level:document.getElementById("skillLevel").value,confirmed:document.getElementById("skillConfirm").checked};try{const data=await getJson("/api/admin/skill-reputation/"+(mode==="add"?"give-skill-points":"set-skill-points"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.action+" executed\\n"+data.sql+"\\n\\nPrevious: "+JSON.stringify(data.previous)+"\\nNext: "+JSON.stringify(data.next)+"\\nRollback: "+data.rollbackSql+"\\n"+data.warning;document.getElementById("skillConfirm").checked=false;addActivity("progression",mode==="add"?"Give Skill Points executed":"Set Skill Points executed",data.sql);playUiSound("success");await refreshSkillReputation();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("skillPreview").textContent;addActivity("error","Skill points action blocked",e.message);playUiSound("warning");}}
+function giveSkillPoints(){runSkillAction("add");}
+function setSkillPoints(){runSkillAction("set");}
+async function runReputationAction(mode){updateSkillReputationPreviews();const p=selectedPlayer();const payload={playerControllerId:p?.player_controller_id||"",factionId:document.getElementById("reputationFaction").value,reputationAmount:document.getElementById("reputationAmount").value,confirmed:document.getElementById("reputationConfirm").checked};try{const data=await getJson("/api/admin/skill-reputation/"+(mode==="add"?"add-reputation":"set-reputation"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.action+" executed\\n"+data.sql+"\\n\\nPrevious: "+JSON.stringify(data.previous)+"\\nNext: "+JSON.stringify(data.next)+"\\nRollback: "+data.rollbackSql+"\\n"+data.warning;document.getElementById("reputationConfirm").checked=false;addActivity("progression",mode==="add"?"Add Reputation executed":"Set Reputation executed",data.sql);playUiSound("success");await refreshSkillReputation();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("reputationPreview").textContent;addActivity("error","Reputation action blocked",e.message);playUiSound("warning");}}
+function addReputation(){runReputationAction("add");}
+function setReputation(){runReputationAction("set");}
+function jumpToGive(){setView("give");renderPlayerSelect();}
+function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td><span class="badge '+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</span></td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
+function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,90);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<div class="avatar">IT</div>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join(""):'<div class="empty">No matching item templates.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
+function syncQualityWarning(){const warning=document.getElementById("qualityWarning");if(!warning)return;const quality=Number(document.getElementById("adminQuality")?.value||0);warning.classList.toggle("hidden",!(quality>0));}
+function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
+function isServerOnlineStatus(data){const vmState=String(data?.vm?.state||"");const status=String(data?.status?.summary?.status||"");return /^Running$/i.test(vmState)&&/Healthy|Ready|Running/i.test(status);}
+function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";syncLiveGiveTransportStatus();syncGiveItemControls();}
+function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=kind==="ok"?"empty mt":"warning mt";}
+function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(give)give.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||!liveGiveServerOnline||(mode==="execute"&&!adminLiveGiveAvailable);if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
+async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const data=await getJson("/api/status");liveGiveServerOnline=isServerOnlineStatus(data);setGiveServerStatus(liveGiveServerOnline?"Server Status: Online. Give Item is available.":"Server Status: Offline. Start the server before using Give Item.",liveGiveServerOnline?"ok":"warn");await refreshLiveGiveEnv();return data;}catch(e){liveGiveServerOnline=false;setGiveServerStatus("Server Status: Offline. "+betterError(e),"warn");return null;}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
+async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;syncLiveGiveMode();await checkGiveItemServerStatus();syncLiveGiveTransportStatus();}
+async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
+async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking server status...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server)){log.textContent="Server is offline. Start the server before using Give Item.";addActivity("grant","Give Item blocked","Server is offline.");playUiSound("warning");return;}const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}const confirmed=confirm("Server is online. This will publish a real Live Give command. Inventory is not verified unless the backend reports live-verified.");if(!confirmed){addActivity("grant","Live Give cancelled","Confirmation was declined.");playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
+function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
+function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();}
+renderActivity();syncQualityWarning();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshMaps,30000);
+setInterval(refreshPlayerFeed,12000);
+setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active"))refreshLiveMap();},12000);
 </script>
 </body>
 </html>`;
@@ -395,14 +4019,26 @@ async function route(req, res) {
     if (!serveStatic(res, path.join(__dirname, "assets"), url.pathname.replace(/^\/assets\//, ""))) send(res, 404, "text/plain", "Not found");
     return;
   }
+  if (url.pathname.startsWith("/vendor/leaflet/")) {
+    if (!serveStatic(res, path.join(__dirname, "node_modules", "leaflet", "dist"), url.pathname.replace(/^\/vendor\/leaflet\//, ""))) send(res, 404, "text/plain", "Not found");
+    return;
+  }
   if (url.pathname === "/api/status") {
     const vm = await vmInfo();
     let status = null;
+    let raw = "";
     if (vm.exists && vm.state === "Running") {
       const result = await battlegroup("status");
-      status = parseStatus(result.stdout || result.stderr || result.error || "");
+      raw = result.stdout || result.stderr || result.error || "";
+      status = parseStatus(raw);
     }
-    await json(res, { vm, status, directorUrl: lastDirectorUrl });
+    const runtimeTransport = await updateRuntimeGiveTransport({ vm, status, raw }, "status");
+    await json(res, { vm, status, directorUrl: lastDirectorUrl, runtimeTransport });
+    return;
+  }
+  if (url.pathname === "/api/vm-monitor" && req.method === "GET") {
+    try { await json(res, await vmConnectionMonitor()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }
   if (url.pathname === "/api/config" && req.method === "GET") {
@@ -412,6 +4048,204 @@ async function route(req, res) {
   if (url.pathname === "/api/config" && req.method === "POST") {
     try { await json(res, { ok: true, config: saveConfig(JSON.parse(await readBody(req) || "{}")), restartRequired: true }); }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/setup/status" && req.method === "GET") {
+    await json(res, { ok: true, config: publicConfig(), setupComplete: Boolean(loadConfig().setupComplete), discovery: await autoDiscovery() });
+    return;
+  }
+  if (url.pathname === "/api/setup/save" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const saved = saveConfig({ ...loadConfig(), ...body, setupComplete: true });
+      await json(res, { ok: true, config: publicConfig(saved), restartRequired: true });
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/discovery" && req.method === "GET") {
+    try { await json(res, await autoDiscovery()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname.startsWith("/api/test/") && req.method === "POST") {
+    await json(res, await connectionTest(url.pathname.replace("/api/test/", "")));
+    return;
+  }
+  if (url.pathname === "/api/receiver/status" && req.method === "GET") {
+    await json(res, await receiverStatus());
+    return;
+  }
+  if (url.pathname === "/api/receiver/start" && req.method === "POST") {
+    try { await json(res, await startManagedReceiver()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/receiver/stop" && req.method === "POST") {
+    await json(res, stopManagedReceiver());
+    return;
+  }
+  if (url.pathname === "/api/receiver/restart" && req.method === "POST") {
+    try {
+      stopManagedReceiver();
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      await json(res, await startManagedReceiver());
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/settings/export" && req.method === "GET") {
+    await json(res, { ok: true, exportedAt: new Date().toISOString(), version: APP_VERSION, config: loadConfig() });
+    return;
+  }
+  if (url.pathname === "/api/settings/import" && req.method === "POST") {
+    try { await json(res, { ok: true, config: publicConfig(importSettings(JSON.parse(await readBody(req) || "{}"))), restartRequired: true }); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/diagnostics" && req.method === "GET") {
+    try { await json(res, await diagnosticsSnapshot()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/updates/check" && req.method === "GET") {
+    await json(res, await checkGitHubUpdates(url.searchParams.get("repo")));
+    return;
+  }
+  if (url.pathname === "/api/maps" && req.method === "GET") {
+    try { await json(res, await mapDeploymentList()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/world-map/metadata" && req.method === "GET") {
+    try { await json(res, await worldMapMetadata()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/live-map/entities" && req.method === "GET") {
+    try { await json(res, await liveMapEntities()); }
+    catch (error) { await json(res, { ok: false, layers: { players: [], vehicles: [], bases: [] }, errors: [error.message], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/live-map/teleport" && req.method === "POST") {
+    try { await json(res, await liveMapTeleportPreview(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/maps/deploy" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await setMapReplicas(body.map, body.replicas);
+      await json(res, result, result.ok ? 200 : 500);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/probe" && req.method === "GET") {
+    try { await json(res, await adminProbe()); }
+    catch (error) { await json(res, adminProbeUnavailable(error), 500); }
+    return;
+  }
+  if (url.pathname === "/api/live-give/env" && req.method === "GET") {
+    try { await json(res, await liveGiveEnvStatus()); }
+    catch (error) { await json(res, { ok: false, liveGiveAvailable: false, missingEnv: [], message: error.message, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/players" && req.method === "GET") {
+    try { await json(res, await adminPlayers()); }
+    catch (error) { await json(res, { ok: false, players: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/players/feed" && req.method === "GET") {
+    try { await json(res, await playersFeed()); }
+    catch (error) { await json(res, { ok: false, players: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/items" && req.method === "GET") {
+    const items = gearCatalog();
+    await json(res, { ok: true, items });
+    return;
+  }
+  if (url.pathname === "/api/admin/tuned-channels" && req.method === "GET") {
+    try { await json(res, await adminTunedChannels()); }
+    catch (error) { await json(res, { ok: false, rows: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/permissions" && req.method === "GET") {
+    try { await json(res, await adminPermissions(url.searchParams.get("playerControllerId"))); }
+    catch (error) { await json(res, { ok: false, guildMembers: [], objectPermissions: [], accessCodes: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/permissions/set-rank" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminSetPermissionRank(body));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/permissions/create-access-code" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminCreateAccessCode(body));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation" && req.method === "GET") {
+    try { await json(res, await adminSkillReputation(url.searchParams.get("playerControllerId"))); }
+    catch (error) { await json(res, { ok: false, tracks: [], reputation: [], factions: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation/give-skill-points" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminSpecializationAction(body, "add"));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation/set-skill-points" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminSpecializationAction(body, "set"));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation/add-reputation" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminReputationAction(body, "add"));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/skill-reputation/set-reputation" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminReputationAction(body, "set"));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/give-item" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await adminGiveItem(body);
+      await json(res, result, result.ok || result.dryRun ? 200 : 409);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname.startsWith("/api/action/") && req.method === "POST") {
@@ -453,9 +4287,19 @@ const server = http.createServer((req, res) => {
   route(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
 });
 
-server.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, async () => {
   console.log(`AlphaNine Dune Suite: http://${HOST}:${PORT}`);
   console.log(`Expected server install: ${DEFAULT_SERVER_ROOT}`);
+  try {
+    await updateRuntimeGiveTransport(null, "startup");
+  } catch (error) {
+    runtimeGiveTransport.mode = "dry-run";
+    runtimeGiveTransport.serverOnline = false;
+    runtimeGiveTransport.reason = error.message || "Server Offline or Not Healthy.";
+    runtimeGiveTransport.initialized = true;
+    appendAdminAudit("startup_transport_dry_run", { source: "startup", transport: "dry-run", serverOnline: false, reason: runtimeGiveTransport.reason });
+  }
+  logLiveGiveStartupValidation();
 });
 
 process.on("exit", () => {

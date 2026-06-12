@@ -7,33 +7,55 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #10120f;
-      --panel: #171b18;
-      --panel-2: #20251f;
-      --line: #384038;
-      --text: #f4ead8;
-      --muted: #b9ad98;
-      --accent: #e4aa55;
-      --accent-2: #6fb4ac;
-      --bad: #d97461;
-      --good: #8bc77d;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --bg: #050603;
+      --bg-2: #090b07;
+      --panel: #10110d;
+      --panel-2: #17150f;
+      --line: rgba(212, 165, 74, 0.42);
+      --line-soft: rgba(212, 165, 74, 0.18);
+      --line-strong: rgba(240, 201, 106, 0.72);
+      --text: #e8e3d9;
+      --muted: #9f9276;
+      --accent: #d4a54a;
+      --accent-bright: #f0c96a;
+      --bad: #ff5c5c;
+      --good: #62d26f;
+      font-family: "Rajdhani", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       background:
-        radial-gradient(circle at 12% 0%, rgba(228, 170, 85, .18), transparent 30%),
-        radial-gradient(circle at 90% 8%, rgba(111, 180, 172, .14), transparent 28%),
-        var(--bg);
+        radial-gradient(circle at 76% 0%, rgba(212, 165, 74, .18), transparent 28%),
+        radial-gradient(circle at 18% 2%, rgba(111, 80, 30, .2), transparent 30%),
+        linear-gradient(160deg, #050603 0%, #0d0f08 48%, #060704 100%);
       color: var(--text);
     }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .35;
+      background:
+        linear-gradient(rgba(212, 165, 74, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(212, 165, 74, .03) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: linear-gradient(180deg, black, transparent 86%);
+    }
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-track { background: #070806; }
+    *::-webkit-scrollbar-thumb {
+      background: rgba(212, 165, 74, .45);
+      border: 2px solid #070806;
+    }
+    *::-webkit-scrollbar-thumb:hover { background: rgba(240, 201, 106, .72); }
     button, input, select, textarea { font: inherit; }
     .wrap { width: min(1380px, calc(100% - 28px)); margin: 0 auto; }
     header {
-      padding: 22px 0 18px;
-      border-bottom: 1px solid rgba(244, 234, 216, .12);
-      background: rgba(16, 18, 15, .78);
+      padding: 14px 0;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(18, 18, 12, .95), rgba(6, 8, 5, .9));
       position: sticky;
       top: 0;
       z-index: 3;
@@ -45,116 +67,46 @@
       gap: 18px;
       align-items: center;
     }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      min-width: 0;
-    }
+    .brand { min-width: 0; }
     .brand-logo {
+      display: none;
       width: 64px;
       height: 64px;
       object-fit: cover;
       border-radius: 8px;
-      border: 1px solid rgba(111, 180, 172, .7);
-      box-shadow: 0 0 24px rgba(111, 180, 172, .16), 0 0 18px rgba(228, 170, 85, .12);
+      border: 1px solid var(--line-strong);
+      box-shadow: 0 0 24px rgba(212, 165, 74, .16), 0 0 18px rgba(240, 201, 106, .12);
       flex: 0 0 auto;
     }
     .brand-copy { min-width: 0; }
-    h1 { margin: 0; font-size: clamp(26px, 3vw, 42px); letter-spacing: 0; }
-    .sub { color: var(--muted); margin-top: 5px; line-height: 1.45; }
+    h1 { margin: 0; font-size: 20px; letter-spacing: 0; }
+    .sub { color: var(--muted); margin-top: 4px; line-height: 1.35; font-size: 12px; text-transform: uppercase; letter-spacing: .1em; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
-    .kofi-widget {
-      display: flex;
-      align-items: center;
-      min-height: 40px;
-    }
-    .kofi-fallback {
-      display: inline-flex;
-      align-items: center;
-      min-height: 40px;
-      padding: 0 14px;
-      border: 1px solid #a9c9ff;
-      background: #72a4f2;
-      color: #08111f;
-      font-weight: 800;
-      text-decoration: none;
-      border-radius: 4px;
-    }
     .btn {
-      border: 1px solid var(--line);
-      background: var(--panel-2);
-      color: var(--text);
+      border: 1px solid rgba(212, 165, 74, .38);
+      background: linear-gradient(180deg, rgba(30, 29, 18, .95), rgba(10, 12, 8, .95));
+      color: var(--accent-bright);
       min-height: 40px;
       padding: 0 12px;
       cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      font-weight: 800;
     }
-    .btn:hover { border-color: var(--accent); }
-    .btn.primary { background: #d5923d; border-color: #ecb56b; color: #17110b; font-weight: 800; }
+    .btn:hover {
+      border-color: var(--line-strong);
+      background: linear-gradient(180deg, rgba(51, 43, 22, .96), rgba(14, 13, 8, .96));
+      box-shadow: 0 0 18px rgba(212, 165, 74, .13);
+    }
+    .btn.primary {
+      background: linear-gradient(180deg, rgba(159, 111, 38, .98), rgba(78, 55, 22, .98));
+      border-color: var(--line-strong);
+      color: #fff1c8;
+      font-weight: 900;
+    }
     .btn.ghost { background: transparent; }
     .btn.compact { min-height: 32px; padding: 0 9px; font-size: 12px; }
-    .dune-banner {
-      margin: 18px auto 0;
-      min-height: 150px;
-      border: 1px solid rgba(216, 162, 76, .36);
-      border-radius: 8px;
-      overflow: hidden;
-      position: relative;
-      background:
-        radial-gradient(circle at 78% 18%, rgba(255, 220, 140, .5) 0 7%, rgba(255, 220, 140, .16) 8% 15%, transparent 16%),
-        linear-gradient(180deg, rgba(20, 25, 30, .1), rgba(16, 17, 20, .88)),
-        linear-gradient(120deg, rgba(216, 162, 76, .32), rgba(123, 183, 255, .12) 54%, rgba(0, 0, 0, .28));
-      box-shadow: inset 0 0 85px rgba(0, 0, 0, .42), 0 18px 46px rgba(0, 0, 0, .2);
-    }
-    .dune-banner::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background:
-        linear-gradient(168deg, transparent 0 42%, rgba(227, 157, 70, .54) 43%, rgba(227, 157, 70, .14) 56%, transparent 57%),
-        linear-gradient(8deg, rgba(67, 45, 29, .74) 0 31%, transparent 32%),
-        linear-gradient(350deg, transparent 0 54%, rgba(245, 195, 111, .34) 55%, rgba(245, 195, 111, .08) 68%, transparent 69%);
-      opacity: .96;
-    }
-    .dune-banner::after {
-      content: "";
-      position: absolute;
-      inset: auto -8% 0 -8%;
-      height: 48%;
-      background:
-        linear-gradient(170deg, transparent 0 28%, rgba(164, 92, 39, .62) 29%, rgba(164, 92, 39, .18) 58%, transparent 59%),
-        linear-gradient(7deg, rgba(35, 26, 19, .84), rgba(147, 84, 37, .42) 52%, transparent 53%);
-    }
-    .banner-content {
-      position: relative;
-      z-index: 1;
-      min-height: 150px;
-      display: grid;
-      align-content: end;
-      justify-items: start;
-      padding: 24px;
-      max-width: 720px;
-    }
-    .banner-kicker {
-      color: #f4d19a;
-      font-size: 12px;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-      margin-bottom: 7px;
-    }
-    .banner-title {
-      margin: 0;
-      font-size: 25px;
-      line-height: 1.08;
-      text-shadow: 0 2px 18px rgba(0, 0, 0, .56);
-    }
-    .banner-copy {
-      margin: 8px 0 0;
-      color: #e7dcc8;
-      line-height: 1.45;
-    }
-    main { padding: 18px 0 34px; }
+    main { padding: 14px 0 34px; }
     .toolbar {
       display: grid;
       grid-template-columns: minmax(220px, 1fr) 190px 150px 150px;
@@ -165,7 +117,7 @@
       min-width: 0;
       height: 42px;
       border: 1px solid var(--line);
-      background: rgba(0,0,0,.24);
+      background: rgba(6, 8, 5, .9);
       color: var(--text);
       padding: 0 12px;
       outline: none;
@@ -177,10 +129,14 @@
       align-items: start;
     }
     .panel {
-      background: rgba(23, 27, 24, .92);
+      background: linear-gradient(180deg, rgba(19, 19, 12, .94), rgba(5, 7, 5, .88));
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 0;
       overflow: hidden;
+      box-shadow:
+        inset 0 0 0 1px rgba(240, 201, 106, .05),
+        inset 0 -42px 70px rgba(0, 0, 0, .34),
+        0 28px 90px rgba(0, 0, 0, .42);
     }
     .panel-head {
       padding: 13px 14px;
@@ -196,16 +152,10 @@
       color: var(--muted);
       padding: 5px 8px;
       font-size: 12px;
-      background: rgba(255,255,255,.04);
-    }
-    .version {
-      color: #17110b;
-      background: var(--accent);
-      border-color: #edc17d;
-      font-weight: 800;
+      background: rgba(212, 165, 74, .08);
     }
     .list {
-      height: calc(100vh - 210px);
+      height: calc(100vh - 156px);
       min-height: 520px;
       overflow: auto;
     }
@@ -213,7 +163,7 @@
       width: 100%;
       text-align: left;
       border: 0;
-      border-bottom: 1px solid rgba(244, 234, 216, .08);
+      border-bottom: 1px solid var(--line-soft);
       background: transparent;
       color: var(--text);
       padding: 12px 14px;
@@ -223,7 +173,7 @@
       gap: 10px;
       align-items: center;
     }
-    .item:hover, .item.active { background: rgba(228, 170, 85, .09); }
+    .item:hover, .item.active { background: rgba(212, 165, 74, .11); }
     .item-body { display: grid; gap: 4px; min-width: 0; }
     .item-title { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
     .item-title strong { overflow-wrap: anywhere; }
@@ -232,8 +182,8 @@
     .item-thumb {
       width: 46px;
       aspect-ratio: 1;
-      border: 1px solid rgba(244, 234, 216, .12);
-      background: rgba(0,0,0,.2);
+      border: 1px solid var(--line-soft);
+      background: rgba(6, 8, 5, .72);
       display: grid;
       place-items: center;
       overflow: hidden;
@@ -273,10 +223,10 @@
     .item-art {
       width: 150px;
       aspect-ratio: 1;
-      border: 1px solid rgba(244, 234, 216, .14);
+      border: 1px solid var(--line);
       background:
-        radial-gradient(circle at 38% 26%, rgba(228, 170, 85, .28), transparent 32%),
-        linear-gradient(145deg, rgba(111, 180, 172, .14), rgba(0,0,0,.16));
+        radial-gradient(circle at 38% 26%, rgba(240, 201, 106, .24), transparent 32%),
+        linear-gradient(145deg, rgba(78, 55, 22, .42), rgba(0,0,0,.22));
       display: grid;
       place-items: center;
       overflow: hidden;
@@ -290,13 +240,13 @@
     .item-symbol {
       width: 82px;
       height: 82px;
-      border: 1px solid rgba(228, 170, 85, .42);
+      border: 1px solid var(--line);
       display: grid;
       place-items: center;
-      color: var(--accent);
+      color: var(--accent-bright);
       font-size: 28px;
       font-weight: 900;
-      background: rgba(0,0,0,.18);
+      background: rgba(6, 8, 5, .78);
     }
     h2 { margin: 0; font-size: 18px; line-height: 1.25; letter-spacing: 0; overflow-wrap: anywhere; }
     .detail-info .actions { justify-content: flex-start; }
@@ -307,15 +257,15 @@
       margin: 14px 0;
     }
     .stat {
-      border: 1px solid rgba(244, 234, 216, .12);
-      background: rgba(0,0,0,.18);
+      border: 1px solid var(--line-soft);
+      background: rgba(6, 8, 5, .72);
       padding: 11px;
       min-height: 72px;
     }
     .stat span { color: var(--muted); font-size: 12px; display: block; }
     .stat strong { display: block; margin-top: 6px; overflow-wrap: anywhere; }
     .tags { display: flex; gap: 7px; flex-wrap: wrap; margin: 14px 0; }
-    .tag { color: #cddfdc; border: 1px solid rgba(111, 180, 172, .34); background: rgba(111, 180, 172, .08); padding: 5px 8px; font-size: 12px; }
+    .tag { color: var(--accent-bright); border: 1px solid var(--line-soft); background: rgba(212, 165, 74, .08); padding: 5px 8px; font-size: 12px; }
     textarea {
       width: 100%;
       min-height: 130px;
@@ -328,8 +278,8 @@
     .side-body { padding: 14px; display: grid; gap: 12px; }
     .mini-list { display: grid; gap: 8px; max-height: 230px; overflow: auto; }
     .mini {
-      border: 1px solid rgba(244, 234, 216, .1);
-      background: rgba(0,0,0,.18);
+      border: 1px solid var(--line-soft);
+      background: rgba(6, 8, 5, .72);
       padding: 9px;
       display: flex;
       justify-content: space-between;
@@ -344,14 +294,14 @@
     }
     .compare-card {
       border: 1px solid var(--line);
-      background: rgba(0,0,0,.16);
+      background: rgba(6, 8, 5, .72);
       padding: 12px;
     }
     .toast {
       position: fixed;
       right: 18px;
       bottom: 18px;
-      background: var(--accent);
+      background: linear-gradient(180deg, var(--accent-bright), var(--accent));
       color: #17110b;
       padding: 12px 14px;
       font-weight: 800;
@@ -371,10 +321,6 @@
       header { position: static; }
       .top, .toolbar, .layout { grid-template-columns: 1fr; }
       .actions { justify-content: flex-start; }
-      .brand-logo { width: 56px; height: 56px; }
-      .dune-banner, .banner-content { min-height: 164px; }
-      .banner-content { padding: 18px; }
-      .banner-title { font-size: 21px; }
       .list { height: 360px; min-height: 360px; }
       .grid, .compare, .side-body { grid-template-columns: 1fr; }
       .detail-top { grid-template-columns: 1fr; }
@@ -394,26 +340,12 @@
         </div>
       </div>
       <div class="actions">
-        <div class="kofi-widget">
-          <a class="kofi-fallback" href="https://ko-fi.com/E1W220NMPA" target="_blank" rel="noopener noreferrer">Support me on Ko-fi</a>
-          <script type="text/javascript" src="https://storage.ko-fi.com/cdn/widget/Widget_2.js"></script>
-          <script type="text/javascript">(function(){const root=document.currentScript.closest('.kofi-widget');if(window.kofiwidget2){root.querySelector('.kofi-fallback')?.remove();kofiwidget2.init('Support me on Ko-fi','#72a4f2','E1W220NMPA');kofiwidget2.draw();}}());</script>
-        </div>
-        <span class="pill version">v1.0.1</span>
         <button class="btn" id="exportBtn">Export Notes</button>
         <button class="btn" id="importBtn">Import Notes</button>
         <button class="btn primary" id="addCustomBtn">Add Custom</button>
       </div>
     </div>
   </header>
-
-  <section class="wrap dune-banner" aria-label="Dune Gear Codex banner">
-    <div class="banner-content">
-      <div class="banner-kicker">AlphaNine field archive</div>
-      <h2 class="banner-title">Weapons, armor, vehicles, tools, and resources at a glance.</h2>
-      <p class="banner-copy">Browse the local codex, favorite important gear, and keep notes for your next run across Arrakis.</p>
-    </div>
-  </section>
 
   <main class="wrap">
     <div class="toolbar">

@@ -1,8 +1,13 @@
 node_modules/
+.env
+.env.local
 *.log
 *.tmp
 *.zip
 dist/
 installer-output/
+out/
+release/
+.electron-builder-cache/
 manager/*.pyc
 manager/__pycache__/

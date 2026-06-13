@@ -63,8 +63,10 @@
       "signAndEditExecutable": false
     },
     "nsis": {
-      "oneClick": true,
-      "perMachine": false
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "allowElevation": true
     }
   }
 }

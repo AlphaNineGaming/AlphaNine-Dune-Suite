@@ -129,7 +129,11 @@ function createFirstRunFiles() {
         updateRepo: "AlphaNineGaming/alphanine-dune-suite",
         panelTitle: "AlphaNine Dune Suite",
         panelSubtitle: "Unified local tools for your self-hosted server",
-        serverInstallPath: "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server"
+        serverInstallPath: "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server",
+        liveTeleportEnabled: true,
+        teleportEndpointPath: "/api/v1/players/teleport-coords",
+        teleportCommandTemplate: "",
+        teleportSafeZOffset: 1000
       }, null, 2), "utf8");
     }
   }
@@ -159,6 +163,14 @@ function loadEnvironment() {
   if (cfg.receiverToken) {
     process.env.DUNE_RECEIVER_TOKEN = cfg.receiverToken;
     process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || cfg.receiverToken;
+  }
+  if (cfg.liveTeleportEnabled === true || cfg.liveTeleportEnabled === "true") {
+    process.env.DUNE_RECEIVER_LIVE_TELEPORT_ENABLED = "true";
+  } else if (Object.prototype.hasOwnProperty.call(cfg, "liveTeleportEnabled")) {
+    process.env.DUNE_RECEIVER_LIVE_TELEPORT_ENABLED = "false";
+  }
+  if (cfg.teleportSafeZOffset) {
+    process.env.DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET = String(cfg.teleportSafeZOffset);
   }
   const receiverHost = process.env.DUNE_RECEIVER_HOST || RECEIVER_DEFAULT_HOST;
   const receiverPort = process.env.DUNE_RECEIVER_PORT || String(RECEIVER_DEFAULT_PORT);

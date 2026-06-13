@@ -6,11 +6,13 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const APP_VERSION = "0.2.2-beta";
+const APP_VERSION = "0.2.3-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
 const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || path.join(__dirname, "config.json");
+const TELEPORT_PRESETS_PATH = process.env.ALPHANINE_TELEPORT_PRESETS_PATH || path.join(__dirname, "assets", "teleport-location-presets.json");
+const TELEPORT_PLACEHOLDER_COMMAND = "teleport {playerId} {x} {y} {z}";
 const ADMIN_AUDIT_LOG = process.env.APPDATA
   ? path.join(process.env.APPDATA, "AlphaNine Dune Suite", "admin-audit.log")
   : path.join(__dirname, "admin-audit.log");
@@ -54,6 +56,10 @@ const defaultConfig = {
   panelTitle: "AlphaNine Dune Suite",
   panelSubtitle: "Unified local tools for your self-hosted server",
   serverInstallPath: "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server",
+  liveTeleportEnabled: true,
+  teleportEndpointPath: "/api/v1/players/teleport-coords",
+  teleportCommandTemplate: "",
+  teleportPayloadTemplate: "{\n  \"fls_id\": \"{playerId}\",\n  \"x\": {x},\n  \"y\": {y},\n  \"z\": {z},\n  \"partition_id\": {partitionId},\n  \"dryRun\": {dryRun},\n  \"test\": {test}\n}",
   uiSoundsEnabled: true,
   uiSoundVolume: 100
 };
@@ -66,8 +72,13 @@ function loadConfig() {
   return { ...defaultConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")) };
 }
 
+function effectiveTeleportCommandTemplate(value) {
+  const template = String(value || "").trim();
+  return template === TELEPORT_PLACEHOLDER_COMMAND ? "" : template;
+}
+
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "uiSoundsEnabled", "uiSoundVolume"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "uiSoundsEnabled", "uiSoundVolume"];
   const clean = {};
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(nextConfig, key)) clean[key] = nextConfig[key];
@@ -97,6 +108,11 @@ function saveConfig(nextConfig) {
   clean.panelTitle = String(clean.panelTitle || "AlphaNine Dune Suite").trim();
   clean.panelSubtitle = String(clean.panelSubtitle || "Unified local tools for your self-hosted server").trim();
   clean.serverInstallPath = String(clean.serverInstallPath || "").trim();
+  clean.liveTeleportEnabled = clean.liveTeleportEnabled === true || clean.liveTeleportEnabled === "true";
+  clean.teleportEndpointPath = String(clean.teleportEndpointPath || "/api/v1/players/teleport-coords").trim();
+  if (!clean.teleportEndpointPath.startsWith("/")) clean.teleportEndpointPath = `/${clean.teleportEndpointPath}`;
+  clean.teleportCommandTemplate = effectiveTeleportCommandTemplate(clean.teleportCommandTemplate);
+  clean.teleportPayloadTemplate = String(clean.teleportPayloadTemplate || defaultConfig.teleportPayloadTemplate).trim();
   clean.uiSoundsEnabled = clean.uiSoundsEnabled === true || clean.uiSoundsEnabled === "true";
   clean.uiSoundVolume = Math.max(0, Math.min(100, Number(clean.uiSoundVolume) || 0));
   if (clean.port < 1 || clean.port > 65535) throw new Error("Port must be between 1 and 65535.");
@@ -290,6 +306,7 @@ async function startManagedReceiver() {
     DUNE_RECEIVER_SSH_HOST: cfg.receiverSshHost || cfg.vmIp || process.env.DUNE_RECEIVER_SSH_HOST || "",
     DUNE_RECEIVER_SSH_USER: cfg.receiverSshUser || cfg.sshUser || process.env.DUNE_RECEIVER_SSH_USER || "",
     DUNE_RECEIVER_SSH_KEY: expandEnvPath(cfg.receiverSshKey || cfg.sshKey || process.env.DUNE_RECEIVER_SSH_KEY || ""),
+    DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: cfg.liveTeleportEnabled ? "true" : "false",
     DUNE_ADMIN_GIVE_ITEM_URL: urls.giveUrl,
     DUNE_ADMIN_GIVE_ITEM_HEALTH_URL: urls.healthUrl,
     DUNE_ADMIN_GIVE_ITEM_TOKEN: cfg.receiverToken || process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || ""
@@ -1576,7 +1593,8 @@ async function adminPlayers() {
     )
     select
       a.account_id::text,
-      coalesce(ac.funcom_id, ac.user, '') as funcom_id,
+      coalesce(ac.user, '') as fls_id,
+      coalesce(ac.funcom_id, '') as funcom_id,
       coalesce(ps.player_controller_id::text, '') as player_controller_id,
       coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
       coalesce(nullif(ps.character_name, ''), a.account_id::text) as character_name,
@@ -1590,11 +1608,12 @@ async function adminPlayers() {
   try {
     const output = await dbQuery(characterQuery);
     const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
-      const [accountId = "", funcomId = "", playerControllerId = "", characterId = "", characterName = "", resolved = "false"] = line.split("\t");
+      const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", characterName = "", resolved = "false"] = line.split("\t");
       return {
         id: accountId,
         name: characterName || accountId || "Unknown",
         account_id: accountId,
+        fls_id: flsId,
         funcom_id: funcomId,
         player_controller_id: playerControllerId,
         character_id: characterId,
@@ -1795,7 +1814,8 @@ async function playersFeed() {
     )
     select
       a.account_id::text,
-      coalesce(ac.funcom_id, ac.user, '') as funcom_id,
+      coalesce(ac.user, '') as fls_id,
+      coalesce(ac.funcom_id, '') as funcom_id,
       coalesce(ps.player_controller_id::text, '') as player_controller_id,
       coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
       coalesce(nullif(ps.character_name, ''), a.account_id::text) as character_name,
@@ -1812,7 +1832,7 @@ async function playersFeed() {
   const output = await dbQuery(feedQuery);
   const seen = new Set();
   const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
-    const [accountId = "", funcomId = "", playerControllerId = "", characterId = "", characterName = "", level = "", onlineState = "", statusText = "", lastSeen = ""] = line.split("\t");
+    const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", characterName = "", level = "", onlineState = "", statusText = "", lastSeen = ""] = line.split("\t");
     const rawStatus = String(onlineState || statusText || "").toLowerCase();
     let status = "unknown";
     if (/online|connected|active|true|1/.test(rawStatus)) status = "online";
@@ -1821,6 +1841,7 @@ async function playersFeed() {
       id: accountId,
       name: characterName || accountId || "Unknown",
       account_id: accountId,
+      fls_id: flsId,
       funcom_id: funcomId,
       player_controller_id: playerControllerId,
       character_id: characterId,
@@ -1853,6 +1874,7 @@ function liveMapPickColumn(columns, patterns) {
 
 function liveMapPlayerIdentityKeys(player) {
   return [
+    player.fls_id,
     player.account_id,
     player.player_controller_id,
     player.character_id,
@@ -2016,10 +2038,11 @@ async function liveMapPlayerPositions(players, discovery, quoteIdent) {
         if (matchKey) matchedKeys.add(String(matchKey));
         matched.push({
           id: row.player_controller_id || row.character_id || row.account_id || row.pawn_entity_id || `player-${matched.length + 1}`,
-          fls_id: row.player_controller_id || "",
+          fls_id: identity?.fls_id || "",
           name: row.character_name || identity?.name || identity?.character_name || row.account_id || "Player",
           character_name: row.character_name || identity?.name || "",
           account_id: row.account_id || identity?.account_id || "",
+          funcom_id: identity?.funcom_id || "",
           player_controller_id: row.player_controller_id || identity?.player_controller_id || "",
           pawn_entity_id: row.pawn_entity_id || "",
           online: liveMapNormalizeStatus(row.online_status || identity?.status),
@@ -2061,6 +2084,8 @@ async function liveMapEntities() {
       positionSourceTable: "",
       rawPlayerRecords: [],
       positionDiscovery: [],
+      counts: { players: 0, vehicles: 0, bases: 0 },
+      entitySources: { vehicles: "unavailable", bases: "unavailable" },
       missingReason: "",
       markerCount: 0
     }
@@ -2110,38 +2135,44 @@ async function liveMapEntities() {
   } catch (error) {
     result.errors.push(`player position discovery: ${error.message}`);
   }
-  const metaOutput = await dbQuery(`
-    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
-    from information_schema.columns
-    where table_schema = 'dune'
-      and (
-        lower(table_name) like '%vehicle%' or
-        lower(table_name) like '%base%' or
-        lower(table_name) like '%building%' or
-        lower(table_name) like '%marker%' or
-        lower(table_name) like '%poi%'
-      )
-    group by table_name
-    order by table_name
-    limit 90
-  `, 45000);
-  const tables = metaOutput.split(/\r?\n/).filter(Boolean).map((line) => {
-    const [table = "", raw = ""] = line.split("\t");
-    const columns = raw.split(",").filter(Boolean);
-    return { table, columns, lower: columns.map((column) => column.toLowerCase()) };
-  });
+  let tables = [];
+  try {
+    const metaOutput = await dbQuery(`
+      select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
+      from information_schema.columns
+      where table_schema = 'dune'
+        and lower(table_name) ~ '(vehicle|sandbike|buggy|ornithopter|base|building|structure|claim|owned|garage|placeable|marker|poi)'
+      group by table_name
+      order by table_name
+      limit 140
+    `, 45000);
+    tables = metaOutput.split(/\r?\n/).filter(Boolean).map((line) => {
+      const [table = "", raw = ""] = line.split("\t");
+      const columns = raw.split(",").filter(Boolean);
+      return { table, columns, lower: columns.map((column) => column.toLowerCase()) };
+    });
+  } catch (error) {
+    result.errors.push(`base/vehicle table discovery: ${error.message}`);
+  }
   const kinds = [
-    { kind: "vehicles", label: "Vehicles", table: /vehicle|sandbike|buggy|ornithopter/i },
-    { kind: "bases", label: "Bases", table: /base|building|structure|claim/i }
+    { kind: "vehicles", label: "Vehicles", table: /vehicle|sandbike|buggy|ornithopter|garage/i },
+    { kind: "bases", label: "Bases", table: /base|building|structure|claim|placeable/i }
   ];
   const allPoints = [...result.layers.players];
   for (const spec of kinds) {
     const candidates = tables.filter((row) => spec.table.test(row.table));
+    if (!candidates.length) {
+      result.sources.push({ kind: spec.kind, table: "", status: "unavailable", rows: 0, coordinateRows: 0, reason: `No ${spec.label.toLowerCase()} tables discovered with candidate names.` });
+      continue;
+    }
     for (const candidate of candidates) {
       const lowerToReal = new Map(candidate.columns.map((column) => [column.toLowerCase(), column]));
       const xCol = liveMapPickColumn(candidate.lower, [/^x$/, /pos.*x/, /position.*x/, /location.*x/, /world.*x/, /coord.*x/]);
-      const yCol = liveMapPickColumn(candidate.lower, [/^y$/, /^z$/, /pos.*y/, /pos.*z/, /position.*y/, /position.*z/, /location.*y/, /location.*z/, /world.*y/, /world.*z/, /coord.*y/]);
-      if (!xCol || !yCol) continue;
+      const yCol = liveMapPickColumn(candidate.lower, [/^y$/, /pos.*y/, /position.*y/, /location.*y/, /world.*y/, /coord.*y/]);
+      if (!xCol || !yCol) {
+        result.sources.push({ kind: spec.kind, table: `dune.${candidate.table}`, status: "unavailable", rows: 0, coordinateRows: 0, x: xCol ? lowerToReal.get(xCol) : "", y: yCol ? lowerToReal.get(yCol) : "", reason: "No usable X/Y coordinate columns detected." });
+        continue;
+      }
       const zCol = liveMapPickColumn(candidate.lower, [/^z$/, /height/, /altitude/]);
       const idCol = liveMapPickColumn(candidate.lower, [/^id$/, /player.*id/, /vehicle.*id/, /base.*id/, /building.*id/, /account.*id/]);
       const nameCol = liveMapPickColumn(candidate.lower, [/name/, /label/, /display/]);
@@ -2151,7 +2182,7 @@ async function liveMapEntities() {
       const id = idCol ? quoteIdent(lowerToReal.get(idCol)) : "null";
       const name = nameCol ? quoteIdent(lowerToReal.get(nameCol)) : "null";
       const sql = `select coalesce(${id}::text, '') as id, coalesce(${name}::text, '') as name, ${x}::double precision as x, ${y}::double precision as y, ${z}::text as z from dune.${quoteIdent(candidate.table)} where ${x} is not null and ${y} is not null limit 200`;
-      const source = { kind: spec.kind, table: `dune.${candidate.table}`, x: lowerToReal.get(xCol), y: lowerToReal.get(yCol), z: zCol ? lowerToReal.get(zCol) : "", rows: 0, coordinateRows: 0 };
+      const source = { kind: spec.kind, table: `dune.${candidate.table}`, status: "checking", x: lowerToReal.get(xCol), y: lowerToReal.get(yCol), z: zCol ? lowerToReal.get(zCol) : "", rows: 0, coordinateRows: 0 };
       try {
         const output = await dbQuery(sql, 30000);
         const loadedRows = output.split(/\r?\n/).filter(Boolean).map((line, index) => {
@@ -2163,10 +2194,12 @@ async function liveMapEntities() {
         const rows = loadedRows.filter((row) => Number.isFinite(row.x) && Number.isFinite(row.y));
         source.rows = loadedRows.length;
         source.coordinateRows = rows.length;
+        source.status = rows.length ? "real" : "empty";
         result.sources.push(source);
         result.layers[spec.kind] = rows;
         if (rows.length) break;
       } catch (error) {
+        source.status = "unavailable";
         source.error = error.message;
         result.sources.push(source);
         result.errors.push(`${source.table}: ${error.message}`);
@@ -2178,7 +2211,15 @@ async function liveMapEntities() {
     const ys = allPoints.map((row) => row.y);
     result.bounds = { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
   }
+  result.debug.counts = { players: result.layers.players.length, vehicles: result.layers.vehicles.length, bases: result.layers.bases.length };
+  for (const kind of ["vehicles", "bases"]) {
+    const source = result.sources.find((row) => row.kind === kind && row.status === "real")
+      || result.sources.find((row) => row.kind === kind && row.status === "empty")
+      || result.sources.find((row) => row.kind === kind);
+    result.debug.entitySources[kind] = source?.status || "unavailable";
+  }
   result.debug.markerCount = result.layers.players.length + result.layers.vehicles.length + result.layers.bases.length;
+  console.log("[AlphaNine Live Map] entity counts", JSON.stringify({ players: result.layers.players.length, vehicles: result.layers.vehicles.length, bases: result.layers.bases.length, entitySources: result.debug.entitySources }));
   result.debug.playerPositionUnavailable = result.debug.playersLoaded > 0 && result.debug.playersWithPosition === 0;
   if (result.debug.playerPositionUnavailable) {
     result.debug.missingReason = result.debug.positionSourceTried.length
@@ -2191,18 +2232,195 @@ async function liveMapEntities() {
 }
 
 async function liveMapTeleportPreview(payload) {
-  const playerId = String(payload.playerId || "").trim();
-  const x = Number(payload.x);
-  const y = Number(payload.y);
-  const z = Number(payload.z || 0);
-  if (!playerId) throw new Error("Choose or enter a player/controller id first.");
-  if (![x, y, z].every(Number.isFinite)) throw new Error("Teleport coordinates must be numeric.");
+  const preview = liveMapTeleportRequest(payload, { dryRun: true, test: true });
   return {
     ok: true,
     status: "preview",
-    message: "Teleport-to-coordinate mode is armed as a safe preview. A server-specific teleport command hook can be connected later.",
-    request: { playerId, x, y, z }
+    message: "Teleport preview only. No live teleport command was sent.",
+    ...preview
   };
+}
+
+function receiverHttpAuthToken(configValue = loadConfig()) {
+  return String(
+    configValue.receiverToken
+    || LIVE_GIVE_ENV.httpToken
+    || process.env.DUNE_RECEIVER_TOKEN
+    || process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN
+    || ""
+  ).trim();
+}
+
+function receiverHttpAuthSource(configValue = loadConfig()) {
+  if (configValue.receiverToken) return "config.receiverToken";
+  if (LIVE_GIVE_ENV.httpToken) return "DUNE_ADMIN_GIVE_ITEM_TOKEN";
+  if (process.env.DUNE_RECEIVER_TOKEN) return "DUNE_RECEIVER_TOKEN";
+  if (process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN) return "DUNE_ADMIN_GIVE_ITEM_TOKEN";
+  return "none";
+}
+
+function teleportReceiverUrl(configValue = loadConfig()) {
+  const receiver = receiverUrls(configValue);
+  const pathPart = String(configValue.teleportEndpointPath || "/teleport").trim() || "/teleport";
+  const endpointPath = pathPart.startsWith("/") ? pathPart : `/${pathPart}`;
+  return `http://${receiver.host}:${receiver.port}${endpointPath}`;
+}
+
+function renderTeleportTemplate(template, values) {
+  return String(template || "").replace(/\{([A-Za-z0-9_]+)\}/g, (whole, key) => (
+    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : whole
+  ));
+}
+
+function loadTeleportLocationPresets() {
+  try {
+    if (!fs.existsSync(TELEPORT_PRESETS_PATH)) return { ok: true, presets: [], path: TELEPORT_PRESETS_PATH };
+    const raw = JSON.parse(fs.readFileSync(TELEPORT_PRESETS_PATH, "utf8").replace(/^\uFEFF/, ""));
+    const rows = Array.isArray(raw) ? raw : Array.isArray(raw.presets) ? raw.presets : [];
+    const presets = rows.filter((row) => row && row.enabled !== false).map((row) => {
+      const x = Number(row.x), y = Number(row.y), z = Number(row.z);
+      const partitionId = Number(row.partition_id ?? row.partitionId ?? 0);
+      return {
+        name: String(row.name || "Unnamed location").trim(),
+        map: String(row.map || "HaggaBasin").trim(),
+        x,
+        y,
+        z,
+        partition_id: Number.isFinite(partitionId) ? Math.trunc(partitionId) : 0
+      };
+    }).filter((row) => row.name && [row.x, row.y, row.z].every(Number.isFinite) && row.z !== 0);
+    return { ok: true, presets, path: TELEPORT_PRESETS_PATH };
+  } catch (error) {
+    return { ok: false, presets: [], path: TELEPORT_PRESETS_PATH, error: error.message };
+  }
+}
+
+function resolveTeleportZ(payload, configValue) {
+  const raw = String(payload.z ?? "").trim();
+  const z = Number(raw);
+  if (raw !== "" && Number.isFinite(z) && z !== 0) return { z, warning: "" };
+  throw new Error("Teleport Z/elevation is required. Map clicks provide X/Y only; enter a verified Z, choose a location preset, or use Teleport to Player.");
+}
+
+function liveMapTeleportRequest(payload, options = {}) {
+  const cfg = loadConfig();
+  const playerId = String(payload.playerId || "").trim();
+  const characterName = String(payload.characterName || payload.name || "").trim();
+  const x = Number(payload.x);
+  const y = Number(payload.y);
+  const zInfo = resolveTeleportZ(payload, cfg);
+  const z = zInfo.z;
+  const partitionId = Number(payload.partition_id ?? payload.partitionId ?? 0);
+  const map = String(payload.map || "HaggaBasin").trim();
+  if (!playerId) throw new Error("Choose or enter a player/controller id first.");
+  if (playerId.length > 128 || !/^[A-Za-z0-9_:.+\-# @]+$/.test(playerId)) throw new Error("Player/controller id contains unsupported characters.");
+  if (![x, y, z].every(Number.isFinite)) throw new Error("Teleport coordinates must be numeric.");
+  if (!Number.isFinite(partitionId) || partitionId < 0) throw new Error("Partition ID must be a non-negative number when provided.");
+  const commandTemplate = effectiveTeleportCommandTemplate(cfg.teleportCommandTemplate);
+  const command = commandTemplate ? renderTeleportTemplate(commandTemplate, {
+    playerId,
+    characterName,
+    x,
+    y,
+    z,
+    map,
+    partitionId: Math.trunc(partitionId)
+  }) : `TeleportToExact ${playerId} ${x} ${y} ${z}`;
+  const values = {
+    playerId: jsonPathEscape(playerId),
+    characterName: jsonPathEscape(characterName),
+    x,
+    y,
+    z,
+    partitionId: Math.trunc(partitionId),
+    map: jsonPathEscape(map),
+    command: jsonPathEscape(command),
+    dryRun: options.dryRun === true ? "true" : "false",
+    test: options.test === true ? "true" : "false"
+  };
+  const rendered = renderTeleportTemplate(cfg.teleportPayloadTemplate || defaultConfig.teleportPayloadTemplate, values);
+  let requestPayload;
+  try { requestPayload = JSON.parse(rendered); }
+  catch (error) { throw new Error(`Teleport HTTP JSON payload template rendered invalid JSON: ${error.message}`); }
+  return {
+    endpoint: teleportReceiverUrl(cfg),
+    command,
+    request: requestPayload,
+    warning: zInfo.warning
+  };
+}
+
+async function liveMapTeleportStatus() {
+  const cfg = loadConfig();
+  const availability = await liveGiveServerAvailability();
+  const receiver = await receiverStatus();
+  const hookConfigured = Boolean(String(cfg.teleportEndpointPath || "").trim() && String(cfg.teleportPayloadTemplate || "").trim());
+  const receiverTeleport = receiver?.health?.config?.teleport || {};
+  const receiverLiveTeleportEnabled = receiverTeleport.liveTeleportEnabled !== false;
+  const receiverTeleportSupported = receiverTeleport.teleportSupported !== false;
+  const reasons = [];
+  if (!availability.online) reasons.push("Server is not Healthy.");
+  if (!receiver.ok) reasons.push(`Receiver is not reachable at ${receiver.healthUrl}.`);
+  if (!cfg.liveTeleportEnabled) reasons.push("Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.");
+  if (receiver.ok && receiverTeleport.liveTeleportEnabled === false) reasons.push("Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.");
+  if (!hookConfigured) reasons.push("Teleport endpoint/payload is not configured.");
+  if (receiver.ok && receiverTeleport.teleportSupported === false) reasons.push("Receiver does not support live teleport.");
+  return {
+    ok: true,
+    canTeleport: availability.online && receiver.ok && Boolean(cfg.liveTeleportEnabled) && receiverLiveTeleportEnabled && hookConfigured && receiverTeleportSupported,
+    serverHealthy: availability.online,
+    receiverReachable: receiver.ok,
+    liveTeleportEnabled: Boolean(cfg.liveTeleportEnabled),
+    receiverLiveTeleportEnabled,
+    hookConfigured,
+    receiverTeleportSupported,
+    endpoint: teleportReceiverUrl(cfg),
+    reasons
+  };
+}
+
+async function liveMapTeleportExecute(payload) {
+  const status = await liveMapTeleportStatus();
+  const preview = liveMapTeleportRequest(payload, { dryRun: false, test: false });
+  if (!status.serverHealthy) return { ok: false, status: "blocked", error: "Server is not Healthy.", ...preview, readiness: status };
+  if (!status.receiverReachable) return { ok: false, status: "blocked", error: "Receiver offline.", ...preview, readiness: status };
+  if (!status.liveTeleportEnabled) return { ok: false, status: "blocked", error: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.", ...preview, readiness: status };
+  if (!status.receiverLiveTeleportEnabled) return { ok: false, status: "blocked", error: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.", ...preview, readiness: status };
+  if (!status.hookConfigured) return { ok: false, status: "blocked", error: "Teleport endpoint/payload is not configured.", ...preview, readiness: status };
+  if (!status.receiverTeleportSupported) return { ok: false, status: "blocked", error: "Receiver does not support live teleport.", ...preview, readiness: status };
+  appendAdminAudit("teleport_requested", {
+    endpoint: preview.endpoint,
+    authHeaderPresent: Boolean(receiverHttpAuthToken(loadConfig())),
+    authTokenSource: receiverHttpAuthSource(loadConfig()),
+    playerId: preview.request.playerId,
+    characterName: preview.request.characterName,
+    x: preview.request.x,
+    y: preview.request.y,
+    z: preview.request.z,
+    map: preview.request.map
+  });
+  const cfg = loadConfig();
+  const authToken = receiverHttpAuthToken(cfg);
+  const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+  try {
+    const response = await httpRequestJson(preview.endpoint, {
+      method: "POST",
+      headers,
+      body: preview.request,
+      timeout: 10000
+    });
+    const failedStatus = response.data?.status || `http-${response.statusCode}`;
+    if (!response.ok || response.data?.ok !== true) {
+      const message = response.data?.message || response.data?.error || response.text || `Receiver returned ${response.statusCode}.`;
+      appendAdminAudit("teleport_failed", { endpoint: preview.endpoint, status: failedStatus, message });
+      return { ok: false, status: failedStatus, error: message, response: response.data, httpStatus: response.statusCode, ...preview, readiness: status };
+    }
+    appendAdminAudit("teleport_sent_to_rmq", { endpoint: preview.endpoint, response: response.data });
+    return { ok: true, status: response.data?.status || "sent_to_rmq", message: response.data?.message || "Teleport command sent. Verify in game.", response: response.data, httpStatus: response.statusCode, ...preview, readiness: status };
+  } catch (error) {
+    appendAdminAudit("teleport_failed", { endpoint: preview.endpoint, error: error.message });
+    return { ok: false, status: "failed", error: error.message, ...preview, readiness: status };
+  }
 }
 
 function playerDiagnosticLines(diagnostics) {
@@ -3089,18 +3307,18 @@ function appPage() {
     .nav::-webkit-scrollbar-track { background:rgba(5,7,5,.68); border:1px solid rgba(214,166,69,.1); }
     .nav::-webkit-scrollbar-thumb { background:linear-gradient(180deg, rgba(240,201,106,.72), rgba(111,80,30,.74)); border:1px solid rgba(240,201,106,.34); }
     .nav::-webkit-scrollbar-thumb:hover { background:linear-gradient(180deg, rgba(255,222,129,.88), rgba(154,107,41,.82)); }
-    .tab { width:100%; min-height:43px; display:flex; align-items:center; justify-content:flex-start; gap:10px; border:1px solid rgba(214,166,69,.08); border-radius:0; padding:0 14px; background:rgba(255,255,255,.01); color:var(--sand); text-align:left; text-transform:uppercase; letter-spacing:.065em; font-size:12px; line-height:1.1; font-weight:760; clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+    .tab { width:100%; min-height:42px; display:flex; align-items:center; justify-content:flex-start; gap:10px; border:1px solid rgba(214,166,69,.08); border-radius:0; background:rgba(255,255,255,.01); color:var(--sand); text-align:left; text-transform:uppercase; letter-spacing:.055em; font-size:12px; line-height:1.2; font-weight:760; clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
     .tab::before { content:""; flex:0 0 auto; width:8px; height:8px; border:1px solid currentColor; transform:rotate(45deg); box-shadow:0 0 8px currentColor; opacity:.72; }
     .tab.active, .tab:hover { color:var(--gold-bright); border-color:rgba(240,201,106,.58); background:linear-gradient(90deg, rgba(214,166,69,.22), rgba(214,166,69,.045)); box-shadow:inset 0 0 22px rgba(240,201,106,.075), 0 0 14px rgba(214,166,69,.1); }
-    .tab.active { font-size:12.5px; font-weight:850; }
+    .tab.active { font-size:12px; font-weight:850; }
     .sidebar-foot { flex:0 0 auto; margin-top:16px; color:var(--muted); font-size:12px; line-height:1.5; }
     .legal-notice { margin-top:12px; padding-top:10px; border-top:1px solid rgba(214,166,69,.16); color:rgba(214,196,151,.68); font-size:10px; line-height:1.35; }
-    .content { min-width:0; padding:18px 24px 30px; }
+    .content { min-width:0; padding:18px 24px 30px; overflow-x:hidden; }
     .topbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(260px,1fr) auto; gap:16px; align-items:center; margin:-18px -24px 18px; padding:16px 24px; backdrop-filter:blur(18px); background:linear-gradient(90deg, rgba(7,8,4,.94), rgba(23,19,10,.88)); border-bottom:1px solid var(--line); box-shadow:0 14px 42px rgba(0,0,0,.36); }
     .title h2 { margin:0; font-size:24px; letter-spacing:.12em; text-transform:uppercase; color:var(--gold-bright); }
     .title p { margin:5px 0 0; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-size:12px; }
     .status-strip { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
-    .badge { display:inline-flex; min-height:32px; align-items:center; gap:8px; border:1px solid var(--line); border-radius:0; padding:0 12px; background:rgba(0,0,0,.28); color:var(--muted); font-size:12px; white-space:nowrap; text-transform:uppercase; letter-spacing:.07em; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .badge { display:inline-flex; min-height:31px; align-items:center; gap:7px; border:1px solid var(--line); border-radius:0; padding:6px 11px; background:rgba(0,0,0,.28); color:var(--muted); font-size:11.5px; line-height:1.15; white-space:normal; text-transform:uppercase; letter-spacing:.055em; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
     .badge::before { content:""; width:7px; height:7px; border-radius:999px; background:currentColor; box-shadow:0 0 10px currentColor; }
     .badge.ok { color:var(--good); border-color:rgba(86,214,143,.35); }
     .badge.warn { color:var(--warn); border-color:rgba(234,191,98,.35); }
@@ -3150,9 +3368,9 @@ function appPage() {
     .region-boundary { fill:rgba(240,201,106,.08); stroke:rgba(240,201,106,.48); stroke-width:2; stroke-dasharray:8 7; opacity:.72; filter:drop-shadow(0 0 8px rgba(240,201,106,.18)); }
     .region-boundary.active { fill:rgba(240,201,106,.18); stroke:var(--gold-bright); stroke-width:3; opacity:1; filter:drop-shadow(0 0 14px rgba(240,201,106,.42)); }
     .map-controls { position:absolute; z-index:15; right:14px; top:14px; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; max-width:min(390px, calc(100% - 28px)); }
-    .map-controls button { min-height:34px; padding:0 10px; font-size:11px; border-color:rgba(143,197,219,.38); background:rgba(5,7,5,.72); color:var(--gold-bright); }
+    .map-controls button { min-height:32px; padding:6px 10px; font-size:11px; border-color:rgba(143,197,219,.38); background:rgba(5,7,5,.72); color:var(--gold-bright); }
     .map-subnav { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
-    .map-subnav button { min-height:34px; padding:0 11px; font-size:11px; border-color:rgba(214,166,69,.25); background:rgba(255,255,255,.025); }
+    .map-subnav button { min-height:32px; padding:6px 11px; font-size:11px; border-color:rgba(214,166,69,.25); background:rgba(255,255,255,.025); }
     .map-subnav button.active { border-color:var(--gold-bright); color:var(--gold-bright); background:rgba(214,166,69,.14); box-shadow:0 0 16px rgba(240,201,106,.1); }
     .map-routes { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:5; opacity:.34; }
     .contour { fill:none; stroke:rgba(240,201,106,.16); stroke-width:1.2; }
@@ -3196,15 +3414,17 @@ function appPage() {
     .map-region-card .line { display:flex; justify-content:space-between; gap:8px; border-top:1px solid rgba(214,166,69,.1); padding-top:6px; margin-top:6px; color:var(--muted); font-size:12px; }
     .map-region-card .line strong { color:var(--sand); font-size:12px; }
     .map-metadata-note { margin-top:10px; color:var(--muted); font-size:12px; line-height:1.45; }
-    .live-map-layout { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:12px; align-items:start; }
-    .live-map-canvas { position:relative; min-height:calc(100vh - 190px); border:1px solid rgba(214,166,69,.34); background:#070604; overflow:hidden; }
-    .live-map-canvas .leaflet-container { background:#070604; font:inherit; }
+    .live-map-layout { width:100%; max-width:1812px; margin:0 auto; display:grid; grid-template-columns:minmax(0,1400px) 360px; justify-content:center; gap:12px; align-items:start; overflow-x:hidden; }
+    .live-map-stage { width:min(100%, calc(100vh - 150px), 1400px); max-width:1400px; justify-self:center; min-width:0; }
+    .live-map-canvas { position:relative; width:100%; height:auto; aspect-ratio:1 / 1; border:1px solid rgba(214,166,69,.34); background:#070604; overflow:hidden; }
+    .live-map-canvas .leaflet-container { width:100%; height:100%; background:#070604; font:inherit; }
     .live-map-canvas .leaflet-control-attribution { display:none; }
     .live-map-marker { border:1px solid currentColor; background:rgba(5,7,5,.88); box-shadow:0 0 14px currentColor; }
     .live-map-marker.player { color:var(--good); border-radius:999px; }
+    .live-map-marker.pending { color:var(--warn); border-style:dashed; border-radius:999px; animation:pulse 1.2s ease-in-out infinite; }
     .live-map-marker.vehicle { color:var(--blue); transform:rotate(45deg); }
     .live-map-marker.base { color:var(--gold-bright); }
-    .live-map-panel { display:grid; gap:12px; }
+    .live-map-panel { width:360px; min-width:0; display:grid; gap:12px; }
     .live-map-layer-row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(214,166,69,.1); }
     .live-map-log { max-height:180px; overflow:auto; }
     .live-map-coordinate-readout { position:absolute; z-index:600; right:12px; bottom:12px; border:1px solid rgba(214,166,69,.34); background:rgba(0,0,0,.62); color:var(--gold-bright); padding:7px 9px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; pointer-events:none; }
@@ -3214,14 +3434,16 @@ function appPage() {
     .ops-list { display:grid; gap:10px; }
     .ops-row { display:grid; grid-template-columns:34px minmax(0,1fr) auto; gap:10px; align-items:center; padding:10px 0; border-bottom:1px solid rgba(214,166,69,.11); }
     .ops-icon { width:30px; height:30px; display:grid; place-items:center; border:1px solid rgba(214,166,69,.42); color:var(--gold-bright); background:rgba(214,166,69,.07); box-shadow:0 0 16px rgba(214,166,69,.08); }
-    .metric-tile { min-height:138px; }
-    .metric-tile .label { min-height:31px; }
+    .metric-tile { min-height:116px; padding:14px 15px !important; }
+    .metric-tile .label { min-height:20px; font-size:10.5px; letter-spacing:.105em; line-height:1.15; }
+    .metric-tile .value { margin-top:8px; font-size:21px; line-height:1.1; font-weight:780; letter-spacing:.015em; }
+    .metric-tile .subtle { margin-top:8px; color:rgba(169,155,119,.74); font-size:11.5px; line-height:1.3; }
     .layout-2 { display:grid; grid-template-columns:minmax(300px,390px) minmax(0,1fr); gap:12px; align-items:start; }
     .layout-3 { display:grid; grid-template-columns:1.1fr .9fr; gap:12px; align-items:start; }
     .controls, .action-row { display:flex; flex-wrap:wrap; gap:10px; }
     .sound-widget { display:grid; gap:9px; margin-top:14px; padding:12px; border:1px solid rgba(214,166,69,.28); background:linear-gradient(180deg, rgba(240,201,106,.055), rgba(0,0,0,.18)); clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
     .sound-widget-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
-    .sound-toggle { min-height:34px; padding:0 11px; border-color:rgba(143,197,219,.42); color:var(--gold-bright); }
+    .sound-toggle { min-height:34px; padding:7px 11px; border-color:rgba(143,197,219,.42); color:var(--gold-bright); }
     .sound-slider { display:grid; grid-template-columns:auto minmax(120px,1fr) 46px; gap:10px; align-items:center; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.1em; }
     .sound-slider input[type="range"] { min-height:30px; padding:0; accent-color:var(--gold-bright); }
     .sound-volume-readout { color:var(--gold-bright); text-align:right; font-weight:900; }
@@ -3232,9 +3454,13 @@ function appPage() {
     .support-links { display:grid; gap:8px; margin-top:12px; color:var(--muted); font-size:13px; }
     .field-grid { display:grid; gap:10px; }
     label { display:grid; gap:6px; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
-    select, input { width:100%; min-height:44px; border:1px solid rgba(214,166,69,.34); border-radius:0; background:rgba(6,8,5,.9); color:var(--text); padding:0 12px; outline:none; }
-    select:focus, input:focus { border-color:var(--blue); box-shadow:0 0 0 3px rgba(114,164,242,.12); }
-    .button, .controls button, button { display:inline-flex; align-items:center; justify-content:center; min-height:42px; border:1px solid rgba(214,166,69,.38); border-radius:0; background:linear-gradient(180deg, rgba(30,29,18,.95), rgba(10,12,8,.95)); color:var(--sand); padding:0 14px; text-decoration:none; text-transform:uppercase; letter-spacing:.06em; font-weight:800; }
+    select, input, textarea { width:100%; min-height:44px; border:1px solid rgba(214,166,69,.34); border-radius:0; background:rgba(6,8,5,.9); color:var(--text); padding:0 12px; outline:none; }
+    textarea { min-height:160px; padding:10px 12px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; line-height:1.35; }
+    select:focus, input:focus, textarea:focus { border-color:var(--blue); box-shadow:0 0 0 3px rgba(114,164,242,.12); }
+    .button, .controls button, button { display:inline-flex; align-items:center; justify-content:center; min-height:38px; max-width:100%; border:1px solid rgba(214,166,69,.38); border-radius:0; background:linear-gradient(180deg, rgba(30,29,18,.95), rgba(10,12,8,.95)); color:var(--sand); padding:7px 13px; text-decoration:none; text-transform:uppercase; letter-spacing:.045em; font-size:13px; line-height:1.18; font-weight:780; text-align:center; white-space:normal; overflow-wrap:anywhere; }
+    .primary { font-size:13.5px; }
+    .panel-head button, .action-row button, .controls button, .setup-card button, .live-map-panel button, .settings-grid button, .vm-details button { font-size:12.5px; min-height:36px; padding:7px 12px; letter-spacing:.04em; }
+    .panel-head button, .action-row button, .live-map-panel button, .settings-grid button, .vm-monitor-lists button, .dashboard-footer button { text-transform:none; }
     .primary { background:linear-gradient(180deg, rgba(159,111,38,.98), rgba(78,55,22,.98)) !important; border-color:rgba(240,201,106,.78) !important; color:#fff1c8 !important; box-shadow:0 0 24px rgba(240,201,106,.16); }
     .danger { background:linear-gradient(180deg, rgba(112,42,42,.98), rgba(63,25,25,.98)) !important; border-color:rgba(255,102,102,.5) !important; }
     .player-list, .admin-items { display:grid; gap:8px; max-height:520px; overflow:auto; padding-right:4px; }
@@ -3313,7 +3539,9 @@ function appPage() {
     .diagnostic-log { min-height:220px; max-height:420px; overflow:auto; white-space:pre-wrap; }
     .mt { margin-top:12px; } .mb { margin-bottom:12px; }
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
-    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists{grid-template-columns:1fr}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
+    @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
+    @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px} }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
   </style>
 </head>
 <body>
@@ -3323,7 +3551,7 @@ function appPage() {
       <div>
         <div class="kicker">About</div>
         <h2>AlphaNine Dune Suite</h2>
-        <div class="subtle">Version 0.2.2-beta</div>
+        <div class="subtle">Version 0.2.3-beta</div>
       </div>
       <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
@@ -3419,7 +3647,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.2.2-beta</span>
+        <span>Version 0.2.3-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -3571,7 +3799,7 @@ function appPage() {
 
     <section id="live-map" class="view">
       <div class="live-map-layout">
-        <div class="panel pad">
+        <div class="panel pad live-map-stage">
           <div class="panel-head"><div><div class="label">Live Map</div><div id="liveMapStamp" class="micro">Leaflet tactical overlay</div></div><button type="button" onclick="refreshLiveMap()">Refresh</button></div>
           <div id="liveMapCanvas" class="live-map-canvas"></div>
         </div>
@@ -3582,7 +3810,8 @@ function appPage() {
             <label class="live-map-layer-row"><span>Vehicles</span><input id="liveLayerVehicles" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
             <label class="live-map-layer-row"><span>Bases</span><input id="liveLayerBases" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
             <div id="livePlayerPositionWarning" class="warning mt hidden">Player position unavailable</div>
-            <div class="warning mt">Resource and POI filters are reserved for the next layer pass.</div>
+            <div id="liveEntityAvailability" class="warning mt hidden">Bases/vehicles data not available from server yet.</div>
+            <div class="subtle mt">Resource and POI filters are reserved for the next layer pass.</div>
           </div>
           <div class="panel pad">
             <div class="label">Clicked Coordinates</div>
@@ -3604,11 +3833,23 @@ function appPage() {
             <div class="label">Teleport To Coordinate</div>
             <div class="field-grid mt">
               <label>Player / Controller ID<input id="teleportPlayerId" placeholder="player_controller_id or account id"></label>
+              <label>Known Location Preset<select id="teleportPreset" onchange="applyTeleportPreset()"><option value="">Manual coordinates</option></select></label>
               <label>X<input id="teleportX" type="number" step="0.01"></label>
               <label>Y<input id="teleportY" type="number" step="0.01"></label>
-              <label>Z<input id="teleportZ" type="number" step="0.01" value="0"></label>
+              <label>Z / Elevation<input id="teleportZ" type="number" step="0.01" placeholder="Required unless using a preset/player target"></label>
+              <label>Partition ID<input id="teleportPartitionId" type="number" step="1" min="0" placeholder="0"></label>
               <button type="button" class="primary" onclick="previewTeleport()">Preview Teleport</button>
+              <button type="button" id="liveTeleportButton" onclick="executeLiveTeleport()" disabled>Live Teleport</button>
             </div>
+            <div class="warning mt">Map clicks provide X/Y only. Enter a verified Z, choose a saved preset, or use Teleport to Player. Terrain elevation is not calculated yet.</div>
+            <div class="label mt">Teleport To Player</div>
+            <div class="field-grid mt">
+              <label>Target Player With Known Position<input id="teleportTargetPlayerId" placeholder="target FLS/controller/account id"></label>
+              <button type="button" onclick="fillTeleportFromTargetPlayer()">Use Target Player Position</button>
+              <button type="button" class="primary" onclick="previewTeleportToPlayer()">Preview To Player</button>
+              <button type="button" id="liveTeleportToPlayerButton" onclick="executeTeleportToPlayer()" disabled>Live Teleport To Player</button>
+            </div>
+            <div id="teleportReadiness" class="warning mt">Live Teleport requires server health, receiver reachability, Settings enablement, and a configured hook.</div>
             <pre id="teleportLog" class="mt">Teleport mode is safe-preview only until a server-specific command hook is configured.</pre>
           </div>
           <div class="panel pad">
@@ -3618,8 +3859,11 @@ function appPage() {
               <div class="detail-row"><span class="subtle">Leaflet</span><strong id="liveDebugLatLng">--</strong></div>
               <div class="detail-row"><span class="subtle">Dune X/Y</span><strong id="liveDebugDune">--</strong></div>
               <div class="detail-row"><span class="subtle">Players</span><strong id="liveDebugPlayers">0</strong></div>
+              <div class="detail-row"><span class="subtle">Vehicles</span><strong id="liveDebugVehicles">0</strong></div>
+              <div class="detail-row"><span class="subtle">Bases</span><strong id="liveDebugBases">0</strong></div>
               <div class="detail-row"><span class="subtle">Markers</span><strong id="liveDebugMarkers">0</strong></div>
               <div class="detail-row"><span class="subtle">Position Source</span><strong id="liveDebugPositionSource">--</strong></div>
+              <div class="detail-row"><span class="subtle">Entity Source</span><strong id="liveDebugEntitySource">--</strong></div>
             </div>
             <pre id="liveMapLog" class="live-map-log mt">Awaiting live map data.</pre>
           </div>
@@ -3908,7 +4152,7 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.2-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.3-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
@@ -4004,6 +4248,16 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
           <div id="settingsSaveStatus" class="empty mt">Settings load automatically.</div>
         </div>
         <div class="panel pad">
+          <div class="label">Live Map Teleport</div>
+          <div class="field-grid mt">
+            <label class="check-row"><input id="settingsLiveTeleportEnabled" type="checkbox">Enable Receiver Live Teleport</label>
+            <label>Teleport Endpoint Path<input id="settingsTeleportEndpointPath" placeholder="/api/v1/players/teleport-coords"></label>
+            <label>Preview Command Template<input id="settingsTeleportCommandTemplate" placeholder="TeleportToExact {playerId} {x} {y} {z}"></label>
+          </div>
+          <label class="mt">HTTP JSON Payload Template<textarea id="settingsTeleportPayloadTemplate" rows="9"></textarea></label>
+          <div class="warning mt">Live Teleport calls the receiver HTTP JSON endpoint. Coordinate teleport requires a verified Z/elevation. The receiver publishes TeleportToExact for online players and uses the DB offline-position path for offline players.</div>
+        </div>
+        <div class="panel pad">
           <div class="label">Backup & Restore</div>
           <div class="action-row mt">
             <button type="button" onclick="exportSettings()">Export Settings</button>
@@ -4053,9 +4307,9 @@ function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.vie
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,setupStep=0,appConfig=null,diagnosticsData=null;
+let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null;
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
-function statusClass(value){const text=String(value||"");if(/healthy|ready|running|online|enabled|reachable|true/i.test(text))return"ok";if(/offline|failed|error|missing|not|false|unavailable/i.test(text))return"bad";return"warn";}
+function statusClass(value){const text=String(value||"");if(/offline|failed|error|missing|not|false|unavailable/i.test(text))return"bad";if(/healthy|ready|running|online|enabled|reachable|available|true/i.test(text))return"ok";return"warn";}
 function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");}
 function badge(id,value){const el=document.getElementById(id);if(!el)return;el.className="badge "+statusClass(value);el.textContent=String(value||"Unknown");}
 function addActivity(type,message,detail){const item={time:new Date().toLocaleTimeString(),type,message,detail:detail||""};activity.unshift(item);activity=activity.slice(0,40);renderActivity();}
@@ -4075,19 +4329,40 @@ function liveLatLngToWorld(latlng,cfg=liveMapConfig()){const fx=Number(latlng.ln
 function leafletToDune(latlng){return liveLatLngToWorld(latlng);}
 function duneToLeaflet(x,y){return worldToLiveLatLng(x,y);}
 function formatLiveCoord(value){const number=Number(value);return Number.isFinite(number)?number.toFixed(2):"--";}
-function initLiveMap(){if(!window.L){setText("liveMapStamp","Leaflet unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});const bounds=liveMapBounds();L.imageOverlay("/assets/world-map-overland.png",bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);liveMap.fitBounds(bounds);liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);refreshLiveMap();}
+function initLiveMap(){if(!window.L){setText("liveMapStamp","Leaflet unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});const bounds=liveMapBounds();L.imageOverlay("/assets/world-map-overland.png",bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);liveMap.fitBounds(bounds);liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
 function liveMapChecked(id){const el=document.getElementById(id);return !el||el.checked;}
 function liveMapProject(entity){const x=Number(entity.x),y=Number(entity.y);if(!Number.isFinite(x)||!Number.isFinite(y))return null;return duneToLeaflet(x,y);}
 function liveMapIcon(kind){return L.divIcon({className:"",html:'<div class="live-map-marker '+kind+'" style="width:14px;height:14px"></div>',iconSize:[14,14],iconAnchor:[7,7]});}
-function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point)return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(kind.slice(0,-1)||kind),draggable:kind==="players"}).bindPopup('<strong>'+esc(row.name||row.id||kind)+'</strong><br>'+esc(row.source||"DB")+'<br>X '+esc(formatLiveCoord(row.x))+' / Y '+esc(formatLiveCoord(row.y))+(row.z!=null?' / Z '+esc(row.z):'')+(kind==="players"?'<br>Drag marker to preview teleport.':''));marker.on("click",()=>{if(kind==="players"){const playerId=row.fls_id||row.id||row.name||"";const input=document.getElementById("teleportPlayerId");if(input&&!input.value)input.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});});if(kind==="players")marker.on("dragend",event=>{const dragged=event.target;const next=dragged.getLatLng();dragged.setLatLng(point);const coords=leafletToDune(next);const playerId=row.fls_id||row.id||row.name||"";const input=document.getElementById("teleportPlayerId");if(input)input.value=playerId;const tx=document.getElementById("teleportX");const ty=document.getElementById("teleportY");const tz=document.getElementById("teleportZ");if(tx)tx.value=String(Math.round(coords.x));if(ty)ty.value=String(Math.round(coords.y));if(tz&&!tz.value)tz.value="5000";selectLiveCoordinates(next,{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Drag teleport preview armed. Marker snapped back until Preview Teleport is sent.\\nPlayer: "+playerId+"\\nX "+Math.round(coords.x)+" / Y "+Math.round(coords.y)+" / Z "+(tz?.value||"5000");playUiSound("click");});marker.addTo(liveMapLayerGroup);});return count;}
-function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;liveMapLayerGroup.clearLayers();liveMarkerCount=0;liveMarkerCount+=addLiveMapMarkers("players",liveMapData.layers?.players);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapData.layers?.vehicles);liveMarkerCount+=addLiveMapMarkers("bases",liveMapData.layers?.bases);updateLiveMapDebug();}
+function liveTeleportPlayerId(row){return row?.fls_id||row?.funcom_id||row?.player_controller_id||"";}
+function liveMapPlayerKeys(row){return [row?.fls_id,row?.funcom_id,row?.player_controller_id,row?.id,row?.account_id,row?.name].filter(value=>value!==undefined&&value!==null&&String(value).trim()).map(value=>String(value).trim());}
+function sameLiveMapPlayer(row,playerId){const target=String(playerId||"").trim();return Boolean(target)&&liveMapPlayerKeys(row).includes(target);}
+function findLiveMapPlayerByTeleportId(playerId){return (liveMapData?.layers?.players||[]).find(row=>sameLiveMapPlayer(row,playerId))||null;}
+function liveMapPosition(row){if(!row)return null;const x=Number(row.x),y=Number(row.y),z=Number(row.z);if(!Number.isFinite(x)||!Number.isFinite(y))return null;return {x,y,z:Number.isFinite(z)?z:null};}
+function liveMapDistance(a,b){if(!a||!b)return Number.POSITIVE_INFINITY;return Math.hypot(Number(a.x)-Number(b.x),Number(a.y)-Number(b.y));}
+function formatLivePosition(pos){return pos?("X "+Math.round(Number(pos.x))+" / Y "+Math.round(Number(pos.y))+" / Z "+(Number.isFinite(Number(pos.z))?Math.round(Number(pos.z)):"--")):"unknown";}
+function clearCachedTeleportPlayer(playerId){if(!liveMapData?.layers?.players)return;liveMapData.layers.players=liveMapData.layers.players.filter(row=>!sameLiveMapPlayer(row,playerId));}
+function renderPendingTeleportMarker(){if(!liveTeleportPending||!liveMapLayerGroup||!liveMapChecked("liveLayerPlayers"))return 0;const target=liveTeleportPending.target;if(!target)return 0;const point=duneToLeaflet(target.x,target.y);const marker=L.marker(point,{icon:L.divIcon({className:"",html:'<div class="live-map-marker pending" style="width:18px;height:18px"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).bindPopup('<strong>Teleport pending</strong><br>Teleport sent, waiting for server position update...<br>'+esc(formatLivePosition(target)));marker.addTo(liveMapLayerGroup);return 1;}
+function reconcileTeleportPending(){if(!liveTeleportPending)return;const player=findLiveMapPlayerByTeleportId(liveTeleportPending.playerId);const next=liveMapPosition(player);if(!next)return;const movedFromOld=!liveTeleportPending.oldPosition||liveMapDistance(next,liveTeleportPending.oldPosition)>2;const nearTarget=liveMapDistance(next,liveTeleportPending.target)<50;if(movedFromOld||nearTarget){const detail="Player "+liveTeleportPending.playerId+" old "+formatLivePosition(liveTeleportPending.oldPosition)+" -> new "+formatLivePosition(next);console.debug("[AlphaNine Live Map] teleport position refresh",{playerId:liveTeleportPending.playerId,oldPosition:liveTeleportPending.oldPosition,newPosition:next,target:liveTeleportPending.target});addActivity("maps","Teleport position confirmed",detail);const log=document.getElementById("teleportLog");if(log&&!/Server position confirmed/.test(log.textContent||""))log.textContent+=(log.textContent?"\n\n":"")+"Server position confirmed.\n"+detail;liveTeleportPending=null;}}
+function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point)return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(kind.slice(0,-1)||kind),draggable:kind==="players"}).bindPopup('<strong>'+esc(row.name||row.id||kind)+'</strong><br>'+esc(row.source||"DB")+'<br>X '+esc(formatLiveCoord(row.x))+' / Y '+esc(formatLiveCoord(row.y))+(row.z!=null?' / Z '+esc(row.z):'')+(kind==="players"?'<br>Drag marker to preview teleport.':''));marker.on("click",()=>{if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});});if(kind==="players")marker.on("dragend",event=>{const dragged=event.target;const next=dragged.getLatLng();dragged.setLatLng(point);const coords=leafletToDune(next);const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");if(input&&playerId)input.value=playerId;const tx=document.getElementById("teleportX");const ty=document.getElementById("teleportY");const tz=document.getElementById("teleportZ");if(tx)tx.value=String(Math.round(coords.x));if(ty)ty.value=String(Math.round(coords.y));selectLiveCoordinates(next,{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Drag teleport preview armed. Marker snapped back until Preview Teleport is sent.\\nPlayer: "+(playerId||"FLS ID unavailable")+"\\nX "+Math.round(coords.x)+" / Y "+Math.round(coords.y)+"\\nEnter a verified Z/elevation before live teleport.";playUiSound("click");});marker.addTo(liveMapLayerGroup);});return count;}
+function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;reconcileTeleportPending();liveMapLayerGroup.clearLayers();liveMarkerCount=0;const playerRows=liveTeleportPending?(liveMapData.layers?.players||[]).filter(row=>!sameLiveMapPlayer(row,liveTeleportPending.playerId)):liveMapData.layers?.players;liveMarkerCount+=addLiveMapMarkers("players",playerRows);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapData.layers?.vehicles);liveMarkerCount+=addLiveMapMarkers("bases",liveMapData.layers?.bases);liveMarkerCount+=renderPendingTeleportMarker();updateLiveMapDebug();}
 function updateLiveMouseCoordinates(latlng){const coords=leafletToDune(latlng);const readout=document.getElementById("liveMouseReadout");if(readout)readout.textContent="X "+formatLiveCoord(coords.x)+" / Y "+formatLiveCoord(coords.y);}
 function selectLiveCoordinates(latlng,options={}){const coords=leafletToDune(latlng);liveSelectedCoordinates={...coords,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(coords.x));setText("liveClickedY",formatLiveCoord(coords.y));const searchX=document.getElementById("liveSearchX");const searchY=document.getElementById("liveSearchY");if(searchX)searchX.value=formatLiveCoord(coords.x);if(searchY)searchY.value=formatLiveCoord(coords.y);if(options.fillTeleport){const teleportX=document.getElementById("teleportX");const teleportY=document.getElementById("teleportY");if(teleportX)teleportX.value=String(Math.round(coords.x));if(teleportY)teleportY.value=String(Math.round(coords.y));}updateLiveMapDebug(latlng);}
 async function copyLiveCoordinates(){if(!liveSelectedCoordinates){playUiSound("warning");return;}const text="X "+formatLiveCoord(liveSelectedCoordinates.x)+", Y "+formatLiveCoord(liveSelectedCoordinates.y);try{await navigator.clipboard.writeText(text);playUiSound("success");addActivity("maps","Coordinates copied",text);}catch{playUiSound("warning");}}
 function goToLiveCoordinates(){if(!liveMap)return;const x=Number(document.getElementById("liveSearchX")?.value);const y=Number(document.getElementById("liveSearchY")?.value);if(!Number.isFinite(x)||!Number.isFinite(y)){playUiSound("warning");return;}const point=duneToLeaflet(x,y);liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:true});playUiSound("click");}
-function updateLiveMapDebug(latlng){const selected=latlng?leafletToDune(latlng):liveSelectedCoordinates;setText("liveDebugZoom",liveMap?String(liveMap.getZoom().toFixed(2)):"--");if(latlng)setText("liveDebugLatLng",formatLiveCoord(latlng.lat)+", "+formatLiveCoord(latlng.lng));else if(liveSelectedCoordinates)setText("liveDebugLatLng",formatLiveCoord(liveSelectedCoordinates.lat)+", "+formatLiveCoord(liveSelectedCoordinates.lng));else setText("liveDebugLatLng","--");setText("liveDebugDune",selected?("X "+formatLiveCoord(selected.x)+" / Y "+formatLiveCoord(selected.y)):"--");const debug=liveMapData?.debug||{};const loaded=Number(debug.playersLoaded??(liveMapData?.layers?.players||[]).length)||0;const positioned=Number(debug.playersWithPosition??debug.playersWithCoordinates??0)||0;setText("liveDebugPlayers","Loaded "+loaded+", positioned "+positioned);setText("liveDebugMarkers",String(liveMarkerCount));setText("liveDebugPositionSource",debug.positionSourceTable||"--");}
-async function refreshLiveMap(){if(!liveMap)return;try{const data=await getJson("/api/live-map/entities");liveMapData=data;renderLiveMapLayers();const counts={players:(data.layers?.players||[]).length,vehicles:(data.layers?.vehicles||[]).length,bases:(data.layers?.bases||[]).length};const debug=data.debug||{};const loaded=Number(debug.playersLoaded??counts.players)||0;const valid=Number(debug.playersWithPosition??debug.playersWithCoordinates??counts.players)||0;const warning=document.getElementById("livePlayerPositionWarning");const playerWord=loaded===1?"player":"players";if(warning){warning.classList.toggle("hidden",!(loaded>0&&valid===0));warning.textContent="Loaded "+loaded+" "+playerWord+", "+valid+" with coordinates";}console.debug("[AlphaNine Live Map] players loaded:",loaded,"with coordinates:",valid,"source:",debug.positionSourceTable||"none");setText("liveMapStamp","Loaded "+loaded+" "+playerWord+", "+valid+" with coordinates / Vehicles "+counts.vehicles+" / Bases "+counts.bases);document.getElementById("liveMapLog").textContent=JSON.stringify({counts,debug,sources:data.sources||[],errors:data.errors||[],raw:data},null,2);updateLiveMapDebug();addActivity("maps","Live map refreshed",loaded+" players / "+valid+" positioned / "+liveMarkerCount+" markers");}catch(e){setText("liveMapStamp","Live map error");document.getElementById("liveMapLog").textContent=betterError(e);addActivity("error","Live map failed",e.message);}}
-async function previewTeleport(){const payload={playerId:document.getElementById("teleportPlayerId").value,x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value};try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("teleportLog").textContent=data.message+"\\n"+JSON.stringify(data.request,null,2);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
+async function loadTeleportPresets(){try{const data=await getJson("/api/live-map/teleport/presets");liveTeleportPresets=data.presets||[];const select=document.getElementById("teleportPreset");if(!select)return;select.innerHTML='<option value="">Manual coordinates</option>'+liveTeleportPresets.map((preset,index)=>'<option value="'+index+'">'+esc(preset.name)+' / '+esc(preset.map)+' / Z '+esc(preset.z)+'</option>').join("");if(!liveTeleportPresets.length)select.innerHTML+='<option value="" disabled>No enabled presets found</option>';}catch(e){const log=document.getElementById("teleportLog");if(log)log.textContent="Location presets unavailable. "+betterError(e);}}
+function applyTeleportPreset(){const select=document.getElementById("teleportPreset");const preset=liveTeleportPresets[Number(select?.value)];if(!preset)return;setValue("teleportX",preset.x);setValue("teleportY",preset.y);setValue("teleportZ",preset.z);setValue("teleportPartitionId",preset.partition_id||0);const point=duneToLeaflet(preset.x,preset.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Loaded verified location preset: "+preset.name+"\\n"+formatLivePosition(preset);playUiSound("click");}
+function findLiveMapPlayerByAnyId(playerId){return findLiveMapPlayerByTeleportId(playerId);}
+function fillTeleportFromTargetPlayer(){const targetId=document.getElementById("teleportTargetPlayerId")?.value||"";const target=findLiveMapPlayerByAnyId(targetId);const pos=liveMapPosition(target);if(!target||!pos){const message="Target player position unavailable. Refresh Live Map and choose a player with known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}if(!Number.isFinite(Number(pos.z))||Number(pos.z)===0){const message="Target player has no valid Z/elevation. Teleport to Player requires known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}setValue("teleportX",pos.x);setValue("teleportY",pos.y);setValue("teleportZ",pos.z);setValue("teleportPartitionId",target.partition_id||target.partitionId||0);const point=duneToLeaflet(pos.x,pos.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});document.getElementById("teleportLog").textContent="Loaded target player position for "+(target.name||target.character_name||targetId)+"\\n"+formatLivePosition(pos);playUiSound("click");return target;}
+async function previewTeleportToPlayer(){if(!fillTeleportFromTargetPlayer())return;await previewTeleport();}
+async function executeTeleportToPlayer(){if(!fillTeleportFromTargetPlayer())return;await executeLiveTeleport();}
+function updateLiveMapDebug(latlng){const selected=latlng?leafletToDune(latlng):liveSelectedCoordinates;setText("liveDebugZoom",liveMap?String(liveMap.getZoom().toFixed(2)):"--");if(latlng)setText("liveDebugLatLng",formatLiveCoord(latlng.lat)+", "+formatLiveCoord(latlng.lng));else if(liveSelectedCoordinates)setText("liveDebugLatLng",formatLiveCoord(liveSelectedCoordinates.lat)+", "+formatLiveCoord(liveSelectedCoordinates.lng));else setText("liveDebugLatLng","--");setText("liveDebugDune",selected?("X "+formatLiveCoord(selected.x)+" / Y "+formatLiveCoord(selected.y)):"--");const debug=liveMapData?.debug||{};const loaded=Number(debug.playersLoaded??(liveMapData?.layers?.players||[]).length)||0;const positioned=Number(debug.playersWithPosition??debug.playersWithCoordinates??0)||0;const counts=debug.counts||{players:(liveMapData?.layers?.players||[]).length,vehicles:(liveMapData?.layers?.vehicles||[]).length,bases:(liveMapData?.layers?.bases||[]).length};setText("liveDebugPlayers","Loaded "+loaded+", positioned "+positioned);setText("liveDebugVehicles",String(counts.vehicles||0)+" / "+(debug.entitySources?.vehicles||"unknown"));setText("liveDebugBases",String(counts.bases||0)+" / "+(debug.entitySources?.bases||"unknown"));setText("liveDebugMarkers",String(liveMarkerCount));setText("liveDebugPositionSource",debug.positionSourceTable||"--");setText("liveDebugEntitySource","Vehicles "+(debug.entitySources?.vehicles||"--")+" / Bases "+(debug.entitySources?.bases||"--"));}
+async function refreshLiveMap(){if(!liveMap)return;try{const data=await getJson("/api/live-map/entities");liveMapData=data;renderLiveMapLayers();const counts={players:(data.layers?.players||[]).length,vehicles:(data.layers?.vehicles||[]).length,bases:(data.layers?.bases||[]).length};const debug=data.debug||{};const loaded=Number(debug.playersLoaded??counts.players)||0;const valid=Number(debug.playersWithPosition??debug.playersWithCoordinates??counts.players)||0;const warning=document.getElementById("livePlayerPositionWarning");const entityWarning=document.getElementById("liveEntityAvailability");const playerWord=loaded===1?"player":"players";if(warning){warning.classList.toggle("hidden",!(loaded>0&&valid===0));warning.textContent="Loaded "+loaded+" "+playerWord+", "+valid+" with coordinates";}const vehicleSource=debug.entitySources?.vehicles||"unavailable";const baseSource=debug.entitySources?.bases||"unavailable";const entityUnavailable=counts.vehicles===0&&counts.bases===0&&vehicleSource!=="real"&&baseSource!=="real";if(entityWarning){entityWarning.classList.toggle("hidden",!entityUnavailable);entityWarning.textContent=entityUnavailable?"Bases/vehicles data not available from server yet.":"";}console.debug("[AlphaNine Live Map] entity counts",{players:counts.players,vehicles:counts.vehicles,bases:counts.bases,playersLoaded:loaded,playersWithCoordinates:valid,entitySources:debug.entitySources||{}});setText("liveMapStamp","Loaded "+loaded+" "+playerWord+", "+valid+" with coordinates / Vehicles "+counts.vehicles+" / Bases "+counts.bases);document.getElementById("liveMapLog").textContent=JSON.stringify({counts,entitySources:debug.entitySources||{},debug,sources:data.sources||[],errors:data.errors||[],raw:data},null,2);updateLiveMapDebug();addActivity("maps","Live map refreshed",loaded+" players / "+valid+" positioned / "+counts.vehicles+" vehicles / "+counts.bases+" bases / "+liveMarkerCount+" markers");}catch(e){setText("liveMapStamp","Live map error");document.getElementById("liveMapLog").textContent=betterError(e);addActivity("error","Live map failed",e.message);}}
+function teleportPayload(){const p=selectedPlayer();return{playerId:document.getElementById("teleportPlayerId").value,characterName:p?.character_name||p?.name||"",x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value,partitionId:document.getElementById("teleportPartitionId")?.value||0,map:"HaggaBasin"};}
+function renderTeleportResult(data){return (data.message||data.error||data.status||"Teleport response")+(data.warning?"\\nWarning: "+data.warning:"")+"\\nEndpoint: "+(data.endpoint||"-")+"\\nCommand: "+(data.command||"-")+"\\nPayload:\\n"+JSON.stringify(data.request||{},null,2)+(data.response?"\\n\\nReceiver response:\\n"+JSON.stringify(data.response,null,2):"")+(data.reasons?.length?"\\n\\nReadiness:\\n"+data.reasons.join("\\n"):"");}
+async function refreshAfterTeleport(payload,data){if(!data?.ok||!liveMap)return;const playerId=String(payload.playerId||data.request?.playerId||data.request?.fls_id||"").trim();const target={x:Number(data.request?.x??payload.x),y:Number(data.request?.y??payload.y),z:Number(data.request?.z??payload.z)};if(!playerId||!Number.isFinite(target.x)||!Number.isFinite(target.y))return;const oldPosition=liveMapPosition(findLiveMapPlayerByTeleportId(playerId));liveTeleportPending={playerId,target:{x:target.x,y:target.y,z:Number.isFinite(target.z)?target.z:null},oldPosition,sentAt:Date.now()};console.debug("[AlphaNine Live Map] teleport sent, refreshing player position",{playerId,oldPosition,target:liveTeleportPending.target});addActivity("maps","Teleport sent, waiting for server position update","Player "+playerId+" target "+formatLivePosition(liveTeleportPending.target));clearCachedTeleportPlayer(playerId);renderLiveMapLayers();const log=document.getElementById("teleportLog");if(log)log.textContent+=(log.textContent?"\\n\\n":"")+"Teleport sent, waiting for server position update...";await refreshLiveMap();}
+async function refreshTeleportReadiness(){const button=document.getElementById("liveTeleportButton");const playerButton=document.getElementById("liveTeleportToPlayerButton");const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);if(button)button.disabled=!liveTeleportReady;if(playerButton)playerButton.disabled=!liveTeleportReady;if(status){status.className=liveTeleportReady?"empty mt":"warning mt";status.textContent=liveTeleportReady?"Live Teleport ready: server healthy, receiver reachable, and hook configured.":(data.reasons||["Live Teleport unavailable."]).join(" ");}return data;}catch(e){liveTeleportReady=false;if(button)button.disabled=true;if(playerButton)playerButton.disabled=true;if(status){status.className="warning mt";status.textContent=betterError(e);}return null;}}
+async function previewTeleport(){const payload=teleportPayload();try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("teleportLog").textContent=renderTeleportResult(data);await refreshTeleportReadiness();playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
+async function executeLiveTeleport(){const payload=teleportPayload();try{const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("teleportLog").textContent=renderTeleportResult(data);playUiSound(data.ok?"success":"warning");await refreshAfterTeleport(payload,data);}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}finally{refreshTeleportReadiness();}}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
@@ -4100,8 +4375,8 @@ function fillSetup(config){setValue("setupServerType",config.serverType||"local-
 function setSshKeyWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.exists);el.className=ok?"empty mt":"warning mt";el.textContent=status?.message||"SSH key file not found.";if(status?.path)el.textContent+=" "+status.path;}
 async function refreshSshKeyWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/ssh-key/status?path="+encodeURIComponent(path));setSshKeyWarning(warningId,data.sshKey);}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
 async function browseSshKey(inputId,warningId){try{if(!window.alphaNineSuite?.chooseSshKey)throw new Error("File picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseSshKey();if(result?.filePath){setValue(inputId,result.filePath);await refreshSshKeyWarning(inputId,warningId);}}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
-function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);setValue("settingsReceiverSshHost",config.receiverSshHost||"");setValue("settingsReceiverSshUser",config.receiverSshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);}
-function collectSettings(){const payload=configPayload("settings");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.setupComplete=true;return payload;}
+function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);setValue("settingsReceiverSshHost",config.receiverSshHost||"");setValue("settingsReceiverSshUser",config.receiverSshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);}
+function collectSettings(){const payload=configPayload("settings");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.liveTeleportEnabled=document.getElementById("settingsLiveTeleportEnabled")?.checked===true;payload.teleportEndpointPath=getValue("settingsTeleportEndpointPath");payload.teleportCommandTemplate=getValue("settingsTeleportCommandTemplate");payload.teleportPayloadTemplate=getValue("settingsTeleportPayloadTemplate");payload.setupComplete=true;return payload;}
 function updateSetupStep(){document.querySelectorAll(".setup-page").forEach((p,i)=>p.classList.toggle("active",i===setupStep));document.querySelectorAll(".setup-step").forEach((p,i)=>p.classList.toggle("active",i===setupStep));}
 function setupNext(){setupStep=Math.min(4,setupStep+1);updateSetupStep();}
 function setupPrev(){setupStep=Math.max(0,setupStep-1);updateSetupStep();}
@@ -4201,12 +4476,12 @@ function syncGiveItemControls(){const give=document.getElementById("adminGiveBut
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const data=await getJson("/api/status");liveGiveServerOnline=isServerOnlineStatus(data);setGiveServerStatus(liveGiveServerOnline?"Server Status: Online. Give Item is available.":"Server Status: Offline. Start the server before using Give Item.",liveGiveServerOnline?"ok":"warn");await refreshLiveGiveEnv();return data;}catch(e){liveGiveServerOnline=false;setGiveServerStatus("Server Status: Offline. "+betterError(e),"warn");return null;}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
 async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;syncLiveGiveMode();await checkGiveItemServerStatus();syncLiveGiveTransportStatus();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
-async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking server status...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server)){log.textContent="Server is offline. Start the server before using Give Item.";addActivity("grant","Give Item blocked","Server is offline.");playUiSound("warning");return;}const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}const confirmed=confirm("Server is online. This will publish a real Live Give command. Inventory is not verified unless the backend reports live-verified.");if(!confirmed){addActivity("grant","Live Give cancelled","Confirmation was declined.");playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
+async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking server status...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server)){log.textContent="Server is offline. Start the server before using Give Item.";addActivity("grant","Give Item blocked","Server is offline.");playUiSound("warning");return;}const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
 renderActivity();syncQualityWarning();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
-setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active"))refreshLiveMap();},12000);
+setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>
 </body>
 </html>`;
@@ -4340,6 +4615,25 @@ async function route(req, res) {
   if (url.pathname === "/api/live-map/teleport" && req.method === "POST") {
     try { await json(res, await liveMapTeleportPreview(JSON.parse(await readBody(req) || "{}"))); }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/live-map/teleport/presets" && req.method === "GET") {
+    const result = loadTeleportLocationPresets();
+    await json(res, result, result.ok ? 200 : 500);
+    return;
+  }
+  if (url.pathname === "/api/live-map/teleport/status" && req.method === "GET") {
+    try { await json(res, await liveMapTeleportStatus()); }
+    catch (error) { await json(res, { ok: false, canTeleport: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/live-map/teleport/execute" && req.method === "POST") {
+    try {
+      const result = await liveMapTeleportExecute(JSON.parse(await readBody(req) || "{}"));
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "failed", error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/maps/deploy" && req.method === "POST") {

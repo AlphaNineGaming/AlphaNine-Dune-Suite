@@ -18,6 +18,8 @@ const MQ_POD = String(process.env.DUNE_RECEIVER_MQ_POD || "").trim();
 const BG_NAMESPACE = String(process.env.DUNE_RECEIVER_BG_NAMESPACE || "").trim();
 const BG_NAME = String(process.env.DUNE_RECEIVER_BG_NAME || "").trim();
 const TIMEOUT_MS = Number(process.env.DUNE_RECEIVER_TIMEOUT_MS || 30000);
+const LIVE_TELEPORT_ENABLED = /^(true|1|yes)$/i.test(String(process.env.DUNE_RECEIVER_LIVE_TELEPORT_ENABLED || ""));
+const TELEPORT_TIMEOUT_MS = Number(process.env.DUNE_RECEIVER_TELEPORT_TIMEOUT_MS || TIMEOUT_MS);
 
 // Static token used by the Dune server-command envelope. This is not a user secret.
 const SERVER_COMMAND_AUTH_TOKEN = "Nu6VmPWUMvdPMeB7qErr";
@@ -32,6 +34,23 @@ app.get("/health", async (_req, res) => {
 
 app.post("/api/give-item", async (req, res) => handleGiveItem(req, res));
 app.post("/give-item", async (req, res) => handleGiveItem(req, res));
+app.post("/teleport", async (req, res) => handleTeleport(req, res));
+app.post("/api/teleport", async (req, res) => handleTeleport(req, res));
+app.post("/api/v1/players/teleport-coords", async (req, res) => handleTeleport(req, res));
+app.post("/api/v1/players/teleport-to-player", async (req, res) => handleTeleportToPlayer(req, res));
+app.get("/teleport/capabilities", (_req, res) => {
+  res.json({
+    ok: true,
+    teleportSupported: LIVE_TELEPORT_ENABLED,
+    dryRunSupported: true,
+    commandTypes: ["http-json"],
+    liveTeleportEnabled: LIVE_TELEPORT_ENABLED,
+    commandTemplateConfigured: true,
+    endpoints: ["/teleport", "/api/teleport", "/api/v1/players/teleport-coords", "/api/v1/players/teleport-to-player"],
+    onlineCommand: "TeleportToExact",
+    offlineDbFunction: "dune.admin_move_offline_player_to_partition"
+  });
+});
 
 app.listen(PORT, HOST, () => {
   console.log(`Dune live give-item receiver listening on http://${HOST}:${PORT}`);
@@ -110,14 +129,188 @@ async function handleGiveItem(req, res) {
   }
 }
 
+async function handleTeleport(req, res) {
+  const context = { requestId: "", playerId: "", command: "", payload: null };
+  try {
+    const auth = verifyToken(req);
+    const request = validateTeleport(req.body || {});
+    context.requestId = request.requestId;
+    context.playerId = request.flsId;
+    context.payload = request;
+    const originalFlsId = request.flsId;
+    request.flsId = await resolveDunePlayerId(request.flsId);
+    if (originalFlsId !== request.flsId) {
+      logReceiver("teleport resolved numeric player id to FLS id", {
+        requestId: request.requestId,
+        originalPlayerId: originalFlsId,
+        resolvedFlsId: request.flsId
+      });
+    }
+    const preview = buildTeleportPreview(req.path, request);
+    context.command = preview.command;
+    logReceiver("teleport request received", {
+      path: req.path,
+      requestId: request.requestId,
+      flsId: request.flsId,
+      dryRun: request.dryRun,
+      test: request.test,
+      auth
+    });
+
+    if (request.dryRun || request.test) {
+      res.json({
+        ok: true,
+        status: "preview",
+        message: "Teleport dry-run preview accepted. No live teleport command was executed.",
+        ...preview
+      });
+      return;
+    }
+
+    if (!LIVE_TELEPORT_ENABLED) {
+      res.status(409).json({
+        ok: false,
+        status: "disabled",
+        message: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.",
+        ...preview
+      });
+      return;
+    }
+
+    const result = await processTeleportCoords(request);
+    logReceiver("teleport processed", {
+      requestId: request.requestId,
+      flsId: request.flsId,
+      path: result.path,
+      command: result.command
+    });
+    res.json({
+      ok: true,
+      status: result.path === "rmq" ? "sent_to_rmq" : "db-updated",
+      message: result.message,
+      ...preview,
+      path: result.path,
+      target: result.target,
+      command: result.command,
+      rmq: result.rmq || undefined,
+      warning: request.warning || undefined
+    });
+  } catch (error) {
+    logReceiverError("teleport failed", error, context);
+    res.status(error.statusCode || 500).json({
+      ok: false,
+      status: "failed",
+      error: error.message,
+      auth: error.auth || undefined,
+      diagnostics: error.diagnostics || undefined
+    });
+  }
+}
+
+async function handleTeleportToPlayer(req, res) {
+  const context = { requestId: "", playerId: "", command: "", payload: null };
+  try {
+    const auth = verifyToken(req);
+    const request = validateTeleportToPlayer(req.body || {});
+    context.requestId = request.requestId;
+    context.playerId = request.sourceFlsId;
+    context.payload = request;
+    const originalSourceFlsId = request.sourceFlsId;
+    request.sourceFlsId = await resolveDunePlayerId(request.sourceFlsId);
+    if (originalSourceFlsId !== request.sourceFlsId) {
+      logReceiver("teleport-to-player resolved numeric player id to FLS id", {
+        requestId: request.requestId,
+        originalPlayerId: originalSourceFlsId,
+        resolvedFlsId: request.sourceFlsId
+      });
+    }
+    logReceiver("teleport-to-player request received", {
+      path: req.path,
+      requestId: request.requestId,
+      sourceFlsId: request.sourceFlsId,
+      targetId: request.targetId,
+      dryRun: request.dryRun,
+      test: request.test,
+      auth
+    });
+    const target = await getPlayerPosition(request.targetId);
+    const coordsRequest = {
+      flsId: request.sourceFlsId,
+      x: target.x,
+      y: target.y,
+      z: target.z,
+      partitionId: target.partitionId,
+      requestId: request.requestId,
+      dryRun: request.dryRun,
+      test: request.test
+    };
+    const preview = buildTeleportPreview(req.path, coordsRequest);
+    context.command = preview.command;
+
+    if (request.dryRun || request.test) {
+      res.json({
+        ok: true,
+        status: "preview",
+        message: "Teleport-to-player dry-run preview accepted. No live teleport command was executed.",
+        ...preview,
+        target
+      });
+      return;
+    }
+    if (!LIVE_TELEPORT_ENABLED) {
+      res.status(409).json({
+        ok: false,
+        status: "disabled",
+        message: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.",
+        ...preview,
+        target
+      });
+      return;
+    }
+
+    const result = await processTeleportCoords(coordsRequest);
+    res.json({
+      ok: true,
+      status: result.path === "rmq" ? "sent_to_rmq" : "db-updated",
+      message: result.message,
+      ...preview,
+      path: result.path,
+      target,
+      command: result.command,
+      rmq: result.rmq || undefined,
+      warning: coordsRequest.warning || undefined
+    });
+  } catch (error) {
+    logReceiverError("teleport-to-player failed", error, context);
+    res.status(error.statusCode || 500).json({
+      ok: false,
+      status: "failed",
+      error: error.message,
+      auth: error.auth || undefined,
+      diagnostics: error.diagnostics || undefined
+    });
+  }
+}
+
 function verifyToken(req) {
-  if (!TOKEN) return;
   const header = String(req.headers.authorization || "");
-  if (header !== `Bearer ${TOKEN}`) {
+  const bearer = header.match(/^Bearer\s+(.+)$/i);
+  const receivedToken = String(bearer?.[1] || "").trim();
+  const diagnostics = {
+    authHeaderPresent: Boolean(header),
+    tokenReceived: Boolean(receivedToken),
+    tokenMatched: Boolean(TOKEN && receivedToken && receivedToken === TOKEN),
+    tokenConfigured: Boolean(TOKEN),
+    tokenSource: "DUNE_RECEIVER_TOKEN"
+  };
+  if (!TOKEN) return diagnostics;
+  if (!diagnostics.tokenMatched) {
     const error = new Error("Receiver token is missing or invalid.");
     error.statusCode = 401;
+    error.auth = diagnostics;
     throw error;
   }
+  return diagnostics;
 }
 
 function validateGiveItem(payload) {
@@ -153,6 +346,312 @@ function validateGiveItem(payload) {
     throw error;
   }
   return { playerId, template, qty, quality, requestId };
+}
+
+function validateTeleport(payload) {
+  const flsId = String(payload.fls_id || payload.flsId || payload.playerId || "").trim();
+  const characterName = String(payload.characterName || "").trim();
+  const x = Number(payload.x);
+  const y = Number(payload.y);
+  const zInfo = normalizeTeleportZ(payload);
+  const z = zInfo.z;
+  const map = String(payload.map || "HaggaBasin").trim();
+  const partitionId = Number(payload.partition_id ?? payload.partitionId ?? 0);
+  const requestId = String(payload.requestId || `teleport-${Date.now()}-${Math.random().toString(16).slice(2)}`).trim();
+  const dryRun = payload.dryRun === true || payload.dryRun === "true" || payload.test === true || payload.test === "true";
+  const test = payload.test === true || payload.test === "true";
+
+  if (!flsId || flsId.length > 128 || !/^[A-Za-z0-9_.:+\-#@ ]+$/.test(flsId)) {
+    const error = new Error("fls_id must be a valid Dune FLS/player id.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (![x, y, z].every(Number.isFinite)) {
+    const error = new Error("x, y, and z must be numeric teleport coordinates.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!Number.isFinite(partitionId) || partitionId < 0) {
+    const error = new Error("partition_id must be a non-negative number when provided.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (map.length > 80 || !/^[A-Za-z0-9_.:+\-#@ ]*$/.test(map)) {
+    const error = new Error("map contains unsupported characters.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return {
+    flsId,
+    characterName,
+    x,
+    y,
+    z,
+    map,
+    partitionId: Math.trunc(partitionId),
+    requestId,
+    dryRun,
+    test,
+    warning: zInfo.warning
+  };
+}
+
+function normalizeTeleportZ(payload) {
+  const raw = String(payload.z ?? "").trim();
+  const z = Number(raw);
+  if (raw !== "" && Number.isFinite(z) && z !== 0) return { z, warning: "" };
+  const error = new Error("Teleport Z/elevation is required. Map clicks provide X/Y only; enter a verified Z, choose a location preset, or use teleport-to-player.");
+  error.statusCode = 400;
+  throw error;
+}
+
+function validateTeleportToPlayer(payload) {
+  const sourceFlsId = String(payload.source_fls_id || payload.sourceFlsId || payload.fls_id || payload.flsId || payload.playerId || "").trim();
+  const targetId = Number(payload.target_id || payload.targetId || payload.targetPlayerId || 0);
+  const requestId = String(payload.requestId || `teleport-player-${Date.now()}-${Math.random().toString(16).slice(2)}`).trim();
+  const dryRun = payload.dryRun === true || payload.dryRun === "true" || payload.test === true || payload.test === "true";
+  const test = payload.test === true || payload.test === "true";
+  if (!sourceFlsId || sourceFlsId.length > 128 || !/^[A-Za-z0-9_.:+\-#@ ]+$/.test(sourceFlsId)) {
+    const error = new Error("source_fls_id must be a valid Dune FLS/player id.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!Number.isSafeInteger(targetId) || targetId <= 0) {
+    const error = new Error("target_id must be a valid target actor/player id.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return { sourceFlsId, targetId, requestId, dryRun, test };
+}
+
+function buildTeleportPreview(pathname, request) {
+  const command = buildTeleportToExactServerCommand(request);
+  return {
+    endpoint: pathname,
+    liveTeleportEnabled: LIVE_TELEPORT_ENABLED,
+    commandTemplateConfigured: true,
+    command,
+    payload: {
+      fls_id: request.flsId,
+      playerId: request.flsId,
+      characterName: request.characterName,
+      x: request.x,
+      y: request.y,
+      z: request.z,
+      map: request.map,
+      partition_id: request.partitionId,
+      dryRun: request.dryRun,
+      test: request.test,
+      requestId: request.requestId,
+      warning: request.warning
+    }
+  };
+}
+
+async function processTeleportCoords(request) {
+  let rmqError = null;
+  try {
+    const result = await publishTeleportToExact(request);
+    return {
+      path: "rmq",
+      message: "Teleport command sent. Verify in game.",
+      target: { x: request.x, y: request.y, z: request.z, partition_id: request.partitionId },
+      command: result.command,
+      output: result.output,
+      rmq: result.rmq,
+      onlineStatusSource: "rabbitmq"
+    };
+  } catch (error) {
+    rmqError = error;
+    logReceiver("teleport rmq path failed; checking offline DB fallback", {
+      requestId: request.requestId,
+      flsId: request.flsId,
+      error: error.message
+    });
+  }
+
+  let result;
+  try {
+    result = await updateOfflinePlayerPosition(request);
+  } catch (error) {
+    error.diagnostics = {
+      ...(error.diagnostics || {}),
+      rmqError: rmqError?.message || ""
+    };
+    throw error;
+  }
+  return {
+    path: "db",
+    message: `Offline player ${request.flsId} position updated for next login.`,
+    target: { x: request.x, y: request.y, z: request.z, partition_id: result.partitionId },
+    command: result.sql
+  };
+}
+
+async function publishTeleportToExact(request) {
+  const target = await resolveMqTarget();
+  const serverCommand = buildTeleportToExactServerCommand(request);
+  const erlang = buildRabbitEval(serverCommand, request.requestId);
+  const rmq = {
+    exchange: "heartbeats",
+    routingKey: "notifications",
+    targetQueue: "notifications",
+    targetNamespace: target.namespace,
+    targetPod: target.pod,
+    payload: serverCommand,
+    envelope: {
+      Version: 2,
+      AuthToken: "<redacted>",
+      MessageContent: JSON.stringify(serverCommand)
+    }
+  };
+  logReceiver("teleport rmq publish", {
+    requestId: request.requestId,
+    exchange: rmq.exchange,
+    routingKey: rmq.routingKey,
+    targetQueue: rmq.targetQueue,
+    targetNamespace: rmq.targetNamespace,
+    targetPod: rmq.targetPod,
+    payload: rmq.payload,
+    envelope: rmq.envelope
+  });
+  const remote = [
+    "sudo kubectl exec",
+    "-n", shQuote(target.namespace),
+    shQuote(target.pod),
+    "-- rabbitmqctl eval",
+    shQuote(erlang)
+  ].join(" ");
+  const output = await ssh(remote, TELEPORT_TIMEOUT_MS);
+  return { command: serverCommand, executedCommand: buildRabbitCommandLog(target), output: output.stdout || output.stderr || "", rmq };
+}
+
+async function updateOfflinePlayerPosition(request) {
+  const bg = await resolveBattlegroup();
+  const schema = await detectOfflineTeleportSchema(bg);
+  if (!schema.ok) {
+    const error = new Error("Offline teleport DB schema not detected. Online teleport may still work.");
+    error.statusCode = 501;
+    error.diagnostics = schema;
+    throw error;
+  }
+  const partitionId = request.partitionId || await resolveTeleportPartitionId(bg, request.flsId);
+  const sql = [
+    "select dune.admin_move_offline_player_to_partition(",
+    sqlLiteral(request.flsId),
+    ", ",
+    String(partitionId),
+    ", row(",
+    sqlNumber(request.x),
+    ", ",
+    sqlNumber(request.y),
+    ", ",
+    sqlNumber(request.z),
+    ")::dune.vector)"
+  ].join("");
+  await runDuneSql(bg, sql);
+  return { partitionId, sql: "select dune.admin_move_offline_player_to_partition(<fls_id>, <partition_id>, row(<x>, <y>, <z>)::dune.vector)" };
+}
+
+async function detectOfflineTeleportSchema(bg) {
+  const candidates = await discoverTeleportDbCandidatesSafe(bg);
+  const names = new Set(candidates.map((row) => `${row.schema}.${row.table}`.toLowerCase()));
+  const hasDuneAccounts = names.has("dune.accounts");
+  const hasDunePlayerState = names.has("dune.player_state");
+  const hasMoveFunction = await hasDbRoutine(bg, "admin_move_offline_player_to_partition");
+  const ok = hasDuneAccounts && hasDunePlayerState && hasMoveFunction;
+  if (!ok) {
+    logReceiver("teleport offline DB schema not detected", {
+      hasDuneAccounts,
+      hasDunePlayerState,
+      hasMoveFunction,
+      candidates
+    });
+  }
+  return { ok, hasDuneAccounts, hasDunePlayerState, hasMoveFunction, candidates };
+}
+
+async function discoverTeleportDbCandidatesSafe(bg) {
+  try {
+    return await discoverTeleportDbCandidates(bg);
+  } catch (error) {
+    return [{ schema: "", table: "", columns: "", error: error.message }];
+  }
+}
+
+async function discoverTeleportDbCandidates(bg) {
+  const patterns = ["player", "players", "player_state", "character", "characters", "accounts", "account", "entity", "entities"];
+  const likeList = patterns.map((pattern) => `table_name ilike ${sqlLiteral(`%${pattern}%`)}`).join(" or ");
+  const sql = `
+    select table_schema, table_name, string_agg(column_name, ',' order by ordinal_position)
+    from information_schema.columns
+    where table_schema not in ('pg_catalog', 'information_schema')
+      and (${likeList})
+    group by table_schema, table_name
+    order by table_schema, table_name
+    limit 80
+  `;
+  const output = await runDuneSql(bg, sql);
+  return String(output.stdout || "").trim().split(/\r?\n/).filter(Boolean).map((line) => {
+    const [schema, table, columns] = line.split("\t");
+    return { schema, table, columns };
+  });
+}
+
+async function hasDbRoutine(bg, routineName) {
+  const sql = `
+    select exists(
+      select 1
+      from information_schema.routines
+      where routine_schema = 'dune'
+        and routine_name = ${sqlLiteral(routineName)}
+    )::text
+  `;
+  const output = await runDuneSql(bg, sql);
+  return /^true$/i.test(String(output.stdout || "").trim().split(/\r?\n/).find(Boolean) || "");
+}
+
+async function resolveTeleportPartitionId(bg, flsId) {
+  const sql = `
+    select id::text
+    from dune.world_partition
+    where blocked = false
+    order by id
+    limit 1
+  `;
+  const output = await runDuneSql(bg, sql);
+  const id = Number(String(output.stdout || "").trim().split(/\r?\n/).find(Boolean) || 0);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error("Could not resolve a valid partition for offline teleport.");
+  }
+  return id;
+}
+
+async function getPlayerPosition(targetId) {
+  const bg = await resolveBattlegroup();
+  const sql = `
+    select
+      ((a.transform).location).x::text,
+      ((a.transform).location).y::text,
+      ((a.transform).location).z::text,
+      coalesce(a.partition_id, 0)::text
+    from dune.actors a
+    where a.id = ${String(targetId)}
+    limit 1
+  `;
+  const output = await runDuneSql(bg, sql);
+  const line = String(output.stdout || "").trim().split(/\r?\n/).find(Boolean);
+  if (!line) {
+    const error = new Error(`Target player position not found for actor id ${targetId}.`);
+    error.statusCode = 404;
+    throw error;
+  }
+  const [x, y, z, partitionId] = line.split("\t");
+  const pos = { x: Number(x), y: Number(y), z: Number(z), partitionId: Number(partitionId || 0) };
+  if (![pos.x, pos.y, pos.z].every(Number.isFinite)) {
+    throw new Error(`Target player position was not numeric for actor id ${targetId}.`);
+  }
+  return pos;
 }
 
 async function resolveDunePlayerId(playerId) {
@@ -205,7 +704,15 @@ function receiverConfigDiagnostics() {
     mqNamespace: MQ_NAMESPACE || "",
     mqPod: MQ_POD || "",
     battlegroupNamespace: BG_NAMESPACE || "",
-    battlegroupName: BG_NAME || ""
+    battlegroupName: BG_NAME || "",
+    teleport: {
+      dryRunSupported: true,
+      teleportSupported: LIVE_TELEPORT_ENABLED,
+      liveTeleportEnabled: LIVE_TELEPORT_ENABLED,
+      commandTemplateConfigured: true,
+      onlineCommand: "TeleportToExact",
+      offlineDbFunction: "dune.admin_move_offline_player_to_partition"
+    }
   };
 }
 
@@ -297,6 +804,16 @@ function buildAddItemServerCommand(command) {
   };
 }
 
+function buildTeleportToExactServerCommand(command) {
+  return {
+    ServerCommand: "TeleportToExact",
+    PlayerId: command.flsId,
+    X: command.x,
+    Y: command.y,
+    Z: command.z
+  };
+}
+
 function buildRabbitEval(serverCommand, requestId) {
   const outer = Buffer.from(JSON.stringify({
     Version: 2,
@@ -345,6 +862,16 @@ function expandEnvPath(value) {
 
 function shQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function sqlLiteral(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function sqlNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new Error("Invalid numeric SQL value.");
+  return String(number);
 }
 
 function logReceiver(message, data = {}) {

@@ -424,6 +424,15 @@ ipcMain.handle("choose-ssh-key", async () => {
   return { canceled: false, filePath: result.filePaths[0] };
 });
 
+ipcMain.handle("choose-server-install-folder", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select Dune Awakening server installation folder",
+    properties: ["openDirectory"]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  return { canceled: false, folderPath: result.filePaths[0] };
+});
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1380,

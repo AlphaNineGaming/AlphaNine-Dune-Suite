@@ -5,8 +5,9 @@ const { execFile, spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const crypto = require("crypto");
 
-const APP_VERSION = "0.2.4-beta";
+const APP_VERSION = "0.2.5-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -16,6 +17,11 @@ const TELEPORT_PLACEHOLDER_COMMAND = "teleport {playerId} {x} {y} {z}";
 const ADMIN_AUDIT_LOG = process.env.APPDATA
   ? path.join(process.env.APPDATA, "AlphaNine Dune Suite", "admin-audit.log")
   : path.join(__dirname, "admin-audit.log");
+const PROGRESSION_DATA_DIR = process.env.APPDATA
+  ? path.join(process.env.APPDATA, "AlphaNine Dune Suite")
+  : __dirname;
+const PROGRESSION_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "progression-backups");
+const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progression-audit.log");
 function packagedUnpackedPath(...parts) {
   if (!String(__dirname).includes("app.asar")) return path.join(__dirname, ...parts);
   return path.join(__dirname.replace("app.asar", "app.asar.unpacked"), ...parts);
@@ -60,6 +66,7 @@ const defaultConfig = {
   teleportEndpointPath: "/api/v1/players/teleport-coords",
   teleportCommandTemplate: "",
   teleportPayloadTemplate: "{\n  \"fls_id\": \"{playerId}\",\n  \"x\": {x},\n  \"y\": {y},\n  \"z\": {z},\n  \"partition_id\": {partitionId},\n  \"dryRun\": {dryRun},\n  \"test\": {test}\n}",
+  progressionEditingEnabled: false,
   uiSoundsEnabled: true,
   uiSoundVolume: 100
 };
@@ -78,7 +85,7 @@ function effectiveTeleportCommandTemplate(value) {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "uiSoundsEnabled", "uiSoundVolume"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "uiSoundsEnabled", "uiSoundVolume"];
   const clean = {};
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(nextConfig, key)) clean[key] = nextConfig[key];
@@ -113,6 +120,7 @@ function saveConfig(nextConfig) {
   if (!clean.teleportEndpointPath.startsWith("/")) clean.teleportEndpointPath = `/${clean.teleportEndpointPath}`;
   clean.teleportCommandTemplate = effectiveTeleportCommandTemplate(clean.teleportCommandTemplate);
   clean.teleportPayloadTemplate = String(clean.teleportPayloadTemplate || defaultConfig.teleportPayloadTemplate).trim();
+  clean.progressionEditingEnabled = clean.progressionEditingEnabled === true || clean.progressionEditingEnabled === "true";
   clean.uiSoundsEnabled = clean.uiSoundsEnabled === true || clean.uiSoundsEnabled === "true";
   clean.uiSoundVolume = Math.max(0, Math.min(100, Number(clean.uiSoundVolume) || 0));
   if (clean.port < 1 || clean.port > 65535) throw new Error("Port must be between 1 and 65535.");
@@ -122,12 +130,97 @@ function saveConfig(nextConfig) {
   return clean;
 }
 
+function comparableConfigValue(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return Number(value);
+  return String(value ?? "");
+}
+
+function verifyConfigSaved(expectedConfig) {
+  const reloaded = loadConfig();
+  const mismatches = [];
+  for (const [key, expected] of Object.entries(expectedConfig || {})) {
+    if (comparableConfigValue(reloaded[key]) !== comparableConfigValue(expected)) {
+      mismatches.push({
+        field: key,
+        expected: key.toLowerCase().includes("password") || key.toLowerCase().includes("token") ? "<secret>" : comparableConfigValue(expected),
+        actual: key.toLowerCase().includes("password") || key.toLowerCase().includes("token") ? "<secret>" : comparableConfigValue(reloaded[key])
+      });
+    }
+  }
+  return {
+    ok: mismatches.length === 0,
+    config: reloaded,
+    configPath: CONFIG_PATH,
+    checkedAt: new Date().toISOString(),
+    mismatches
+  };
+}
+
+function serverInstallPathStatus(value) {
+  const configured = String(value || "").trim();
+  const resolved = expandEnvPath(configured);
+  const result = {
+    configured,
+    path: resolved,
+    exists: false,
+    valid: false,
+    checks: [],
+    message: "Server install path is not configured."
+  };
+  if (!resolved) return result;
+  result.exists = fs.existsSync(resolved);
+  if (!result.exists) {
+    result.message = "Selected folder does not exist.";
+    return result;
+  }
+  let stat;
+  let entries;
+  try {
+    stat = fs.statSync(resolved);
+  } catch (error) {
+    result.message = `Selected folder could not be inspected: ${error.message}`;
+    return result;
+  }
+  if (!stat.isDirectory()) {
+    result.message = "Selected path is not a folder.";
+    return result;
+  }
+  try {
+    entries = fs.readdirSync(resolved, { withFileTypes: true });
+  } catch (error) {
+    result.message = `Selected folder could not be inspected: ${error.message}`;
+    return result;
+  }
+  const names = new Set(entries.map((entry) => entry.name.toLowerCase()));
+  const files = entries.filter((entry) => entry.isFile()).map((entry) => entry.name.toLowerCase());
+  const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name.toLowerCase());
+  const hasServerName = /dune|awakening|server/i.test(path.basename(resolved));
+  const hasSteamFiles = names.has("steam_appid.txt") || names.has("steamclient64.dll") || names.has("steamclient.dll");
+  const hasBinaries = files.some((name) => name.endsWith(".exe") && /dune|server|awakening/i.test(name));
+  const hasServerDirs = dirs.some((name) => ["dune", "duneawakening", "duneawakeningserver", "server", "binaries", "content", "config", "saved"].includes(name) || /dune|server|binaries|content|config|saved/.test(name));
+  result.checks = [
+    { name: "Folder exists", ok: true },
+    { name: "SteamCMD/Steam files", ok: hasSteamFiles },
+    { name: "Server executable", ok: hasBinaries },
+    { name: "Expected server folders", ok: hasServerDirs },
+    { name: "Dune/server folder name", ok: hasServerName }
+  ];
+  result.valid = hasSteamFiles || hasBinaries || hasServerDirs || hasServerName;
+  result.message = result.valid
+    ? "Selected folder looks like a Dune Awakening server installation."
+    : "Selected folder does not appear to be a valid Dune Awakening server installation.";
+  return result;
+}
+
 function publicConfig(configValue = loadConfig()) {
   const copy = { ...configValue };
+  copy.configPath = CONFIG_PATH;
   copy.databasePasswordSet = Boolean(copy.databasePassword);
   copy.receiverTokenSet = Boolean(copy.receiverToken);
   copy.sshKeyStatus = sshKeyStatus(copy.sshKey || defaultSshKeyPath());
   copy.receiverSshKeyStatus = sshKeyStatus(copy.receiverSshKey || copy.sshKey || defaultSshKeyPath());
+  copy.serverInstallPathStatus = serverInstallPathStatus(copy.serverInstallPath);
   copy.databasePassword = copy.databasePassword ? "********" : "";
   copy.receiverToken = copy.receiverToken ? "********" : "";
   return copy;
@@ -136,8 +229,10 @@ function publicConfig(configValue = loadConfig()) {
 function configWithSshDiagnostics(configValue = loadConfig()) {
   return {
     ...configValue,
+    configPath: CONFIG_PATH,
     sshKeyStatus: sshKeyStatus(configValue.sshKey || defaultSshKeyPath()),
-    receiverSshKeyStatus: sshKeyStatus(configValue.receiverSshKey || configValue.sshKey || defaultSshKeyPath())
+    receiverSshKeyStatus: sshKeyStatus(configValue.receiverSshKey || configValue.sshKey || defaultSshKeyPath()),
+    serverInstallPathStatus: serverInstallPathStatus(configValue.serverInstallPath)
   };
 }
 
@@ -492,19 +587,172 @@ async function ps(script, timeout = 120000) {
   return run("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { timeout });
 }
 
-async function vmInfo() {
+function psSingleQuote(value) {
+  return String(value || "").replace(/'/g, "''");
+}
+
+function normalizeVmState(value) {
+  const raw = String(value || "").trim();
+  const lower = raw.toLowerCase();
+  if (!raw) return "Unknown";
+  if (["running"].includes(lower)) return "Running";
+  if (["off", "stopped", "saved"].includes(lower)) return "Stopped";
+  if (["starting", "restoring"].includes(lower)) return "Starting";
+  if (["stopping", "saving", "pausing", "paused"].includes(lower)) return "Stopping";
+  return raw;
+}
+
+function vmUserError(message) {
+  const text = String(message || "").trim();
+  if (!text) return { code: "unknown", message: "VM command failed. Check Hyper-V and PowerShell permissions." };
+  if (/you do not have the required permission/i.test(text)) {
+    return {
+      code: "access_denied",
+      message: "Hyper-V access denied. Run AlphaNine Dune Suite as Administrator or grant the current Windows account membership in Hyper-V Administrators."
+    };
+  }
+  if (/hyper-v not detected|not recognized|get-vm|start-vm|stop-vm|restart-vm/i.test(text) && /not recognized|not found|not available|not detected/i.test(text)) {
+    return { code: "hyperv_unavailable", message: "Hyper-V not detected on this system." };
+  }
+  if (/access is denied|permission|administrator|elevat/i.test(text)) {
+    return { code: "access_denied", message: "Hyper-V access denied. Run AlphaNine Dune Suite as Administrator or grant the current Windows account membership in Hyper-V Administrators." };
+  }
+  if (/cannot find|was not found|does not exist|not found/i.test(text)) {
+    return { code: "vm_not_found", message: "VM not found. Check the VM Name in Settings." };
+  }
+  if (/service.*not.*running|hyper-v.*service|vmms/i.test(text)) {
+    return { code: "hyperv_service_unavailable", message: "Hyper-V service unavailable. Start the Hyper-V Virtual Machine Management service and try again." };
+  }
+  if (/invalid|parameter/i.test(text)) {
+    return { code: "invalid_vm_name", message: "Invalid VM name. Check the VM Name in Settings." };
+  }
+  return { code: "powershell_failure", message: text };
+}
+
+function configuredVmName() {
+  return String(loadConfig().vmName || VM_NAME || "").trim();
+}
+
+async function hyperVStatus() {
+  if (process.platform !== "win32") {
+    return { ok: false, available: false, code: "unsupported_platform", message: "Hyper-V controls are only available on Windows." };
+  }
+  const result = await ps("if (Get-Command Get-VM -ErrorAction SilentlyContinue) { 'available' } else { 'missing' }", 10000);
+  if (!result.ok) {
+    const error = vmUserError(result.stderr || result.error || result.stdout);
+    return { ok: false, available: false, code: error.code, message: error.message };
+  }
+  const available = /available/i.test(result.stdout);
+  return {
+    ok: available,
+    available,
+    code: available ? "available" : "hyperv_unavailable",
+    message: available ? "Hyper-V PowerShell cmdlets detected." : "Hyper-V not detected on this system."
+  };
+}
+
+async function vmInfo(vmNameValue = configuredVmName()) {
+  const vmName = String(vmNameValue || "").trim();
+  if (!vmName) return { ok: false, configured: false, exists: false, state: "Unknown", status: "Unknown", error: "VM name is not configured." };
+  const hyperv = await hyperVStatus();
+  if (!hyperv.available) return { ok: false, configured: true, exists: false, name: vmName, state: "Unknown", status: "Unknown", hyperv, error: hyperv.message };
   const script = `
     try {
-    $vm = Get-VM -Name '${VM_NAME}' -ErrorAction Stop
-    $ips = @(Get-VMNetworkAdapter -VMName '${VM_NAME}' | Select-Object -ExpandProperty IPAddresses | Where-Object { $_ -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' })
-    @{ exists=$true; state="$($vm.State)"; uptime="$($vm.Uptime)"; memory=$vm.MemoryAssigned; ip=($ips | Select-Object -First 1) } | ConvertTo-Json -Compress
+    $vm = Get-VM -Name '${psSingleQuote(vmName)}' -ErrorAction Stop
+    $ips = @(Get-VMNetworkAdapter -VMName '${psSingleQuote(vmName)}' | Select-Object -ExpandProperty IPAddresses | Where-Object { $_ -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' })
+    @{ ok=$true; configured=$true; exists=$true; name="$($vm.Name)"; state="$($vm.State)"; status="$($vm.State)"; uptime="$($vm.Uptime)"; memory=$vm.MemoryAssigned; ip=($ips | Select-Object -First 1) } | ConvertTo-Json -Compress
     } catch {
-      @{ exists=$false; needsAdmin=$true; error="$($_.Exception.Message)" } | ConvertTo-Json -Compress
+      @{ ok=$false; configured=$true; exists=$false; name='${psSingleQuote(vmName)}'; state='Unknown'; status='Unknown'; needsAdmin=$true; error="$($_.Exception.Message)" } | ConvertTo-Json -Compress
     }
   `;
   const result = await ps(script, 30000);
-  if (!result.ok) return { exists: false, needsAdmin: true, error: result.stderr || result.error };
-  try { return JSON.parse(result.stdout.trim() || "{}"); } catch { return { exists: false, error: result.stdout || result.stderr }; }
+  if (!result.ok) {
+    const error = vmUserError(result.stderr || result.error);
+    return { ok: false, configured: true, exists: false, name: vmName, state: "Unknown", status: "Unknown", needsAdmin: error.code === "access_denied", hyperv, error: error.message, errorCode: error.code };
+  }
+  try {
+    const parsed = JSON.parse(result.stdout.trim() || "{}");
+    const state = normalizeVmState(parsed.state || parsed.status);
+    const parsedError = parsed.ok || parsed.exists ? null : vmUserError(parsed.error);
+    return { ...parsed, ok: Boolean(parsed.ok || parsed.exists), configured: true, name: parsed.name || vmName, state, status: state, hyperv, error: parsedError ? parsedError.message : parsed.error, errorCode: parsedError ? parsedError.code : parsed.errorCode };
+  } catch {
+    const error = vmUserError(result.stdout || result.stderr);
+    return { ok: false, configured: true, exists: false, name: vmName, state: "Unknown", status: "Unknown", hyperv, error: error.message, errorCode: error.code };
+  }
+}
+
+function appendVmAudit(action, result) {
+  appendAdminAudit(`vm_${action}`, {
+    timestamp: new Date().toISOString(),
+    vmName: result?.name || configuredVmName() || "",
+    result: result?.ok ? "success" : "failure",
+    state: result?.state || result?.status || "Unknown",
+    error: result?.error || "",
+    details: result?.details || result?.stdout || result?.stderr || ""
+  });
+}
+
+async function vmAction(action) {
+  const allowed = new Set(["start", "stop", "restart"]);
+  if (!allowed.has(action)) return { ok: false, error: "Unsupported VM action." };
+  const vmName = configuredVmName();
+  if (!vmName) return { ok: false, configured: false, error: "VM name is not configured." };
+  const hyperv = await hyperVStatus();
+  if (!hyperv.available) {
+    const result = { ok: false, configured: true, action, name: vmName, state: "Unknown", status: "Unknown", hyperv, error: hyperv.message, errorCode: hyperv.code };
+    appendVmAudit(action, result);
+    return result;
+  }
+  const before = await vmInfo(vmName);
+  if (action === "start" && before.state === "Running") {
+    const result = { ok: true, action, name: vmName, state: "Running", status: "Running", message: "VM is already running.", vm: before };
+    appendVmAudit(action, result);
+    return result;
+  }
+  if (action === "stop" && before.state === "Stopped") {
+    const result = { ok: true, action, name: vmName, state: "Stopped", status: "Stopped", message: "VM is already stopped.", vm: before };
+    appendVmAudit(action, result);
+    return result;
+  }
+  const command = action === "start" ? "Start-VM" : action === "stop" ? "Stop-VM" : "Restart-VM";
+  const script = `
+    try {
+      ${command} -Name '${psSingleQuote(vmName)}' -ErrorAction Stop
+      $vm = Get-VM -Name '${psSingleQuote(vmName)}' -ErrorAction Stop
+      @{ ok=$true; action='${action}'; name="$($vm.Name)"; state="$($vm.State)"; status="$($vm.State)" } | ConvertTo-Json -Compress
+    } catch {
+      @{ ok=$false; action='${action}'; name='${psSingleQuote(vmName)}'; state='Unknown'; status='Unknown'; error="$($_.Exception.Message)" } | ConvertTo-Json -Compress
+    }
+  `;
+  const result = await ps(script, action === "restart" ? 120000 : 60000);
+  let parsed = {};
+  try { parsed = JSON.parse(result.stdout.trim() || "{}"); } catch {}
+  const state = normalizeVmState(parsed.state || parsed.status);
+  const userError = vmUserError(parsed.error || result.stderr || result.error || "");
+  const finalResult = {
+    ok: Boolean(result.ok && parsed.ok),
+    action,
+    name: parsed.name || vmName,
+    state,
+    status: state,
+    hyperv,
+    details: result.stdout || result.stderr || result.error || parsed.error || "",
+    error: result.ok && parsed.ok ? "" : userError.message,
+    errorCode: result.ok && parsed.ok ? "" : userError.code
+  };
+  appendVmAudit(action, finalResult);
+  return finalResult;
+}
+
+async function waitForVmRunning(timeout = 90000) {
+  const started = Date.now();
+  let last = await vmInfo();
+  while (Date.now() - started < timeout) {
+    if (last.state === "Running") return { ok: true, vm: last, waitedMs: Date.now() - started };
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    last = await vmInfo();
+  }
+  return { ok: false, vm: last, waitedMs: Date.now() - started, error: "Timed out waiting for VM to reach Running." };
 }
 
 function vmMonitorHost(vm = null) {
@@ -708,7 +956,7 @@ function parseStatus(text) {
       statusColumns = line.split(/\s+/).map((part) => part.toLowerCase());
       continue;
     }
-    if (/^(Healthy|Starting|Unhealthy|Ready|Pending)\s+/i.test(line) && (!summary.status || !summary.gateway || !summary.director || !summary.servergroup)) {
+    if (/^(Healthy|Reconciling|Running|Updating|Starting|Progressing|Unhealthy|Ready|Pending|Stopped|Failed|Error|Unreachable|Missing)\s+/i.test(line) && (!summary.status || !summary.gateway || !summary.director || !summary.servergroup)) {
       const parts = line.split(/\s+/);
       summary.status = parts[0];
       summary.phase = parts[0];
@@ -1055,11 +1303,975 @@ async function dbQuery(sql, timeout = 45000) {
   const dbSvc = `${item.metadata?.name}-db-dbdepl-svc`;
   const command = [
     `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
-    `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" psql -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -c ${shQuote(sql)}`
+    `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" psql -v ON_ERROR_STOP=1 -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -c ${shQuote(sql)}`
   ].join("; ");
   const result = await sshCommand(command, timeout);
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Database query failed.");
   return result.stdout.trim();
+}
+
+function parseDbRows(output, columns) {
+  return String(output || "").split(/\r?\n/).filter(Boolean).map((line) => {
+    const parts = line.split("\t");
+    const row = {};
+    columns.forEach((column, index) => { row[column] = parts[index] || ""; });
+    return row;
+  });
+}
+
+function inspectStatus(condition, unavailable = false) {
+  if (unavailable) return "unknown";
+  return condition ? "detected" : "missing";
+}
+
+function progressionTableStatus(tableSet, tableName, unavailable = false) {
+  return {
+    schema: "dune",
+    table: tableName,
+    status: inspectStatus(tableSet.has(`dune.${tableName}`), unavailable)
+  };
+}
+
+function progressionFunctionStatus(functionSet, functionName, unavailable = false) {
+  return {
+    schema: "dune",
+    function: functionName,
+    status: inspectStatus(functionSet.has(`dune.${functionName}`), unavailable)
+  };
+}
+
+function hasColumn(columnSet, schema, table, column) {
+  return columnSet.has(`${schema}.${table}.${column}`);
+}
+
+function progressionSupportStatus(requirements, unavailable = false) {
+  if (unavailable) return "unknown";
+  return requirements.every(Boolean) ? "detected" : "unsupported";
+}
+
+async function progressionFactionComponentScan() {
+  const sql = `
+    with recursive
+    actor_source as (
+      select id as actor_id, properties
+      from dune.actors
+      where properties is not null
+      limit 250
+    ),
+    walk(actor_id, path, value) as (
+      select actor_id, array[]::text[], properties
+      from actor_source
+      union all
+      select w.actor_id, w.path || child.key, child.value
+      from walk w
+      cross join lateral (
+        select e.key, e.value
+        from jsonb_each(case when jsonb_typeof(w.value) = 'object' then w.value else '{}'::jsonb end) e
+        union all
+        select (a.ordinality - 1)::text as key, a.value
+        from jsonb_array_elements(case when jsonb_typeof(w.value) = 'array' then w.value else '[]'::jsonb end) with ordinality a(value, ordinality)
+      ) child
+      where jsonb_typeof(w.value) in ('object', 'array')
+    )
+    select 'component', actor_id::text, array_to_string(path, '.'), ''
+    from walk
+    where path[array_length(path, 1)] = 'FactionPlayerComponent'
+    union all
+    select 'array', actor_id::text, array_to_string(path, '.'), jsonb_typeof(value)
+    from walk
+    where path[array_length(path, 1)] = 'm_FactionDataArray'
+    union all
+    select 'faction_related', actor_id::text, array_to_string(path, '.'), jsonb_typeof(value)
+    from walk
+    where array_to_string(path, '.') ilike '%faction%'
+    order by 1, 2, 3
+    limit 80;
+  `;
+  const rows = parseDbRows(await dbQuery(sql, 20000), ["kind", "actor_id", "path", "jsonType"]);
+  const components = rows.filter((row) => row.kind === "component");
+  const arrays = rows.filter((row) => row.kind === "array");
+  const related = rows.filter((row) => row.kind === "faction_related");
+  const actorIds = [...new Set([...components, ...arrays].map((row) => row.actor_id).filter(Boolean))];
+  return {
+    status: arrays.length ? "detected" : (components.length || related.length ? "missing" : "missing"),
+    actorIds,
+    componentPaths: components.map((row) => ({ actor_id: row.actor_id, path: row.path })),
+    arrayPaths: arrays.map((row) => ({ actor_id: row.actor_id, path: row.path, jsonType: row.jsonType })),
+    factionRelatedPaths: related.slice(0, 20).map((row) => ({ actor_id: row.actor_id, path: row.path, jsonType: row.jsonType }))
+  };
+}
+
+const PROGRESSION_TARGET_TABLES = [
+  "specialization_tracks",
+  "player_faction_reputation",
+  "actors",
+  "fgl_entities",
+  "actor_fgl_entities",
+  "player_state",
+  "accounts",
+  "encrypted_accounts"
+];
+
+const PROGRESSION_CORE_TABLES = [
+  "specialization_tracks",
+  "player_faction_reputation",
+  "actors",
+  "fgl_entities",
+  "actor_fgl_entities"
+];
+
+function progressionSets(inspect) {
+  const tableSet = new Set((inspect?.tables || []).filter((row) => row.status === "detected").map((row) => `${row.schema}.${row.table}`));
+  const columnSet = new Set((inspect?.columns || []).map((row) => `${row.schema}.${row.table}.${row.column}`));
+  const functionSet = new Set((inspect?.functions || []).filter((row) => row.status === "detected").map((row) => `${row.schema}.${row.function}`));
+  return { tableSet, columnSet, functionSet };
+}
+
+async function progressionInspector() {
+  const tableList = PROGRESSION_TARGET_TABLES.map((table) => sqlString(table)).join(", ");
+  const sql = `
+    select 'schema', schema_name, '', '', '', ''
+    from information_schema.schemata
+    where schema_name = 'dune'
+
+    union all
+
+    select 'table', table_schema, table_name, table_type, '', ''
+    from information_schema.tables
+    where table_schema = 'dune'
+      and lower(table_name) in (${tableList})
+
+    union all
+
+    select 'column', table_schema, table_name, column_name, data_type, udt_name
+    from information_schema.columns
+    where table_schema = 'dune'
+      and lower(table_name) in (${tableList})
+
+    union all
+
+    select 'function', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), '', ''
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'dune'
+      and lower(p.proname) in (
+        'set_specialization_xp_and_level',
+        'set_player_faction_reputation'
+      )
+    order by 1, 2, 3, 4;
+  `;
+  try {
+    const started = Date.now();
+    const rows = parseDbRows(await dbQuery(sql, 20000), ["kind", "schema", "name", "detail", "dataType", "udtName"]);
+    const schemaSet = new Set(rows.filter((row) => row.kind === "schema").map((row) => row.schema));
+    const tableSet = new Set(rows.filter((row) => row.kind === "table").map((row) => `${row.schema}.${row.name}`));
+    const columnRows = rows.filter((row) => row.kind === "column").map((row) => ({
+      schema: row.schema,
+      table: row.name,
+      column: row.detail,
+      dataType: row.dataType,
+      udtName: row.udtName,
+      status: "detected"
+    }));
+    const columnSet = new Set(columnRows.map((row) => `${row.schema}.${row.table}.${row.column}`));
+    const functionRows = rows.filter((row) => row.kind === "function").map((row) => ({
+      schema: row.schema,
+      function: row.name,
+      arguments: row.detail,
+      status: "detected"
+    }));
+    const functionSet = new Set(functionRows.map((row) => `${row.schema}.${row.function}`));
+    const tables = PROGRESSION_TARGET_TABLES.map((table) => progressionTableStatus(tableSet, table));
+    const functions = [
+      progressionFunctionStatus(functionSet, "set_specialization_xp_and_level"),
+      progressionFunctionStatus(functionSet, "set_player_faction_reputation")
+    ];
+    const canScanFactionComponent = tableSet.has("dune.actors") && hasColumn(columnSet, "dune", "actors", "properties");
+    const factionComponentScan = canScanFactionComponent
+      ? await progressionFactionComponentScan().catch((error) => ({ status: "unknown", actorIds: [], error: error.message }))
+      : { status: "unsupported", actorIds: [], error: "dune.actors.properties not detected" };
+    const supports = {
+      specializationXp: {
+        label: "Specialization XP",
+        status: progressionSupportStatus([
+          tableSet.has("dune.specialization_tracks"),
+          hasColumn(columnSet, "dune", "specialization_tracks", "player_id"),
+          hasColumn(columnSet, "dune", "specialization_tracks", "track_type"),
+          hasColumn(columnSet, "dune", "specialization_tracks", "xp_amount"),
+          hasColumn(columnSet, "dune", "specialization_tracks", "level"),
+          functionSet.has("dune.set_specialization_xp_and_level")
+        ]),
+        evidence: "Requires specialization_tracks columns and set_specialization_xp_and_level."
+      },
+      characterXp: {
+        label: "Character XP",
+        status: progressionSupportStatus([
+          tableSet.has("dune.fgl_entities"),
+          tableSet.has("dune.actor_fgl_entities"),
+          hasColumn(columnSet, "dune", "fgl_entities", "components"),
+          hasColumn(columnSet, "dune", "actor_fgl_entities", "actor_id"),
+          hasColumn(columnSet, "dune", "actor_fgl_entities", "entity_id"),
+          hasColumn(columnSet, "dune", "actor_fgl_entities", "slot_name")
+        ]),
+        evidence: "Metadata path exists for FLevelComponent discovery; component JSON values are not read in Phase 1."
+      },
+      skillPoints: {
+        label: "Skill Points",
+        status: tableSet.has("dune.fgl_entities") && hasColumn(columnSet, "dune", "fgl_entities", "components") ? "unknown" : "unsupported",
+        evidence: "Skill point fields live inside component JSON and require read-only player lookup in Phase 2."
+      },
+      techKnowledgePoints: {
+        label: "Tech Knowledge Points",
+        status: tableSet.has("dune.actors") && hasColumn(columnSet, "dune", "actors", "properties") ? "unknown" : "unsupported",
+        evidence: "Tech knowledge appears inside actor properties JSON and is not sampled in Phase 1."
+      },
+      factionReputation: {
+        label: "Faction Reputation",
+        status: progressionSupportStatus([
+          tableSet.has("dune.player_faction_reputation"),
+          hasColumn(columnSet, "dune", "player_faction_reputation", "actor_id"),
+          hasColumn(columnSet, "dune", "player_faction_reputation", "faction_id"),
+          hasColumn(columnSet, "dune", "player_faction_reputation", "reputation_amount"),
+          functionSet.has("dune.set_player_faction_reputation")
+        ]),
+        evidence: "Requires player_faction_reputation columns and set_player_faction_reputation."
+      },
+      factionComponentCacheSync: {
+        label: "Faction Component Cache Sync",
+        status: factionComponentScan.status,
+        evidence: factionComponentScan.status === "detected"
+          ? `FactionPlayerComponent.m_FactionDataArray detected on actor IDs: ${factionComponentScan.actorIds.join(", ") || "unknown"}.`
+          : factionComponentScan.status === "missing"
+            ? "dune.actors.properties was scanned; FactionPlayerComponent.m_FactionDataArray was not found in sampled actors."
+            : `Faction component scan unsupported or failed: ${factionComponentScan.error || "unknown reason"}.`,
+        details: factionComponentScan
+      }
+    };
+    return {
+      ok: true,
+      status: "available",
+      database: { status: "connected", schema: schemaSet.has("dune") ? "dune" : "unknown" },
+      schemaSignature: [
+        `tables:${tables.filter((row) => row.status === "detected").map((row) => row.table).sort().join(",") || "none"}`,
+        `functions:${functions.filter((row) => row.status === "detected").map((row) => row.function).sort().join(",") || "none"}`
+      ].join("|"),
+      durationMs: Date.now() - started,
+      tables,
+      columns: columnRows,
+      functions,
+      supports,
+      safety: {
+        readOnlyMode: true,
+        liveEditingEnabled: false,
+        rawSqlInputEnabled: false,
+        message: "Read-only mode active. Live editing disabled."
+      }
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: "unavailable",
+      database: { status: "unavailable", error: error.message },
+      schemaSignature: "unknown",
+      tables: PROGRESSION_TARGET_TABLES.map((table) => progressionTableStatus(new Set(), table, true)),
+      columns: [],
+      functions: ["set_specialization_xp_and_level", "set_player_faction_reputation"].map((name) => progressionFunctionStatus(new Set(), name, true)),
+      supports: {
+        specializationXp: { label: "Specialization XP", status: "unknown", evidence: "Database unavailable." },
+        characterXp: { label: "Character XP", status: "unknown", evidence: "Database unavailable." },
+        skillPoints: { label: "Skill Points", status: "unknown", evidence: "Database unavailable." },
+        techKnowledgePoints: { label: "Tech Knowledge Points", status: "unknown", evidence: "Database unavailable." },
+        factionReputation: { label: "Faction Reputation", status: "unknown", evidence: "Database unavailable." },
+        factionComponentCacheSync: { label: "Faction Component Cache Sync", status: "unknown", evidence: "Database unavailable." }
+      },
+      safety: {
+        readOnlyMode: true,
+        liveEditingEnabled: false,
+        rawSqlInputEnabled: false,
+        message: "Progression database unavailable. Read-only inspector did not run."
+      }
+    };
+  }
+}
+
+function firstExpression(expressions, fallback = "''") {
+  return expressions.filter(Boolean).join(", ") || fallback;
+}
+
+function progressionUnsupported(reason, inspect = null) {
+  return {
+    ok: false,
+    status: "unsupported",
+    reason,
+    inspectStatus: inspect?.status || "unknown",
+    safety: {
+      readOnlyMode: true,
+      liveEditingEnabled: false,
+      rawSqlInputEnabled: false
+    }
+  };
+}
+
+async function progressionPlayerLookup(queryValue) {
+  const query = String(queryValue || "").trim();
+  if (!query) return { ok: false, status: "not-found", reason: "Enter a character name, player name, actor id, or player id." };
+  const inspect = await progressionInspector();
+  if (!inspect.ok) {
+    return {
+      ok: false,
+      status: "unavailable",
+      reason: "Progression database unavailable",
+      database: inspect.database,
+      safety: inspect.safety
+    };
+  }
+  const { tableSet, columnSet } = progressionSets(inspect);
+  if (!tableSet.has("dune.actors") || !hasColumn(columnSet, "dune", "actors", "id")) {
+    return progressionUnsupported("dune.actors with id column is required for player lookup.", inspect);
+  }
+  const columnType = new Map((inspect.columns || []).map((row) => [`${row.schema}.${row.table}.${row.column}`, row.udtName || row.dataType || ""]));
+
+  const hasActorsClass = hasColumn(columnSet, "dune", "actors", "class");
+  const hasActorsOwner = hasColumn(columnSet, "dune", "actors", "owner_account_id");
+  const hasActorsMap = hasColumn(columnSet, "dune", "actors", "map");
+  const hasActorsProperties = hasColumn(columnSet, "dune", "actors", "properties");
+  const hasPlayerState = tableSet.has("dune.player_state");
+  const hasPsAccount = hasColumn(columnSet, "dune", "player_state", "account_id");
+  const hasPsName = hasColumn(columnSet, "dune", "player_state", "character_name");
+  const hasPsController = hasColumn(columnSet, "dune", "player_state", "player_controller_id");
+  const hasPsPawn = hasColumn(columnSet, "dune", "player_state", "player_pawn_id");
+  const hasPsOnline = hasColumn(columnSet, "dune", "player_state", "online_status");
+  const hasAccounts = tableSet.has("dune.accounts");
+  const hasAccountsId = hasColumn(columnSet, "dune", "accounts", "id");
+  const hasAccountsUser = hasColumn(columnSet, "dune", "accounts", "user");
+  const hasAccountsFuncom = hasColumn(columnSet, "dune", "accounts", "funcom_id");
+  const hasEncrypted = tableSet.has("dune.encrypted_accounts");
+  const hasEncryptedId = hasColumn(columnSet, "dune", "encrypted_accounts", "id");
+  const hasEncryptedFuncom = hasColumn(columnSet, "dune", "encrypted_accounts", "encrypted_funcom_id")
+    && String(columnType.get("dune.encrypted_accounts.encrypted_funcom_id") || "").toLowerCase() === "bytea";
+
+  const joins = [];
+  if (hasPlayerState && hasPsAccount && hasActorsOwner) {
+    joins.push("left join dune.player_state ps on ps.account_id = a.owner_account_id");
+  }
+  if (hasAccounts && hasAccountsId && hasActorsOwner) {
+    joins.push("left join dune.accounts ac on ac.id = a.owner_account_id");
+  }
+  if (hasEncrypted && hasEncryptedId && hasActorsOwner) {
+    joins.push("left join dune.encrypted_accounts ea on ea.id = a.owner_account_id");
+  }
+
+  const search = sqlString(`%${query}%`);
+  const exact = sqlString(query);
+  const conditions = [`a.id::text = ${exact}`];
+  if (hasActorsOwner) conditions.push(`a.owner_account_id::text = ${exact}`);
+  if (hasPsController && joins.some((join) => join.includes("player_state"))) conditions.push(`ps.player_controller_id::text = ${exact}`);
+  if (hasPsPawn && joins.some((join) => join.includes("player_state"))) conditions.push(`ps.player_pawn_id::text = ${exact}`);
+  if (hasPsName && joins.some((join) => join.includes("player_state"))) conditions.push(`ps.character_name ilike ${search}`);
+  if (hasAccountsUser && joins.some((join) => join.includes("dune.accounts"))) conditions.push(`ac."user" ilike ${search}`);
+  if (hasAccountsFuncom && joins.some((join) => join.includes("dune.accounts"))) conditions.push(`ac.funcom_id ilike ${search}`);
+  if (hasEncryptedFuncom && joins.some((join) => join.includes("encrypted_accounts"))) conditions.push(`convert_from(ea.encrypted_funcom_id, 'UTF8') ilike ${search}`);
+  const playerFilter = hasActorsClass ? "and a.class ilike '%Player%'" : "";
+  const nameExpr = firstExpression([
+    hasPsName && joins.some((join) => join.includes("player_state")) ? "ps.character_name" : "",
+    hasAccountsUser && joins.some((join) => join.includes("dune.accounts")) ? "ac.\"user\"" : "",
+    hasAccountsFuncom && joins.some((join) => join.includes("dune.accounts")) ? "ac.funcom_id" : "",
+    hasEncryptedFuncom && joins.some((join) => join.includes("encrypted_accounts")) ? "convert_from(ea.encrypted_funcom_id, 'UTF8')" : ""
+  ]);
+  const playerSql = `
+    select
+      a.id::text as actor_id,
+      ${hasActorsOwner ? "coalesce(a.owner_account_id::text, '')" : "''"} as account_id,
+      coalesce(${nameExpr}) as character_name,
+      ${hasPsController && joins.some((join) => join.includes("player_state")) ? "coalesce(ps.player_controller_id::text, '')" : "''"} as player_controller_id,
+      ${hasPsPawn && joins.some((join) => join.includes("player_state")) ? "coalesce(ps.player_pawn_id::text, '')" : "''"} as player_pawn_id,
+      ${hasPsOnline && joins.some((join) => join.includes("player_state")) ? "coalesce(ps.online_status::text, 'unknown')" : "'unknown'"} as online_status,
+      ${hasActorsMap ? "coalesce(a.map, '')" : "''"} as map
+    from dune.actors a
+    ${joins.join("\n")}
+    where (${conditions.join(" or ")})
+      ${playerFilter}
+    order by a.id
+    limit 20;
+  `;
+  const players = parseDbRows(await dbQuery(playerSql, 20000), ["actor_id", "account_id", "character_name", "player_controller_id", "player_pawn_id", "online_status", "map"]);
+  if (!players.length) {
+    return { ok: false, status: "not-found", query, players: [], reason: "No matching progression player found.", safety: inspect.safety };
+  }
+  const player = players[0];
+  const progressionActorId = Number(player.player_controller_id || player.actor_id);
+  if (!Number.isSafeInteger(progressionActorId) || progressionActorId < 1) {
+    return progressionUnsupported("Matched player did not expose a usable actor/player id.", inspect);
+  }
+
+  const result = {
+    ok: true,
+    status: "found",
+    query,
+    matches: players,
+    player: {
+      player_id: String(progressionActorId),
+      actor_id: String(progressionActorId),
+      character_actor_id: player.actor_id,
+      account_id: player.account_id,
+      character_name: player.character_name || "Unknown",
+      player_controller_id: player.player_controller_id,
+      player_pawn_id: player.player_pawn_id,
+      online_status: player.online_status || "unknown",
+      map: player.map || ""
+    },
+    specializationTracks: [],
+    factionReputation: [],
+    characterXp: null,
+    techKnowledge: null,
+    progressionDebug: {
+      checkedActorIds: [],
+      fglEntityLinks: [],
+      componentNames: [],
+      fLevelTarget: null,
+      fieldStatus: {}
+    },
+    warnings: [],
+    safety: inspect.safety
+  };
+
+  const onlineText = String(player.online_status || "").toLowerCase();
+  if (onlineText.includes("online")) {
+    result.warnings.push("Character XP editing requires the player to be offline.");
+  }
+
+  if (inspect.supports?.specializationXp?.status === "detected") {
+    const rows = parseDbRows(await dbQuery(`
+      select track_type::text, xp_amount::text, level::text
+      from dune.specialization_tracks
+      where player_id = ${progressionActorId}
+      order by track_type
+    `, 20000), ["track_type", "xp_amount", "level"]);
+    result.specializationTracks = rows;
+  } else {
+    result.specializationStatus = inspect.supports?.specializationXp?.status || "unsupported";
+  }
+
+  if (inspect.supports?.factionReputation?.status === "detected") {
+    const rows = parseDbRows(await dbQuery(`
+      select faction_id::text, reputation_amount::text
+      from dune.player_faction_reputation
+      where actor_id = ${progressionActorId}
+      order by faction_id
+    `, 20000), ["faction_id", "reputation_amount"]);
+    result.factionReputation = rows;
+  } else {
+    result.factionReputationStatus = inspect.supports?.factionReputation?.status || "unsupported";
+  }
+
+  const actorIdsToCheck = [...new Set([
+    player.actor_id,
+    player.player_controller_id,
+    player.player_pawn_id,
+    String(progressionActorId)
+  ].map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))];
+  result.progressionDebug.checkedActorIds = actorIdsToCheck.map(String);
+
+  if (inspect.supports?.characterXp?.status === "detected") {
+    const characterScan = await progressionCharacterComponentScan(actorIdsToCheck).catch((error) => ({
+      values: null,
+      links: [],
+      componentNames: [],
+      fieldStatus: {
+        TotalXPEarned: `Character XP component scan failed: ${error.message}`,
+        TotalSkillPoints: `Character XP component scan failed: ${error.message}`,
+        UnspentSkillPoints: `Character XP component scan failed: ${error.message}`
+      }
+    }));
+    result.progressionDebug.fglEntityLinks = characterScan.links;
+    result.progressionDebug.componentNames = characterScan.componentNames;
+    result.progressionDebug.fLevelTarget = characterScan.target || null;
+    result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...characterScan.fieldStatus };
+    result.characterXp = characterScan.values;
+  } else {
+    result.characterXpStatus = inspect.supports?.characterXp?.status || "unsupported";
+    result.progressionDebug.fieldStatus.TotalXPEarned = "unsupported: character XP schema not detected";
+    result.progressionDebug.fieldStatus.TotalSkillPoints = "unsupported: character XP schema not detected";
+    result.progressionDebug.fieldStatus.UnspentSkillPoints = "unsupported: character XP schema not detected";
+  }
+
+  if (tableSet.has("dune.actors") && hasActorsProperties) {
+    const techScan = await progressionTechKnowledgeScan(actorIdsToCheck).catch((error) => ({
+      values: null,
+      componentNames: [],
+      fieldStatus: { m_TechKnowledgePoints: `Character XP component scan failed: ${error.message}` }
+    }));
+    result.progressionDebug.componentNames = [...new Set([...(result.progressionDebug.componentNames || []), ...techScan.componentNames])];
+    result.progressionDebug.techKnowledgeTarget = techScan.target || null;
+    result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...techScan.fieldStatus };
+    result.techKnowledge = techScan.values;
+  } else {
+    result.techKnowledgeStatus = inspect.supports?.techKnowledgePoints?.status || "unsupported";
+    result.progressionDebug.fieldStatus.m_TechKnowledgePoints = "unsupported: actors.properties not detected";
+  }
+
+  return result;
+}
+
+function sqlValuesList(numbers) {
+  return numbers.map((value) => `(${Number(value)})`).join(", ");
+}
+
+function fieldFoundStatus(value, paths) {
+  return value === "" || value == null
+    ? `unsupported: field not found in scanned component JSON${paths ? `; paths checked ${paths}` : ""}`
+    : "detected";
+}
+
+async function progressionCharacterComponentScan(actorIds) {
+  if (!actorIds.length) {
+    return {
+      values: null,
+      target: null,
+      links: [],
+      componentNames: [],
+      fieldStatus: {
+        TotalXPEarned: "unsupported: no actor ids available",
+        TotalSkillPoints: "unsupported: no actor ids available",
+        UnspentSkillPoints: "unsupported: no actor ids available"
+      }
+    };
+  }
+  const sql = `
+    with recursive
+    candidates(actor_id) as (values ${sqlValuesList(actorIds)}),
+    links as (
+      select c.actor_id, afe.entity_id, coalesce(afe.slot_name, '') as slot_name, fe.components
+      from candidates c
+      left join dune.actor_fgl_entities afe on afe.actor_id = c.actor_id
+      left join dune.fgl_entities fe on fe.entity_id = afe.entity_id
+    ),
+    walk(actor_id, entity_id, slot_name, path, value) as (
+      select actor_id, entity_id, slot_name, array[]::text[], components
+      from links
+      where components is not null
+      union all
+      select w.actor_id, w.entity_id, w.slot_name, w.path || child.key, child.value
+      from walk w
+      cross join lateral (
+        select e.key, e.value
+        from jsonb_each(case when jsonb_typeof(w.value) = 'object' then w.value else '{}'::jsonb end) e
+        union all
+        select (a.ordinality - 1)::text as key, a.value
+        from jsonb_array_elements(case when jsonb_typeof(w.value) = 'array' then w.value else '[]'::jsonb end) with ordinality a(value, ordinality)
+      ) child
+      where jsonb_typeof(w.value) in ('object', 'array')
+    )
+    select 'link', actor_id::text, coalesce(entity_id::text, ''), slot_name, '', ''
+    from links
+    union all
+    select distinct 'component', '', '', '', path[1], ''
+    from walk
+    where array_length(path, 1) = 1
+    union all
+    select 'field', actor_id::text, coalesce(entity_id::text, ''), slot_name, array_to_string(path, '.'), value #>> '{}'
+    from walk
+    where path[array_length(path, 1)] in ('TotalXPEarned', 'TotalSkillPoints', 'UnspentSkillPoints')
+    order by 1, 2, 3, 4, 5;
+  `;
+  const rows = parseDbRows(await dbQuery(sql, 20000), ["kind", "actor_id", "entity_id", "slot_name", "path", "value"]);
+  const links = rows.filter((row) => row.kind === "link").map((row) => ({
+    actor_id: row.actor_id,
+    entity_id: row.entity_id,
+    slot_name: row.slot_name,
+    found: Boolean(row.entity_id)
+  }));
+  const componentNames = [...new Set(rows.filter((row) => row.kind === "component").map((row) => row.path).filter(Boolean))];
+  const fields = rows.filter((row) => row.kind === "field");
+  const targetOf = (name) => {
+    const preferred = fields.find((row) => row.path.endsWith(`.${name}`) && /DuneCharacter/i.test(row.slot_name || ""));
+    return preferred || fields.find((row) => row.path.endsWith(`.${name}`)) || null;
+  };
+  const totalXpTarget = targetOf("TotalXPEarned");
+  const totalSkillTarget = targetOf("TotalSkillPoints");
+  const unspentTarget = targetOf("UnspentSkillPoints");
+  const pathOf = (name) => fields.filter((row) => row.path.endsWith(`.${name}`)).map((row) => `${row.actor_id}/${row.entity_id}/${row.slot_name}:${row.path}`).join("; ");
+  const values = {
+    TotalXPEarned: totalXpTarget?.value || "",
+    TotalSkillPoints: totalSkillTarget?.value || "",
+    UnspentSkillPoints: unspentTarget?.value || ""
+  };
+  return {
+    values,
+    target: {
+      actor_id: totalXpTarget?.actor_id || totalSkillTarget?.actor_id || unspentTarget?.actor_id || "",
+      entity_id: totalXpTarget?.entity_id || totalSkillTarget?.entity_id || unspentTarget?.entity_id || "",
+      slot_name: totalXpTarget?.slot_name || totalSkillTarget?.slot_name || unspentTarget?.slot_name || "",
+      fields: {
+        TotalXPEarned: totalXpTarget ? { path: totalXpTarget.path, value: totalXpTarget.value } : null,
+        TotalSkillPoints: totalSkillTarget ? { path: totalSkillTarget.path, value: totalSkillTarget.value } : null,
+        UnspentSkillPoints: unspentTarget ? { path: unspentTarget.path, value: unspentTarget.value } : null
+      }
+    },
+    links,
+    componentNames,
+    fieldStatus: {
+      TotalXPEarned: fieldFoundStatus(values.TotalXPEarned, pathOf("TotalXPEarned")),
+      TotalSkillPoints: fieldFoundStatus(values.TotalSkillPoints, pathOf("TotalSkillPoints")),
+      UnspentSkillPoints: fieldFoundStatus(values.UnspentSkillPoints, pathOf("UnspentSkillPoints"))
+    }
+  };
+}
+
+async function progressionTechKnowledgeScan(actorIds) {
+  if (!actorIds.length) {
+    return { values: null, componentNames: [], target: null, fieldStatus: { m_TechKnowledgePoints: "unsupported: no actor ids available" } };
+  }
+  const sql = `
+    with recursive
+    candidates(actor_id) as (values ${sqlValuesList(actorIds)}),
+    actors as (
+      select c.actor_id, a.properties
+      from candidates c
+      left join dune.actors a on a.id = c.actor_id
+    ),
+    walk(actor_id, path, value) as (
+      select actor_id, array[]::text[], properties
+      from actors
+      where properties is not null
+      union all
+      select w.actor_id, w.path || child.key, child.value
+      from walk w
+      cross join lateral (
+        select e.key, e.value
+        from jsonb_each(case when jsonb_typeof(w.value) = 'object' then w.value else '{}'::jsonb end) e
+        union all
+        select (a.ordinality - 1)::text as key, a.value
+        from jsonb_array_elements(case when jsonb_typeof(w.value) = 'array' then w.value else '[]'::jsonb end) with ordinality a(value, ordinality)
+      ) child
+      where jsonb_typeof(w.value) in ('object', 'array')
+    )
+    select distinct 'component', actor_id::text, path[1], ''
+    from walk
+    where array_length(path, 1) = 1
+    union all
+    select 'field', actor_id::text, array_to_string(path, '.'), value #>> '{}'
+    from walk
+    where path[array_length(path, 1)] = 'm_TechKnowledgePoints'
+    order by 1, 2, 3;
+  `;
+  const rows = parseDbRows(await dbQuery(sql, 20000), ["kind", "actor_id", "path", "value"]);
+  const componentNames = [...new Set(rows.filter((row) => row.kind === "component").map((row) => row.path).filter(Boolean))];
+  const fields = rows.filter((row) => row.kind === "field");
+  const preferred = fields.find((row) => String(row.actor_id) === String(actorIds[0])) || fields[0];
+  const value = preferred?.value || "";
+  const paths = fields.map((row) => `${row.actor_id}:${row.path}`).join("; ");
+  return {
+    values: { m_TechKnowledgePoints: value },
+    componentNames,
+    target: preferred ? { actor_id: preferred.actor_id, path: preferred.path, value } : null,
+    fieldStatus: { m_TechKnowledgePoints: fieldFoundStatus(value, paths) }
+  };
+}
+
+const progressionPreviews = new Map();
+
+function clampNumber(value, name, min, max = Number.MAX_SAFE_INTEGER) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new Error(`${name} must be a number.`);
+  return Math.max(min, Math.min(max, number));
+}
+
+function progressionAudit(action, payload) {
+  const entry = { timestamp: new Date().toISOString(), action, ...payload };
+  fs.mkdirSync(path.dirname(PROGRESSION_AUDIT_LOG), { recursive: true });
+  fs.appendFileSync(PROGRESSION_AUDIT_LOG, JSON.stringify(entry) + "\n", "utf8");
+}
+
+function progressionBackupPath(playerId, action, id) {
+  fs.mkdirSync(PROGRESSION_BACKUP_DIR, { recursive: true });
+  const safeAction = String(action || "progression").replace(/[^a-z0-9_-]/gi, "_");
+  const safePlayer = String(playerId || "player").replace(/[^a-z0-9_-]/gi, "_");
+  return path.join(PROGRESSION_BACKUP_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}-${safePlayer}-${safeAction}-${id}.json`);
+}
+
+function sqlTextArrayPath(pathValue) {
+  const parts = String(pathValue || "").split(".").filter(Boolean);
+  if (!parts.length) throw new Error("Detected JSON path is empty.");
+  return `ARRAY[${parts.map((part) => sqlString(part)).join(", ")}]`;
+}
+
+function requireSqlIntegerLiteral(value, name) {
+  const text = String(value ?? "").trim();
+  if (!/^-?\d+$/.test(text)) throw new Error(`${name} must be an integer.`);
+  return text;
+}
+
+async function progressionPlayerComponentSupport(actorId) {
+  const output = await dbQuery(`
+    select
+      coalesce((properties ? 'FactionPlayerComponent')::text, 'false'),
+      coalesce((properties ? 'TechKnowledgePlayerComponent')::text, 'false')
+    from dune.actors
+    where id = ${actorId}
+    limit 1
+  `, 20000);
+  const [faction = "false", tech = "false"] = String(output || "").split("\t");
+  return { factionComponent: /^true$/i.test(faction), techKnowledgeComponent: /^true$/i.test(tech) };
+}
+
+async function progressionPreview(payload) {
+  const action = String(payload?.action || "").trim();
+  if (!["specialization_xp", "faction_reputation", "character_xp_skill_points"].includes(action)) {
+    throw new Error("Unsupported progression action.");
+  }
+  const query = String(payload?.query || payload?.playerId || "").trim();
+  const playerData = await progressionPlayerLookup(query);
+  if (!playerData.ok) return progressionUnsupported(playerData.reason || "Player lookup failed.");
+  const inspect = await progressionInspector();
+  const actorId = requireInteger(playerData.player.actor_id, "actor_id", 1);
+  const componentSupport = await progressionPlayerComponentSupport(actorId).catch(() => ({ factionComponent: false, techKnowledgeComponent: false }));
+  const previewId = crypto.randomBytes(16).toString("hex");
+  let oldValues = {};
+  let newValues = {};
+  let sqlPreview = "";
+
+  if (action === "specialization_xp") {
+    if (inspect.supports?.specializationXp?.status !== "detected") return progressionUnsupported("Specialization XP schema/function support was not detected.", inspect);
+    const track = String(payload?.trackType || "").trim();
+    if (!track) throw new Error("trackType is required.");
+    const xp = Math.round(clampNumber(payload?.xpAmount, "xpAmount", 0, 44182));
+    const level = clampNumber(payload?.level, "level", 0, 100);
+    const current = (playerData.specializationTracks || []).find((row) => row.track_type === track) || null;
+    oldValues = current || { track_type: track, xp_amount: "0", level: "0", missing: true };
+    newValues = { track_type: track, xp_amount: xp, level };
+    sqlPreview = `SELECT dune.set_specialization_xp_and_level(${actorId}, ${sqlString(track)}::dune.specializationtracktype, ${xp}, ${level});`;
+  }
+
+  if (action === "faction_reputation") {
+    if (inspect.supports?.factionReputation?.status !== "detected") return progressionUnsupported("Faction reputation schema/function support was not detected.", inspect);
+    if (!componentSupport.factionComponent) return progressionUnsupported("FactionPlayerComponent cache sync support was not detected for this player; refusing live reputation write.", inspect);
+    const factionId = requireInteger(payload?.factionId, "factionId", 1, 32767);
+    const reputationAmount = Math.round(clampNumber(payload?.reputationAmount, "reputationAmount", 0, 12474));
+    const current = (playerData.factionReputation || []).find((row) => String(row.faction_id) === String(factionId)) || null;
+    oldValues = current || { faction_id: String(factionId), reputation_amount: "0", missing: true };
+    newValues = { faction_id: factionId, reputation_amount: reputationAmount };
+    sqlPreview = `SELECT dune.set_player_faction_reputation(${actorId}, ${factionId}, ${reputationAmount}); plus FactionPlayerComponent cache rebuild.`;
+  }
+
+  if (action === "character_xp_skill_points") {
+    if (inspect.supports?.characterXp?.status !== "detected") return progressionUnsupported("Character XP FLevelComponent support was not detected.", inspect);
+    if (String(playerData.player.online_status || "").toLowerCase().includes("online")) {
+      return progressionUnsupported("Character XP editing requires the player to be offline.", inspect);
+    }
+    const techTarget = playerData.progressionDebug?.techKnowledgeTarget || null;
+    const fLevelTarget = playerData.progressionDebug?.fLevelTarget || null;
+    const xpDetected = playerData.characterXp
+      && playerData.characterXp.TotalXPEarned !== ""
+      && playerData.characterXp.TotalSkillPoints !== ""
+      && playerData.characterXp.UnspentSkillPoints !== ""
+      && playerData.techKnowledge
+      && playerData.techKnowledge.m_TechKnowledgePoints !== "";
+    const fLevelFields = fLevelTarget?.fields || {};
+    const fLevelDetected = fLevelTarget?.entity_id
+      && fLevelFields.TotalXPEarned?.path
+      && fLevelFields.TotalSkillPoints?.path
+      && fLevelFields.UnspentSkillPoints?.path;
+    if (!xpDetected || !fLevelDetected || !techTarget?.actor_id || !techTarget?.path) {
+      return {
+        ...progressionUnsupported("Character XP fields were not detected correctly for this player. Live character XP editing remains blocked.", inspect),
+        mismatchDebug: {
+          lookupDetectedCharacterXp: playerData.characterXp || null,
+          lookupFLevelTarget: fLevelTarget,
+          lookupDetectedTechKnowledge: playerData.techKnowledge || null,
+          lookupTechKnowledgeTarget: techTarget,
+          fieldStatus: playerData.progressionDebug?.fieldStatus || {},
+          checkedActorIds: playerData.progressionDebug?.checkedActorIds || []
+        }
+      };
+    }
+    const totalXp = Math.round(clampNumber(payload?.totalXpEarned, "totalXpEarned", 0));
+    const totalSkillPoints = Math.round(clampNumber(payload?.totalSkillPoints, "totalSkillPoints", 0));
+    const unspentSkillPoints = Math.round(clampNumber(payload?.unspentSkillPoints, "unspentSkillPoints", 0));
+    const techKnowledgePoints = Math.round(clampNumber(payload?.techKnowledgePoints, "techKnowledgePoints", 0));
+    oldValues = {
+      ...(playerData.characterXp || {}),
+      ...(playerData.techKnowledge || {})
+    };
+    newValues = { TotalXPEarned: totalXp, TotalSkillPoints: totalSkillPoints, UnspentSkillPoints: unspentSkillPoints, m_TechKnowledgePoints: techKnowledgePoints };
+    sqlPreview = `Update FLevelComponent at actor ${fLevelTarget.actor_id} entity ${fLevelTarget.entity_id} paths ${fLevelFields.TotalXPEarned.path}, ${fLevelFields.TotalSkillPoints.path}, ${fLevelFields.UnspentSkillPoints.path}; update TechKnowledge at actor ${techTarget.actor_id} path ${techTarget.path}.`;
+    componentSupport.fLevelTarget = fLevelTarget;
+    componentSupport.techKnowledgeTarget = techTarget;
+  }
+
+  const backup = {
+    createdAt: new Date().toISOString(),
+    action,
+    player: playerData.player,
+    oldValues,
+    fLevelTarget: componentSupport.fLevelTarget || null,
+    techKnowledgeTarget: componentSupport.techKnowledgeTarget || null,
+    source: "progression-preview",
+    readOnlyBackup: true
+  };
+  const backupPath = progressionBackupPath(actorId, action, previewId);
+  fs.writeFileSync(backupPath, JSON.stringify(backup, null, 2), "utf8");
+  const preview = {
+    ok: true,
+    status: "preview",
+    previewId,
+    backupPath,
+    action,
+    player: playerData.player,
+    oldValues,
+    newValues,
+    fLevelTarget: componentSupport.fLevelTarget || null,
+    techKnowledgeTarget: componentSupport.techKnowledgeTarget || null,
+    sqlPreview,
+    warning: "Live progression editing can corrupt player data. Backup first."
+  };
+  progressionPreviews.set(previewId, { ...preview, createdAt: Date.now(), componentSupport });
+  return preview;
+}
+
+function factionComponentArraySql(actorId) {
+  return `
+    update dune.actors
+    set properties = jsonb_set(
+      properties,
+      '{FactionPlayerComponent,m_FactionDataArray}',
+      (
+        select jsonb_agg(jsonb_build_object(
+          'Faction', jsonb_build_object('Name', case when fid = 1 then 'Atreides' else 'Harkonnen' end),
+          'timestamp', extract(epoch from now()),
+          'ReputationAmount', rep
+        ))
+        from (
+          values
+            (1, coalesce((select reputation_amount from dune.player_faction_reputation where actor_id = ${actorId} and faction_id = 1), 0)),
+            (2, coalesce((select reputation_amount from dune.player_faction_reputation where actor_id = ${actorId} and faction_id = 2), 0))
+        ) as v(fid, rep)
+      ),
+      true
+    )
+    where id = ${actorId}
+      and properties ? 'FactionPlayerComponent';
+  `;
+}
+
+async function progressionApply(payload) {
+  const configValue = loadConfig();
+  const previewId = String(payload?.previewId || "").trim();
+  const preview = progressionPreviews.get(previewId);
+  if (!configValue.progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+  if (!preview) throw new Error("Dry-run preview was not generated first or has expired.");
+  if (!fs.existsSync(preview.backupPath)) throw new Error("Matching backup file is missing.");
+  if (payload?.confirmText !== "CONFIRM" && payload?.confirmed !== true) throw new Error("Type CONFIRM before applying.");
+  if (Date.now() - preview.createdAt > 1000 * 60 * 30) throw new Error("Dry-run preview expired. Generate a new preview.");
+  const inspect = await progressionInspector();
+  if (!inspect.ok) throw new Error("Progression schema inspection failed.");
+  const actorId = requireInteger(preview.player.actor_id, "actor_id", 1);
+  const action = preview.action;
+  let sql = "";
+  if (action === "specialization_xp") {
+    if (inspect.supports?.specializationXp?.status !== "detected") throw new Error("Specialization XP support is no longer detected.");
+    sql = `
+      begin;
+      select dune.set_specialization_xp_and_level(${actorId}, ${sqlString(preview.newValues.track_type)}::dune.specializationtracktype, ${preview.newValues.xp_amount}, ${preview.newValues.level});
+      commit;
+    `;
+  } else if (action === "faction_reputation") {
+    if (inspect.supports?.factionReputation?.status !== "detected") throw new Error("Faction reputation support is no longer detected.");
+    if (!preview.componentSupport?.factionComponent) throw new Error("FactionPlayerComponent cache sync support was not detected.");
+    sql = `
+      begin;
+      select dune.set_player_faction_reputation(${actorId}, ${preview.newValues.faction_id}, ${preview.newValues.reputation_amount});
+      ${factionComponentArraySql(actorId)}
+      commit;
+    `;
+  } else if (action === "character_xp_skill_points") {
+    if (inspect.supports?.characterXp?.status !== "detected") throw new Error("Character XP support is no longer detected.");
+    const fresh = await progressionPlayerLookup(actorId);
+    if (String(fresh.player?.online_status || "").toLowerCase().includes("online")) throw new Error("Character XP editing requires the player to be offline.");
+    const fLevelTarget = preview.componentSupport?.fLevelTarget;
+    const fLevelFields = fLevelTarget?.fields || {};
+    if (!fLevelTarget?.entity_id
+      || !fLevelFields.TotalXPEarned?.path
+      || !fLevelFields.TotalSkillPoints?.path
+      || !fLevelFields.UnspentSkillPoints?.path) {
+      throw new Error("Preview did not include a resolved FLevelComponent path.");
+    }
+    const techTarget = preview.componentSupport?.techKnowledgeTarget;
+    if (!techTarget?.actor_id || !techTarget?.path) throw new Error("Preview did not include a resolved TechKnowledge component path.");
+    const fLevelEntityId = requireSqlIntegerLiteral(fLevelTarget.entity_id, "fLevel_entity_id");
+    sql = `
+      begin;
+      with updated_flevel as (
+        update dune.fgl_entities
+        set components = jsonb_set(jsonb_set(jsonb_set(
+        components,
+        ${sqlTextArrayPath(fLevelFields.TotalXPEarned.path)}, to_jsonb(${preview.newValues.TotalXPEarned}::bigint), false),
+        ${sqlTextArrayPath(fLevelFields.TotalSkillPoints.path)}, to_jsonb(${preview.newValues.TotalSkillPoints}::bigint), false),
+        ${sqlTextArrayPath(fLevelFields.UnspentSkillPoints.path)}, to_jsonb(${preview.newValues.UnspentSkillPoints}::bigint), false)
+        where entity_id = ${fLevelEntityId}
+        returning 1
+      )
+      select 'flevel_rows', count(*)::text from updated_flevel;
+      with updated_tech as (
+        update dune.actors
+        set properties = jsonb_set(
+        properties,
+        ${sqlTextArrayPath(techTarget.path)},
+        to_jsonb(${preview.newValues.m_TechKnowledgePoints}::bigint),
+        false)
+        where id = ${requireInteger(techTarget.actor_id, "tech_knowledge_actor_id", 1)}
+        returning 1
+      )
+      select 'tech_rows', count(*)::text from updated_tech;
+      commit;
+    `;
+  } else {
+    throw new Error("Unsupported progression action.");
+  }
+  try {
+    const output = await dbQuery(sql, 30000);
+    const debugRows = parseDbRows(output, ["key", "value"]);
+    const rowsAffected = Object.fromEntries(debugRows.filter((row) => /_rows$/.test(row.key || "")).map((row) => [row.key, Number(row.value) || 0]));
+    if (action === "character_xp_skill_points") {
+      const readBack = await progressionPlayerLookup(actorId);
+      const readBackValues = {
+        TotalXPEarned: readBack.characterXp?.TotalXPEarned ?? "",
+        TotalSkillPoints: readBack.characterXp?.TotalSkillPoints ?? "",
+        UnspentSkillPoints: readBack.characterXp?.UnspentSkillPoints ?? "",
+        m_TechKnowledgePoints: readBack.techKnowledge?.m_TechKnowledgePoints ?? ""
+      };
+      const expected = {
+        TotalXPEarned: String(preview.newValues.TotalXPEarned),
+        TotalSkillPoints: String(preview.newValues.TotalSkillPoints),
+        UnspentSkillPoints: String(preview.newValues.UnspentSkillPoints),
+        m_TechKnowledgePoints: String(preview.newValues.m_TechKnowledgePoints)
+      };
+      const verified = Object.keys(expected).every((key) => String(readBackValues[key]) === expected[key]);
+      const verificationDebug = {
+        fLevelTarget: preview.componentSupport?.fLevelTarget || null,
+        techKnowledgeTarget: preview.componentSupport?.techKnowledgeTarget || null,
+        rowsAffected,
+        readBackValues,
+        expectedValues: expected,
+        readBackFieldStatus: readBack.progressionDebug?.fieldStatus || {}
+      };
+      if (!verified) {
+        progressionPreviews.delete(previewId);
+        progressionAudit("progression_apply_verification_failed", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: false, verificationFailed: true, debug: verificationDebug });
+        return { ok: false, status: "verification_failed", action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath, debug: verificationDebug, warning: "Database write completed, but read-back did not match the requested values." };
+      }
+      progressionPreviews.delete(previewId);
+      progressionAudit("progression_apply_success", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: true, debug: verificationDebug });
+      return { ok: true, status: "applied", action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath, debug: verificationDebug };
+    }
+    progressionPreviews.delete(previewId);
+    progressionAudit("progression_apply_success", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: true });
+    return { ok: true, status: "applied", action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath };
+  } catch (error) {
+    try { await dbQuery("rollback;", 10000); } catch {}
+    progressionAudit("progression_apply_failure", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: false, error: error.message });
+    throw error;
+  }
 }
 
 function redactUrl(value) {
@@ -1155,18 +2367,28 @@ function transportDisplayName(mode) {
   return mode || "dry-run";
 }
 
+const SERVER_STATUS_ONLINE = new Set(["healthy", "reconciling", "running", "updating", "starting", "progressing", "ready"]);
+const SERVER_STATUS_OFFLINE = new Set(["stopped", "failed", "error", "unreachable", "missing", "offline"]);
+
+function mapServerStatus(value) {
+  const raw = String(value || "").trim();
+  const key = raw.toLowerCase();
+  if (!raw || key === "unknown") return { raw: raw || "Unknown", label: "Warning", kind: "warn", online: false };
+  if (SERVER_STATUS_ONLINE.has(key)) return { raw, label: "Online", kind: "ok", online: true };
+  if (SERVER_STATUS_OFFLINE.has(key)) return { raw, label: "Offline", kind: "bad", online: false };
+  return { raw, label: "Warning", kind: "warn", online: false };
+}
+
+function mapServerSummaryStatus(summary) {
+  const phaseStatus = mapServerStatus(summary?.phase || summary?.status);
+  const checks = [summary?.servergroup, summary?.gateway, summary?.director].filter((value) => String(value || "").trim()).map(mapServerStatus);
+  if (phaseStatus.kind === "bad" || checks.some((check) => check.kind === "bad")) return { label: "Offline", kind: "bad", online: false, phase: phaseStatus, checks };
+  if (phaseStatus.online && checks.every((check) => check.kind !== "bad")) return { label: "Online", kind: "ok", online: true, phase: phaseStatus, checks };
+  return { label: "Warning", kind: "warn", online: false, phase: phaseStatus, checks };
+}
+
 function statusSummaryIsOnline(summary) {
-  const phase = String(summary?.phase || summary?.status || "");
-  const servergroup = String(summary?.servergroup || "");
-  const gateway = String(summary?.gateway || "");
-  const director = String(summary?.director || "");
-  const servergroupOk = servergroup ? /^Running$/i.test(servergroup) : true;
-  const gatewayOk = gateway ? /^Healthy$/i.test(gateway) : true;
-  const directorOk = director ? /^Healthy$/i.test(director) : true;
-  return /^Healthy$/i.test(phase)
-    && servergroupOk
-    && gatewayOk
-    && directorOk;
+  return mapServerSummaryStatus(summary).online;
 }
 
 function serverSnapshotIsOnline(snapshot) {
@@ -1232,12 +2454,14 @@ async function updateRuntimeGiveTransport(snapshot = null, source = "status") {
   }
   const online = serverSnapshotIsOnline(checked);
   const nextMode = online ? "http-json" : "dry-run";
-  const nextReason = online ? "Server Online/Healthy." : "Server Offline or Not Healthy.";
+  const mappedStatus = mapServerSummaryStatus(checked?.status?.summary || checked?.status);
+  const nextReason = online ? `Server ${mappedStatus.label}.` : `Server ${mappedStatus.label}.`;
   const changed = !runtimeGiveTransport.initialized || runtimeGiveTransport.mode !== nextMode || runtimeGiveTransport.serverOnline !== online;
   const startup = !runtimeGiveTransport.initialized || source === "startup";
   runtimeGiveTransport.mode = nextMode;
   runtimeGiveTransport.serverOnline = online;
   runtimeGiveTransport.serverStatus = String(checked?.status?.summary?.status || checked?.status?.status || "");
+  runtimeGiveTransport.serverStatusMapped = mappedStatus;
   runtimeGiveTransport.reason = nextReason;
   runtimeGiveTransport.initialized = true;
   if (changed) {
@@ -2359,7 +3583,7 @@ async function liveMapTeleportStatus() {
   const receiverLiveTeleportEnabled = receiverTeleport.liveTeleportEnabled !== false;
   const receiverTeleportSupported = receiverTeleport.teleportSupported !== false;
   const reasons = [];
-  if (!availability.online) reasons.push("Server is not Healthy.");
+  if (!availability.online) reasons.push("Server is not online.");
   if (!receiver.ok) reasons.push(`Receiver is not reachable at ${receiver.healthUrl}.`);
   if (!cfg.liveTeleportEnabled) reasons.push("Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.");
   if (receiver.ok && receiverTeleport.liveTeleportEnabled === false) reasons.push("Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.");
@@ -2382,7 +3606,7 @@ async function liveMapTeleportStatus() {
 async function liveMapTeleportExecute(payload) {
   const status = await liveMapTeleportStatus();
   const preview = liveMapTeleportRequest(payload, { dryRun: false, test: false });
-  if (!status.serverHealthy) return { ok: false, status: "blocked", error: "Server is not Healthy.", ...preview, readiness: status };
+  if (!status.serverHealthy) return { ok: false, status: "blocked", error: "Server is not online.", ...preview, readiness: status };
   if (!status.receiverReachable) return { ok: false, status: "blocked", error: "Receiver offline.", ...preview, readiness: status };
   if (!status.liveTeleportEnabled) return { ok: false, status: "blocked", error: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.", ...preview, readiness: status };
   if (!status.receiverLiveTeleportEnabled) return { ok: false, status: "blocked", error: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.", ...preview, readiness: status };
@@ -2730,6 +3954,8 @@ async function adminCreateAccessCode(payload) {
   };
 }
 
+// Legacy progression helpers are intentionally kept out of the active UI/API.
+// Phase 1 uses /api/progression/inspect for read-only metadata discovery only.
 const SPECIALIZATION_TRACKS = ["Crafting", "Gathering", "Exploration", "Combat", "Sabotage"];
 
 function requireTrack(value) {
@@ -3275,6 +4501,7 @@ function appPage() {
       --glass:rgba(245,199,93,.055); --line:rgba(214,166,69,.46); --line-strong:rgba(240,201,106,.72); --line-blue:rgba(143,197,219,.45);
       --text:#eee5d2; --muted:#a99b77; --sand:#d0a44e; --gold:#d7a84c; --gold-bright:#f3cf73; --blue:#8fc5db;
       --good:#66d17a; --warn:#f0b95c; --bad:#ff6262; --shadow:0 28px 90px rgba(0,0,0,.62);
+      --content-max:1812px; --panel-gap:12px; --panel-pad:18px; --panel-cut:14px; --panel-radius:0;
       color-scheme:dark; font-family:"Rajdhani","Segoe UI",system-ui,sans-serif;
     }
     * { box-sizing:border-box; }
@@ -3323,7 +4550,7 @@ function appPage() {
     .badge.ok { color:var(--good); border-color:rgba(86,214,143,.35); }
     .badge.warn { color:var(--warn); border-color:rgba(234,191,98,.35); }
     .badge.bad { color:var(--bad); border-color:rgba(255,102,102,.35); }
-    .view { display:none; animation:fade .16s ease-out; }
+    .view { display:none; width:100%; max-width:var(--content-max); margin:0 auto; animation:fade .16s ease-out; }
     .view.active { display:block; }
     @keyframes fade { from { opacity:.2; transform:translateY(4px); } to { opacity:1; transform:none; } }
     .hero { position:relative; overflow:hidden; min-height:190px; margin-bottom:16px; border:1px solid var(--line-strong); border-radius:0; background:
@@ -3340,15 +4567,15 @@ function appPage() {
     .kicker, .label { color:var(--gold-bright); font-size:13px; text-transform:uppercase; letter-spacing:.11em; font-weight:900; }
     .hero h3 { margin:9px 0 0; font-size:clamp(26px, 2.1vw, 31px); line-height:1.08; letter-spacing:.075em; text-transform:uppercase; color:var(--gold-bright); text-shadow:0 0 24px rgba(240,201,106,.16); max-width:600px; }
     .hero p { margin:10px 0 0; color:#ded3c1; line-height:1.45; max-width:600px; }
-    .grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; }
+    .grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:var(--panel-gap); }
     .grid.four { grid-template-columns:repeat(4,minmax(0,1fr)); }
-    .panel { position:relative; border:1px solid var(--line); border-radius:0; background:linear-gradient(180deg, rgba(19,19,12,.94), rgba(5,7,5,.88)); box-shadow:inset 0 0 0 1px rgba(240,201,106,.05), inset 0 -42px 70px rgba(0,0,0,.34), 0 18px 54px rgba(0,0,0,.32); clip-path:polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px)); }
+    .panel { position:relative; width:100%; min-width:0; border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.94), rgba(5,7,5,.88)); box-shadow:inset 0 0 0 1px rgba(240,201,106,.05), inset 0 -42px 70px rgba(0,0,0,.34), 0 18px 54px rgba(0,0,0,.32); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
     .panel::before { content:""; position:absolute; left:12px; right:12px; top:8px; height:1px; background:linear-gradient(90deg, transparent, rgba(240,201,106,.42), transparent); pointer-events:none; }
     .panel::after { content:""; position:absolute; inset:0; pointer-events:none; box-shadow:inset 0 0 38px rgba(240,201,106,.06), 0 0 18px rgba(214,166,69,.08); }
-    .panel.pad { padding:18px; }
+    .panel.pad { padding:var(--panel-pad); }
     .value { margin-top:10px; font-size:29px; font-weight:850; color:var(--gold-bright); overflow-wrap:anywhere; letter-spacing:.03em; }
     .subtle { color:var(--muted); font-size:13px; line-height:1.45; }
-    .dashboard-grid { display:grid; grid-template-columns:minmax(280px,.82fr) minmax(420px,1.2fr) minmax(320px,.92fr); gap:12px; align-items:start; margin-top:12px; }
+    .dashboard-grid { display:grid; grid-template-columns:minmax(280px,.82fr) minmax(420px,1.2fr) minmax(320px,.92fr); gap:var(--panel-gap); align-items:start; margin-top:var(--panel-gap); }
     .panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid rgba(214,166,69,.14); padding-bottom:10px; margin-bottom:12px; }
     .micro { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.12em; }
     .resource-bars { display:grid; gap:14px; }
@@ -3416,7 +4643,7 @@ function appPage() {
     .map-region-card .line { display:flex; justify-content:space-between; gap:8px; border-top:1px solid rgba(214,166,69,.1); padding-top:6px; margin-top:6px; color:var(--muted); font-size:12px; }
     .map-region-card .line strong { color:var(--sand); font-size:12px; }
     .map-metadata-note { margin-top:10px; color:var(--muted); font-size:12px; line-height:1.45; }
-    .live-map-layout { width:100%; max-width:1812px; margin:0 auto; display:grid; grid-template-columns:minmax(0,1400px) 360px; justify-content:center; gap:12px; align-items:start; overflow-x:hidden; }
+    .live-map-layout { width:100%; max-width:var(--content-max); margin:0 auto; display:grid; grid-template-columns:minmax(0,1400px) 360px; justify-content:center; gap:var(--panel-gap); align-items:start; overflow-x:hidden; }
     .live-map-stage { width:min(100%, calc(100vh - 150px), 1400px); max-width:1400px; justify-self:center; min-width:0; }
     .live-map-canvas { position:relative; width:100%; height:auto; aspect-ratio:1 / 1; border:1px solid rgba(214,166,69,.34); background:#070604; overflow:hidden; }
     .live-map-canvas .leaflet-container { width:100%; height:100%; background:#070604; font:inherit; }
@@ -3440,8 +4667,8 @@ function appPage() {
     .metric-tile .label { min-height:20px; font-size:10.5px; letter-spacing:.105em; line-height:1.15; }
     .metric-tile .value { margin-top:8px; font-size:21px; line-height:1.1; font-weight:780; letter-spacing:.015em; }
     .metric-tile .subtle { margin-top:8px; color:rgba(169,155,119,.74); font-size:11.5px; line-height:1.3; }
-    .layout-2 { display:grid; grid-template-columns:minmax(300px,390px) minmax(0,1fr); gap:12px; align-items:start; }
-    .layout-3 { display:grid; grid-template-columns:1.1fr .9fr; gap:12px; align-items:start; }
+    .layout-2 { display:grid; grid-template-columns:minmax(300px,390px) minmax(0,1fr); gap:var(--panel-gap); align-items:start; }
+    .layout-3 { display:grid; grid-template-columns:1.1fr .9fr; gap:var(--panel-gap); align-items:start; }
     .controls, .action-row { display:flex; flex-wrap:wrap; gap:10px; }
     .sound-widget { display:grid; gap:9px; margin-top:14px; padding:12px; border:1px solid rgba(214,166,69,.28); background:linear-gradient(180deg, rgba(240,201,106,.055), rgba(0,0,0,.18)); clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
     .sound-widget-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
@@ -3452,7 +4679,7 @@ function appPage() {
     .dashboard-footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid rgba(214,166,69,.16); color:var(--muted); font-size:12px; }
     .dashboard-footer a, .support-links a { color:var(--gold-bright); overflow-wrap:anywhere; }
     .about-overlay { position:fixed; inset:0; z-index:5100; background:rgba(3,4,5,.76); backdrop-filter:blur(8px); display:grid; place-items:center; padding:20px; }
-    .about-card { width:min(560px,100%); border:1px solid rgba(214,166,69,.42); background:linear-gradient(180deg,rgba(16,14,10,.98),rgba(7,8,8,.98)); box-shadow:0 24px 80px rgba(0,0,0,.55); padding:20px; }
+    .about-card { width:min(560px,100%); border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.94)); box-shadow:var(--shadow); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
     .support-links { display:grid; gap:8px; margin-top:12px; color:var(--muted); font-size:13px; }
     .field-grid { display:grid; gap:10px; }
     label { display:grid; gap:6px; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
@@ -3525,25 +4752,27 @@ function appPage() {
     pre { white-space:pre-wrap; background:rgba(3,5,4,.78); border:1px solid rgba(214,166,69,.28); border-radius:0; padding:14px; max-height:430px; overflow:auto; color:#e8dfc8; }
     .frame-wrap { overflow:hidden; min-height:720px; }
     iframe { width:100%; height:78vh; min-height:720px; border:0; display:block; background:#080a0d; }
-    .empty { padding:18px; border:1px dashed rgba(217,178,111,.35); border-radius:8px; color:var(--muted); background:rgba(255,255,255,.025); }
+    .empty { padding:var(--panel-pad); border:1px dashed rgba(217,178,111,.35); border-radius:var(--panel-radius); color:var(--muted); background:rgba(255,255,255,.025); }
     .setup-overlay { position:fixed; inset:0; z-index:5000; background:rgba(3,4,5,.92); backdrop-filter:blur(10px); display:grid; place-items:center; padding:20px; }
-    .setup-card { width:min(980px,100%); max-height:92vh; overflow:auto; border:1px solid rgba(214,166,69,.42); background:linear-gradient(180deg,rgba(16,14,10,.98),rgba(7,8,8,.98)); box-shadow:0 24px 80px rgba(0,0,0,.55); padding:22px; }
+    .setup-card { width:min(980px,100%); max-height:92vh; overflow:auto; border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.94)); box-shadow:var(--shadow); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
     .setup-steps { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0; }
     .setup-step { border:1px solid rgba(214,166,69,.24); color:var(--muted); padding:7px 10px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
     .setup-step.active { color:var(--gold-bright); border-color:rgba(214,166,69,.6); background:rgba(214,166,69,.08); }
     .setup-page { display:none; }
     .setup-page.active { display:block; }
+    .path-picker-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; }
+    .path-picker-row label { min-width:0; }
     .test-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
     .test-result { min-height:74px; border:1px solid rgba(214,166,69,.2); padding:10px; background:rgba(255,255,255,.025); color:var(--muted); font-size:12px; }
     .test-result.ok { color:var(--good); border-color:rgba(89,213,139,.46); }
     .test-result.bad { color:var(--bad); border-color:rgba(255,102,102,.52); }
-    .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--panel-gap); }
     .diagnostic-log { min-height:220px; max-height:420px; overflow:auto; white-space:pre-wrap; }
     .mt { margin-top:12px; } .mb { margin-bottom:12px; }
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
-    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
   </style>
 </head>
 <body>
@@ -3553,7 +4782,7 @@ function appPage() {
       <div>
         <div class="kicker">About</div>
         <h2>AlphaNine Dune Suite</h2>
-        <div class="subtle">Version 0.2.4-beta</div>
+        <div class="subtle">Version 0.2.5-beta</div>
       </div>
       <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
@@ -3588,7 +4817,11 @@ function appPage() {
     <div id="setupPage1" class="setup-page">
       <div class="field-grid">
         <label>Server Type<select id="setupServerType"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
-        <label>Dune Server Install Path<input id="setupServerInstallPath" placeholder="D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server"></label>
+        <div class="path-picker-row">
+          <label>Dune Server Install Path<input id="setupServerInstallPath" placeholder="D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server" onchange="refreshServerInstallPathWarning('setupServerInstallPath','setupServerInstallPathWarning')"></label>
+          <button type="button" onclick="browseServerInstallPath('setupServerInstallPath','setupServerInstallPathWarning')">Browse...</button>
+        </div>
+        <div id="setupServerInstallPathWarning" class="warning">Server install path not checked.</div>
         <label>VM Name<input id="setupVmName" placeholder="dune-awakening"></label>
         <label>VM / Server IP<input id="setupVmIp" placeholder="192.168.1.50"></label>
         <button type="button" onclick="runDiscovery()">Auto Discover</button>
@@ -3649,7 +4882,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.2.4-beta</span>
+        <span>Version 0.2.5-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -3658,6 +4891,7 @@ function appPage() {
       <button class="tab" data-view="players">Players</button>
       <button class="tab" data-view="give">Give Item</button>
       <button class="tab" data-view="admin">Admin Tools</button>
+      <button class="tab" data-view="progression">Progression Inspector</button>
       <button class="tab" data-view="server">Server Status</button>
       <button class="tab" data-view="live-map">Live Map</button>
       <button class="tab" data-view="management">Server Management</button>
@@ -3700,6 +4934,7 @@ function appPage() {
         </div>
       </div>
       <div class="grid">
+        <div class="panel pad metric-tile"><div class="label">VM Status</div><div id="dashboardVmStatus" class="value">Checking...</div><div class="subtle">Hyper-V VM state.</div></div>
         <div class="panel pad metric-tile"><div class="label">Server Population</div><div id="players" class="value">Checking...</div><div class="subtle">Current known player state.</div></div>
         <div class="panel pad metric-tile"><div class="label">Database Link</div><div id="adminDb" class="value">Checking...</div><div class="subtle">Postgres/admin probe.</div></div>
         <div class="panel pad metric-tile"><div class="label">Give Transport</div><div id="adminLive" class="value">Checking...</div><div class="subtle">Runtime grant route.</div></div>
@@ -4016,47 +5251,9 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
         </div>
       </div>
       <div class="panel pad mt">
-        <div class="label">Skill Points and Reputation</div>
-        <div class="warning mt">Confirmed safe path uses specialization XP/level and faction reputation functions. Live pickup is not confirmed; a player relog or server restart may be required.</div>
-        <div class="layout-3 mt">
-          <div>
-            <div class="label">Current Specialization Tracks</div>
-            <table class="mt">
-              <thead><tr><th>Track</th><th>XP</th><th>Level</th></tr></thead>
-              <tbody id="skillRows"><tr><td colspan="3">Loading specialization tracks...</td></tr></tbody>
-            </table>
-          </div>
-          <div>
-            <div class="label">Current Reputation</div>
-            <table class="mt">
-              <thead><tr><th>Faction</th><th>Reputation</th><th>Current</th></tr></thead>
-              <tbody id="reputationRows"><tr><td colspan="3">Loading reputation...</td></tr></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="layout-3 mt">
-          <div class="panel pad">
-            <div class="label">Give / Set Skill Points</div>
-            <div class="field-grid mt">
-              <label>Track<select id="skillTrack"></select></label>
-              <label>XP Amount<input id="skillXpAmount" type="number" min="0" value="0"></label>
-              <label>Level<input id="skillLevel" type="number" min="0" step="0.1" placeholder="Leave blank to keep current"></label>
-              <pre id="skillPreview">select dune.set_specialization_xp_and_level(player_controller_id, 'Combat'::dune.specializationtracktype, xp_amount, level);</pre>
-              <label class="check-row"><input id="skillConfirm" type="checkbox">I confirm this exact function call.</label>
-              <div class="action-row"><button class="primary" onclick="giveSkillPoints()">Give Skill Points</button><button onclick="setSkillPoints()">Set Skill Points</button></div>
-            </div>
-          </div>
-          <div class="panel pad">
-            <div class="label">Add / Set Reputation</div>
-            <div class="field-grid mt">
-              <label>Faction<select id="reputationFaction"></select></label>
-              <label>Reputation Amount<input id="reputationAmount" type="number" min="0" value="0"></label>
-              <pre id="reputationPreview">select dune.set_player_faction_reputation(player_controller_id, faction_id, reputation_amount);</pre>
-              <label class="check-row"><input id="reputationConfirm" type="checkbox">I confirm this exact function call.</label>
-              <div class="action-row"><button class="primary" onclick="addReputation()">Add Reputation</button><button onclick="setReputation()">Set Reputation</button></div>
-            </div>
-          </div>
-        </div>
+        <div class="label">Progression Editing</div>
+        <div class="warning mt">Legacy skill/reputation edit controls are disabled. Use Progression Inspector for read-only schema detection. Live XP/reputation editing is not available in this phase.</div>
+        <div class="action-row mt"><button type="button" data-open="progression">Open Progression Inspector</button></div>
       </div>
       <div class="panel pad mt">
         <div class="label">Tuned Channels</div>
@@ -4067,12 +5264,156 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
       </div>
     </section>
 
+    <section id="progression" class="view">
+      <div class="grid four">
+        <div class="panel pad"><div class="label">Database</div><div id="progressionDbStatus" class="value">Checking...</div><div class="subtle">Progression metadata probe.</div></div>
+        <div class="panel pad"><div class="label">Safety</div><div id="progressionSafety" class="value">Read Only</div><div class="subtle">Live editing disabled.</div></div>
+        <div class="panel pad"><div class="label">Schema</div><div id="progressionSchema" class="value">Unknown</div><div class="subtle">Detected Dune schema signature.</div></div>
+        <div class="panel pad"><div class="label">Duration</div><div id="progressionDuration" class="value">--</div><div class="subtle">Metadata query time.</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div><div class="label">Progression / XP Reputation Inspector</div><div class="subtle">Read-only database metadata discovery. No SQL input and no write actions.</div></div>
+          <button type="button" onclick="refreshProgressionInspector()">Refresh Inspector</button>
+        </div>
+        <div id="progressionUnavailable" class="warning mt hidden">Progression database unavailable</div>
+        <div class="layout-3 mt">
+          <div>
+            <div class="label">Support Detection</div>
+            <div id="progressionSupportList" class="detail-list mt"><div class="empty">Open or refresh the inspector.</div></div>
+          </div>
+          <div>
+            <div class="label">Safety Status</div>
+            <div id="progressionSafetyList" class="detail-list mt">
+              <div class="detail-row"><span class="subtle">Read-only mode</span><strong>Active</strong></div>
+              <div class="detail-row"><span class="subtle">Live editing</span><strong>Disabled</strong></div>
+              <div class="detail-row"><span class="subtle">Raw SQL input</span><strong>Disabled</strong></div>
+            </div>
+          </div>
+          <div>
+            <div class="label">Schema Signature</div>
+            <pre id="progressionSignature" class="mt">Not loaded.</pre>
+          </div>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div><div class="label">Read-Only Player Lookup</div><div class="subtle">Search by character name, player name, actor id, or player id when available.</div></div>
+          <span class="badge ok">Read-only</span>
+        </div>
+        <div class="field-grid mt">
+          <label>Player Search<input id="progressionPlayerQuery" placeholder="Character name, actor id, player id"></label>
+          <button type="button" class="primary" onclick="lookupProgressionPlayer()">Lookup Player</button>
+        </div>
+        <div id="progressionPlayerStatus" class="empty mt">No player lookup has been run.</div>
+        <div class="layout-3 mt">
+          <div>
+            <div class="label">Player Identity</div>
+            <div id="progressionPlayerIdentity" class="detail-list mt"><div class="empty">No player selected.</div></div>
+          </div>
+          <div>
+            <div class="label">Character XP</div>
+            <div id="progressionCharacterXp" class="detail-list mt"><div class="empty">No character XP loaded.</div></div>
+          </div>
+          <div>
+            <div class="label">Warnings</div>
+            <div id="progressionPlayerWarnings" class="detail-list mt"><div class="empty">No warnings.</div></div>
+          </div>
+        </div>
+        <div class="label mt">Character XP Detection Debug</div>
+        <pre id="progressionCharacterDebug" class="mt">Run a player lookup to inspect actor/entity component paths.</pre>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Live Progression Editing</div>
+        <div class="warning mt">Live progression editing can corrupt player data. Backup first.</div>
+        <div class="subtle mt">Generate Preview creates a read-only backup and old/new summary. Apply is blocked unless Settings enables progression editing and you type CONFIRM.</div>
+        <div class="field-grid mt">
+          <label>Action<select id="progressionAction" onchange="syncProgressionActionFields()"><option value="specialization_xp">Specialization XP</option><option value="faction_reputation">Faction Reputation</option><option value="character_xp_skill_points">Character XP / Skill Points</option></select></label>
+          <label class="progression-edit-field progression-specialization">Track Type<input id="progressionTrackType" placeholder="Combat"></label>
+          <label class="progression-edit-field progression-specialization">XP Amount<input id="progressionXpAmount" type="number" min="0" max="44182" value="0"></label>
+          <label class="progression-edit-field progression-specialization">Level<input id="progressionLevel" type="number" min="0" max="100" step="0.1" value="0"></label>
+          <label class="progression-edit-field progression-faction hidden">Faction ID<input id="progressionFactionId" type="number" min="1" value="1"></label>
+          <label class="progression-edit-field progression-faction hidden">Reputation<input id="progressionReputationAmount" type="number" min="0" max="12474" value="0"></label>
+          <label class="progression-edit-field progression-character hidden">Total XP Earned<input id="progressionTotalXp" type="number" min="0" value="0"></label>
+          <label class="progression-edit-field progression-character hidden">Total Skill Points<input id="progressionTotalSkillPoints" type="number" min="0" value="0"></label>
+          <label class="progression-edit-field progression-character hidden">Unspent Skill Points<input id="progressionUnspentSkillPoints" type="number" min="0" value="0"></label>
+          <label class="progression-edit-field progression-character hidden">Tech Knowledge Points<input id="progressionTechKnowledgePoints" type="number" min="0" value="0"></label>
+          <button type="button" onclick="previewProgressionApply()">Generate Preview + Backup</button>
+          <label>Type CONFIRM<input id="progressionConfirmText" placeholder="CONFIRM"></label>
+          <button type="button" class="danger" onclick="applyProgressionLive()">Apply Live Change</button>
+        </div>
+        <pre id="progressionPreviewLog" class="mt">No live progression preview generated.</pre>
+      </div>
+      <div class="layout-2 mt">
+        <div class="panel pad">
+          <div class="label">Detected Progression Tables</div>
+          <table class="mt">
+            <thead><tr><th>Schema</th><th>Table</th><th>Status</th></tr></thead>
+            <tbody id="progressionTableRows"><tr><td colspan="3">Not loaded.</td></tr></tbody>
+          </table>
+        </div>
+        <div class="panel pad">
+          <div class="label">Detected Progression Functions</div>
+          <table class="mt">
+            <thead><tr><th>Schema</th><th>Function</th><th>Arguments</th><th>Status</th></tr></thead>
+            <tbody id="progressionFunctionRows"><tr><td colspan="4">Not loaded.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">XP / Reputation Related Columns</div>
+        <table class="mt">
+          <thead><tr><th>Table</th><th>Column</th><th>Type</th><th>Status</th></tr></thead>
+          <tbody id="progressionColumnRows"><tr><td colspan="4">Not loaded.</td></tr></tbody>
+        </table>
+      </div>
+      <div class="layout-2 mt">
+        <div class="panel pad">
+          <div class="label">Specialization Tracks</div>
+          <table class="mt">
+            <thead><tr><th>Track</th><th>XP</th><th>Level</th></tr></thead>
+            <tbody id="progressionSpecRows"><tr><td colspan="3">No player loaded.</td></tr></tbody>
+          </table>
+        </div>
+        <div class="panel pad">
+          <div class="label">Faction Reputation</div>
+          <table class="mt">
+            <thead><tr><th>Faction ID</th><th>Reputation</th></tr></thead>
+            <tbody id="progressionFactionRows"><tr><td colspan="2">No player loaded.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section id="server" class="view">
       <div class="grid four">
         <div class="panel pad"><div class="label">VM</div><div id="vm" class="value">Checking...</div></div>
         <div class="panel pad"><div class="label">Battlegroup</div><div id="battlegroup" class="value">Checking...</div></div>
         <div class="panel pad"><div class="label">Database</div><div id="sdb" class="value">Checking...</div></div>
         <div class="panel pad"><div class="label">Uptime</div><div id="suptime" class="value">Checking...</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div>
+            <div class="label">VM Actions</div>
+            <div class="subtle">Hyper-V virtual machine state is tracked separately from Battlegroup health.</div>
+          </div>
+          <button onclick="refreshVmStatus()">Refresh VM</button>
+        </div>
+        <div class="grid four mt">
+          <div class="panel pad"><div class="label">VM Name</div><div id="vmControlName" class="value">Unknown</div></div>
+          <div class="panel pad"><div class="label">VM Status</div><div id="vmControlStatus" class="value">Checking...</div></div>
+          <div class="panel pad"><div class="label">VM Address</div><div id="vmControlAddress" class="value">Unknown</div></div>
+          <div class="panel pad"><div class="label">VM Uptime</div><div id="vmControlUptime" class="value">Unknown</div></div>
+        </div>
+        <div class="controls mt">
+          <button onclick="refreshVmStatus()">Refresh VM</button>
+          <button class="primary" onclick="runVmAction('start')">Start VM</button>
+          <button class="danger" onclick="runVmAction('stop')">Stop VM</button>
+          <button onclick="runVmAction('restart')">Restart VM</button>
+        </div>
+        <div class="subtle mt"><a href="https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/manage/manage-hyper-v-hosts" target="_blank" rel="noopener">How to fix Hyper-V permissions</a></div>
+        <pre id="vmControlLog" class="mt">Ready.</pre>
       </div>
       <div class="panel pad mt">
         <div class="label">Battlegroup Actions</div>
@@ -4156,7 +5497,7 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.4-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.5-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
@@ -4235,7 +5576,11 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
             <label>SSH Key<input id="settingsSshKey"></label>
             <div class="action-row"><button type="button" onclick="browseSshKey('settingsSshKey','settingsSshKeyWarning')">Browse SSH Key</button></div>
             <div id="settingsSshKeyWarning" class="warning">SSH key file not checked.</div>
-            <label>Dune Server Path<input id="settingsServerInstallPath"></label>
+            <div class="path-picker-row">
+              <label>Dune Server Path<input id="settingsServerInstallPath" onchange="refreshServerInstallPathWarning('settingsServerInstallPath','settingsServerInstallPathWarning')"></label>
+              <button type="button" onclick="browseServerInstallPath('settingsServerInstallPath','settingsServerInstallPathWarning')">Browse...</button>
+            </div>
+            <div id="settingsServerInstallPathWarning" class="warning">Server install path not checked.</div>
           </div>
         </div>
         <div class="panel pad">
@@ -4271,6 +5616,13 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
           <pre id="settingsBackupStatus" class="mt">No backup action yet.</pre>
         </div>
         <div class="panel pad">
+          <div class="label">Progression Safety</div>
+          <div class="warning mt">Enable only when you have a current backup and understand that live progression edits can corrupt player data.</div>
+          <div class="field-grid mt">
+            <label class="check-row"><input id="settingsProgressionEditingEnabled" type="checkbox">Enable Progression Editing</label>
+          </div>
+        </div>
+        <div class="panel pad">
           <div class="label">App Preferences</div>
           <div class="field-grid mt">
             <label class="check-row"><input id="uiSoundsEnabled" type="checkbox">Enable UI Sounds</label>
@@ -4298,6 +5650,7 @@ const viewCopy={
   players:["Players","Search, inspect, and select characters for admin actions."],
   give:["Give Item","Live item grants through the configured receiver."],
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
+  progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
   server:["Server Status","Battlegroup controls, maps, and live server telemetry."],
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
@@ -4307,13 +5660,17 @@ const viewCopy={
   diagnostics:["Diagnostics","Connection health, version info, and log viewer."],
   settings:["Settings","App-level preferences and local runtime details."]
 };
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();}
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null;
+let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null;
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
-function statusClass(value){const text=String(value||"");if(/offline|failed|error|missing|not|false|unavailable/i.test(text))return"bad";if(/healthy|ready|running|online|enabled|reachable|available|true/i.test(text))return"ok";return"warn";}
+const SERVER_STATUS_ONLINE=["healthy","reconciling","running","updating","starting","progressing","ready"];
+const SERVER_STATUS_OFFLINE=["stopped","failed","error","unreachable","missing","offline"];
+function mapServerStatusValue(value){const raw=String(value||"").trim();const key=raw.toLowerCase();if(!raw||key==="unknown")return{raw:raw||"Unknown",label:"Warning",kind:"warn",online:false};if(SERVER_STATUS_ONLINE.includes(key))return{raw,label:"Online",kind:"ok",online:true};if(SERVER_STATUS_OFFLINE.includes(key))return{raw,label:"Offline",kind:"bad",online:false};return{raw,label:"Warning",kind:"warn",online:false};}
+function mapServerSummary(data){const s=data?.status?.summary||data?.summary||data?.status||{};const phase=mapServerStatusValue(s.phase||s.status);const checks=[s.servergroup,s.gateway,s.director].filter(value=>String(value||"").trim()).map(mapServerStatusValue);if(phase.kind==="bad"||checks.some(check=>check.kind==="bad"))return{label:"Offline",kind:"bad",online:false,phase,checks};if(phase.online&&checks.every(check=>check.kind!=="bad"))return{label:"Online",kind:"ok",online:true,phase,checks};return{label:"Warning",kind:"warn",online:false,phase,checks};}
+function statusClass(value){const text=String(value||"");if(/offline|failed|error|missing|not|false|unavailable|unsupported|stopped|unreachable/i.test(text))return"bad";if(/healthy|ready|running|reconciling|updating|starting|progressing|online|enabled|reachable|available|true|detected|connected/i.test(text))return"ok";return"warn";}
 function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");}
 function badge(id,value){const el=document.getElementById(id);if(!el)return;el.className="badge "+statusClass(value);el.textContent=String(value||"Unknown");}
 function telemetryPercent(value){const number=Number(value);return Number.isFinite(number)&&number>=0&&number<=100?number:null;}
@@ -4379,12 +5736,15 @@ function getValue(id){return document.getElementById(id)?.value||"";}
 function setChecked(id,value){const el=document.getElementById(id);if(el)el.checked=Boolean(value);}
 function resultBox(id,data){const el=document.getElementById(id);if(!el)return;el.className="test-result "+(data.ok?"ok":"bad");el.textContent=(data.message||data.status||data.error||"Done")+(data.error?"\\n"+data.error:"");}
 function configPayload(prefix){const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),serverInstallPath:getValue(prefix+"ServerInstallPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey")};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");if(dbPass&&dbPass!=="********")payload.databasePassword=dbPass;if(token&&token!=="********")payload.receiverToken=token;return payload;}
-function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);setValue("setupReceiverSshHost",config.receiverSshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");}
+function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);setValue("setupReceiverSshHost",config.receiverSshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");setServerInstallPathWarning("setupServerInstallPathWarning",config.serverInstallPathStatus);}
 function setSshKeyWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.exists);el.className=ok?"empty mt":"warning mt";el.textContent=status?.message||"SSH key file not found.";if(status?.path)el.textContent+=" "+status.path;}
 async function refreshSshKeyWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/ssh-key/status?path="+encodeURIComponent(path));setSshKeyWarning(warningId,data.sshKey);}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
 async function browseSshKey(inputId,warningId){try{if(!window.alphaNineSuite?.chooseSshKey)throw new Error("File picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseSshKey();if(result?.filePath){setValue(inputId,result.filePath);await refreshSshKeyWarning(inputId,warningId);}}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
-function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);setValue("settingsReceiverSshHost",config.receiverSshHost||"");setValue("settingsReceiverSshUser",config.receiverSshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);}
-function collectSettings(){const payload=configPayload("settings");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.liveTeleportEnabled=document.getElementById("settingsLiveTeleportEnabled")?.checked===true;payload.teleportEndpointPath=getValue("settingsTeleportEndpointPath");payload.teleportCommandTemplate=getValue("settingsTeleportCommandTemplate");payload.teleportPayloadTemplate=getValue("settingsTeleportPayloadTemplate");payload.setupComplete=true;return payload;}
+function setServerInstallPathWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.valid);el.className=ok?"empty mt":"warning mt";let text=status?.message||"Selected folder does not appear to be a valid Dune Awakening server installation.";if(status?.path)text+=" "+status.path;const checks=(status?.checks||[]).filter(item=>item.ok).map(item=>item.name);if(checks.length)text+="\nDetected: "+checks.join(", ");el.textContent=text;}
+async function refreshServerInstallPathWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/server-install-path/status?path="+encodeURIComponent(path));setServerInstallPathWarning(warningId,data.serverInstallPath);}catch(e){setServerInstallPathWarning(warningId,{valid:false,message:betterError(e)});}}
+async function browseServerInstallPath(inputId,warningId){try{if(!window.alphaNineSuite?.chooseServerInstallFolder)throw new Error("Folder picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseServerInstallFolder();if(result?.folderPath){setValue(inputId,result.folderPath);await refreshServerInstallPathWarning(inputId,warningId);}}catch(e){setServerInstallPathWarning(warningId,{valid:false,message:betterError(e)});}}
+function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);setValue("settingsReceiverSshHost",config.receiverSshHost||"");setValue("settingsReceiverSshUser",config.receiverSshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setChecked("settingsProgressionEditingEnabled",config.progressionEditingEnabled===true);setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("settingsServerInstallPathWarning",config.serverInstallPathStatus);}
+function collectSettings(){const payload=configPayload("settings");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.liveTeleportEnabled=document.getElementById("settingsLiveTeleportEnabled")?.checked===true;payload.teleportEndpointPath=getValue("settingsTeleportEndpointPath");payload.teleportCommandTemplate=getValue("settingsTeleportCommandTemplate");payload.teleportPayloadTemplate=getValue("settingsTeleportPayloadTemplate");payload.progressionEditingEnabled=document.getElementById("settingsProgressionEditingEnabled")?.checked===true;payload.setupComplete=true;return payload;}
 function updateSetupStep(){document.querySelectorAll(".setup-page").forEach((p,i)=>p.classList.toggle("active",i===setupStep));document.querySelectorAll(".setup-step").forEach((p,i)=>p.classList.toggle("active",i===setupStep));}
 function setupNext(){setupStep=Math.min(4,setupStep+1);updateSetupStep();}
 function setupPrev(){setupStep=Math.max(0,setupStep-1);updateSetupStep();}
@@ -4395,9 +5755,9 @@ function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.ad
 function openSupportDiscord(){window.open("https://discord.gg/tuUv3hYTv","_blank","noopener");playUiSound("click");}
 function openSupportKofi(){window.open("https://ko-fi.com/E1W220NMPA","_blank","noopener");playUiSound("click");}
 async function initSetup(){try{const data=await getJson("/api/setup/status");const config=data.config||{};fillSetup(config);fillSettings(config);if(!data.setupComplete)openSetupWizard();if(data.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(data.discovery,null,2);refreshReceiverStatus();}catch(e){addActivity("error","Setup status failed",e.message);}}
-async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.installPath)setValue("setupServerInstallPath",data.server.installPath);if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
+async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.installPath){setValue("setupServerInstallPath",data.server.installPath);await refreshServerInstallPathWarning("setupServerInstallPath","setupServerInstallPathWarning");}if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}
-async function finishSetup(){try{const payload={...configPayload("setup"),setupComplete:true};const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("setupFinishResult").textContent="Setup saved. Restart the suite if receiver or environment values changed.";fillSettings(data.config||payload);closeSetupWizard();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
+async function finishSetup(){try{const payload={...configPayload("setup"),setupComplete:true};const pathCheck=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload.serverInstallPath||""));setServerInstallPathWarning("setupServerInstallPathWarning",pathCheck.serverInstallPath);if(!pathCheck.serverInstallPath?.valid)throw new Error("Selected folder does not appear to be a valid Dune Awakening server installation.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified)throw new Error("Setup config save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);fillSettings(data.config||payload);closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
 async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);refreshReceiverStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
 async function saveSettings(){try{const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...appConfig,...collectSettings()})});fillSettings(data.config||{});setText("settingsSaveStatus","Settings saved. Restart the suite for receiver startup environment changes.");playUiSound("success");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
 async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");const label=data.ok?"Receiver Online":"Receiver Offline";setText("receiverManagerStatus",label+" / "+data.healthUrl);setText("settingsReceiver",label);tone("receiverState",label);if(!data.ok)tone("rabbitState","Dry Run Active");return data;}catch(e){setText("receiverManagerStatus",betterError(e));tone("receiverState","Receiver Offline");tone("rabbitState","Dry Run Active");}}
@@ -4422,7 +5782,9 @@ function wireUiSounds(){document.addEventListener("pointerover",(event)=>{const 
 function relativeTime(value){if(!value)return"";const date=new Date(value);if(Number.isNaN(date.getTime()))return value;const seconds=Math.max(0,Math.floor((Date.now()-date.getTime())/1000));if(seconds<60)return"just now";const minutes=Math.floor(seconds/60);if(minutes<60)return minutes+"m ago";const hours=Math.floor(minutes/60);if(hours<24)return hours+"h ago";const days=Math.floor(hours/24);return days+"d ago";}
 function renderPlayerFeed(players){const wrap=document.getElementById("playerFeed");if(!wrap)return;if(!players.length){wrap.innerHTML='<div class="empty">No players discovered yet.</div>';return;}wrap.innerHTML=players.map(p=>{const status=["online","offline","unknown"].includes(p.status)?p.status:"unknown";const level=p.level?"Level "+esc(p.level):"Level: Unknown";const id=p.character_id||p.player_controller_id||p.account_id||p.id||"";const offline=status==="offline"&&p.last_seen?(" - Last seen "+relativeTime(p.last_seen)):"";const statusText=status.charAt(0).toUpperCase()+status.slice(1)+offline;return '<div class="feed-row"><span class="feed-dot '+esc(status)+'"></span><div class="feed-name"><strong>'+esc(p.name||p.character_name||p.account_id||"Unknown")+'</strong><div class="feed-id">'+(id?"ID "+esc(id):"ID unavailable")+'</div></div><div class="feed-level">'+level+'</div><div class="feed-status '+esc(status)+'">'+esc(statusText)+'</div></div>';}).join("");}
 async function refreshPlayerFeed(){const stamp=document.getElementById("playerFeedStamp");try{const data=await getJson("/api/players/feed");renderPlayerFeed(data.players||[]);if(stamp)stamp.textContent="Updated "+new Date().toLocaleTimeString();}catch(e){const wrap=document.getElementById("playerFeed");if(wrap)wrap.innerHTML='<div class="empty">'+esc(betterError(e))+'</div>';if(stamp)stamp.textContent="Feed error";}}
-async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);tone("vm",data.vm?.state||"Unknown");tone("battlegroup",s.status||"Unknown");tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer",s.status?"Server "+s.status:"Server offline");document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||"No real resource telemetry source"));await refreshLiveGiveEnv();}catch(e){renderServerResources(null);tone("vm","Status error");tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);}}
+function renderVmStatus(vm){const status=vm?.state||vm?.status||"Unknown";tone("vm",status);tone("dashboardVmStatus","VM: "+status);setText("vmControlName",vm?.name||"Not configured");setText("vmControlStatus",status);setText("vmControlAddress",vm?.ip||"Unknown");setText("vmControlUptime",vm?.uptime||"Unknown");}
+function vmDisplayMessage(data){const vm=data?.vm||data||{};const status=vm.state||data?.status||"Unknown";const name=vm.name||data?.name||"Not configured";const lines=["VM: "+name,"Status: "+status];if(data?.message)lines.push(data.message);if(data?.error||vm.error)lines.push(data.error||vm.error);if((data?.errorCode||vm.errorCode)==="access_denied")lines.push("How to fix Hyper-V permissions: use the help link above.");return lines.filter(Boolean).join("\\n");}
+async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(mapped.label||"Warning"));document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);}}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(open){if(open===null||open===undefined)return"Not Configured";return open?"Open":"Closed";}
 function monitorMs(value){return Number.isFinite(Number(value))?Math.round(Number(value))+" ms":"-- ms";}
@@ -4431,7 +5793,10 @@ function renderServiceRows(services){const rows=Object.values(services||{});retu
 function renderPingGraph(history){const graph=document.getElementById("vmPingGraph");if(!graph)return;const values=(history||[]).slice(-60);const max=Math.max(80,...values.map(row=>Number(row.ms)||0));graph.innerHTML=values.length?values.map(row=>{const ms=Number(row.ms);const ok=Number.isFinite(ms);const h=ok?Math.max(8,Math.round((ms/max)*64)):8;const kind=!ok?"bad":ms<120?"ok":ms<250?"warn":"bad";return '<span class="ping-bar '+kind+'" title="'+(ok?ms+' ms':'offline')+'" style="height:'+h+'px"></span>';}).join(""):'<div class="empty">Ping history will appear after checks.</div>';}
 async function refreshVmMonitor(){try{const data=await getJson("/api/vm-monitor");const kind=monitorKindClass(data.kind);setText("vmMonitorStatus",data.status||"Unknown");setText("vmMonitorAddress",data.vm?.address||"Unknown");setText("vmMonitorHost",data.vm?.hostname||"Unknown");setText("vmUptime",data.vm?.uptime||"Unknown");setText("vmHealthScore",Number.isFinite(Number(data.healthScore))?Math.round(Number(data.healthScore))+"%":"--");setText("vmPingCurrent",monitorMs(data.latency?.current));setText("vmPingAverage",monitorMs(data.latency?.average));setText("vmPingMin",monitorMs(data.latency?.min));setText("vmPingMax",monitorMs(data.latency?.max));setText("vmMonitorStamp","Last check "+new Date(data.checkedAt||Date.now()).toLocaleTimeString());setText("vmLastSuccess",data.lastSuccessfulConnection&&data.lastSuccessfulConnection!=="None yet"?new Date(data.lastSuccessfulConnection).toLocaleString():data.lastSuccessfulConnection||"None yet");["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card "+kind;});const ports=data.ports||[];const services=data.services||{};document.getElementById("vmPortList").innerHTML=renderMonitorRows(ports);document.getElementById("vmServiceList").innerHTML=renderServiceRows(services);document.getElementById("vmPortDetailList").innerHTML=ports.length?ports.map(row=>'<div>'+esc(row.label)+": "+esc(monitorStatusLabel(row.open))+" / "+esc(row.responseMs!=null?monitorMs(row.responseMs):row.error||"No response")+'</div>').join(""):'<div>No configured ports.</div>';document.getElementById("vmErrorList").innerHTML=(data.lastErrors||[]).length?data.lastErrors.map(error=>'<div>'+esc(error)+'</div>').join(""):'<div>No recent connection errors.</div>';renderPingGraph(data.latency?.history||[]);badge("topSsh",services.ssh?.reachable?"SSH reachable":"SSH offline");addActivity("vm","VM connection monitor",(data.status||"Unknown")+" / "+Math.round(Number(data.healthScore)||0)+"%");}catch(e){setText("vmMonitorStatus","Monitor error");setText("vmMonitorStamp",betterError(e));const card=document.getElementById("vmStatusCard");if(card)card.className="vm-status-card bad";addActivity("error","VM monitor failed",e.message);}}
 function betterError(e){return e&&e.message?e.message:"Command failed. Check that the suite is running as Administrator and the Dune VM is reachable.";}
-async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";syncLogs();addActivity("action",action+" completed",(data.error||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
+async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status");renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
+async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!confirm("Are you sure you want to "+action+" the VM?"))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}
+async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!confirm("VM is stopped. Start VM first?"))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
+async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";syncLogs();addActivity("action",action+" completed",(data.error||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
 async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>'<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td></tr>').join(""):'<tr><td colspan="5">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
 function setText(id,value){const el=document.getElementById(id);if(el)el.textContent=String(value);}
@@ -4459,8 +5824,21 @@ function updatePermissionPreviews(){const actor=document.getElementById("permAct
 ["permActorId","permControllerId","permRank","permMapId","accessAccountId","accessCodeValue","accessCodeType","accessResettable"].forEach(id=>setTimeout(()=>{const el=document.getElementById(id);if(el)el.addEventListener("input",updatePermissionPreviews);if(el)el.addEventListener("change",updatePermissionPreviews);},0));
 async function setPermissionRank(){updatePermissionPreviews();const payload={actorId:document.getElementById("permActorId").value,playerControllerId:document.getElementById("permControllerId").value,rank:document.getElementById("permRank").value,mapId:document.getElementById("permMapId").value,confirmed:document.getElementById("permRankConfirm").checked};try{const data=await getJson("/api/admin/permissions/set-rank",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.message+"\\n"+data.sql;document.getElementById("permRankConfirm").checked=false;addActivity("permissions","Object permission function executed",data.sql);playUiSound("success");await refreshPermissions();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("permRankPreview").textContent;addActivity("error","Object permission function blocked",e.message);playUiSound("warning");}}
 async function createAccessCode(){updatePermissionPreviews();const payload={accountId:document.getElementById("accessAccountId").value,accessCode:document.getElementById("accessCodeValue").value,accessCodeType:document.getElementById("accessCodeType").value,isResettable:document.getElementById("accessResettable").checked,confirmed:document.getElementById("accessCodeConfirm").checked};try{const data=await getJson("/api/admin/permissions/create-access-code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.message+"\\n"+data.sql;document.getElementById("accessCodeConfirm").checked=false;addActivity("permissions","Access code function executed",data.sql);playUiSound("success");await refreshPermissions();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("accessCodePreview").textContent;addActivity("error","Access code function blocked",e.message);playUiSound("warning");}}
+function progressionBadge(status){return '<span class="badge '+statusClass(status)+'">'+esc(status||"unknown")+'</span>';}
+function progressionSupportDetails(item){const details=item?.details;if(!details)return"";if(item.label!=="Faction Component Cache Sync")return"";return '<pre class="mt">'+esc(JSON.stringify({actorIds:details.actorIds||[],componentPaths:details.componentPaths||[],arrayPaths:details.arrayPaths||[],factionRelatedPaths:details.factionRelatedPaths||[],error:details.error||""},null,2))+'</pre>';}
+function renderProgressionInspector(data){const unavailable=document.getElementById("progressionUnavailable");if(unavailable)unavailable.classList.toggle("hidden",data?.status!=="unavailable");tone("progressionDbStatus",data?.database?.status||"Unknown");tone("progressionSafety",data?.safety?.readOnlyMode?"Read-only active":"Unknown");tone("progressionSchema",data?.database?.schema||"Unknown");tone("progressionDuration",data?.durationMs!=null?data.durationMs+" ms":"--");setText("progressionSignature",data?.schemaSignature||"unknown");const supports=Object.values(data?.supports||{});const supportList=document.getElementById("progressionSupportList");if(supportList)supportList.innerHTML=supports.length?supports.map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.label)+'</span><strong>'+progressionBadge(item.status)+'</strong></div><div class="subtle">'+esc(item.evidence||"")+'</div>'+progressionSupportDetails(item)).join(""):'<div class="empty">No progression support metadata found.</div>';const safety=document.getElementById("progressionSafetyList");if(safety)safety.innerHTML='<div class="detail-row"><span class="subtle">Read-only mode</span><strong>'+progressionBadge(data?.safety?.readOnlyMode?"active":"unknown")+'</strong></div><div class="detail-row"><span class="subtle">Live editing</span><strong>'+progressionBadge(data?.safety?.liveEditingEnabled?"enabled":"disabled")+'</strong></div><div class="detail-row"><span class="subtle">Raw SQL input</span><strong>'+progressionBadge(data?.safety?.rawSqlInputEnabled?"enabled":"disabled")+'</strong></div><div class="subtle">'+esc(data?.safety?.message||"Read-only mode active. Live editing disabled.")+'</div>';const tableRows=document.getElementById("progressionTableRows");if(tableRows)tableRows.innerHTML=(data?.tables||[]).length?(data.tables||[]).map(row=>'<tr><td>'+esc(row.schema)+'</td><td>'+esc(row.table)+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="3">No target progression tables detected.</td></tr>';const functionRows=document.getElementById("progressionFunctionRows");if(functionRows)functionRows.innerHTML=(data?.functions||[]).length?(data.functions||[]).map(row=>'<tr><td>'+esc(row.schema)+'</td><td>'+esc(row.function)+'</td><td>'+esc(row.arguments||"")+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="4">No target progression functions detected.</td></tr>';const columnRows=document.getElementById("progressionColumnRows");if(columnRows)columnRows.innerHTML=(data?.columns||[]).length?(data.columns||[]).map(row=>'<tr><td>'+esc(row.schema+"."+row.table)+'</td><td>'+esc(row.column)+'</td><td>'+esc(row.dataType||row.udtName||"")+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="4">No target progression columns detected.</td></tr>';}
+async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});addActivity("warn","Progression database unavailable",e.message);}}
+function detailRows(rows){return Object.entries(rows||{}).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value||"--")+'</strong></div>').join("");}
+function renderProgressionPlayer(data){const status=document.getElementById("progressionPlayerStatus");if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Read-only values loaded.":(data?.reason||data?.error||"Progression player lookup failed.");}const identity=document.getElementById("progressionPlayerIdentity");if(identity){const p=data?.player||{};identity.innerHTML=data?.ok?detailRows({"player_id":p.player_id,"actor_id":p.actor_id,"character_actor_id":p.character_actor_id,"character_name":p.character_name,"account_id":p.account_id,"controller_id":p.player_controller_id,"pawn_id":p.player_pawn_id,"online_status":p.online_status,"map":p.map}):'<div class="empty">No player selected.</div>';}const xp=document.getElementById("progressionCharacterXp");if(xp){const character=data?.characterXp||{};const tech=data?.techKnowledge||{};xp.innerHTML=data?.ok?(detailRows({"TotalXPEarned":character.TotalXPEarned||"Unsupported / not found","TotalSkillPoints":character.TotalSkillPoints||"Unsupported / not found","UnspentSkillPoints":character.UnspentSkillPoints||"Unsupported / not found","TechKnowledgePoints":tech.m_TechKnowledgePoints||"Unsupported / not found"})):'<div class="empty">No character XP loaded.</div>';}const warnings=document.getElementById("progressionPlayerWarnings");if(warnings){const items=data?.warnings||[];warnings.innerHTML=items.length?items.map(item=>'<div class="warning">'+esc(item)+'</div>').join(""):'<div class="empty">No warnings.</div>';}renderProgressionCharacterDebug(data);const spec=document.getElementById("progressionSpecRows");if(spec)spec.innerHTML=data?.ok?((data.specializationTracks||[]).length?(data.specializationTracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this player.</td></tr>'):'<tr><td colspan="3">No player loaded.</td></tr>';const factions=document.getElementById("progressionFactionRows");if(factions)factions.innerHTML=data?.ok?((data.factionReputation||[]).length?(data.factionReputation||[]).map(row=>'<tr><td>'+esc(row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';}
+function renderProgressionCharacterDebug(data){const el=document.getElementById("progressionCharacterDebug");if(!el)return;const debug=data?.progressionDebug||{};if(!data?.ok){el.textContent="No progression player lookup debug data.";return;}el.textContent=JSON.stringify({checkedActorIds:debug.checkedActorIds||[],fglEntityLinks:debug.fglEntityLinks||[],componentNames:debug.componentNames||[],techKnowledgeTarget:debug.techKnowledgeTarget||null,fieldStatus:debug.fieldStatus||{}},null,2);}
+async function lookupProgressionPlayer(){const query=document.getElementById("progressionPlayerQuery")?.value||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query));renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup unsupported",e.message);}}
+setTimeout(()=>{const input=document.getElementById("progressionPlayerQuery");if(input)input.addEventListener("keydown",event=>{if(event.key==="Enter")lookupProgressionPlayer();});},0);
+function syncProgressionActionFields(){const action=document.getElementById("progressionAction")?.value||"specialization_xp";document.querySelectorAll(".progression-specialization").forEach(el=>el.classList.toggle("hidden",action!=="specialization_xp"));document.querySelectorAll(".progression-faction").forEach(el=>el.classList.toggle("hidden",action!=="faction_reputation"));document.querySelectorAll(".progression-character").forEach(el=>el.classList.toggle("hidden",action!=="character_xp_skill_points"));progressionPreviewState=null;setText("progressionPreviewLog","No live progression preview generated.");}
+function progressionPayload(){const action=document.getElementById("progressionAction")?.value||"specialization_xp";const payload={action,query:document.getElementById("progressionPlayerQuery")?.value||""};if(action==="specialization_xp"){payload.trackType=document.getElementById("progressionTrackType")?.value||"";payload.xpAmount=document.getElementById("progressionXpAmount")?.value||0;payload.level=document.getElementById("progressionLevel")?.value||0;}if(action==="faction_reputation"){payload.factionId=document.getElementById("progressionFactionId")?.value||1;payload.reputationAmount=document.getElementById("progressionReputationAmount")?.value||0;}if(action==="character_xp_skill_points"){payload.totalXpEarned=document.getElementById("progressionTotalXp")?.value||0;payload.totalSkillPoints=document.getElementById("progressionTotalSkillPoints")?.value||0;payload.unspentSkillPoints=document.getElementById("progressionUnspentSkillPoints")?.value||0;payload.techKnowledgePoints=document.getElementById("progressionTechKnowledgePoints")?.value||0;}return payload;}
+async function previewProgressionApply(){try{const data=await getJson("/api/progression/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(progressionPayload())});if(!data.ok)throw new Error(data.reason||data.error||"Progression preview failed.");progressionPreviewState=data;setText("progressionPreviewLog","Preview generated. Backup created.\\nBackup: "+data.backupPath+"\\n\\nOld values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nNew values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\n"+data.sqlPreview+"\\n\\nType CONFIRM before applying.");addActivity("progression","Progression backup created",data.backupPath);playUiSound("success");}catch(e){progressionPreviewState=null;setText("progressionPreviewLog",betterError(e));addActivity("error","Progression preview failed",e.message);playUiSound("warning");}}
+async function applyProgressionLive(){try{if(!progressionPreviewState)throw new Error("Generate Preview + Backup first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionPreviewState.previewId,confirmText:document.getElementById("progressionConfirmText")?.value||""})});setText("progressionPreviewLog","Live progression apply complete.\\nBackup: "+data.backupPath+"\\n\\nOld values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nNew values:\\n"+JSON.stringify(data.newValues,null,2));addActivity("progression","Progression live edit applied",data.action);progressionPreviewState=null;document.getElementById("progressionConfirmText").value="";await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionPreviewLog",betterError(e));addActivity("error","Progression live edit failed",e.message);playUiSound("warning");}}
 function skillRepQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
-async function refreshSkillReputation(){try{skillRepState=await getJson("/api/admin/skill-reputation"+skillRepQuery());renderSkillReputation();addActivity("progression","Skill/reputation refreshed",skillRepState.playerControllerId?("controller "+skillRepState.playerControllerId):"all players");}catch(e){const skill=document.getElementById("skillRows");const rep=document.getElementById("reputationRows");if(skill)skill.innerHTML='<tr><td colspan="3">'+esc(e.message)+'</td></tr>';if(rep)rep.innerHTML='<tr><td colspan="3">'+esc(e.message)+'</td></tr>';addActivity("error","Skill/reputation refresh failed",e.message);}}
+async function refreshSkillReputation(){return;}
 function renderSkillReputation(){const data=skillRepState||{};const trackSelect=document.getElementById("skillTrack");if(trackSelect){const selected=trackSelect.value;trackSelect.innerHTML=(data.availableTracks||[]).map(t=>'<option value="'+esc(t)+'">'+esc(t)+'</option>').join("")||'<option value="">No tracks found</option>';if(selected)trackSelect.value=selected;}const factionSelect=document.getElementById("reputationFaction");if(factionSelect){const selected=factionSelect.value;factionSelect.innerHTML=(data.factions||[]).filter(f=>f.name!=="None").map(f=>'<option value="'+esc(f.id)+'">'+esc(f.name)+' ('+esc(f.id)+')</option>').join("")||'<option value="">No factions found</option>';if(selected)factionSelect.value=selected;}const skillRows=document.getElementById("skillRows");if(skillRows)skillRows.innerHTML=(data.tracks||[]).length?(data.tracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this selection.</td></tr>';const repRows=document.getElementById("reputationRows");if(repRows){const current=new Map((data.currentFactions||[]).map(row=>[String(row.faction_id),row]));repRows.innerHTML=(data.reputation||[]).length?(data.reputation||[]).map(row=>'<tr><td>'+esc(row.faction_name||row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td><td>'+esc(current.has(String(row.faction_id))?'yes':'no')+'</td></tr>').join(""):'<tr><td colspan="3">No reputation rows found for this selection.</td></tr>';}updateSkillReputationPreviews();}
 function currentSkillRow(track){return (skillRepState?.tracks||[]).find(row=>row.track_type===track)||null;}
 function currentRepRow(factionId){return (skillRepState?.reputation||[]).find(row=>String(row.faction_id)===String(factionId))||null;}
@@ -4478,7 +5856,7 @@ function renderAdminItems(){const q=(document.getElementById("adminSearch")?.val
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");if(!warning)return;const quality=Number(document.getElementById("adminQuality")?.value||0);warning.classList.toggle("hidden",!(quality>0));}
 function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
-function isServerOnlineStatus(data){if(data?.runtimeTransport&&typeof data.runtimeTransport.serverOnline==="boolean")return data.runtimeTransport.serverOnline;const s=data?.status?.summary||{};const servergroup=String(s.servergroup||"");const gateway=String(s.gateway||"");const director=String(s.director||"");return /^Healthy$/i.test(String(s.phase||s.status||""))&&(!servergroup||/^Running$/i.test(servergroup))&&(!gateway||/^Healthy$/i.test(gateway))&&(!director||/^Healthy$/i.test(director));}
+function isServerOnlineStatus(data){if(data?.runtimeTransport&&typeof data.runtimeTransport.serverOnline==="boolean")return data.runtimeTransport.serverOnline;return mapServerSummary(data).online;}
 function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";syncLiveGiveTransportStatus();syncGiveItemControls();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=kind==="ok"?"empty mt":"warning mt";}
 function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(give)give.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||!liveGiveServerOnline||(mode==="execute"&&!adminLiveGiveAvailable);if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
@@ -4488,7 +5866,7 @@ async function startServerForGiveItem(){const log=document.getElementById("admin
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking server status...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server)){log.textContent="Server is offline. Start the server before using Give Item.";addActivity("grant","Give Item blocked","Server is offline.");playUiSound("warning");return;}const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();syncProgressionActionFields();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>
@@ -4521,7 +5899,8 @@ async function route(req, res) {
       status = parseStatus(raw);
     }
     const runtimeTransport = await updateRuntimeGiveTransport({ vm, status, raw }, "status");
-    await json(res, { vm, status, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
+    const serverStatus = mapServerSummaryStatus(status?.summary || status);
+    await json(res, { vm, status, serverStatus, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
     return;
   }
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {
@@ -4534,12 +5913,24 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/config" && req.method === "POST") {
-    try { await json(res, { ok: true, config: configWithSshDiagnostics(saveConfig(JSON.parse(await readBody(req) || "{}"))), restartRequired: true }); }
+    try {
+      const saved = saveConfig(JSON.parse(await readBody(req) || "{}"));
+      const verification = verifyConfigSaved(saved);
+      if (!verification.ok) {
+        await json(res, { ok: false, error: "Config save verification failed.", configPath: verification.configPath, mismatches: verification.mismatches }, 500);
+        return;
+      }
+      await json(res, { ok: true, verified: true, configPath: verification.configPath, config: configWithSshDiagnostics(verification.config), restartRequired: true });
+    }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
     return;
   }
   if (url.pathname === "/api/ssh-key/status" && req.method === "GET") {
     await json(res, { ok: true, sshKey: sshKeyStatus(url.searchParams.get("path") || loadConfig().sshKey || defaultSshKeyPath()) });
+    return;
+  }
+  if (url.pathname === "/api/server-install-path/status" && req.method === "GET") {
+    await json(res, { ok: true, serverInstallPath: serverInstallPathStatus(url.searchParams.get("path") || loadConfig().serverInstallPath || "") });
     return;
   }
   if (url.pathname === "/api/setup/status" && req.method === "GET") {
@@ -4549,8 +5940,18 @@ async function route(req, res) {
   if (url.pathname === "/api/setup/save" && req.method === "POST") {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
+      const pathStatus = serverInstallPathStatus(body.serverInstallPath);
+      if (!pathStatus.valid) {
+        await json(res, { ok: false, error: "Selected folder does not appear to be a valid Dune Awakening server installation.", serverInstallPath: pathStatus }, 400);
+        return;
+      }
       const saved = saveConfig({ ...loadConfig(), ...body, setupComplete: true });
-      await json(res, { ok: true, config: publicConfig(saved), restartRequired: true });
+      const verification = verifyConfigSaved(saved);
+      if (!verification.ok) {
+        await json(res, { ok: false, error: "Setup config save verification failed.", configPath: verification.configPath, mismatches: verification.mismatches }, 500);
+        return;
+      }
+      await json(res, { ok: true, verified: true, configPath: verification.configPath, config: publicConfig(verification.config), restartRequired: true });
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 400);
     }
@@ -4708,45 +6109,54 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === "/api/progression/inspect" && req.method === "GET") {
+    await json(res, await progressionInspector());
+    return;
+  }
+  if (url.pathname === "/api/progression/player" && req.method === "GET") {
+    await json(res, await progressionPlayerLookup(url.searchParams.get("query")));
+    return;
+  }
+  if (url.pathname === "/api/progression/preview" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await progressionPreview(body));
+    } catch (error) {
+      await json(res, { ok: false, status: "error", error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/apply" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await progressionApply(body));
+    } catch (error) {
+      await json(res, { ok: false, status: "failed", error: error.message }, 400);
+    }
+    return;
+  }
   if (url.pathname === "/api/admin/skill-reputation" && req.method === "GET") {
-    try { await json(res, await adminSkillReputation(url.searchParams.get("playerControllerId"))); }
-    catch (error) { await json(res, { ok: false, tracks: [], reputation: [], factions: [], error: error.message }, 500); }
+    await json(res, {
+      ok: false,
+      status: "deprecated",
+      error: "Legacy skill/reputation API is disabled. Use /api/progression/inspect for read-only schema discovery."
+    }, 410);
     return;
   }
   if (url.pathname === "/api/admin/skill-reputation/give-skill-points" && req.method === "POST") {
-    try {
-      const body = JSON.parse(await readBody(req) || "{}");
-      await json(res, await adminSpecializationAction(body, "add"));
-    } catch (error) {
-      await json(res, { ok: false, error: error.message }, 400);
-    }
+    await json(res, { ok: false, status: "disabled", error: "Progression editing is disabled. Phase 1 is read-only inspection only." }, 403);
     return;
   }
   if (url.pathname === "/api/admin/skill-reputation/set-skill-points" && req.method === "POST") {
-    try {
-      const body = JSON.parse(await readBody(req) || "{}");
-      await json(res, await adminSpecializationAction(body, "set"));
-    } catch (error) {
-      await json(res, { ok: false, error: error.message }, 400);
-    }
+    await json(res, { ok: false, status: "disabled", error: "Progression editing is disabled. Phase 1 is read-only inspection only." }, 403);
     return;
   }
   if (url.pathname === "/api/admin/skill-reputation/add-reputation" && req.method === "POST") {
-    try {
-      const body = JSON.parse(await readBody(req) || "{}");
-      await json(res, await adminReputationAction(body, "add"));
-    } catch (error) {
-      await json(res, { ok: false, error: error.message }, 400);
-    }
+    await json(res, { ok: false, status: "disabled", error: "Progression editing is disabled. Phase 1 is read-only inspection only." }, 403);
     return;
   }
   if (url.pathname === "/api/admin/skill-reputation/set-reputation" && req.method === "POST") {
-    try {
-      const body = JSON.parse(await readBody(req) || "{}");
-      await json(res, await adminReputationAction(body, "set"));
-    } catch (error) {
-      await json(res, { ok: false, error: error.message }, 400);
-    }
+    await json(res, { ok: false, status: "disabled", error: "Progression editing is disabled. Phase 1 is read-only inspection only." }, 403);
     return;
   }
   if (url.pathname === "/api/admin/give-item" && req.method === "POST") {
@@ -4763,6 +6173,23 @@ async function route(req, res) {
     const action = decodeURIComponent(url.pathname.split("/").pop());
     const result = await battlegroup(action);
     await json(res, result, result.ok ? 200 : 500);
+    return;
+  }
+  if (url.pathname === "/api/vm/status" && req.method === "GET") {
+    const vm = await vmInfo();
+    await json(res, { ok: Boolean(vm.ok || vm.exists), status: vm.state || "Unknown", vm });
+    return;
+  }
+  if (url.pathname.startsWith("/api/vm/") && req.method === "POST") {
+    const action = decodeURIComponent(url.pathname.split("/").pop());
+    const result = await vmAction(action);
+    if (result.ok && action === "start" && url.searchParams.get("wait") === "1") {
+      const wait = await waitForVmRunning();
+      if (!wait.ok) appendVmAudit("start_timeout", { ...result, ok: false, error: wait.error, state: wait.vm?.state || "Unknown" });
+      await json(res, { ...result, waited: wait, vm: wait.vm, ok: Boolean(wait.ok) }, wait.ok ? 200 : 500);
+      return;
+    }
+    await json(res, { ...result, vm: await vmInfo().catch(() => ({ state: result.state || "Unknown" })) }, result.ok ? 200 : 500);
     return;
   }
   if (url.pathname === "/api/director") {

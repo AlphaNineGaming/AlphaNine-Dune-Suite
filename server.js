@@ -6,7 +6,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const APP_VERSION = "0.2.3-beta";
+const APP_VERSION = "0.2.4-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -3553,7 +3553,7 @@ function appPage() {
       <div>
         <div class="kicker">About</div>
         <h2>AlphaNine Dune Suite</h2>
-        <div class="subtle">Version 0.2.3-beta</div>
+        <div class="subtle">Version 0.2.4-beta</div>
       </div>
       <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
@@ -3649,7 +3649,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.2.3-beta</span>
+        <span>Version 0.2.4-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -4156,7 +4156,7 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.3-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.4-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>

@@ -4,8 +4,67 @@
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
+  "scripts": {
+    "build:win": "electron-builder --win nsis --x64 --publish never --config.win.signAndEditExecutable=false"
+  },
   "dependencies": {
     "express": "^5.2.1",
     "leaflet": "^1.9.4"
+  },
+  "devDependencies": {
+    "electron": "^38.3.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.alphanine.dunesuite",
+    "productName": "AlphaNine Dune Suite",
+    "artifactName": "AlphaNine Dune Suite Setup ${version}.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "installer-output"
+    },
+    "files": [
+      "server.js",
+      "package.json",
+      "package-lock.json",
+      "README.md",
+      "LICENSE",
+      "RELEASE_TEST.md",
+      "SKILL_REPUTATION_DISCOVERY.md",
+      ".env.example",
+      "config.example.json",
+      "Start AlphaNine Dune Suite.bat",
+      "Stop AlphaNine Dune Suite.bat",
+      "start-suite.ps1",
+      "stop-suite.ps1",
+      "stop-alphanine-suite.ps1",
+      "electron/**",
+      "assets/**",
+      "gear-codex/**",
+      "manager/**",
+      "receivers/**",
+      "scripts/**",
+      "!installer-output/**",
+      "!dist/**",
+      "!work/**",
+      "!logs/**",
+      "!backups/**",
+      "!screenshots/**",
+      "!*.exe",
+      "!*.blockmap",
+      "!.git/**",
+      "!.gitignore",
+      "!node_modules/.cache/**",
+      "!node_modules/.bin/**",
+      "!**/*.log"
+    ],
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    }
   }
 }

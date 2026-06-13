@@ -3334,10 +3334,12 @@ function appPage() {
       radial-gradient(ellipse at 76% 14%, rgba(240,201,106,.26), transparent 26%),
       radial-gradient(ellipse at 34% 82%, rgba(215,168,76,.2), transparent 36%),
       linear-gradient(164deg, transparent 0 52%, rgba(214,166,69,.24) 53%, rgba(214,166,69,.06) 66%, transparent 67%); }
-    .hero-body { position:relative; min-height:190px; display:grid; align-content:center; max-width:820px; padding:30px; }
+    .hero-body { position:relative; min-height:190px; display:grid; align-content:center; box-sizing:border-box; width:100%; max-width:920px; padding:30px; padding-right:250px; }
+    .hero-actions { position:absolute; right:28px; bottom:24px; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; max-width:230px; }
+    .hero-actions button { min-height:34px; padding:7px 11px; font-size:12px; line-height:1.15; text-transform:none; letter-spacing:.025em; background:rgba(6,8,5,.74); border-color:rgba(240,201,106,.44); color:var(--gold-bright); box-shadow:0 0 18px rgba(0,0,0,.2); }
     .kicker, .label { color:var(--gold-bright); font-size:13px; text-transform:uppercase; letter-spacing:.11em; font-weight:900; }
-    .hero h3 { margin:9px 0 0; font-size:42px; line-height:1.02; letter-spacing:.09em; text-transform:uppercase; color:var(--gold-bright); text-shadow:0 0 28px rgba(240,201,106,.18); }
-    .hero p { margin:10px 0 0; color:#ded3c1; line-height:1.45; }
+    .hero h3 { margin:9px 0 0; font-size:clamp(26px, 2.1vw, 31px); line-height:1.08; letter-spacing:.075em; text-transform:uppercase; color:var(--gold-bright); text-shadow:0 0 24px rgba(240,201,106,.16); max-width:600px; }
+    .hero p { margin:10px 0 0; color:#ded3c1; line-height:1.45; max-width:600px; }
     .grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; }
     .grid.four { grid-template-columns:repeat(4,minmax(0,1fr)); }
     .panel { position:relative; border:1px solid var(--line); border-radius:0; background:linear-gradient(180deg, rgba(19,19,12,.94), rgba(5,7,5,.88)); box-shadow:inset 0 0 0 1px rgba(240,201,106,.05), inset 0 -42px 70px rgba(0,0,0,.34), 0 18px 54px rgba(0,0,0,.32); clip-path:polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px)); }
@@ -3538,10 +3540,10 @@ function appPage() {
     .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
     .diagnostic-log { min-height:220px; max-height:420px; overflow:auto; white-space:pre-wrap; }
     .mt { margin-top:12px; } .mb { margin-bottom:12px; }
-    @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
+    @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
-    @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px} }
-    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
+    @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
   </style>
 </head>
 <body>
@@ -3667,7 +3669,6 @@ function appPage() {
     </nav>
     <div class="sidebar-foot">
       <button type="button" onclick="openAboutDialog()">About</button>
-      <div class="kofi-widget"><script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'E1W220NMPA');kofiwidget2.draw();</script></div>
       <div class="legal-notice">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
     </div>
   </aside>
@@ -3692,6 +3693,10 @@ function appPage() {
           <div class="kicker">Server operations command</div>
           <h3>Dune Awakening Server Operations Center</h3>
           <p>Live status, VM control, player telemetry, grant transport, database health, receiver bridge, and audit visibility for SH-HAGGA BASIN.</p>
+        </div>
+        <div class="hero-actions" aria-label="Support links">
+          <button type="button" onclick="openSupportDiscord()">Discord Support</button>
+          <button type="button" onclick="openSupportKofi()">Support on Ko-fi</button>
         </div>
       </div>
       <div class="grid">
@@ -3780,7 +3785,6 @@ function appPage() {
             <button data-open="players">Players</button>
             <button data-open="server">Server Status</button>
             <button onclick="refreshAll()">Refresh All</button>
-            <button type="button" onclick="openSupportDiscord()">💬 Discord Support</button>
           </div>
           <div class="sound-widget" aria-label="UI sound controls">
             <div class="sound-widget-head">
@@ -4385,6 +4389,7 @@ function closeSetupWizard(){document.getElementById("setupWizard")?.classList.ad
 function openAboutDialog(){document.getElementById("aboutDialog")?.classList.remove("hidden");playUiSound("click");}
 function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.add("hidden");playUiSound("click");}
 function openSupportDiscord(){window.open("https://discord.gg/tuUv3hYTv","_blank","noopener");playUiSound("click");}
+function openSupportKofi(){window.open("https://ko-fi.com/E1W220NMPA","_blank","noopener");playUiSound("click");}
 async function initSetup(){try{const data=await getJson("/api/setup/status");const config=data.config||{};fillSetup(config);fillSettings(config);if(!data.setupComplete)openSetupWizard();if(data.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(data.discovery,null,2);refreshReceiverStatus();}catch(e){addActivity("error","Setup status failed",e.message);}}
 async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.installPath)setValue("setupServerInstallPath",data.server.installPath);if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}

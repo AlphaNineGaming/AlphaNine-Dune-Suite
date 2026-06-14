@@ -155,11 +155,11 @@ function loadEnvironment() {
   readEnvFile(userPath(".env.local"), true);
   const cfg = readAppConfig();
   if (cfg.vmIp && !process.env.DUNE_RECEIVER_SSH_HOST) process.env.DUNE_RECEIVER_SSH_HOST = cfg.vmIp;
-  if (cfg.receiverSshHost) process.env.DUNE_RECEIVER_SSH_HOST = cfg.receiverSshHost;
-  if (cfg.receiverSshUser) process.env.DUNE_RECEIVER_SSH_USER = cfg.receiverSshUser;
-  if (cfg.receiverSshKey) process.env.DUNE_RECEIVER_SSH_KEY = cfg.receiverSshKey;
-  if (cfg.receiverHost) process.env.DUNE_RECEIVER_HOST = cfg.receiverHost;
-  if (cfg.receiverPort) process.env.DUNE_RECEIVER_PORT = String(cfg.receiverPort);
+  if (cfg.receiverSshHost && !process.env.DUNE_RECEIVER_SSH_HOST) process.env.DUNE_RECEIVER_SSH_HOST = cfg.receiverSshHost;
+  if (cfg.receiverSshUser && !process.env.DUNE_RECEIVER_SSH_USER) process.env.DUNE_RECEIVER_SSH_USER = cfg.receiverSshUser;
+  if (cfg.receiverSshKey && !process.env.DUNE_RECEIVER_SSH_KEY) process.env.DUNE_RECEIVER_SSH_KEY = cfg.receiverSshKey;
+  if (cfg.receiverHost && !process.env.DUNE_RECEIVER_HOST) process.env.DUNE_RECEIVER_HOST = cfg.receiverHost;
+  if (cfg.receiverPort && !process.env.DUNE_RECEIVER_PORT) process.env.DUNE_RECEIVER_PORT = String(cfg.receiverPort);
   if (cfg.receiverToken) {
     process.env.DUNE_RECEIVER_TOKEN = cfg.receiverToken;
     process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || cfg.receiverToken;

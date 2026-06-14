@@ -79,6 +79,11 @@ function loadConfig() {
   return { ...defaultConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")) };
 }
 
+function loadRawConfig() {
+  if (!fs.existsSync(CONFIG_PATH)) return {};
+  return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, ""));
+}
+
 function effectiveTeleportCommandTemplate(value) {
   const template = String(value || "").trim();
   return template === TELEPORT_PLACEHOLDER_COMMAND ? "" : template;
@@ -293,6 +298,104 @@ function envFlag(name, fallback = "") {
 function envNumber(name, fallback) {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function parseEnvFile(filePath) {
+  const values = {};
+  if (!filePath || !fs.existsSync(filePath)) return values;
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) continue;
+    let value = match[2].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    values[match[1]] = value.replace(/%([^%]+)%/g, (_whole, key) => process.env[key] || _whole);
+  }
+  return values;
+}
+
+function runtimeEnvFiles() {
+  return [
+    { label: "app .env", path: path.join(__dirname, ".env"), override: false },
+    { label: "app .env.local", path: path.join(__dirname, ".env.local"), override: true },
+    { label: "user .env", path: APPDATA_DIR ? path.join(APPDATA_DIR, ".env") : "", override: false },
+    { label: "user .env.local", path: APPDATA_DIR ? path.join(APPDATA_DIR, ".env.local") : "", override: true }
+  ].filter((entry) => entry.path);
+}
+
+function configHasValue(configValue, key) {
+  return Object.prototype.hasOwnProperty.call(configValue || {}, key)
+    && configValue[key] !== undefined
+    && configValue[key] !== null
+    && String(configValue[key]) !== "";
+}
+
+function configSourceForEnv(name, configValue = loadConfig()) {
+  const rawConfig = loadRawConfig();
+  const mappings = {
+    PORT: { key: "port", value: () => String(PORT), source: "runtime override" },
+    ALPHANINE_CONFIG_PATH: { key: "configPath", value: () => CONFIG_PATH, source: "runtime override" },
+    DUNE_ADMIN_GIVE_ITEM_TRANSPORT: { key: "runtimeGiveTransport", value: () => runtimeGiveTransport.mode || "dry-run", source: "runtime override" },
+    DUNE_ADMIN_GIVE_ITEM_URL: { key: "receiverHost/receiverPort", value: () => receiverUrls(configValue).giveUrl, source: "runtime override" },
+    DUNE_ADMIN_GIVE_ITEM_HEALTH_URL: { key: "receiverHost/receiverPort", value: () => receiverUrls(configValue).healthUrl, source: "runtime override" },
+    DUNE_RECEIVER_HOST: { key: "receiverHost", value: () => String(configValue.receiverHost || "") },
+    DUNE_RECEIVER_PORT: { key: "receiverPort", value: () => String(configValue.receiverPort || "") },
+    DUNE_RECEIVER_TOKEN: { key: "receiverToken", value: () => String(configValue.receiverToken || "") },
+    DUNE_ADMIN_GIVE_ITEM_TOKEN: { key: "receiverToken", value: () => String(configValue.receiverToken || "") },
+    DUNE_RECEIVER_SSH_HOST: { key: "receiverSshHost", fallbackKey: "vmIp", value: () => String(configValue.receiverSshHost || configValue.vmIp || "") },
+    DUNE_RECEIVER_SSH_USER: { key: "receiverSshUser", fallbackKey: "sshUser", value: () => String(configValue.receiverSshUser || configValue.sshUser || "") },
+    DUNE_RECEIVER_SSH_KEY: { key: "receiverSshKey", fallbackKey: "sshKey", value: () => expandEnvPath(configValue.receiverSshKey || configValue.sshKey || "") },
+    DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: { key: "liveTeleportEnabled", value: () => configValue.liveTeleportEnabled ? "true" : "false" },
+    DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET: { key: "teleportSafeZOffset", value: () => String(configValue.teleportSafeZOffset || "") }
+  };
+  const mapping = mappings[name];
+  if (!mapping) return null;
+  if (mapping.source) return { source: mapping.source, setting: mapping.key, value: mapping.value() };
+  if (configHasValue(rawConfig, mapping.key)) return { source: "settings", setting: mapping.key, value: mapping.value() };
+  if (mapping.fallbackKey && configHasValue(rawConfig, mapping.fallbackKey)) return { source: "settings", setting: mapping.fallbackKey, value: mapping.value() };
+  return null;
+}
+
+function runtimeEnvSource(name, configValue = loadConfig()) {
+  const finalValue = process.env[name] || "";
+  const configSource = configSourceForEnv(name, configValue);
+  if (configSource && String(configSource.value) === String(finalValue)) {
+    return { source: configSource.source, detail: configSource.setting || "", path: CONFIG_PATH };
+  }
+  let current = "";
+  let source = null;
+  for (const entry of runtimeEnvFiles()) {
+    const values = parseEnvFile(entry.path);
+    if (!Object.prototype.hasOwnProperty.call(values, name)) continue;
+    if (entry.override || !current) {
+      current = values[name];
+      source = { source: "env", detail: entry.label, path: entry.path };
+    }
+  }
+  if (source && String(current) === String(finalValue)) return source;
+  if (finalValue) return { source: "env", detail: "process.env", path: "" };
+  return { source: "default", detail: "not configured", path: "" };
+}
+
+function runtimeValue(name, fallback = "", configValue = loadConfig()) {
+  const value = process.env[name] || fallback || "";
+  const configSource = configSourceForEnv(name, configValue);
+  const source = process.env[name]
+    ? runtimeEnvSource(name, configValue)
+    : configSource && String(configSource.value) === String(value)
+      ? { source: configSource.source, detail: configSource.setting || "", path: CONFIG_PATH }
+      : { source: fallback ? "default" : "default", detail: fallback ? "computed fallback" : "not configured", path: "" };
+  return {
+    name,
+    value,
+    displayValue: LIVE_GIVE_SECRET_ENV_NAMES.has(name) || /TOKEN|PASSWORD|SECRET/i.test(name) ? (value ? "<set>" : "") : value,
+    set: Boolean(value),
+    ...source
+  };
 }
 
 const LIVE_GIVE_ENV = {
@@ -2575,6 +2678,56 @@ function giveTransportConfig() {
   };
 }
 
+function activeRuntimeConfigDiagnostics() {
+  const cfg = loadConfig();
+  const urls = receiverUrls(cfg);
+  const runtimeValues = [
+    runtimeValue("PORT", String(PORT), cfg),
+    runtimeValue("ALPHANINE_CONFIG_PATH", CONFIG_PATH, cfg),
+    runtimeValue("DUNE_ADMIN_GIVE_ITEM_TRANSPORT", runtimeGiveTransport.mode || "dry-run", cfg),
+    runtimeValue("DUNE_ADMIN_GIVE_ITEM_URL", urls.giveUrl, cfg),
+    runtimeValue("DUNE_ADMIN_GIVE_ITEM_HEALTH_URL", urls.healthUrl, cfg),
+    runtimeValue("DUNE_ADMIN_GIVE_ITEM_TOKEN", cfg.receiverToken || "", cfg),
+    runtimeValue("DUNE_RECEIVER_HOST", urls.host, cfg),
+    runtimeValue("DUNE_RECEIVER_PORT", String(urls.port), cfg),
+    runtimeValue("DUNE_RECEIVER_TOKEN", cfg.receiverToken || "", cfg),
+    runtimeValue("DUNE_RECEIVER_SSH_HOST", cfg.receiverSshHost || cfg.vmIp || "", cfg),
+    runtimeValue("DUNE_RECEIVER_SSH_USER", cfg.receiverSshUser || cfg.sshUser || "", cfg),
+    runtimeValue("DUNE_RECEIVER_SSH_KEY", expandEnvPath(cfg.receiverSshKey || cfg.sshKey || ""), cfg),
+    runtimeValue("DUNE_RECEIVER_LIVE_TELEPORT_ENABLED", cfg.liveTeleportEnabled ? "true" : "false", cfg),
+    runtimeValue("DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET", String(cfg.teleportSafeZOffset || ""), cfg),
+    runtimeValue("DUNE_ADMIN_RABBITMQ_PUBLISH_URL", "", cfg),
+    runtimeValue("DUNE_ADMIN_RABBITMQ_HEALTH_URL", "", cfg),
+    runtimeValue("DUNE_ADMIN_RABBITMQ_USER", "", cfg),
+    runtimeValue("DUNE_ADMIN_RABBITMQ_PASSWORD", "", cfg),
+    runtimeValue("DUNE_ADMIN_RABBITMQ_ROUTING_KEY", "", cfg),
+    runtimeValue("DUNE_ADMIN_GIVE_ITEM_MESSAGE_TEMPLATE", "", cfg)
+  ];
+  return {
+    activeConfigPath: CONFIG_PATH,
+    backendConfigPath: CONFIG_PATH,
+    managerConfigPath: MANAGER_CONFIG_PATH,
+    appDataDir: APPDATA_DIR,
+    managerDataDir: MANAGER_DATA_DIR,
+    sourcePriority: [
+      "process.env inherited by Electron",
+      "app .env when variable is not already set",
+      "app .env.local overrides earlier env values",
+      "user .env when variable is not already set",
+      "user .env.local overrides earlier env values",
+      "AppData config.json settings mapped into runtime env",
+      "computed runtime fallbacks/defaults"
+    ],
+    envFiles: runtimeEnvFiles().map((entry) => ({
+      label: entry.label,
+      path: entry.path,
+      exists: fs.existsSync(entry.path),
+      override: entry.override
+    })),
+    values: runtimeValues
+  };
+}
+
 async function checkGiveTransport() {
   const config = giveTransportConfig();
   if (!config.configured) return { ...config, reachable: false, dryRunReason: dryRunReason({ ...config, reachable: false }) };
@@ -2782,6 +2935,7 @@ async function liveGiveEnvStatus() {
     dryRunReason: liveGiveAvailable ? "" : (transport.dryRunReason || transport.reason || transport.error || "Live give-item transport is unavailable."),
     message: liveGiveAvailable ? "Live Give transport is configured and reachable." : liveGiveUnavailableMessage(transport),
     runtimeTransport: { ...runtimeGiveTransport },
+    activeRuntimeConfig: activeRuntimeConfigDiagnostics(),
     giveTransport: {
       mode: transport.mode,
       configured: Boolean(transport.configured),
@@ -5216,6 +5370,9 @@ function appPage() {
           <div class="label">Live Give Env Setup</div>
           <div id="envLiveStatus" class="warning mt">Loading live-give environment status...</div>
           <div id="envMissingVars" class="detail-list mt"></div>
+          <div class="label mt">Active Runtime Configuration</div>
+          <div id="envRuntimePaths" class="detail-list mt"></div>
+          <div id="envRuntimeValues" class="detail-list mt"></div>
         </div>
         <div class="panel pad">
           <div class="label">Required Modes</div>
@@ -5231,6 +5388,8 @@ DUNE_RECEIVER_TOKEN=...
 DUNE_RECEIVER_SSH_HOST=192.168.1.11
 DUNE_RECEIVER_SSH_USER=dune
 DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
+          <div class="label mt">Configuration Source Priority</div>
+          <div id="envSourcePriority" class="detail-list mt"></div>
           <div class="action-row mt"><button class="primary" onclick="refreshLiveGiveEnv()">Refresh Env Status</button></div>
         </div>
       </div>
@@ -5727,7 +5886,7 @@ function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.vie
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null;
+let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null;
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
@@ -5873,9 +6032,9 @@ function setText(id,value){const el=document.getElementById(id);if(el)el.textCon
 async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";addActivity("maps","Map deployment updated",map+" -> "+replicas);playUiSound("success");setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);playUiSound("warning");}}
 function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
 function liveGiveTransportMessage(transport){const missing=transport?.missingEnv||[];if(missing.includes("DUNE_ADMIN_GIVE_ITEM_TRANSPORT"))return"Live Give unavailable: missing DUNE_ADMIN_GIVE_ITEM_TRANSPORT.";if(missing.length)return"Live Give unavailable: missing "+missing.join(", ")+".";return"Live Give unavailable: "+(transport?.dryRunReason||transport?.reason||"transport is not configured.");}
-function renderEnvSetup(){const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong>'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}}
+function renderEnvSetup(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagnostics=data;const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong>'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}const runtime=(data?.activeRuntimeConfig||liveGiveEnvDiagnostics?.activeRuntimeConfig||{});const paths=document.getElementById("envRuntimePaths");const values=document.getElementById("envRuntimeValues");const priority=document.getElementById("envSourcePriority");if(paths){const envFiles=(runtime.envFiles||[]).map(file=>'<div class="detail-row"><span class="subtle">'+esc(file.label)+(file.override?" override":"")+'</span><strong>'+esc((file.exists?"Found: ":"Missing: ")+(file.path||""))+'</strong></div>').join("");paths.innerHTML='<div class="detail-row"><span class="subtle">Active config</span><strong>'+esc(runtime.activeConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Backend config</span><strong>'+esc(runtime.backendConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Manager config</span><strong>'+esc(runtime.managerConfigPath||"Unknown")+'</strong></div>'+envFiles;}if(values){const rows=(runtime.values||[]).map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.name)+'<br>'+esc(item.source||"unknown")+(item.detail?' · '+esc(item.detail):'')+'</span><strong>'+esc(item.displayValue||item.value||"(empty)")+'</strong></div>').join("");values.innerHTML=rows||'<div class="empty">No runtime configuration details returned.</div>';}if(priority){priority.innerHTML=(runtime.sourcePriority||[]).map((item,index)=>'<div class="detail-row"><span class="subtle">'+(index+1)+'</span><strong>'+esc(item)+'</strong></div>').join("")||'<div class="empty">No source priority returned.</div>';}}
 function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=adminLiveGiveAvailable?"empty mt":"warning mt";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
-async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();}}
+async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}

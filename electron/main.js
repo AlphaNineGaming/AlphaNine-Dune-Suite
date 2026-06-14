@@ -433,6 +433,35 @@ ipcMain.handle("choose-server-install-folder", async () => {
   return { canceled: false, folderPath: result.filePaths[0] };
 });
 
+ipcMain.handle("choose-database-backup-folder", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select database backup folder",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  return { canceled: false, folderPath: result.filePaths[0] };
+});
+
+ipcMain.handle("choose-database-backup-file", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select database backup file",
+    properties: ["openFile"],
+    filters: [
+      { name: "Database backups", extensions: ["zip", "sql", "dump", "backup", "tar"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  return { canceled: false, filePath: result.filePaths[0] };
+});
+
+ipcMain.handle("open-path", async (_event, targetPath) => {
+  const value = String(targetPath || "").trim();
+  if (!value) return { ok: false, error: "Path is empty." };
+  const error = await shell.openPath(value);
+  return { ok: !error, error };
+});
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1380,

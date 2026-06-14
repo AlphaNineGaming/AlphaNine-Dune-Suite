@@ -7,7 +7,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
-const APP_VERSION = "0.2.7-beta";
+const APP_VERSION = "0.2.8-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -35,6 +35,7 @@ const MANAGER_DATA_DIR = LOCALAPPDATA_DIR ? path.join(LOCALAPPDATA_DIR, "AlphaNi
 const MANAGER_CONFIG_PATH = path.join(MANAGER_DATA_DIR, "manager-config.json");
 const MANAGER_APPLIED_PROFILE_PATH = path.join(MANAGER_DATA_DIR, "applied-profile.json");
 const MANAGER_APPLIED_SETTINGS_PATH = path.join(MANAGER_DATA_DIR, "applied-server-settings.json");
+const DEFAULT_DATABASE_BACKUP_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "database-backups") : path.join(__dirname, "database-backups");
 
 const defaultConfig = {
   setupComplete: false,
@@ -67,6 +68,7 @@ const defaultConfig = {
   teleportCommandTemplate: "",
   teleportPayloadTemplate: "{\n  \"fls_id\": \"{playerId}\",\n  \"x\": {x},\n  \"y\": {y},\n  \"z\": {z},\n  \"partition_id\": {partitionId},\n  \"dryRun\": {dryRun},\n  \"test\": {test}\n}",
   progressionEditingEnabled: false,
+  databaseBackupLocation: DEFAULT_DATABASE_BACKUP_DIR,
   uiSoundsEnabled: true,
   uiSoundVolume: 100
 };
@@ -90,7 +92,7 @@ function effectiveTeleportCommandTemplate(value) {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "uiSoundsEnabled", "uiSoundVolume"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiSoundsEnabled", "uiSoundVolume"];
   const clean = {};
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(nextConfig, key)) clean[key] = nextConfig[key];
@@ -126,6 +128,7 @@ function saveConfig(nextConfig) {
   clean.teleportCommandTemplate = effectiveTeleportCommandTemplate(clean.teleportCommandTemplate);
   clean.teleportPayloadTemplate = String(clean.teleportPayloadTemplate || defaultConfig.teleportPayloadTemplate).trim();
   clean.progressionEditingEnabled = clean.progressionEditingEnabled === true || clean.progressionEditingEnabled === "true";
+  clean.databaseBackupLocation = expandEnvPath(String(clean.databaseBackupLocation || DEFAULT_DATABASE_BACKUP_DIR).trim());
   clean.uiSoundsEnabled = clean.uiSoundsEnabled === true || clean.uiSoundsEnabled === "true";
   clean.uiSoundVolume = Math.max(0, Math.min(100, Number(clean.uiSoundVolume) || 0));
   if (clean.port < 1 || clean.port > 65535) throw new Error("Port must be between 1 and 65535.");
@@ -727,7 +730,7 @@ function run(command, args, options = {}) {
     execFile(command, args, {
       windowsHide: true,
       timeout: options.timeout || 120000,
-      maxBuffer: 1024 * 1024 * 8
+      maxBuffer: options.maxBuffer || 1024 * 1024 * 8
     }, (error, stdout, stderr) => {
       resolve({
         ok: !error,
@@ -1071,7 +1074,7 @@ async function vmConnectionMonitor() {
   };
 }
 
-async function sshCommand(command, timeout = 180000) {
+async function sshCommand(command, timeout = 180000, options = {}) {
   const info = await vmInfo();
   const ip = info.ip || VM_IP;
   if (!info.exists && !ip) return { ok: false, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
@@ -1085,7 +1088,7 @@ async function sshCommand(command, timeout = 180000) {
     "-i", key.path,
     `${SSH_USER}@${ip}`,
     command
-  ], { timeout });
+  ], { timeout, maxBuffer: options.maxBuffer });
 }
 
 function parseStatus(text) {
@@ -1454,10 +1457,7 @@ function gearCatalog() {
 }
 
 async function dbQuery(sql, timeout = 45000) {
-  const item = await battlegroupResource();
-  const namespace = item.metadata?.namespace;
-  const dbPod = `${item.metadata?.name}-db-dbdepl-sts-0`;
-  const dbSvc = `${item.metadata?.name}-db-dbdepl-svc`;
+  const { namespace, dbPod, dbSvc } = await databaseRuntimeTarget();
   const command = [
     `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
     `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" psql -v ON_ERROR_STOP=1 -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -c ${shQuote(sql)}`
@@ -1465,6 +1465,199 @@ async function dbQuery(sql, timeout = 45000) {
   const result = await sshCommand(command, timeout);
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Database query failed.");
   return result.stdout.trim();
+}
+
+async function databaseRuntimeTarget() {
+  const item = await battlegroupResource();
+  const namespace = item.metadata?.namespace;
+  const name = item.metadata?.name;
+  if (!namespace || !name) throw new Error("Dune battlegroup database target was not detected.");
+  return {
+    namespace,
+    name,
+    dbPod: `${name}-db-dbdepl-sts-0`,
+    dbSvc: `${name}-db-dbdepl-svc`
+  };
+}
+
+function databaseBackupAudit(action, payload) {
+  appendAdminAudit(action, payload);
+}
+
+function databaseBackupDir(configValue = loadConfig()) {
+  return expandEnvPath(configValue.databaseBackupLocation || DEFAULT_DATABASE_BACKUP_DIR);
+}
+
+function ensureDatabaseBackupDir(folder = databaseBackupDir()) {
+  const resolved = path.resolve(expandEnvPath(folder || DEFAULT_DATABASE_BACKUP_DIR));
+  fs.mkdirSync(resolved, { recursive: true });
+  const stat = fs.statSync(resolved);
+  if (!stat.isDirectory()) throw new Error("Database backup location is not a folder.");
+  return resolved;
+}
+
+function databaseBackupFilename(prefix = "dune-db-backup") {
+  const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[:T]/g, "-").replace(/Z$/, "");
+  return `${prefix}-${stamp}-${APP_VERSION}.zip`;
+}
+
+function fileInfo(filePath) {
+  const stat = fs.statSync(filePath);
+  return {
+    filename: path.basename(filePath),
+    path: filePath,
+    size: stat.size,
+    sizeLabel: formatBytes(stat.size),
+    date: stat.mtime.toISOString()
+  };
+}
+
+function formatBytes(value) {
+  const size = Number(value) || 0;
+  if (size >= 1024 * 1024 * 1024) return `${(size / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${size} B`;
+}
+
+async function databaseStatus() {
+  const started = Date.now();
+  try {
+    const output = await dbQuery("select current_database(), pg_size_pretty(pg_database_size(current_database())), (select count(*) from pg_stat_activity), (select count(*) from pg_stat_activity where state = 'active'), date_trunc('second', now() - pg_postmaster_start_time())::text", 12000);
+    const row = parseDbRows(output, ["database", "size", "connections", "activeQueries", "uptime"])[0] || {};
+    return { ok: true, status: "online", durationMs: Date.now() - started, ...row };
+  } catch (error) {
+    return { ok: false, status: "unavailable", durationMs: Date.now() - started, error: error.message };
+  }
+}
+
+async function createDatabaseBackup(options = {}) {
+  const started = Date.now();
+  const folder = ensureDatabaseBackupDir(options.folder || databaseBackupDir());
+  const filename = databaseBackupFilename(options.prefix || "dune-db-backup");
+  const backupPath = path.join(folder, filename);
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-db-backup-"));
+  const sqlPath = path.join(tempDir, filename.replace(/\.zip$/i, ".sql"));
+  try {
+    const { namespace, dbPod, dbSvc } = await databaseRuntimeTarget();
+    const command = [
+      `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
+      `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" pg_dump -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune --no-owner --no-privileges`
+    ].join("; ");
+    const result = await sshCommand(command, options.timeout || 600000, { maxBuffer: options.maxBuffer || 1024 * 1024 * 256 });
+    if (!result.ok || !result.stdout) throw new Error(result.stderr || result.error || "Database backup command failed.");
+    fs.writeFileSync(sqlPath, result.stdout, "utf8");
+    const zipResult = await ps(`Compress-Archive -LiteralPath '${psSingleQuote(sqlPath)}' -DestinationPath '${psSingleQuote(backupPath)}' -Force`, 180000);
+    if (!zipResult.ok) throw new Error(zipResult.stderr || zipResult.error || "Backup zip creation failed.");
+    const info = fileInfo(backupPath);
+    const payload = { ok: true, status: "created", durationMs: Date.now() - started, file: info, filePath: backupPath };
+    databaseBackupAudit(options.safety ? "database_safety_backup_created" : "database_backup_created", payload);
+    return payload;
+  } catch (error) {
+    const payload = { ok: false, status: "failed", durationMs: Date.now() - started, error: error.message, filePath: backupPath };
+    databaseBackupAudit(options.safety ? "database_safety_backup_failed" : "database_backup_failed", payload);
+    return payload;
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function listDatabaseBackups() {
+  const folder = ensureDatabaseBackupDir();
+  const allowed = new Set([".zip", ".sql", ".dump", ".backup", ".tar"]);
+  const backups = fs.readdirSync(folder, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && allowed.has(path.extname(entry.name).toLowerCase()))
+    .map((entry) => fileInfo(path.join(folder, entry.name)))
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  return { ok: true, folder, backups };
+}
+
+function validateRestoreFile(filePath) {
+  const resolved = path.resolve(expandEnvPath(filePath || ""));
+  const ext = path.extname(resolved).toLowerCase();
+  const allowed = new Set([".zip", ".sql", ".dump", ".backup", ".tar"]);
+  if (!resolved) throw new Error("Backup file path is required.");
+  if (!allowed.has(ext)) throw new Error("Unsupported backup file type. Choose .zip, .sql, .dump, .backup, or .tar.");
+  if (!fs.existsSync(resolved)) throw new Error("Backup file was not found.");
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile()) throw new Error("Selected backup path is not a file.");
+  return { path: resolved, ext, size: stat.size };
+}
+
+async function extractRestoreSource(filePath) {
+  const source = validateRestoreFile(filePath);
+  if (source.ext !== ".zip") return { ...source, cleanup: () => {} };
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-db-restore-"));
+  const expand = await ps(`Expand-Archive -LiteralPath '${psSingleQuote(source.path)}' -DestinationPath '${psSingleQuote(tempDir)}' -Force`, 180000);
+  if (!expand.ok) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    throw new Error(expand.stderr || expand.error || "Backup zip extraction failed.");
+  }
+  const candidates = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if ([".sql", ".dump", ".backup", ".tar"].includes(path.extname(entry.name).toLowerCase())) candidates.push(full);
+    }
+  };
+  walk(tempDir);
+  if (!candidates.length) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    throw new Error("Zip backup did not contain a supported database restore file.");
+  }
+  const selected = candidates.sort((a, b) => fs.statSync(b).size - fs.statSync(a).size)[0];
+  return { path: selected, ext: path.extname(selected).toLowerCase(), size: fs.statSync(selected).size, cleanup: () => fs.rmSync(tempDir, { recursive: true, force: true }) };
+}
+
+async function copyRestoreFileToVm(localPath) {
+  const info = await vmInfo();
+  const ip = info.ip || VM_IP;
+  if (!info.exists && !ip) throw new Error(info.error || "VM not found.");
+  if (info.exists && info.state !== "Running") throw new Error("VM is not running.");
+  if (!ip) throw new Error("VM IP address was not found.");
+  const key = sshKeyStatus(SSH_KEY);
+  if (!key.exists) throw new Error(key.message);
+  const remotePath = `/tmp/alphanine-restore-${Date.now()}-${path.basename(localPath).replace(/[^a-zA-Z0-9_.-]/g, "_")}`;
+  const result = await run("scp", ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=QUIET", "-i", key.path, localPath, `${SSH_USER}@${ip}:${remotePath}`], { timeout: 600000, maxBuffer: 1024 * 1024 * 32 });
+  if (!result.ok) throw new Error(result.stderr || result.error || "Could not copy backup file to VM.");
+  return remotePath;
+}
+
+async function restoreDatabaseBackup(payload = {}) {
+  const started = Date.now();
+  const filePath = String(payload.filePath || "").trim();
+  const confirmText = String(payload.confirmText || "").trim();
+  if (confirmText !== "RESTORE") throw new Error("Restore requires typing RESTORE.");
+  let restoreSource = null;
+  let remotePath = "";
+  try {
+    restoreSource = await extractRestoreSource(filePath);
+    const safety = await createDatabaseBackup({ prefix: "pre-restore-safety", safety: true });
+    if (!safety.ok) throw new Error(`Pre-restore safety backup failed: ${safety.error}`);
+    remotePath = await copyRestoreFileToVm(restoreSource.path);
+    const { namespace, dbPod, dbSvc } = await databaseRuntimeTarget();
+    const restoreCommand = [".dump", ".backup", ".tar"].includes(restoreSource.ext)
+      ? `cat ${shQuote(remotePath)} | sudo kubectl exec -i -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" pg_restore -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune --clean --if-exists --no-owner`
+      : `cat ${shQuote(remotePath)} | sudo kubectl exec -i -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" psql -v ON_ERROR_STOP=1 -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune`;
+    const command = [
+      `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
+      restoreCommand,
+      `rm -f ${shQuote(remotePath)}`
+    ].join("; ");
+    const result = await sshCommand(command, 900000, { maxBuffer: 1024 * 1024 * 64 });
+    if (!result.ok) throw new Error(result.stderr || result.error || "Database restore failed.");
+    const response = { ok: true, status: "restored", durationMs: Date.now() - started, restoredFrom: filePath, safetyBackup: safety.file, stdout: result.stdout.slice(-4000), stderr: result.stderr.slice(-4000) };
+    databaseBackupAudit("database_restore_success", response);
+    return response;
+  } catch (error) {
+    if (remotePath) await sshCommand(`rm -f ${shQuote(remotePath)}`, 30000).catch(() => {});
+    const response = { ok: false, status: "failed", durationMs: Date.now() - started, restoredFrom: filePath, error: error.message };
+    databaseBackupAudit("database_restore_failed", response);
+    return response;
+  } finally {
+    if (restoreSource?.cleanup) restoreSource.cleanup();
+  }
 }
 
 function parseDbRows(output, columns) {
@@ -4990,6 +5183,8 @@ function appPage() {
     table { width:100%; border-collapse:collapse; font-size:var(--font-table); line-height:1.35; }
     th, td { text-align:left; border-bottom:1px solid rgba(255,255,255,.08); padding:9px 8px; overflow-wrap:anywhere; }
     th { color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.07em; }
+    .table-wrap { width:100%; overflow-x:auto; }
+    .table-wrap table { min-width:760px; }
     .panel { font-size:var(--font-panel-body); line-height:1.42; }
     .panel h2 { font-size:18px; line-height:1.18; letter-spacing:.07em; }
     .panel h3 { font-size:16px; line-height:1.2; letter-spacing:.055em; }
@@ -5039,7 +5234,7 @@ function appPage() {
       <div>
         <div class="kicker">About</div>
         <h2>AlphaNine Dune Suite</h2>
-        <div class="subtle">Version 0.2.7-beta</div>
+        <div class="subtle">Version 0.2.8-beta</div>
       </div>
       <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
@@ -5139,7 +5334,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.2.7-beta</span>
+        <span>Version 0.2.8-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -5149,6 +5344,7 @@ function appPage() {
       <button class="tab" data-view="give">Give Item</button>
       <button class="tab" data-view="admin">Admin Tools</button>
       <button class="tab" data-view="progression">Progression Inspector</button>
+      <button class="tab" data-view="database">Database</button>
       <button class="tab" data-view="server">Server Status</button>
       <button class="tab" data-view="live-map">Live Map</button>
       <button class="tab" data-view="management">Server Management</button>
@@ -5734,6 +5930,65 @@ DUNE_RECEIVER_SSH_KEY</pre>
       </div>
     </section>
 
+    <section id="database" class="view">
+      <div class="grid four">
+        <div class="panel pad metric-tile"><div class="label">Database Status</div><div id="dbMgmtStatus" class="value">Checking...</div><div id="dbMgmtStatusDetail" class="subtle">Waiting for refresh.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Database Size</div><div id="dbMgmtSize" class="value">--</div><div class="subtle">Reported by PostgreSQL.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Connections</div><div id="dbMgmtConnections" class="value">--</div><div class="subtle">Current / active queries.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Backup Folder</div><div id="dbMgmtBackupFolderState" class="value">Checking...</div><div class="subtle">Persistent AppData setting.</div></div>
+      </div>
+      <div class="layout-3 mt">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Backup Database</div><div class="subtle">Create a timestamped PostgreSQL dump archive in the selected folder.</div></div></div>
+          <div class="action-row mt">
+            <button class="primary" onclick="createDatabaseBackup()">Create Backup</button>
+            <button onclick="refreshDatabaseManagement()">Refresh</button>
+          </div>
+          <div id="dbBackupResult" class="empty mt">No backup created in this session.</div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Import / Restore Database</div><div class="subtle">Restore requires RESTORE confirmation and creates a safety backup first.</div></div></div>
+          <div class="field-grid">
+            <label>Backup File<input id="dbRestoreFile" placeholder="Choose a .zip, .sql, .dump, .backup, or .tar file"></label>
+            <label>Confirmation<input id="dbRestoreConfirm" placeholder="Type RESTORE before restoring"></label>
+          </div>
+          <div class="action-row mt">
+            <button onclick="chooseDatabaseRestoreFile()">Choose Backup File</button>
+            <button class="danger" onclick="restoreDatabaseBackup()">Restore Database</button>
+          </div>
+          <div id="dbRestoreResult" class="warning mt">Restore is destructive. Confirm exact file and type RESTORE.</div>
+        </div>
+      </div>
+      <div class="layout-3 mt">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Backup Location</div><div class="subtle">Choose where local database backup archives are saved.</div></div></div>
+          <div class="detail-list">
+            <div class="detail-row"><span class="subtle">Current path</span><strong id="dbBackupPath" class="env-path-value">Loading...</strong></div>
+            <div class="detail-row"><span class="subtle">Default path</span><strong id="dbBackupDefaultPath" class="env-path-value">Loading...</strong></div>
+          </div>
+          <div class="action-row mt">
+            <button onclick="chooseDatabaseBackupFolder()">Choose Folder</button>
+            <button onclick="openDatabaseBackupFolder()">Open Folder</button>
+            <button onclick="resetDatabaseBackupFolder()">Reset to Default</button>
+          </div>
+          <div id="dbLocationResult" class="empty mt">Backup location ready.</div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Safety / Warnings</div><div class="subtle">Restore is guarded; backups still require a healthy database path.</div></div></div>
+          <div class="warning">Restoring a database can overwrite live server data. The Suite requires explicit confirmation and creates a pre-restore safety backup before any restore attempt.</div>
+          <div class="detail-list mt">
+            <div class="detail-row"><span class="subtle">Restore confirmation</span><strong>RESTORE</strong></div>
+            <div class="detail-row"><span class="subtle">Safety backup</span><strong>Required before restore</strong></div>
+            <div class="detail-row"><span class="subtle">Accepted files</span><strong>.zip, .sql, .dump, .backup, .tar</strong></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Recent Backups</div><div class="subtle">Backups found in the selected backup folder.</div></div><button onclick="refreshDatabaseBackups()">Refresh Backups</button></div>
+        <div class="table-wrap"><table><thead><tr><th>Filename</th><th>Date</th><th>Size</th><th>Path</th><th>Actions</th></tr></thead><tbody id="dbBackupRows"><tr><td colspan="5">Loading backups...</td></tr></tbody></table></div>
+      </div>
+    </section>
+
     <section id="logs" class="view">
       <div class="layout-3">
         <div class="panel pad"><div class="label">Recent Activity</div><div id="activityFeedLogs" class="activity mt"></div></div>
@@ -5783,7 +6038,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.7-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.8-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
@@ -5937,6 +6192,7 @@ const viewCopy={
   give:["Give Item","Live item grants through the configured receiver."],
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
+  database:["Database","Backup, restore, and manage Dune database backup locations."],
   server:["Server Status","Battlegroup controls, maps, and live server telemetry."],
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
@@ -5947,7 +6203,7 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="management")initManagerFrame();}
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
@@ -6102,6 +6358,22 @@ function envValueRow(item){return '<div class="env-var-row"><div><div class="env
 function renderEnvSetup(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagnostics=data;const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong class="env-path-value">'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}const runtime=(data?.activeRuntimeConfig||liveGiveEnvDiagnostics?.activeRuntimeConfig||{});const help=(data?.requiredModesHelp||liveGiveEnvDiagnostics?.requiredModesHelp||null);const overview=document.getElementById("envRuntimeOverview");const paths=document.getElementById("envRuntimePaths");const values=document.getElementById("envRuntimeValues");const priority=document.getElementById("envSourcePriority");const guide=document.getElementById("envLiveGuide");if(overview){overview.innerHTML=['<div class="env-card"><span>Active config</span><strong>'+esc(runtime.activeConfigPath||"Unknown")+'</strong></div>','<div class="env-card"><span>App data</span><strong>'+esc(runtime.appDataDir||"Unknown")+'</strong></div>','<div class="env-card"><span>Manager data</span><strong>'+esc(runtime.managerDataDir||"Unknown")+'</strong></div>'].join("");}if(paths){const envFiles=(runtime.envFiles||[]).map(file=>'<div class="detail-row"><span class="subtle">'+esc(file.label)+(file.override?" override":"")+'</span><strong class="env-path-value">'+esc((file.exists?"Found: ":"Missing: ")+(file.path||""))+'</strong></div>').join("");paths.innerHTML='<div class="detail-row"><span class="subtle">Backend config</span><strong class="env-path-value">'+esc(runtime.backendConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Manager config</span><strong class="env-path-value">'+esc(runtime.managerConfigPath||"Unknown")+'</strong></div>'+envFiles;}if(values){const envValues=runtime.loadedEnvironmentVariables||runtime.values||[];values.innerHTML=envValues.length?envValues.map(envValueRow).join(""):'<div class="empty">No runtime environment details returned.</div>';}if(priority){priority.innerHTML=(runtime.sourcePriority||[]).map((item,index)=>'<div class="detail-row"><span class="subtle">'+(index+1)+'</span><strong class="env-path-value">'+esc(item)+'</strong></div>').join("")||'<div class="empty">No source priority returned.</div>';}if(guide&&help){guide.textContent=[help.note||"",...(help.lines||[])].filter(Boolean).join("\\n\\n");}}
 function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=adminLiveGiveAvailable?"empty mt":"warning mt";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
 async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
+function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
+function renderDatabaseLocation(data){const folder=data?.folder||"";setText("dbBackupPath",folder||"Unknown");setText("dbBackupDefaultPath",data?.defaultFolder||"Unknown");tone("dbMgmtBackupFolderState",folder?"Configured":"Missing");}
+function renderDatabaseBackups(data){const rows=document.getElementById("dbBackupRows");if(!rows)return;const backups=data?.backups||[];window.databaseBackupRows=backups;if(!backups.length){rows.innerHTML='<tr><td colspan="5">No backups found in the selected folder.</td></tr>';return;}rows.innerHTML=backups.map((row,index)=>'<tr><td>'+esc(row.filename)+'</td><td>'+esc(new Date(row.date).toLocaleString())+'</td><td>'+esc(row.sizeLabel||row.size)+'</td><td>'+esc(row.path)+'</td><td><div class="action-row"><button onclick="copyDatabaseBackupPath('+index+')">Copy path</button><button onclick="selectDatabaseRestoreBackup('+index+')">Restore</button></div></td></tr>').join("");}
+async function refreshDatabaseStatus(){try{renderDatabaseStatus(await getJson("/api/database/status",{timeoutMs:15000}));}catch(e){renderDatabaseStatus({ok:false,status:"unavailable",error:betterError(e)});}}
+async function refreshDatabaseLocation(){try{renderDatabaseLocation(await getJson("/api/database/backup-location"));}catch(e){renderDatabaseLocation({ok:false,folder:"",defaultFolder:"",error:betterError(e)});setText("dbLocationResult",betterError(e));}}
+async function refreshDatabaseBackups(){try{const data=await getJson("/api/database/backups");renderDatabaseBackups(data);}catch(e){const rows=document.getElementById("dbBackupRows");if(rows)rows.innerHTML='<tr><td colspan="5">'+esc(betterError(e))+'</td></tr>';}}
+async function refreshDatabaseManagement(){await Promise.all([refreshDatabaseStatus(),refreshDatabaseLocation(),refreshDatabaseBackups()]);addActivity("database","Database management refreshed","Status, backup location, and recent backups loaded.");}
+async function chooseDatabaseBackupFolder(){try{let folder="";if(window.alphaNineSuite?.chooseDatabaseBackupFolder){const result=await window.alphaNineSuite.chooseDatabaseBackupFolder();if(result?.canceled)return;folder=result.folderPath||"";}else{folder=prompt("Backup folder path","")||"";}if(!folder)return;const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({folder})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder saved: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
+async function openDatabaseBackupFolder(){try{const folder=document.getElementById("dbBackupPath")?.textContent||"";if(window.alphaNineSuite?.openPath)await window.alphaNineSuite.openPath(folder);else window.open("file:///"+folder.replace(/\\\\/g,"/"),"_blank");}catch(e){setText("dbLocationResult",betterError(e));}}
+async function resetDatabaseBackupFolder(){try{const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reset:true})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder reset: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
+async function createDatabaseBackup(){const el=document.getElementById("dbBackupResult");try{el.className="empty mt";el.textContent="Creating database backup...";const data=await getJson("/api/database/backup",{method:"POST",timeoutMs:900000});if(!data.ok)throw new Error(data.error||"Backup failed.");el.className="empty mt";el.textContent="Backup created.\\nFile: "+data.filePath+"\\nSize: "+(data.file?.sizeLabel||data.file?.size||"--")+"\\nDuration: "+data.durationMs+" ms";addActivity("database","Database backup created",data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){el.className="warning mt";el.textContent=betterError(e);addActivity("error","Database backup failed",e.message);playUiSound("warning");}}
+async function chooseDatabaseRestoreFile(){try{let filePath="";if(window.alphaNineSuite?.chooseDatabaseBackupFile){const result=await window.alphaNineSuite.chooseDatabaseBackupFile();if(result?.canceled)return;filePath=result.filePath||"";}else{filePath=prompt("Backup file path","")||"";}if(filePath)document.getElementById("dbRestoreFile").value=filePath;}catch(e){setText("dbRestoreResult",betterError(e));}}
+function selectDatabaseRestoreBackup(index){const row=(window.databaseBackupRows||[])[index];if(!row)return;document.getElementById("dbRestoreFile").value=row.path;document.getElementById("dbRestoreResult").textContent="Selected backup: "+row.filename+". Type RESTORE before restoring.";}
+function copyDatabaseBackupPath(index){const row=(window.databaseBackupRows||[])[index];if(row)copyTextToClipboard(row.path);}
+async function copyTextToClipboard(text){try{if(navigator.clipboard)await navigator.clipboard.writeText(text);setText("dbLocationResult","Path copied.");playUiSound("click");}catch(e){setText("dbLocationResult",betterError(e));}}
+async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="RESTORE")throw new Error("Type RESTORE before restoring.");if(!confirm("Restore database from this backup? A safety backup will be created first."))return;el.className="warning mt";el.textContent="Creating safety backup and restoring database...";const data=await getJson("/api/database/restore",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:1200000});if(!data.ok)throw new Error(data.error||"Restore failed.");el.className="empty mt";el.textContent="Restore completed.\\nRestored from: "+data.restoredFrom+"\\nSafety backup: "+(data.safetyBackup?.path||"created")+"\\nDuration: "+data.durationMs+" ms";document.getElementById("dbRestoreConfirm").value="";addActivity("database","Database restore completed",data.restoredFrom);await refreshDatabaseBackups();playUiSound("success");}catch(e){el.className="warning mt";el.textContent=betterError(e);addActivity("error","Database restore failed",e.message);playUiSound("warning");}}
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
@@ -6297,6 +6569,55 @@ async function route(req, res) {
   if (url.pathname === "/api/diagnostics" && req.method === "GET") {
     try { await json(res, await diagnosticsSnapshot()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/database/status" && req.method === "GET") {
+    await json(res, await databaseStatus());
+    return;
+  }
+  if (url.pathname === "/api/database/backup-location" && req.method === "GET") {
+    try {
+      const folder = ensureDatabaseBackupDir();
+      await json(res, { ok: true, folder, defaultFolder: DEFAULT_DATABASE_BACKUP_DIR, exists: true });
+    } catch (error) {
+      await json(res, { ok: false, folder: databaseBackupDir(), defaultFolder: DEFAULT_DATABASE_BACKUP_DIR, error: error.message }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/database/backup-location" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const folder = body.reset ? DEFAULT_DATABASE_BACKUP_DIR : String(body.folder || "").trim();
+      if (!folder) throw new Error("Backup folder is required.");
+      const resolved = ensureDatabaseBackupDir(folder);
+      const saved = saveConfig({ ...loadConfig(), databaseBackupLocation: resolved });
+      await json(res, { ok: true, folder: databaseBackupDir(saved), configPath: CONFIG_PATH });
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/database/backup" && req.method === "POST") {
+    try {
+      const result = await createDatabaseBackup();
+      await json(res, result, result.ok ? 200 : 500);
+    } catch (error) {
+      await json(res, { ok: false, status: "failed", error: error.message }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/database/backups" && req.method === "GET") {
+    try { await json(res, listDatabaseBackups()); }
+    catch (error) { await json(res, { ok: false, backups: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/database/restore" && req.method === "POST") {
+    try {
+      const result = await restoreDatabaseBackup(JSON.parse(await readBody(req) || "{}"));
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "failed", error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/updates/check" && req.method === "GET") {

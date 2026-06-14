@@ -4285,6 +4285,8 @@ function managerSpawnDetails(resolved, args, useShell, reason = "") {
     shell: Boolean(useShell),
     executableExists: executable ? fs.existsSync(executable) : false,
     isWindowsAppsAlias: isWindowsAppsAlias(executable),
+    ComSpec: process.env.ComSpec || "",
+    SystemRoot: process.env.SystemRoot || "",
     PATH: process.env.PATH || "",
     PYTHONPATH: process.env.PYTHONPATH || ""
   };
@@ -4426,6 +4428,43 @@ function serveStatic(res, baseDir, requestPath) {
   return true;
 }
 
+function managerUnavailableHtml(reason) {
+  const safeReason = String(reason || "Manager service not running").replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }[ch]));
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Server Manager unavailable</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, Segoe UI, Arial, sans-serif; background:#080a0d; color:#f6d98a; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background:linear-gradient(135deg,#080a0d,#17120a); }
+    .panel { width:min(720px, calc(100vw - 48px)); border:1px solid rgba(214,166,69,.35); background:rgba(10,12,12,.88); padding:28px; box-shadow:0 18px 48px rgba(0,0,0,.45); }
+    h1 { margin:0 0 12px; font-size:22px; letter-spacing:.08em; text-transform:uppercase; }
+    .label { margin-top:18px; color:#bda764; font-size:11px; letter-spacing:.12em; text-transform:uppercase; }
+    .reason { margin-top:8px; color:#f1e0ac; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>Server Manager unavailable.</h1>
+    <div class="label">Reason</div>
+    <div class="reason">${safeReason}</div>
+  </main>
+</body>
+</html>`;
+}
+
+function sendManagerUnavailable(res, reason, status = 503) {
+  send(res, status, "text/html", managerUnavailableHtml(reason));
+}
+
 function startManagerService() {
   if (managerProcess) return;
   if (managerStartError) return;
@@ -4450,7 +4489,7 @@ function spawnManagerProcess(resolved, useShell, reason) {
     stdio: "ignore"
   });
   managerProcess.on("error", (error) => {
-    if (error.code === "ENOENT" && !useShell && resolved.source.startsWith("PYTHON_PATH")) {
+    if (error.code === "ENOENT" && !useShell && isWindowsAppsAlias(resolved.command)) {
       managerSpawnDiagnostics = { ...managerSpawnDiagnostics, errorCode: error.code || "", errorMessage: error.message || String(error) };
       console.warn(`Manager service direct spawn failed with ENOENT for ${resolved.command}; retrying with shell:true.`);
       managerProcess = null;
@@ -5470,10 +5509,17 @@ DUNE_RECEIVER_SSH_KEY=%LOCALAPPDATA%\\DuneAwakeningServer\\sshKey</pre>
             <div class="label">Server Management</div>
             <div class="subtle mt">Embedded AlphaNine manager tools for server operations.</div>
           </div>
-          <button onclick="document.getElementById('managerFrame').contentWindow.location.reload()">Reload Manager</button>
+          <button onclick="reloadManagerFrame()">Reload Manager</button>
         </div>
       </div>
-      <div class="panel frame-wrap mt"><iframe id="managerFrame" src="/manager/" title="AlphaNine Server Management"></iframe></div>
+      <div class="panel frame-wrap mt">
+        <div id="managerFrameStatus" class="panel pad">
+          <div class="label">Server Manager</div>
+          <div class="value warn mt">Loading...</div>
+          <div class="subtle mt">Opening embedded manager console.</div>
+        </div>
+        <iframe id="managerFrame" src="/manager/" title="AlphaNine Server Management" style="display:none" onload="handleManagerFrameLoad()"></iframe>
+      </div>
     </section>
 
     <section id="codex" class="view">
@@ -5660,12 +5706,19 @@ const viewCopy={
   diagnostics:["Diagnostics","Connection health, version info, and log viewer."],
   settings:["Settings","App-level preferences and local runtime details."]
 };
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();}
+let managerFrameCheckTimer=null;
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="management")initManagerFrame();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
 let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null;
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
+function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
+function managerFrameHasContent(){const frame=document.getElementById("managerFrame");try{return Boolean(frame&&frame.contentDocument&&frame.contentDocument.body&&frame.contentDocument.body.innerText.trim());}catch{return false;}}
+function handleManagerFrameLoad(){window.clearTimeout(managerFrameCheckTimer);managerFrameCheckTimer=window.setTimeout(checkManagerFrameLoaded,700);}
+async function checkManagerFrameLoaded(){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");try{const service=await fetch("/manager-api/api/server/config",{cache:"no-store"});if(!service.ok){setManagerFrameStatus("Server Manager unavailable.","Manager service not running / failed to start. HTTP "+service.status+" from /manager-api/api/server/config.","bad");return;}const serviceData=await service.json().catch(()=>({}));if(serviceData.warning||serviceData.error){setManagerFrameStatus("Server Manager unavailable.",serviceData.warning||serviceData.error||"Manager service not running / failed to start.","bad");return;}}catch(error){setManagerFrameStatus("Server Manager unavailable.",error&&error.message?error.message:"Manager service not running / failed to start.","bad");return;}if(managerFrameHasContent()){if(status)status.style.display="none";if(frame)frame.style.display="block";return;}try{const response=await fetch("/manager/",{cache:"no-store"});if(!response.ok){setManagerFrameStatus("Server Manager unavailable.","HTTP "+response.status+" loading /manager/.","bad");return;}const text=await response.text();if(!text.trim()){setManagerFrameStatus("Server Manager unavailable.","Manager endpoint returned an empty response.","bad");return;}setManagerFrameStatus("Server Manager unavailable.","Embedded manager frame did not finish rendering. The manager endpoint is reachable, but the embedded frame stayed empty. Use Reload Manager or open /manager/ directly.","warn");}catch(error){setManagerFrameStatus("Server Manager unavailable.",error&&error.message?error.message:"Manager service not running / failed to start.","bad");}}
+function initManagerFrame(){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(status){status.style.display="block";status.innerHTML='<div class="label">Server Manager</div><div class="value warn mt">Loading...</div><div class="subtle mt">Opening embedded manager console.</div>';}if(frame&&!frame.getAttribute("src"))frame.setAttribute("src","/manager/");window.clearTimeout(managerFrameCheckTimer);managerFrameCheckTimer=window.setTimeout(checkManagerFrameLoaded,3500);}
+function reloadManagerFrame(){const frame=document.getElementById("managerFrame");if(!frame)return;const status=document.getElementById("managerFrameStatus");if(status){status.style.display="block";status.innerHTML='<div class="label">Server Manager</div><div class="value warn mt">Loading...</div><div class="subtle mt">Reloading embedded manager console.</div>';}frame.style.display="none";frame.src="/manager/?reload="+Date.now();window.clearTimeout(managerFrameCheckTimer);managerFrameCheckTimer=window.setTimeout(checkManagerFrameLoaded,3500);}
 const SERVER_STATUS_ONLINE=["healthy","reconciling","running","updating","starting","progressing","ready"];
 const SERVER_STATUS_OFFLINE=["stopped","failed","error","unreachable","missing","offline"];
 function mapServerStatusValue(value){const raw=String(value||"").trim();const key=raw.toLowerCase();if(!raw||key==="unknown")return{raw:raw||"Unknown",label:"Warning",kind:"warn",online:false};if(SERVER_STATUS_ONLINE.includes(key))return{raw,label:"Online",kind:"ok",online:true};if(SERVER_STATUS_OFFLINE.includes(key))return{raw,label:"Offline",kind:"bad",online:false};return{raw,label:"Warning",kind:"warn",online:false};}
@@ -6201,7 +6254,9 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/manager" || url.pathname === "/manager/") {
-    serveStatic(res, MANAGER_DIR, "index.html");
+    if (!serveStatic(res, MANAGER_DIR, "index.html")) {
+      sendManagerUnavailable(res, `Manager UI shell was not found at ${MANAGER_DIR}. Rebuild with manager/** unpacked or reinstall the Suite.`);
+    }
     return;
   }
   if (url.pathname.startsWith("/manager/")) {

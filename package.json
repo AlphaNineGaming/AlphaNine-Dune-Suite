@@ -58,6 +58,9 @@
       "!node_modules/.bin/**",
       "!**/*.log"
     ],
+    "asarUnpack": [
+      "manager/**"
+    ],
     "win": {
       "target": "nsis",
       "signAndEditExecutable": false

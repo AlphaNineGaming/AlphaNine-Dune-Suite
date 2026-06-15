@@ -4,6 +4,7 @@ const fs = require("fs");
 const http = require("http");
 const os = require("os");
 const path = require("path");
+const crypto = require("crypto");
 
 const APP_PORT = Number(process.env.PORT || 8810);
 const RECEIVER_DEFAULT_HOST = "127.0.0.1";
@@ -148,22 +149,38 @@ function readAppConfig() {
   }
 }
 
+function generateReceiverToken() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+function ensureReceiverTokenConfig() {
+  const configPath = userPath("config.json");
+  const cfg = readAppConfig();
+  if (String(cfg.receiverToken || "").trim()) return cfg;
+  const next = {
+    ...cfg,
+    receiverToken: generateReceiverToken(),
+    receiverTokenSource: "generated"
+  };
+  fs.writeFileSync(configPath, JSON.stringify(next, null, 2), "utf8");
+  appendLog("desktop", "Generated receiver authentication token and saved it to config.json.");
+  return next;
+}
+
 function loadEnvironment() {
   readEnvFile(appPath(".env"));
   readEnvFile(appPath(".env.local"), true);
   readEnvFile(userPath(".env"));
   readEnvFile(userPath(".env.local"), true);
-  const cfg = readAppConfig();
+  const cfg = ensureReceiverTokenConfig();
   if (cfg.vmIp && !process.env.DUNE_RECEIVER_SSH_HOST) process.env.DUNE_RECEIVER_SSH_HOST = cfg.vmIp;
   if (cfg.receiverSshHost && !process.env.DUNE_RECEIVER_SSH_HOST) process.env.DUNE_RECEIVER_SSH_HOST = cfg.receiverSshHost;
   if (cfg.receiverSshUser && !process.env.DUNE_RECEIVER_SSH_USER) process.env.DUNE_RECEIVER_SSH_USER = cfg.receiverSshUser;
   if (cfg.receiverSshKey && !process.env.DUNE_RECEIVER_SSH_KEY) process.env.DUNE_RECEIVER_SSH_KEY = cfg.receiverSshKey;
   if (cfg.receiverHost && !process.env.DUNE_RECEIVER_HOST) process.env.DUNE_RECEIVER_HOST = cfg.receiverHost;
   if (cfg.receiverPort && !process.env.DUNE_RECEIVER_PORT) process.env.DUNE_RECEIVER_PORT = String(cfg.receiverPort);
-  if (cfg.receiverToken) {
-    process.env.DUNE_RECEIVER_TOKEN = cfg.receiverToken;
-    process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || cfg.receiverToken;
-  }
+  process.env.DUNE_RECEIVER_TOKEN = cfg.receiverToken || process.env.DUNE_RECEIVER_TOKEN || "";
+  process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = cfg.receiverToken || process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || process.env.DUNE_RECEIVER_TOKEN || "";
   if (cfg.liveTeleportEnabled === true || cfg.liveTeleportEnabled === "true") {
     process.env.DUNE_RECEIVER_LIVE_TELEPORT_ENABLED = "true";
   } else if (Object.prototype.hasOwnProperty.call(cfg, "liveTeleportEnabled")) {
@@ -176,6 +193,9 @@ function loadEnvironment() {
   const receiverPort = process.env.DUNE_RECEIVER_PORT || String(RECEIVER_DEFAULT_PORT);
   process.env.DUNE_ADMIN_GIVE_ITEM_URL = process.env.DUNE_ADMIN_GIVE_ITEM_URL || `http://${receiverHost}:${receiverPort}/api/give-item`;
   process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL = process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL || `http://${receiverHost}:${receiverPort}/health`;
+  if (!process.env.DUNE_RECEIVER_TOKEN || !process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN) {
+    appendLog("desktop", "Receiver token environment is incomplete after startup configuration load.");
+  }
   process.env.PORT = String(APP_PORT);
 }
 
@@ -305,9 +325,9 @@ async function startReceiverIfNeeded() {
   const cfg = receiverConfig();
   process.env.DUNE_ADMIN_GIVE_ITEM_URL = process.env.DUNE_ADMIN_GIVE_ITEM_URL || cfg.giveUrl;
   process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL = process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL || cfg.healthUrl;
-  if (!process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN && process.env.DUNE_RECEIVER_TOKEN) {
-    process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = process.env.DUNE_RECEIVER_TOKEN;
-  }
+  if (!process.env.DUNE_RECEIVER_TOKEN) process.env.DUNE_RECEIVER_TOKEN = generateReceiverToken();
+  if (!process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN) process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = process.env.DUNE_RECEIVER_TOKEN;
+  process.env.ALPHANINE_RECEIVER_STARTED_BY_SUITE = "true";
 
   if (await requestOk(cfg.healthUrl)) {
     appendLog("desktop", `Receiver already healthy at ${cfg.healthUrl}.`);
@@ -492,10 +512,6 @@ async function boot() {
   appendLog("desktop", `Booting AlphaNine Dune Suite. packaged=${app.isPackaged} appPath=${app.getAppPath()} resourcesPath=${process.resourcesPath || ""}`);
   createFirstRunFiles();
   loadEnvironment();
-  const receiverStartup = await startReceiverIfNeeded();
-  if (receiverStartup?.degraded) {
-    appendLog("desktop", `Starting dashboard with receiver degraded: ${receiverStartup.reason || receiverStartup.healthUrl || "receiver offline"}`);
-  }
   await startServer();
   createWindow();
   createTray();

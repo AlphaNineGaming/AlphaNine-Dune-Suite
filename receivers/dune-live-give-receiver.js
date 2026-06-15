@@ -686,7 +686,10 @@ async function probeReceiver() {
   const config = receiverConfigDiagnostics();
   if (missing.length) return { ok: false, missing, config, reason: "Receiver SSH config is incomplete." };
   try {
-    const target = await resolveMqTarget();
+    const target = await Promise.race([
+      resolveMqTarget(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Receiver MQ target probe timed out.")), Math.min(TIMEOUT_MS, 5000)))
+    ]);
     return { ok: true, config, target };
   } catch (error) {
     return { ok: false, config, error: error.message };
@@ -701,6 +704,7 @@ function receiverConfigDiagnostics() {
     sshUser: SSH_USER || "",
     sshKeyConfigured: Boolean(SSH_KEY),
     tokenConfigured: Boolean(TOKEN),
+    startedBySuite: /^(true|1|yes)$/i.test(String(process.env.ALPHANINE_RECEIVER_STARTED_BY_SUITE || "")),
     mqNamespace: MQ_NAMESPACE || "",
     mqPod: MQ_POD || "",
     battlegroupNamespace: BG_NAMESPACE || "",

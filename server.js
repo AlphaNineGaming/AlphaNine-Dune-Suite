@@ -7,7 +7,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
-const APP_VERSION = "0.3.0-beta";
+const APP_VERSION = "0.3.1-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -25,6 +25,16 @@ const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progressi
 function packagedUnpackedPath(...parts) {
   if (!String(__dirname).includes("app.asar")) return path.join(__dirname, ...parts);
   return path.join(__dirname.replace("app.asar", "app.asar.unpacked"), ...parts);
+}
+
+function packagedAssetPath(...parts) {
+  const unpacked = packagedUnpackedPath(...parts);
+  if (fs.existsSync(unpacked)) return unpacked;
+  return path.join(__dirname, ...parts);
+}
+
+function packagedChildCwd() {
+  return String(__dirname).includes("app.asar") ? path.dirname(process.execPath) : __dirname;
 }
 
 const MANAGER_DIR = packagedUnpackedPath("manager");
@@ -60,6 +70,7 @@ const defaultConfig = {
   receiverHost: "127.0.0.1",
   receiverPort: 5055,
   receiverToken: "",
+  receiverTokenSource: "",
   receiverSshHost: "",
   receiverSshUser: "dune",
   receiverSshKey: "",
@@ -81,10 +92,17 @@ const defaultConfig = {
 
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig, null, 2));
-    return defaultConfig;
+    const generated = { ...defaultConfig, receiverToken: generateReceiverToken(), receiverTokenSource: "generated" };
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(generated, null, 2));
+    return generated;
   }
-  return { ...defaultConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")) };
+  const configValue = { ...defaultConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")) };
+  if (!String(configValue.receiverToken || "").trim()) {
+    configValue.receiverToken = generateReceiverToken();
+    configValue.receiverTokenSource = "generated";
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(configValue, null, 2));
+  }
+  return configValue;
 }
 
 function loadRawConfig() {
@@ -98,7 +116,7 @@ function effectiveTeleportCommandTemplate(value) {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiSoundsEnabled", "uiSoundVolume"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiSoundsEnabled", "uiSoundVolume"];
   const clean = {};
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(nextConfig, key)) clean[key] = nextConfig[key];
@@ -118,7 +136,9 @@ function saveConfig(nextConfig) {
   clean.databasePassword = String(clean.databasePassword || "");
   clean.receiverHost = String(clean.receiverHost || "127.0.0.1").trim();
   clean.receiverPort = Number(clean.receiverPort) || 5055;
-  clean.receiverToken = String(clean.receiverToken || "");
+  clean.receiverToken = String(clean.receiverToken || "").trim() || generateReceiverToken();
+  clean.receiverTokenSource = String(clean.receiverTokenSource || (clean.receiverToken ? "config.json" : "")).trim();
+  if (!clean.receiverTokenSource) clean.receiverTokenSource = "generated";
   clean.receiverSshHost = String(clean.receiverSshHost || "").trim();
   clean.receiverSshUser = String(clean.receiverSshUser || "dune").trim();
   clean.receiverSshKey = String(clean.receiverSshKey || "").trim();
@@ -291,6 +311,10 @@ const VM_IP = String(config.vmIp || "").trim();
 const SSH_USER = config.sshUser || "dune";
 const SSH_KEY = expandEnvPath(config.sshKey || defaultSshKeyPath());
 const DEFAULT_SERVER_ROOT = expandEnvPath(config.serverInstallPath);
+if (config.receiverToken) {
+  process.env.DUNE_RECEIVER_TOKEN = config.receiverToken;
+  process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || config.receiverToken;
+}
 let lastDirectorUrl = null;
 let managerProcess = null;
 let managerStartError = "";
@@ -500,8 +524,8 @@ function localIps() {
 }
 
 function receiverUrls(configValue = loadConfig()) {
-  const host = configValue.receiverHost || envFlag("DUNE_RECEIVER_HOST", "127.0.0.1");
-  const port = Number(configValue.receiverPort || envNumber("DUNE_RECEIVER_PORT", 5055));
+  const host = envFlag("DUNE_RECEIVER_HOST", "") || configValue.receiverHost || "127.0.0.1";
+  const port = Number(envFlag("DUNE_RECEIVER_PORT", "") || configValue.receiverPort || 5055);
   return {
     host,
     port,
@@ -542,6 +566,62 @@ async function receiverStatus() {
   };
 }
 
+async function receiverHealthJson(configValue = loadConfig()) {
+  const urls = receiverUrls(configValue);
+  try {
+    const response = await httpRequestJson(urls.healthUrl, {
+      method: "GET",
+      headers: receiverHttpAuthToken(configValue) ? { Authorization: `Bearer ${receiverHttpAuthToken(configValue)}` } : {},
+      timeout: 8000
+    });
+    return {
+      ok: response.statusCode >= 200 && response.statusCode < 500,
+      reachable: response.statusCode >= 200 && response.statusCode < 500,
+      statusCode: response.statusCode,
+      data: response.data || null,
+      error: ""
+    };
+  } catch (error) {
+    return { ok: false, reachable: false, statusCode: 0, data: null, error: error.message };
+  }
+}
+
+function receiverTokenSource(configValue = loadConfig()) {
+  const raw = loadRawConfig();
+  if (String(configValue.receiverTokenSource || "").trim()) return String(configValue.receiverTokenSource).trim();
+  if (String(raw.receiverToken || "").trim()) return "config.json";
+  const adminSource = runtimeEnvSource("DUNE_ADMIN_GIVE_ITEM_TOKEN", configValue);
+  const receiverSource = runtimeEnvSource("DUNE_RECEIVER_TOKEN", configValue);
+  if (receiverSource?.source && receiverSource.source !== "missing" && receiverSource.source !== "default") return receiverSource.source;
+  if (adminSource?.source && adminSource.source !== "missing" && adminSource.source !== "default") return adminSource.source;
+  return "generated";
+}
+
+async function receiverTokenDiagnostics(configValue = loadConfig(), transport = null) {
+  const suiteToken = receiverHttpAuthToken(configValue);
+  const health = await receiverHealthJson(configValue);
+  const healthConfig = health.data?.config || health.data || {};
+  const receiverHealthTokenConfigured = Boolean(healthConfig.tokenConfigured ?? healthConfig.tokenConfig);
+  const receiverStartedBySuite = Boolean(healthConfig.startedBySuite || (receiverManagedProcess && !receiverManagedProcess.killed));
+  const suiteTokenConfigured = Boolean(suiteToken);
+  const receiverTokenConfigured = Boolean(configValue.receiverToken || process.env.DUNE_RECEIVER_TOKEN);
+  return {
+    receiverTokenConfigured,
+    suiteTokenConfigured,
+    receiverHealthTokenConfigured,
+    tokensMatch: Boolean(suiteTokenConfigured && receiverHealthTokenConfigured && (receiverStartedBySuite || configValue.receiverToken)),
+    receiverStartedBySuite,
+    configurationSource: receiverTokenSource(configValue),
+    healthUrl: receiverUrls(configValue).healthUrl,
+    healthReachable: Boolean(health.reachable),
+    healthStatusCode: health.statusCode,
+    healthError: health.error || transport?.error || "",
+    message: receiverHealthTokenConfigured
+      ? "Receiver authentication token is configured."
+      : "Receiver started without a configured authentication token."
+  };
+}
+
 async function waitForReceiver(urlValue, timeout = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
@@ -553,27 +633,42 @@ async function waitForReceiver(urlValue, timeout = 12000) {
 }
 
 async function startManagedReceiver() {
+  const ensured = ensureReceiverTokenSaved();
+  const startupUrls = receiverUrls(ensured.config);
+  if (startupUrls.port === PORT) throw new Error("Receiver port is configured to the Suite backend port. Update DUNE_RECEIVER_PORT or Receiver Port before restarting the receiver.");
   const before = await receiverStatus();
-  if (before.ok) return { ok: true, message: "Receiver is already online.", receiver: before };
-  const receiverFile = packagedUnpackedPath("receivers", "dune-live-give-receiver.js");
+  const beforeHealth = before.ok ? await receiverHealthJson(ensured.config) : null;
+  const beforeTokenConfigured = Boolean(beforeHealth?.data?.config?.tokenConfigured ?? beforeHealth?.data?.tokenConfigured ?? beforeHealth?.data?.config?.tokenConfig ?? beforeHealth?.data?.tokenConfig);
+  if (before.ok && beforeTokenConfigured) return { ok: true, message: "Receiver is already online.", receiver: before };
+  if (before.ok && !beforeTokenConfigured && !receiverManagedProcess) {
+    return { ok: false, message: "Receiver started without a configured authentication token. Stop the existing receiver or restart the Suite so it can be launched with the current configuration.", receiver: before };
+  }
+  const receiverFile = packagedAssetPath("receivers", "dune-live-give-receiver.js");
   if (!fs.existsSync(receiverFile)) throw new Error(`Receiver was not found: ${receiverFile}`);
-  const cfg = loadConfig();
+  const cfg = ensured.config;
   const urls = receiverUrls(cfg);
+  const receiverToken = String(cfg.receiverToken || process.env.DUNE_RECEIVER_TOKEN || "").trim();
+  const suiteToken = String(cfg.receiverToken || process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || receiverToken || "").trim();
+  if (!receiverToken || !suiteToken) throw new Error("Receiver token configuration is incomplete.");
+  process.env.DUNE_RECEIVER_TOKEN = receiverToken;
+  process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = suiteToken;
   const env = {
     ...process.env,
     DUNE_RECEIVER_HOST: urls.host,
     DUNE_RECEIVER_PORT: String(urls.port),
-    DUNE_RECEIVER_TOKEN: cfg.receiverToken || process.env.DUNE_RECEIVER_TOKEN || "",
+    DUNE_RECEIVER_TOKEN: receiverToken,
     DUNE_RECEIVER_SSH_HOST: cfg.receiverSshHost || cfg.vmIp || process.env.DUNE_RECEIVER_SSH_HOST || "",
     DUNE_RECEIVER_SSH_USER: cfg.receiverSshUser || cfg.sshUser || process.env.DUNE_RECEIVER_SSH_USER || "",
     DUNE_RECEIVER_SSH_KEY: expandEnvPath(cfg.receiverSshKey || cfg.sshKey || process.env.DUNE_RECEIVER_SSH_KEY || ""),
     DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: cfg.liveTeleportEnabled ? "true" : "false",
+    ALPHANINE_RECEIVER_STARTED_BY_SUITE: "true",
+    ELECTRON_RUN_AS_NODE: "1",
     DUNE_ADMIN_GIVE_ITEM_URL: urls.giveUrl,
     DUNE_ADMIN_GIVE_ITEM_HEALTH_URL: urls.healthUrl,
-    DUNE_ADMIN_GIVE_ITEM_TOKEN: cfg.receiverToken || process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || ""
+    DUNE_ADMIN_GIVE_ITEM_TOKEN: suiteToken
   };
   receiverManagedProcess = spawn(process.execPath, [receiverFile], {
-    cwd: __dirname,
+    cwd: packagedChildCwd(),
     env,
     stdio: "ignore",
     windowsHide: true,
@@ -584,16 +679,32 @@ async function startManagedReceiver() {
   return { ok: ready.ok, message: ready.ok ? "Receiver started." : "Receiver did not become healthy.", receiver: await receiverStatus() };
 }
 
-function stopManagedReceiver() {
+async function stopManagedReceiver() {
+  const urls = receiverUrls();
+  const stopped = [];
   if (receiverManagedProcess && !receiverManagedProcess.killed) {
     try {
-      if (process.platform === "win32" && receiverManagedProcess.pid) spawn("taskkill", ["/pid", String(receiverManagedProcess.pid), "/T", "/F"], { windowsHide: true });
+      if (process.platform === "win32" && receiverManagedProcess.pid) {
+        await run("taskkill", ["/pid", String(receiverManagedProcess.pid), "/F"], { timeout: 10000 });
+      }
       else receiverManagedProcess.kill("SIGTERM");
     } catch {}
+    stopped.push(String(receiverManagedProcess.pid || "managed"));
     receiverManagedProcess = null;
-    return { ok: true, message: "Receiver stop requested." };
   }
-  return { ok: true, message: "No suite-managed receiver process was running." };
+  if (urls.port === PORT) {
+    return stopped.length
+      ? { ok: true, message: "Receiver stop requested. Skipped listener cleanup because receiver port matches the Suite backend port.", stoppedPids: stopped }
+      : { ok: false, message: "Receiver port is configured to the Suite backend port. Refusing to stop that listener." };
+  }
+  const listenerPid = await listeningPidOnPort(urls.port);
+  if (listenerPid && listenerPid !== String(process.pid)) {
+    const killed = await run("taskkill", ["/pid", listenerPid, "/F"], { timeout: 10000 });
+    if (killed.ok) stopped.push(listenerPid);
+  }
+  return stopped.length
+    ? { ok: true, message: "Receiver stop requested.", stoppedPids: stopped }
+    : { ok: true, message: "No suite-managed receiver process was running." };
 }
 
 async function autoDiscovery() {
@@ -747,6 +858,43 @@ function run(command, args, options = {}) {
       });
     });
   });
+}
+
+async function listeningPidOnPort(port) {
+  if (process.platform !== "win32") return "";
+  const result = await run("netstat", ["-ano", "-p", "tcp"], { timeout: 10000, maxBuffer: 1024 * 512 });
+  if (!result.ok) return "";
+  const pattern = new RegExp(`^\\s*TCP\\s+127\\.0\\.0\\.1:${Number(port)}\\s+\\S+\\s+LISTENING\\s+(\\d+)`, "i");
+  for (const line of String(result.stdout || "").split(/\r?\n/)) {
+    const match = line.match(pattern);
+    if (match) return match[1];
+  }
+  return "";
+}
+
+function generateReceiverToken() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+function ensureReceiverTokenSaved(source = "generated") {
+  const current = loadConfig();
+  if (String(current.receiverToken || "").trim()) return { config: current, generated: false };
+  const next = { ...current, receiverToken: generateReceiverToken(), receiverTokenSource: source };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
+  process.env.DUNE_RECEIVER_TOKEN = next.receiverToken;
+  process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = next.receiverToken;
+  appendAdminAudit("receiver_token_generated", { source, configPath: CONFIG_PATH });
+  return { config: next, generated: true };
+}
+
+function regenerateReceiverToken() {
+  const current = loadConfig();
+  const next = { ...current, receiverToken: generateReceiverToken(), receiverTokenSource: "generated" };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
+  process.env.DUNE_RECEIVER_TOKEN = next.receiverToken;
+  process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = next.receiverToken;
+  appendAdminAudit("receiver_token_regenerated", { configPath: CONFIG_PATH });
+  return next;
 }
 
 function runWithStdin(command, args, inputPath, options = {}) {
@@ -2085,14 +2233,20 @@ async function discoverDuneItems() {
   return { ...cache, items: discoveredItems.map(sanitizeGearItemForUi) };
 }
 
-async function dbQuery(sql, timeout = 45000) {
-  const { namespace, dbPod, dbSvc } = await databaseRuntimeTarget();
+async function dbQuery(sql, timeout = 45000, runtimeTarget = null) {
+  const target = runtimeTarget || await databaseRuntimeTarget();
+  const { namespace, dbPod, dbSvc } = target;
   const command = [
     `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
     `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" psql -v ON_ERROR_STOP=1 -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -c ${shQuote(sql)}`
   ].join("; ");
   const result = await sshCommand(command, timeout);
-  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Database query failed.");
+  if (!result.ok) {
+    const error = new Error(result.stderr || result.stdout || result.error || "Database query failed.");
+    error.diagnostics = target.diagnostics || null;
+    error.lastCommand = command;
+    throw error;
+  }
   return result.stdout.trim();
 }
 
@@ -2179,16 +2333,256 @@ async function verifyImportedDatabaseStatus(timeout = 20000, options = {}) {
   return result;
 }
 
-async function databaseRuntimeTarget() {
-  const item = await battlegroupResource();
-  const namespace = item.metadata?.namespace;
-  const name = item.metadata?.name;
-  if (!namespace || !name) throw new Error("Dune battlegroup database target was not detected.");
+function configuredBattlegroupName() {
+  const cfg = loadConfig();
+  return String(
+    process.env.ALPHANINE_BATTLEGROUP ||
+    process.env.ALPHANINE_BATTLEGROUP_NAME ||
+    process.env.DUNE_BATTLEGROUP ||
+    process.env.DUNE_BATTLEGROUP_NAME ||
+    cfg.databaseBattlegroup ||
+    cfg.battlegroup ||
+    cfg.battlegroupName ||
+    ""
+  ).trim();
+}
+
+function battlegroupStatusRank(value) {
+  const key = String(value || "").trim().toLowerCase();
+  if (!key || key === "unknown") return 20;
+  if (["healthy", "ready", "running", "reconciling", "reconciled", "progressing", "starting", "updating"].includes(key)) return 0;
+  if (["pending", "initializing"].includes(key)) return 10;
+  if (SERVER_STATUS_OFFLINE.has(key)) return 100;
+  return 30;
+}
+
+function battlegroupItemStatus(item = {}) {
+  const status = item.status || {};
+  const conditions = Array.isArray(status.conditions) ? status.conditions : [];
+  const readyCondition = conditions.find((condition) => /^(Ready|Reconciled|Healthy)$/i.test(String(condition.type || "")));
+  const failedCondition = conditions.find((condition) => /^(Failed|Error|Stalled)$/i.test(String(condition.type || "")) && String(condition.status || "").toLowerCase() === "true");
+  return {
+    phase: status.phase || status.status || status.state || status.phaseName || "",
+    ready: readyCondition && String(readyCondition.status || "").toLowerCase() === "true",
+    readyType: readyCondition?.type || "",
+    failed: Boolean(failedCondition),
+    failedType: failedCondition?.type || "",
+    conditions: conditions.map((condition) => ({
+      type: condition.type || "",
+      status: condition.status || "",
+      reason: condition.reason || "",
+      message: condition.message || ""
+    }))
+  };
+}
+
+function normalizeBattlegroupCandidate(item = {}) {
+  const namespace = item.metadata?.namespace || "";
+  const name = item.metadata?.name || "";
+  const status = battlegroupItemStatus(item);
+  const statusValue = status.phase || (status.ready ? status.readyType : "") || (status.failed ? status.failedType : "");
+  const createdAt = item.metadata?.creationTimestamp || "";
+  const hardOffline = status.failed || SERVER_STATUS_OFFLINE.has(String(statusValue || "").toLowerCase());
   return {
     namespace,
     name,
-    dbPod: `${name}-db-dbdepl-sts-0`,
-    dbSvc: `${name}-db-dbdepl-svc`
+    createdAt,
+    status: statusValue || "Unknown",
+    phase: status.phase || "",
+    ready: Boolean(status.ready),
+    failed: Boolean(status.failed),
+    hardOffline,
+    rank: hardOffline ? 100 : battlegroupStatusRank(statusValue),
+    dbPod: name ? `${name}-db-dbdepl-sts-0` : "",
+    dbService: name ? `${name}-db-dbdepl-svc` : "",
+    conditions: status.conditions
+  };
+}
+
+function publicBattlegroupCandidate(candidate = {}) {
+  return {
+    name: candidate.name || "",
+    namespace: candidate.namespace || "",
+    status: candidate.status || "Unknown",
+    phase: candidate.phase || "",
+    ready: Boolean(candidate.ready),
+    failed: Boolean(candidate.failed),
+    hardOffline: Boolean(candidate.hardOffline),
+    createdAt: candidate.createdAt || "",
+    dbPod: candidate.dbPod || "",
+    dbService: candidate.dbService || "",
+    dbPodExists: candidate.dbPodExists === true,
+    dbServiceExists: candidate.dbServiceExists === true,
+    validationError: candidate.validationError || ""
+  };
+}
+
+async function listBattlegroupCandidates() {
+  const command = "sudo kubectl get igwbg -A -o json";
+  const result = await sshCommand(command, 30000, { maxBuffer: 1024 * 1024 * 4 });
+  if (!result.ok) {
+    const error = new Error(result.stderr || result.stdout || result.error || "Could not read battlegroup resources.");
+    error.diagnostics = { lastCommand: command, failureReason: error.message };
+    throw error;
+  }
+  let data = null;
+  try { data = JSON.parse(result.stdout || "{}"); }
+  catch {
+    const error = new Error("Could not parse battlegroup resources.");
+    error.diagnostics = { lastCommand: command, failureReason: error.message };
+    throw error;
+  }
+  const candidates = (data.items || []).map(normalizeBattlegroupCandidate).filter((candidate) => candidate.name && candidate.namespace);
+  if (!candidates.length) {
+    const error = new Error("No battlegroup resources were found.");
+    error.diagnostics = { lastCommand: command, availableBattlegroups: [], failureReason: error.message };
+    throw error;
+  }
+  return { candidates, command };
+}
+
+async function activeBattlegroupFromStatus() {
+  const result = await battlegroup("status");
+  const raw = result.stdout || result.stderr || result.error || "";
+  if (!result.ok && !raw.trim()) {
+    return { name: "", ok: false, raw, error: result.stderr || result.error || "Battlegroup status did not return output." };
+  }
+  const parsed = parseStatus(raw);
+  return {
+    name: parsed.summary?.battlegroup || "",
+    ok: Boolean(result.ok || raw.trim()),
+    raw,
+    parsed,
+    error: result.ok ? "" : (result.stderr || result.error || "")
+  };
+}
+
+function matchingBattlegroups(candidates, name) {
+  const target = String(name || "").trim().toLowerCase();
+  if (!target) return [];
+  return candidates.filter((candidate) => {
+    const shortName = String(candidate.name || "").toLowerCase();
+    const qualified = `${candidate.namespace}/${candidate.name}`.toLowerCase();
+    return shortName === target || qualified === target;
+  });
+}
+
+function mostRecentCandidate(candidates) {
+  return [...candidates].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0] || null;
+}
+
+async function validateDatabaseCandidate(candidate, diagnostics) {
+  const podCommand = `sudo kubectl get pod -n ${shQuote(candidate.namespace)} ${shQuote(candidate.dbPod)} -o name`;
+  diagnostics.lastCommand = podCommand;
+  const pod = await sshCommand(podCommand, 15000);
+  candidate.dbPodExists = Boolean(pod.ok && String(pod.stdout || "").trim());
+  if (!candidate.dbPodExists) {
+    candidate.validationError = pod.stderr || pod.stdout || pod.error || `DB pod ${candidate.dbPod} was not found.`;
+    return candidate;
+  }
+  const svcCommand = `sudo kubectl get svc -n ${shQuote(candidate.namespace)} ${shQuote(candidate.dbService)} -o name`;
+  diagnostics.lastCommand = svcCommand;
+  const svc = await sshCommand(svcCommand, 15000);
+  candidate.dbServiceExists = Boolean(svc.ok && String(svc.stdout || "").trim());
+  if (!candidate.dbServiceExists) {
+    candidate.validationError = svc.stderr || svc.stdout || svc.error || `DB service ${candidate.dbService} was not found.`;
+  } else {
+    candidate.validationError = "";
+  }
+  return candidate;
+}
+
+async function selectValidatedDatabaseCandidate(candidates, diagnostics, orderedGroups) {
+  const tried = new Set();
+  for (const group of orderedGroups) {
+    const groupCandidates = (group.candidates || []).filter(Boolean).filter((candidate) => {
+      const key = `${candidate.namespace}/${candidate.name}`;
+      if (tried.has(key)) return false;
+      tried.add(key);
+      return true;
+    });
+    if (!groupCandidates.length) continue;
+    const valid = [];
+    for (const candidate of groupCandidates) {
+      await validateDatabaseCandidate(candidate, diagnostics);
+      diagnostics.availableBattlegroups = candidates.map(publicBattlegroupCandidate);
+      if (candidate.dbPodExists && candidate.dbServiceExists) {
+        valid.push(candidate);
+        continue;
+      }
+      diagnostics.failureReason = candidate.validationError || "Selected candidate did not have a valid DB pod/service.";
+    }
+    if (valid.length > 1 && group.requireUnique) {
+      const error = new Error("Multiple Battlegroup database candidates remain. Select a Battlegroup in Suite settings or environment.");
+      diagnostics.failureReason = error.message;
+      diagnostics.availableBattlegroups = candidates.map(publicBattlegroupCandidate);
+      error.diagnostics = diagnostics;
+      throw error;
+    }
+    if (valid.length) {
+      const candidate = valid[0];
+      diagnostics.selectedBattlegroup = candidate.name;
+      diagnostics.selectedNamespace = candidate.namespace;
+      diagnostics.selectionReason = group.reason;
+      diagnostics.dbPod = candidate.dbPod;
+      diagnostics.dbService = candidate.dbService;
+      diagnostics.dbPodExists = true;
+      diagnostics.dbServiceExists = true;
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function databaseRuntimeTarget() {
+  const diagnostics = {
+    selectedBattlegroup: "",
+    selectedNamespace: "",
+    selectionReason: "",
+    availableBattlegroups: [],
+    dbPod: "",
+    dbService: "",
+    dbPodExists: false,
+    dbServiceExists: false,
+    lastCommand: "",
+    failureReason: "",
+    configuredBattlegroup: configuredBattlegroupName(),
+    statusBattlegroup: "",
+    statusCommandReturned: false
+  };
+  const { candidates, command } = await listBattlegroupCandidates();
+  diagnostics.lastCommand = command;
+  diagnostics.availableBattlegroups = candidates.map(publicBattlegroupCandidate);
+  const configuredName = diagnostics.configuredBattlegroup;
+  const statusInfo = await activeBattlegroupFromStatus();
+  diagnostics.statusBattlegroup = statusInfo.name || "";
+  diagnostics.statusCommandReturned = Boolean(statusInfo.ok);
+  if (statusInfo.error) diagnostics.statusCommandError = statusInfo.error;
+  const configuredMatches = matchingBattlegroups(candidates, configuredName);
+  const statusMatches = matchingBattlegroups(candidates, statusInfo.name);
+  const healthy = candidates
+    .filter((candidate) => !candidate.hardOffline && (candidate.ready || candidate.rank === 0))
+    .sort((a, b) => a.rank - b.rank || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const newestNonStopped = mostRecentCandidate(candidates.filter((candidate) => !candidate.hardOffline));
+  const selected = await selectValidatedDatabaseCandidate(candidates, diagnostics, [
+    { reason: "configured Battlegroup", candidates: configuredMatches, requireUnique: true },
+    { reason: "Battlegroup reported by battlegroup status", candidates: statusMatches, requireUnique: true },
+    { reason: "healthy/running igwbg resource", candidates: healthy, requireUnique: true },
+    { reason: "most recently created non-stopped igwbg resource", candidates: newestNonStopped ? [newestNonStopped] : [] }
+  ]);
+  if (!selected) {
+    const error = new Error("Database target could not be confirmed. Check selected Battlegroup.");
+    diagnostics.failureReason = diagnostics.failureReason || error.message;
+    diagnostics.availableBattlegroups = candidates.map(publicBattlegroupCandidate);
+    error.diagnostics = diagnostics;
+    throw error;
+  }
+  return {
+    namespace: selected.namespace,
+    name: selected.name,
+    dbPod: selected.dbPod,
+    dbSvc: selected.dbService,
+    diagnostics
   };
 }
 
@@ -2327,12 +2721,25 @@ function formatBytes(value) {
 
 async function databaseStatus() {
   const started = Date.now();
+  let target = null;
   try {
-    const output = await dbQuery("select current_database(), pg_size_pretty(pg_database_size(current_database())), (select count(*) from pg_stat_activity), (select count(*) from pg_stat_activity where state = 'active'), date_trunc('second', now() - pg_postmaster_start_time())::text", 12000);
+    target = await databaseRuntimeTarget();
+    const output = await dbQuery("select current_database(), pg_size_pretty(pg_database_size(current_database())), (select count(*) from pg_stat_activity), (select count(*) from pg_stat_activity where state = 'active'), date_trunc('second', now() - pg_postmaster_start_time())::text", 12000, target);
     const row = parseDbRows(output, ["database", "size", "connections", "activeQueries", "uptime"])[0] || {};
-    return { ok: true, status: "online", durationMs: Date.now() - started, ...row };
+    return { ok: true, status: "online", durationMs: Date.now() - started, ...row, diagnostics: target.diagnostics || null };
   } catch (error) {
-    return { ok: false, status: "unavailable", durationMs: Date.now() - started, error: error.message };
+    const diagnostics = error.diagnostics || target?.diagnostics || null;
+    const statusOnline = diagnostics?.statusCommandReturned === true;
+    return {
+      ok: false,
+      status: "unavailable",
+      durationMs: Date.now() - started,
+      error: error.message,
+      message: statusOnline
+        ? "Server is online, but database target could not be confirmed. Check selected Battlegroup."
+        : "Database target could not be confirmed.",
+      diagnostics
+    };
   }
 }
 
@@ -4143,6 +4550,7 @@ function dryRunReason(transport) {
     return transport.reason || "Live give-item transport is not configured.";
   }
   if (!transport.reachable) {
+    if (transport.reason) return transport.reason;
     return transport.error ? `Transport is not reachable: ${transport.error}` : "Transport is configured but not reachable.";
   }
   return "";
@@ -4196,13 +4604,15 @@ function giveTransportConfig() {
     const url = LIVE_GIVE_ENV.httpUrl || LIVE_GIVE_DEFAULT_HTTP_URL;
     const missingEnv = liveGiveMissingEnv("http-json");
     if (missingEnv.length) return { mode: "http-json", configured: false, missingEnv, reason: `${missingEnv.join(", ")} required for http-json transport.` };
+    const cfg = loadConfig();
     return {
       mode: "http-json",
       configured: true,
       missingEnv: [],
       url,
       healthUrl: LIVE_GIVE_ENV.httpHealthUrl || LIVE_GIVE_DEFAULT_HEALTH_URL,
-      token: LIVE_GIVE_ENV.httpToken,
+      token: receiverHttpAuthToken(cfg),
+      tokenSource: receiverHttpAuthSource(cfg),
       runtime: { ...runtimeGiveTransport }
     };
   }
@@ -4271,7 +4681,17 @@ async function checkGiveTransport() {
     if (config.mode === "http-json") {
       const headers = config.token ? { Authorization: `Bearer ${config.token}` } : {};
       const response = await httpRequestJson(config.healthUrl, { method: "GET", headers, timeout: LIVE_GIVE_ENV.timeoutMs });
-      const checked = { ...config, reachable: response.statusCode >= 200 && response.statusCode < 500, statusCode: response.statusCode };
+      const healthConfig = response.data?.config || response.data || {};
+      const hasTokenFlag = Object.prototype.hasOwnProperty.call(healthConfig, "tokenConfigured") || Object.prototype.hasOwnProperty.call(healthConfig, "tokenConfig");
+      const receiverHealthTokenConfigured = Boolean(healthConfig.tokenConfigured ?? healthConfig.tokenConfig);
+      const tokenProblem = hasTokenFlag && !receiverHealthTokenConfigured;
+      const checked = {
+        ...config,
+        reachable: response.statusCode >= 200 && response.statusCode < 500 && !tokenProblem,
+        statusCode: response.statusCode,
+        receiverHealthTokenConfigured,
+        reason: tokenProblem ? "Receiver started without a configured authentication token." : config.reason
+      };
       return { ...checked, dryRunReason: dryRunReason(checked) };
     }
     if (config.mode === "rabbitmq-http") {
@@ -4459,6 +4879,7 @@ function adminProbeUnavailable(error, transportOverride = null) {
 async function liveGiveEnvStatus() {
   await updateRuntimeGiveTransport(null, "env");
   const transport = await checkGiveTransport();
+  const receiverToken = await receiverTokenDiagnostics(loadConfig(), transport);
   const liveGiveAvailable = Boolean(transport.configured && transport.reachable);
   appendLiveGiveAvailabilityAudit(liveGiveAvailable, transport, "live-give-env");
   return {
@@ -4473,6 +4894,13 @@ async function liveGiveEnvStatus() {
     runtimeTransport: { ...runtimeGiveTransport },
     activeRuntimeConfig: activeRuntimeConfigDiagnostics(),
     requiredModesHelp: requiredModesHelp(),
+    receiverToken,
+    receiverTokenConfigured: receiverToken.receiverTokenConfigured,
+    suiteTokenConfigured: receiverToken.suiteTokenConfigured,
+    receiverHealthTokenConfigured: receiverToken.receiverHealthTokenConfigured,
+    tokensMatch: receiverToken.tokensMatch,
+    receiverStartedBySuite: receiverToken.receiverStartedBySuite,
+    configurationSource: receiverToken.configurationSource,
     giveTransport: {
       mode: transport.mode,
       configured: Boolean(transport.configured),
@@ -4481,6 +4909,7 @@ async function liveGiveEnvStatus() {
       target: transport.url ? redactUrl(transport.url) : "",
       missingEnv: transport.missingEnv || [],
       reason: transport.reason || transport.error || "",
+      receiverHealthTokenConfigured: transport.receiverHealthTokenConfigured,
       dryRunReason: liveGiveAvailable ? "" : (transport.dryRunReason || transport.reason || transport.error || "Live give-item transport is unavailable.")
     }
   };
@@ -6552,7 +6981,7 @@ function appPage() {
       <div>
         <div class="kicker">About</div>
         <h2>AlphaNine Dune Suite</h2>
-        <div class="subtle">Version 0.3.0-beta</div>
+        <div class="subtle">Version 0.3.1-beta</div>
       </div>
       <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
@@ -6652,7 +7081,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.3.0-beta</span>
+        <span>Version 0.3.1-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -6942,6 +7371,15 @@ function appPage() {
           <div id="envLiveStatus" class="warning mt">Loading live-give environment status...</div>
           <div id="envMissingVars" class="detail-list mt"></div>
           <div class="action-row mt"><button class="primary" onclick="refreshLiveGiveEnv()">Refresh Env Status</button></div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Receiver Token</div>
+          <div id="envReceiverTokenStatus" class="detail-list mt"></div>
+          <div id="envReceiverTokenWarning" class="warning mt hidden"></div>
+          <div class="action-row mt">
+            <button onclick="restartReceiverWithCurrentConfig()">Restart Receiver with Current Configuration</button>
+            <button onclick="regenerateReceiverToken()">Regenerate Receiver Token</button>
+          </div>
         </div>
         <div class="panel pad">
           <div class="label mt">Active Runtime Configuration</div>
@@ -7366,7 +7804,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.3.0-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.3.1-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
@@ -7684,10 +8122,14 @@ function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deploy
 function liveGiveTransportMessage(transport){const missing=transport?.missingEnv||[];if(missing.includes("DUNE_ADMIN_GIVE_ITEM_TRANSPORT"))return"Live Give unavailable: missing DUNE_ADMIN_GIVE_ITEM_TRANSPORT.";if(missing.length)return"Live Give unavailable: missing "+missing.join(", ")+".";return"Live Give unavailable: "+(transport?.dryRunReason||transport?.reason||"transport is not configured.");}
 function renderEnvSetupLegacy(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagnostics=data;const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong>'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}const runtime=(data?.activeRuntimeConfig||liveGiveEnvDiagnostics?.activeRuntimeConfig||{});const help=(data?.requiredModesHelp||liveGiveEnvDiagnostics?.requiredModesHelp||null);const paths=document.getElementById("envRuntimePaths");const values=document.getElementById("envRuntimeValues");const priority=document.getElementById("envSourcePriority");const guide=document.getElementById("envLiveGuide");if(paths){const envFiles=(runtime.envFiles||[]).map(file=>'<div class="detail-row"><span class="subtle">'+esc(file.label)+(file.override?" override":"")+'</span><strong>'+esc((file.exists?"Found: ":"Missing: ")+(file.path||""))+'</strong></div>').join("");paths.innerHTML='<div class="detail-row"><span class="subtle">Active config</span><strong>'+esc(runtime.activeConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Backend config</span><strong>'+esc(runtime.backendConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Manager config</span><strong>'+esc(runtime.managerConfigPath||"Unknown")+'</strong></div>'+envFiles;}if(values){const envValues=runtime.loadedEnvironmentVariables||runtime.values||[];const rows=envValues.map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.name)+'<br>'+esc(item.source||"unknown")+(item.detail?' · '+esc(item.detail):'')+'</span><strong>'+esc(item.displayValue||item.value||"(empty)")+'</strong></div>').join("");values.innerHTML=rows||'<div class="empty">No runtime environment details returned.</div>';}if(priority){priority.innerHTML=(runtime.sourcePriority||[]).map((item,index)=>'<div class="detail-row"><span class="subtle">'+(index+1)+'</span><strong>'+esc(item)+'</strong></div>').join("")||'<div class="empty">No source priority returned.</div>';}if(guide&&help){guide.textContent=[help.note||"",...(help.lines||[])].filter(Boolean).join("\\n\\n");}}
 function envValueRow(item){return '<div class="env-var-row"><div><div class="env-var-name">'+esc(item.name)+'</div><span class="env-var-source">'+esc(item.source||"unknown")+(item.detail?' · '+esc(item.detail):'')+'</span></div><div class="env-var-value">'+esc(item.displayValue||item.value||"(empty)")+'</div></div>';}
-function renderEnvSetup(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagnostics=data;const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong class="env-path-value">'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}const runtime=(data?.activeRuntimeConfig||liveGiveEnvDiagnostics?.activeRuntimeConfig||{});const help=(data?.requiredModesHelp||liveGiveEnvDiagnostics?.requiredModesHelp||null);const overview=document.getElementById("envRuntimeOverview");const paths=document.getElementById("envRuntimePaths");const values=document.getElementById("envRuntimeValues");const priority=document.getElementById("envSourcePriority");const guide=document.getElementById("envLiveGuide");if(overview){overview.innerHTML=['<div class="env-card"><span>Active config</span><strong>'+esc(runtime.activeConfigPath||"Unknown")+'</strong></div>','<div class="env-card"><span>App data</span><strong>'+esc(runtime.appDataDir||"Unknown")+'</strong></div>','<div class="env-card"><span>Manager data</span><strong>'+esc(runtime.managerDataDir||"Unknown")+'</strong></div>'].join("");}if(paths){const envFiles=(runtime.envFiles||[]).map(file=>'<div class="detail-row"><span class="subtle">'+esc(file.label)+(file.override?" override":"")+'</span><strong class="env-path-value">'+esc((file.exists?"Found: ":"Missing: ")+(file.path||""))+'</strong></div>').join("");paths.innerHTML='<div class="detail-row"><span class="subtle">Backend config</span><strong class="env-path-value">'+esc(runtime.backendConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Manager config</span><strong class="env-path-value">'+esc(runtime.managerConfigPath||"Unknown")+'</strong></div>'+envFiles;}if(values){const envValues=runtime.loadedEnvironmentVariables||runtime.values||[];values.innerHTML=envValues.length?envValues.map(envValueRow).join(""):'<div class="empty">No runtime environment details returned.</div>';}if(priority){priority.innerHTML=(runtime.sourcePriority||[]).map((item,index)=>'<div class="detail-row"><span class="subtle">'+(index+1)+'</span><strong class="env-path-value">'+esc(item)+'</strong></div>').join("")||'<div class="empty">No source priority returned.</div>';}if(guide&&help){guide.textContent=[help.note||"",...(help.lines||[])].filter(Boolean).join("\\n\\n");}}
+function yesNo(value){return value?"Yes":"No";}
+function renderReceiverTokenStatus(data=null){const token=data?.receiverToken||liveGiveEnvDiagnostics?.receiverToken||{};const wrap=document.getElementById("envReceiverTokenStatus");const warn=document.getElementById("envReceiverTokenWarning");if(!wrap)return;wrap.innerHTML=['<div class="detail-row"><span class="subtle">Receiver Token Configured</span><strong>'+esc(yesNo(token.receiverTokenConfigured))+'</strong></div>','<div class="detail-row"><span class="subtle">Source</span><strong>'+esc(token.configurationSource||"Unknown")+'</strong></div>','<div class="detail-row"><span class="subtle">Receiver /health tokenConfigured</span><strong>'+esc(yesNo(token.receiverHealthTokenConfigured))+'</strong></div>','<div class="detail-row"><span class="subtle">Suite token present</span><strong>'+esc(yesNo(token.suiteTokenConfigured))+'</strong></div>','<div class="detail-row"><span class="subtle">Tokens match</span><strong>'+esc(yesNo(token.tokensMatch))+'</strong></div>','<div class="detail-row"><span class="subtle">Receiver started by Suite</span><strong>'+esc(yesNo(token.receiverStartedBySuite))+'</strong></div>'].join("");if(warn){const show=token.receiverHealthTokenConfigured===false;warn.classList.toggle("hidden",!show);warn.textContent=show?"Receiver started without a configured authentication token.":"";}}
+function renderEnvSetup(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagnostics=data;const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong class="env-path-value">'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}renderReceiverTokenStatus(data);const runtime=(data?.activeRuntimeConfig||liveGiveEnvDiagnostics?.activeRuntimeConfig||{});const help=(data?.requiredModesHelp||liveGiveEnvDiagnostics?.requiredModesHelp||null);const overview=document.getElementById("envRuntimeOverview");const paths=document.getElementById("envRuntimePaths");const values=document.getElementById("envRuntimeValues");const priority=document.getElementById("envSourcePriority");const guide=document.getElementById("envLiveGuide");if(overview){overview.innerHTML=['<div class="env-card"><span>Active config</span><strong>'+esc(runtime.activeConfigPath||"Unknown")+'</strong></div>','<div class="env-card"><span>App data</span><strong>'+esc(runtime.appDataDir||"Unknown")+'</strong></div>','<div class="env-card"><span>Manager data</span><strong>'+esc(runtime.managerDataDir||"Unknown")+'</strong></div>'].join("");}if(paths){const envFiles=(runtime.envFiles||[]).map(file=>'<div class="detail-row"><span class="subtle">'+esc(file.label)+(file.override?" override":"")+'</span><strong class="env-path-value">'+esc((file.exists?"Found: ":"Missing: ")+(file.path||""))+'</strong></div>').join("");paths.innerHTML='<div class="detail-row"><span class="subtle">Backend config</span><strong class="env-path-value">'+esc(runtime.backendConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Manager config</span><strong class="env-path-value">'+esc(runtime.managerConfigPath||"Unknown")+'</strong></div>'+envFiles;}if(values){const envValues=runtime.loadedEnvironmentVariables||runtime.values||[];values.innerHTML=envValues.length?envValues.map(envValueRow).join(""):'<div class="empty">No runtime environment details returned.</div>';}if(priority){priority.innerHTML=(runtime.sourcePriority||[]).map((item,index)=>'<div class="detail-row"><span class="subtle">'+(index+1)+'</span><strong class="env-path-value">'+esc(item)+'</strong></div>').join("")||'<div class="empty">No source priority returned.</div>';}if(guide&&help){guide.textContent=[help.note||"",...(help.lines||[])].filter(Boolean).join("\\n\\n");}}
+async function restartReceiverWithCurrentConfig(){const box=document.getElementById("envReceiverTokenWarning");try{if(box){box.classList.remove("hidden");box.textContent="Restarting receiver with current configuration...";}const data=await getJson("/api/receiver/restart",{method:"POST"});if(box)box.textContent=data.message||"Receiver restart requested.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
+async function regenerateReceiverToken(){const box=document.getElementById("envReceiverTokenWarning");try{if(!confirm("Regenerate the receiver token and restart the managed receiver?"))return;if(box){box.classList.remove("hidden");box.textContent="Regenerating receiver token...";}const data=await getJson("/api/receiver/token/regenerate",{method:"POST"});if(box)box.textContent=data.message||"Receiver token regenerated.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
 function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=adminLiveGiveAvailable?"empty mt":"warning mt";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
 async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
-function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
+function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.message||data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
 function renderDatabaseLocation(data){const folder=data?.folder||"";setText("dbBackupPath",folder||"Unknown");setText("dbBackupDefaultPath",data?.defaultFolder||"Unknown");tone("dbMgmtBackupFolderState",folder?"Configured":"Missing");}
 function backupAvailabilityLabel(row){if(row?.availabilityStatus)return row.availabilityStatus;if(row?.vmBackupPath||row?.vmPath)return"Metadata only";return"Local file";}
 function importAvailabilityLabel(source){if(!source)return"Metadata only";if(source.sourceType==="local")return"Local file";if(source.availability?.available)return"Available on VM";if(source.availability?.known)return"Missing on VM";return"Metadata only";}
@@ -7896,12 +8338,13 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/receiver/stop" && req.method === "POST") {
-    await json(res, stopManagedReceiver());
+    await json(res, await stopManagedReceiver());
     return;
   }
   if (url.pathname === "/api/receiver/restart" && req.method === "POST") {
     try {
-      stopManagedReceiver();
+      ensureReceiverTokenSaved();
+      await stopManagedReceiver();
       await new Promise((resolve) => setTimeout(resolve, 800));
       await json(res, await startManagedReceiver());
     } catch (error) {
@@ -7933,6 +8376,19 @@ async function route(req, res) {
       await json(res, { ok: true, folder, defaultFolder: DEFAULT_DATABASE_BACKUP_DIR, exists: true });
     } catch (error) {
       await json(res, { ok: false, folder: databaseBackupDir(), defaultFolder: DEFAULT_DATABASE_BACKUP_DIR, error: error.message }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/receiver/token/regenerate" && req.method === "POST") {
+    try {
+      regenerateReceiverToken();
+      await stopManagedReceiver();
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const receiver = await startManagedReceiver();
+      const token = await receiverTokenDiagnostics(loadConfig());
+      await json(res, { ok: receiver.ok, message: receiver.ok ? "Receiver token regenerated and receiver restarted." : "Receiver token regenerated. Receiver restart did not become healthy.", receiver, receiverToken: token });
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 500);
     }
     return;
   }
@@ -8249,6 +8705,16 @@ server.listen(PORT, HOST, async () => {
     appendAdminAudit("startup_transport_dry_run", { source: "startup", transport: "dry-run", serverOnline: false, reason: runtimeGiveTransport.reason });
   }
   setTimeout(() => attemptConfiguredServerStart("startup"), 1000);
+  setTimeout(() => {
+    startManagedReceiver().then((result) => {
+      appendAdminAudit(result?.ok ? "receiver_startup_ready" : "receiver_startup_degraded", {
+        message: result?.message || "",
+        receiver: result?.receiver?.status || result?.receiver?.reason || ""
+      });
+    }).catch((error) => {
+      appendAdminAudit("receiver_startup_degraded", { error: error.message });
+    });
+  }, 1200);
   logLiveGiveStartupValidation();
 });
 

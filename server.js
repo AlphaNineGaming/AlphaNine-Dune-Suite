@@ -6701,7 +6701,10 @@ function appPage() {
         </div>
         <div class="hero-actions" aria-label="Support links">
           <button type="button" onclick="openSupportDiscord()">Discord Support</button>
-          <button type="button" onclick="openSupportKofi()">Support on Ko-fi</button>
+          <span class="kofi-widget-slot">
+            <script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script>
+            <script type='text/javascript'>if(window.kofiwidget2){kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'E1W220NMPA');kofiwidget2.draw();}</script>
+          </span>
         </div>
       </div>
       <div class="grid">

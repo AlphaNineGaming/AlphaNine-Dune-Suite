@@ -30,6 +30,12 @@ function packagedUnpackedPath(...parts) {
 const MANAGER_DIR = packagedUnpackedPath("manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
 const APPDATA_DIR = process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "";
+const DATA_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "data") : path.join(__dirname, "data");
+const DUNE_ITEMS_CACHE_PATH = path.join(DATA_DIR, "dune-items-cache.json");
+const GEAR_IMAGE_CACHE_DIR = path.join(DATA_DIR, "gear-images");
+const GEAR_IMPORT_URL = "https://dune.gaming.tools/items";
+const GEAR_DATA_ENTITIES_URL = "https://cdn-hosted.gaming.tools/dune/data/en/entities.d.json";
+const GEAR_CDN_ASSET_URL = "https://cdn-hosted.gaming.tools/dune";
 const LOCALAPPDATA_DIR = process.env.LOCALAPPDATA || process.env.APPDATA || "";
 const MANAGER_DATA_DIR = LOCALAPPDATA_DIR ? path.join(LOCALAPPDATA_DIR, "AlphaNine Dune Awakening Manager") : MANAGER_DIR;
 const MANAGER_CONFIG_PATH = path.join(MANAGER_DATA_DIR, "manager-config.json");
@@ -1474,26 +1480,609 @@ async function setMapReplicas(mapName, replicas) {
 }
 
 function gearCatalog() {
-  const filePath = path.join(CODEX_DIR, "index.html");
-  if (!fs.existsSync(filePath)) return [];
-  const html = fs.readFileSync(filePath, "utf8");
-  const match = html.match(/<script id="catalogData" type="application\/json">([\s\S]*?)<\/script>/);
-  if (!match) return [];
+  const cache = loadDuneItemsCache();
+  return cache.items || [];
+}
+
+function gearImageUrlFromPath(localPath) {
+  if (!localPath) return "";
+  const name = path.basename(String(localPath));
+  return name ? `/gear-images/${encodeURIComponent(name)}` : "";
+}
+
+function sanitizeGearItemForUi(item = {}) {
+  const imageLocalPath = String(item.imageLocalPath || "");
+  const icon = gearImageUrlFromPath(imageLocalPath);
+  return {
+    id: String(item.id || ""),
+    name: String(item.name || item.id || ""),
+    category: String(item.category || ""),
+    type: String(item.type || item.subtype || ""),
+    subtype: String(item.subtype || item.type || ""),
+    detail: String(item.detail || ""),
+    tier: String(item.tier || ""),
+    rarity: String(item.rarity || ""),
+    maxStack: String(item.maxStack || ""),
+    imageLocalPath,
+    icon,
+    hasDisplayName: item.hasDisplayName === true
+  };
+}
+
+function loadDuneItemsCache() {
+  if (!fs.existsSync(DUNE_ITEMS_CACHE_PATH)) {
+    return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, totalItemsFound: 0, totalImagesDownloaded: 0, totalImagesReused: 0, failedImageDownloads: 0, message: "Item cache has not been generated yet. Run Import Gear Items." } };
+  }
   try {
-    const data = JSON.parse(match[1]);
-    return (data.items || []).map((item) => ({
+    const data = JSON.parse(fs.readFileSync(DUNE_ITEMS_CACHE_PATH, "utf8"));
+    const items = (data.items || []).map(sanitizeGearItemForUi).filter((item) => item.id && item.name);
+    return { ok: true, items, report: data.report || {}, generatedAt: data.generatedAt || "" };
+  } catch (error) {
+    return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, error: error.message, totalItemsFound: 0 } };
+  }
+}
+
+function itemCandidateRoots() {
+  const cfg = loadConfig();
+  return [
+    cfg.serverInstallPath,
+    process.env.DUNE_SERVER_INSTALL_PATH,
+    process.env.DUNE_AWAKENING_SERVER_PATH,
+    process.env.DUNE_GAME_PATH,
+    process.env.STEAM_APPS
+  ].filter(Boolean).map((entry) => path.resolve(String(entry))).filter((entry, index, list) => fs.existsSync(entry) && list.indexOf(entry) === index);
+}
+
+function isLikelyItemFile(filePath) {
+  const lower = filePath.toLowerCase();
+  return /\.(json|jsonc|csv|tsv|txt|ini|cfg|dat|bin|uasset|uexp|pak|utoc|ucas|vhd|vhdx)$/i.test(lower);
+}
+
+function walkItemFiles(root, limit = 12000) {
+  const files = [];
+  let truncated = false;
+  const stack = [root];
+  while (stack.length && files.length < limit) {
+    const current = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (!/node_modules|installer-output|\.git|logs|backups|screenshots/i.test(full)) stack.push(full);
+      } else if (entry.isFile() && isLikelyItemFile(full)) {
+        files.push(full);
+      }
+    }
+  }
+  if (stack.length || files.length >= limit) truncated = true;
+  files.truncated = truncated;
+  return files;
+}
+
+function cleanItemText(value) {
+  return String(value || "").replace(/\u0000/g, "").trim();
+}
+
+function looksLikeItemId(value) {
+  const text = cleanItemText(value);
+  return /^[A-Za-z0-9_:.\/-]{3,220}$/.test(text) && /(item|items\.|inventory|loot|weapon|armor|resource|equipment|template|gear)/i.test(text);
+}
+
+function addDiscoveredItem(items, raw) {
+  const id = cleanItemText(raw.id || raw.template || raw.path || raw.internalId);
+  if (!id || !looksLikeItemId(id)) return;
+  const existing = items.get(id);
+  const display = cleanItemText(raw.name || raw.displayName || raw.label || raw.title);
+  const hasDisplayName = Boolean(display && display !== id && !looksLikeItemId(display));
+  const item = {
+    id,
+    name: hasDisplayName ? display : id,
+    category: cleanItemText(raw.category || raw.type || raw.class || ""),
+    detail: cleanItemText(raw.detail || raw.description || raw.source || ""),
+    tier: cleanItemText(raw.tier || ""),
+    rarity: cleanItemText(raw.rarity || ""),
+    maxStack: cleanItemText(raw.maxStack || raw.stackSize || ""),
+    icon: "",
+    source: cleanItemText(raw.source || ""),
+    hasDisplayName
+  };
+  if (!existing || (!existing.hasDisplayName && item.hasDisplayName)) items.set(id, { ...existing, ...item });
+}
+
+function scanJsonForItems(value, source, items, depth = 0) {
+  if (depth > 18 || value == null) return;
+  if (Array.isArray(value)) {
+    value.forEach((entry) => scanJsonForItems(entry, source, items, depth + 1));
+    return;
+  }
+  if (typeof value !== "object") return;
+  const id = value.id || value.itemId || value.ItemId || value.template || value.Template || value.nameId || value.assetId || value.path || value.objectPath || value.ObjectPath || value.primaryAssetId;
+  const name = value.displayName || value.DisplayName || value.name || value.Name || value.title || value.Title || value.localizedName;
+  if (id || looksLikeItemId(name)) {
+    addDiscoveredItem(items, {
+      id: id || name,
+      name,
+      category: value.category || value.Category || value.itemType || value.ItemType || value.type || value.Type,
+      detail: value.description || value.Description || value.tooltip || value.Tooltip,
+      tier: value.tier || value.Tier,
+      rarity: value.rarity || value.Rarity,
+      maxStack: value.maxStack || value.MaxStack || value.stackSize || value.StackSize,
+      source
+    });
+  }
+  for (const child of Object.values(value)) scanJsonForItems(child, source, items, depth + 1);
+}
+
+function scanTextForItems(text, source, items) {
+  const patterns = [
+    /\bItems\.[A-Za-z0-9_.:-]{2,180}\b/g,
+    /\b(?:Item|Weapon|Armor|Resource|Inventory)[A-Za-z0-9_.:-]{3,180}\b/g,
+    /\/Game\/[A-Za-z0-9_\/.-]*(?:Item|Weapon|Armor|Resource|Inventory|Gear)[A-Za-z0-9_\/.-]*/g
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) addDiscoveredItem(items, { id: match[0], source });
+  }
+}
+
+function scanItemFile(filePath, items) {
+  const ext = path.extname(filePath).toLowerCase();
+  const stat = fs.statSync(filePath);
+  const report = { path: filePath, size: stat.size, format: ext.replace(".", "") || "unknown", itemsFound: 0, status: "scanned" };
+  const before = items.size;
+  if (stat.size > 250 * 1024 * 1024) {
+    report.status = "skipped-too-large";
+    report.note = "File exceeds scanner limit. No items were silently skipped; this file requires a dedicated Unreal extraction tool.";
+    return report;
+  }
+  try {
+    if ([".json", ".jsonc"].includes(ext)) {
+      const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+      scanJsonForItems(JSON.parse(raw), filePath, items);
+    } else if ([".pak", ".utoc", ".ucas", ".uasset", ".uexp"].includes(ext)) {
+      const raw = fs.readFileSync(filePath);
+      scanTextForItems(raw.toString("latin1"), filePath, items);
+      report.status = "binary-inspected";
+      report.note = "Unreal binary/container inspected for item identifiers. Display names require exported metadata/localization.";
+    } else {
+      scanTextForItems(fs.readFileSync(filePath, "utf8"), filePath, items);
+    }
+  } catch (error) {
+    report.status = "error";
+    report.error = error.message;
+  }
+  report.itemsFound = items.size - before;
+  return report;
+}
+
+async function scanRemoteDuneItems(items) {
+  const script = [
+    "set +e",
+    "roots='/home/dune /funcom /mnt /opt /var/lib/rancher/k3s/storage'",
+    "pattern='Items\\.[A-Za-z0-9_.:-]{2,180}|/Game/[A-Za-z0-9_./-]*(Item|Weapon|Armor|Resource|Inventory|Gear)[A-Za-z0-9_./-]*'",
+    "for root in $roots; do",
+    "  [ -d \"$root\" ] || continue",
+    "  find \"$root\" -type f \\( -iname '*.json' -o -iname '*.csv' -o -iname '*.ini' -o -iname '*.txt' -o -iname '*.uasset' -o -iname '*.uexp' -o -iname '*.pak' -o -iname '*.utoc' -o -iname '*.ucas' \\) -size -300M -print 2>/dev/null",
+    "done | head -n 2000 | while IFS= read -r file; do",
+    "  echo __ALPHANINE_FILE__:$file",
+    "  grep -aEo \"$pattern\" \"$file\" 2>/dev/null | sort -u | head -n 5000",
+    "done"
+  ].join("\n");
+  const result = await sshCommand(script, 120000, { maxBuffer: 1024 * 1024 * 12 });
+  const report = { source: "ssh-vm", status: result.ok ? "scanned" : "unavailable", filesScanned: [], itemsFound: 0, error: result.ok ? "" : (result.stderr || result.error || result.stdout || "Remote VM item scan failed.") };
+  if (!result.ok) return report;
+  let current = "";
+  const before = items.size;
+  for (const line of String(result.stdout || "").split(/\r?\n/)) {
+    if (line.startsWith("__ALPHANINE_FILE__:")) {
+      current = line.slice("__ALPHANINE_FILE__:".length);
+      report.filesScanned.push({ path: current, status: "remote-scanned" });
+      continue;
+    }
+    if (line.trim()) addDiscoveredItem(items, { id: line.trim(), source: current ? `ssh:${current}` : "ssh" });
+  }
+  report.itemsFound = items.size - before;
+  return report;
+}
+
+function decodeHtmlEntities(value = "") {
+  return String(value || "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
+}
+
+function stripTags(value = "") {
+  return decodeHtmlEntities(String(value || "").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function parseHtmlAttrs(tag = "") {
+  const attrs = {};
+  for (const match of String(tag || "").matchAll(/([a-zA-Z_:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)) {
+    attrs[match[1].toLowerCase()] = decodeHtmlEntities(match[2] || match[3] || match[4] || "");
+  }
+  return attrs;
+}
+
+function absoluteUrl(href, base = GEAR_IMPORT_URL) {
+  try { return new URL(String(href || ""), base).toString(); } catch { return ""; }
+}
+
+function stableGearIdFromUrl(urlValue, fallback = "") {
+  try {
+    const url = new URL(urlValue);
+    const segment = url.pathname.split("/").filter(Boolean).pop() || fallback;
+    return decodeURIComponent(segment).trim() || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function safeGearFileName(value) {
+  return String(value || "item").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "item";
+}
+
+function cleanGearDisplayName(value, fallback = "") {
+  const clean = stripTags(value)
+    .replace(/\s+[\-|]\s*(Dune Awakening|Dune: Awakening|Gaming\.Tools|Dune Gaming Tools).*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean || fallback;
+}
+
+function gearImageExtension(urlValue = "", contentType = "") {
+  const type = String(contentType || "").toLowerCase();
+  if (type.includes("webp")) return ".webp";
+  if (type.includes("jpeg") || type.includes("jpg")) return ".jpg";
+  if (type.includes("png")) return ".png";
+  try {
+    const ext = path.extname(new URL(urlValue).pathname).toLowerCase();
+    if ([".png", ".jpg", ".jpeg", ".webp"].includes(ext)) return ext === ".jpeg" ? ".jpg" : ext;
+  } catch {}
+  return ".png";
+}
+
+function httpRequestBuffer(urlValue, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 20000);
+  const redirects = Number(options.redirects ?? 4);
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try { parsed = new URL(urlValue); } catch (error) { reject(error); return; }
+    const client = parsed.protocol === "http:" ? http : https;
+    const req = client.request(parsed, {
+      method: "GET",
+      headers: {
+        "User-Agent": `AlphaNine-Dune-Suite/${APP_VERSION} item-cache-importer`,
+        "Accept": options.accept || "*/*"
+      }
+    }, (response) => {
+      const location = response.headers.location;
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && location && redirects > 0) {
+        response.resume();
+        httpRequestBuffer(absoluteUrl(location, urlValue), { ...options, redirects: redirects - 1 }).then(resolve, reject);
+        return;
+      }
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const body = Buffer.concat(chunks);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`HTTP ${response.statusCode}`));
+          return;
+        }
+        resolve({ buffer: body, contentType: String(response.headers["content-type"] || ""), statusCode: response.statusCode });
+      });
+    });
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Request timed out after ${timeoutMs}ms`)));
+    req.end();
+  });
+}
+
+async function httpRequestText(urlValue, timeoutMs = 25000) {
+  const result = await httpRequestBuffer(urlValue, { timeoutMs, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" });
+  return result.buffer.toString("utf8");
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let index = 0;
+  const count = Math.max(1, Math.min(Number(limit) || 1, items.length || 1));
+  await Promise.all(Array.from({ length: count }, async () => {
+    while (index < items.length) {
+      const current = index++;
+      results[current] = await worker(items[current], current);
+    }
+  }));
+  return results;
+}
+
+function parseGearTextMetadata(text = "") {
+  const clean = stripTags(text);
+  const result = { name: cleanGearDisplayName(clean, clean), category: "", subtype: "", type: "", tier: "", rarity: "" };
+  const rarityMatch = clean.match(/\b(Common|Uncommon|Rare|Epic|Legendary|Unique)\b/i);
+  if (rarityMatch) result.rarity = rarityMatch[1];
+  const tierMatch = clean.match(/\bTier\s+([0-9IVX]+)\b/i);
+  if (tierMatch) result.tier = `Tier ${tierMatch[1]}`;
+  const structured = clean.match(/^(.*?)\s+([A-Za-z][A-Za-z &/]+?)\s+-\s+([A-Za-z][A-Za-z &/]+?)(?:\s+Tier\s+[0-9IVX]+)?(?:\s+(?:Common|Uncommon|Rare|Epic|Legendary|Unique))?$/i);
+  if (structured) {
+    result.name = cleanGearDisplayName(structured[1], structured[1]).trim();
+    result.category = structured[2].trim();
+    result.subtype = structured[3].trim();
+    result.type = result.subtype;
+  }
+  return result;
+}
+
+function metaContent(html, selectorName) {
+  const escaped = selectorName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regexes = [
+    new RegExp(`<meta[^>]+property=["']${escaped}["'][^>]+content=["']([^"']+)["'][^>]*>`, "i"),
+    new RegExp(`<meta[^>]+name=["']${escaped}["'][^>]+content=["']([^"']+)["'][^>]*>`, "i"),
+    new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${escaped}["'][^>]*>`, "i")
+  ];
+  for (const regex of regexes) {
+    const match = String(html || "").match(regex);
+    if (match) return decodeHtmlEntities(match[1]);
+  }
+  return "";
+}
+
+function parseDuneGamingToolsItemLinks(html) {
+  const items = new Map();
+  for (const match of String(html || "").matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attrs = parseHtmlAttrs(match[1]);
+    const href = attrs.href || "";
+    if (!/\/items\/[^/?#]+/i.test(href)) continue;
+    const detailUrl = absoluteUrl(href, GEAR_IMPORT_URL);
+    const id = stableGearIdFromUrl(detailUrl);
+    if (!id || items.has(id)) continue;
+    const parsed = parseGearTextMetadata(match[2]);
+    const name = parsed.name && parsed.name.length < 140 ? cleanGearDisplayName(parsed.name, id) : id;
+    items.set(id, {
+      id,
+      name,
+      category: parsed.category,
+      subtype: parsed.subtype,
+      type: parsed.type,
+      tier: parsed.tier,
+      rarity: parsed.rarity,
+      detail: "",
+      detailUrl,
+      imageUrl: "",
+      imageLocalPath: "",
+      maxStack: "",
+      hasDisplayName: Boolean(name && name !== id)
+    });
+  }
+  return Array.from(items.values());
+}
+
+function parseDuneGamingToolsDetail(html, item) {
+  const h1 = String(html || "").match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  const title = cleanGearDisplayName(metaContent(html, "og:title") || (h1 ? stripTags(h1[1]) : ""), item.name);
+  const description = metaContent(html, "description") || metaContent(html, "og:description");
+  const imageUrl = metaContent(html, "og:image") || metaContent(html, "twitter:image") || (() => {
+    for (const match of String(html || "").matchAll(/<img\b([^>]*)>/gi)) {
+      const attrs = parseHtmlAttrs(match[1]);
+      const src = attrs.src || attrs["data-src"] || "";
+      if (src && !/logo|avatar|favicon/i.test(src)) return absoluteUrl(src, item.detailUrl);
+    }
+    return "";
+  })();
+  const combined = [title, description, stripTags(html).slice(0, 800)].filter(Boolean).join(" ");
+  const parsed = parseGearTextMetadata(`${title || item.name} ${description || ""}`);
+  return {
+    ...item,
+    name: title && title.length < 140 ? cleanGearDisplayName(title, item.name) : item.name,
+    detail: description || item.detail || "",
+    category: item.category || parsed.category,
+    subtype: item.subtype || parsed.subtype,
+    type: item.type || parsed.type,
+    tier: item.tier || parsed.tier || (combined.match(/\bTier\s+([0-9IVX]+)\b/i) ? `Tier ${combined.match(/\bTier\s+([0-9IVX]+)\b/i)[1]}` : ""),
+    rarity: item.rarity || parsed.rarity || ((combined.match(/\b(Common|Uncommon|Rare|Epic|Legendary|Unique)\b/i) || [])[1] || ""),
+    imageUrl: imageUrl ? absoluteUrl(imageUrl, item.detailUrl) : item.imageUrl,
+    hasDisplayName: Boolean((title || item.name) && (title || item.name) !== item.id)
+  };
+}
+
+async function downloadGearImage(item) {
+  if (!item.imageUrl) return { ...item, imageStatus: "missing", imageError: "No image URL found." };
+  fs.mkdirSync(GEAR_IMAGE_CACHE_DIR, { recursive: true });
+  const hash = crypto.createHash("sha1").update(item.imageUrl).digest("hex").slice(0, 12);
+  const stem = safeGearFileName(`${item.id}-${item.name}-${hash}`);
+  const existing = fs.readdirSync(GEAR_IMAGE_CACHE_DIR).find((file) => file.startsWith(`${stem}.`));
+  if (existing) {
+    return { ...item, imageLocalPath: path.join(GEAR_IMAGE_CACHE_DIR, existing), imageStatus: "reused" };
+  }
+  let lastError = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await httpRequestBuffer(item.imageUrl, { timeoutMs: 20000, accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" });
+      const ext = gearImageExtension(item.imageUrl, response.contentType);
+      const filePath = path.join(GEAR_IMAGE_CACHE_DIR, `${stem}${ext}`);
+      fs.writeFileSync(filePath, response.buffer);
+      return { ...item, imageLocalPath: filePath, imageStatus: "downloaded" };
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 350 * attempt));
+    }
+  }
+  return { ...item, imageStatus: "failed", imageError: lastError ? lastError.message : "Image download failed." };
+}
+
+function parseSvelteDevalueJson(text) {
+  const UNDEFINED = -1;
+  const HOLE = -2;
+  const NAN = -3;
+  const POSITIVE_INFINITY = -4;
+  const NEGATIVE_INFINITY = -5;
+  const NEGATIVE_ZERO = -6;
+  const SPARSE_ARRAY = -7;
+  const values = JSON.parse(String(text || ""));
+  const hydrated = new Array(values.length);
+  function hydrate(index, strict = false) {
+    if (index === UNDEFINED) return undefined;
+    if (index === NAN) return NaN;
+    if (index === POSITIVE_INFINITY) return Infinity;
+    if (index === NEGATIVE_INFINITY) return -Infinity;
+    if (index === NEGATIVE_ZERO) return -0;
+    if (strict || typeof index !== "number") throw new Error("Invalid devalue reference.");
+    if (index in hydrated) return hydrated[index];
+    const value = values[index];
+    if (!value || typeof value !== "object") {
+      hydrated[index] = value;
+    } else if (Array.isArray(value)) {
+      if (typeof value[0] === "string") {
+        const type = value[0];
+        if (type === "Date") hydrated[index] = new Date(value[1]);
+        else if (type === "Set") {
+          const set = new Set();
+          hydrated[index] = set;
+          for (let i = 1; i < value.length; i++) set.add(hydrate(value[i]));
+        } else if (type === "Map") {
+          const map = new Map();
+          hydrated[index] = map;
+          for (let i = 1; i < value.length; i += 2) map.set(hydrate(value[i]), hydrate(value[i + 1]));
+        } else if (type === "Object") {
+          hydrated[index] = Object(value[1]);
+        } else {
+          hydrated[index] = value;
+        }
+      } else if (value[0] === SPARSE_ARRAY) {
+        const sparse = new Array(value[1]);
+        hydrated[index] = sparse;
+        for (let i = 2; i < value.length; i += 2) sparse[value[i]] = hydrate(value[i + 1]);
+      } else {
+        const array = new Array(value.length);
+        hydrated[index] = array;
+        for (let i = 0; i < value.length; i++) if (value[i] !== HOLE) array[i] = hydrate(value[i]);
+      }
+    } else {
+      const object = {};
+      hydrated[index] = object;
+      for (const key of Object.keys(value)) {
+        if (key !== "__proto__") object[key] = hydrate(value[key]);
+      }
+    }
+    return hydrated[index];
+  }
+  return hydrate(0);
+}
+
+function titleCaseGearCategory(value = "") {
+  return String(value || "")
+    .replace(/^items\//, "")
+    .split("/")
+    .pop()
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\b\w/g, (ch) => ch.toUpperCase())
+    .trim();
+}
+
+function gearItemCategory(entity = {}) {
+  const categories = Array.isArray(entity.categories) ? entity.categories : [];
+  const primary = categories.find((entry) => /^items\/[^/]+$/i.test(entry)) || categories[0] || "";
+  return titleCaseGearCategory(primary || entity.mainCategoryId || "");
+}
+
+function gearItemSubtype(entity = {}) {
+  const categories = Array.isArray(entity.categories) ? entity.categories : [];
+  const deepest = categories.slice().sort((a, b) => b.length - a.length)[0] || "";
+  const subtype = titleCaseGearCategory(deepest);
+  const category = gearItemCategory(entity);
+  return subtype && subtype !== category ? subtype : "";
+}
+
+function gearItemDetail(entity = {}) {
+  const lines = [];
+  if (entity.description) lines.push(stripTags(entity.description));
+  if (Array.isArray(entity.stats) && entity.stats.length) {
+    for (const stat of entity.stats) {
+      if (!stat || stat.value == null) continue;
+      lines.push(`${String(stat.name || stat.key || "Stat").replace(/:+$/, "")}: ${stat.value}`);
+    }
+  }
+  return lines.filter(Boolean).join("\n");
+}
+
+function gearImageUrlFromIconPath(iconPath = "") {
+  const clean = String(iconPath || "").trim();
+  if (!clean) return "";
+  if (/^https?:\/\//i.test(clean)) return clean;
+  return `${GEAR_CDN_ASSET_URL}${clean.startsWith("/") ? clean : `/${clean}`}`;
+}
+
+async function discoverDuneItems() {
+  const startedAt = Date.now();
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(GEAR_IMAGE_CACHE_DIR, { recursive: true });
+  const entityResponse = await httpRequestText(GEAR_DATA_ENTITIES_URL, 45000);
+  const entities = parseSvelteDevalueJson(entityResponse);
+  const listItems = (Array.isArray(entities) ? entities : []).filter((entity) => entity && entity.mainCategoryId === "items");
+  if (!listItems.length) throw new Error("No items were found in the online item entity feed.");
+  const normalized = listItems.map((entity) => ({
+    id: String(entity.id || ""),
+    name: cleanGearDisplayName(entity.name || entity.id || "", entity.id || ""),
+    category: gearItemCategory(entity),
+    subtype: gearItemSubtype(entity),
+    type: gearItemSubtype(entity),
+    detail: gearItemDetail(entity),
+    tier: entity.tier ? `Tier ${entity.tier}` : "",
+    rarity: String(entity.rarity || ""),
+    maxStack: String(entity.maxStack || entity.maxStackSize || entity.stackSize || ""),
+    detailUrl: `${GEAR_IMPORT_URL}/${encodeURIComponent(String(entity.id || ""))}`,
+    imageUrl: gearImageUrlFromIconPath(entity.iconPath),
+    imageLocalPath: "",
+    hasDisplayName: Boolean(entity.name && entity.name !== entity.id),
+    detailStatus: "loaded"
+  })).filter((item) => item.id && item.name);
+  const withImages = await mapWithConcurrency(normalized, 4, downloadGearImage);
+  const discoveredItems = withImages
+    .map((item) => ({
       id: String(item.id || ""),
       name: String(item.name || item.id || ""),
       category: String(item.category || ""),
+      subtype: String(item.subtype || item.type || ""),
+      type: String(item.type || item.subtype || ""),
       detail: String(item.detail || ""),
       tier: String(item.tier || ""),
       rarity: String(item.rarity || ""),
       maxStack: String(item.maxStack || ""),
-      icon: item.icon ? `/gear-codex/${item.icon}` : ""
-    })).filter((item) => item.id && item.name);
-  } catch {
-    return [];
-  }
+      detailUrl: String(item.detailUrl || ""),
+      imageUrl: String(item.imageUrl || ""),
+      imageLocalPath: String(item.imageLocalPath || ""),
+      hasDisplayName: item.hasDisplayName === true,
+      imageStatus: String(item.imageStatus || "missing"),
+      imageError: String(item.imageError || ""),
+      detailStatus: String(item.detailStatus || "")
+    }))
+    .filter((item) => item.id && item.name)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const report = {
+    cachePath: DUNE_ITEMS_CACHE_PATH,
+    imageCacheDir: GEAR_IMAGE_CACHE_DIR,
+    filesScanned: [{ label: "entity feed", status: "loaded", itemsFound: listItems.length }],
+    totalFilesScanned: 1,
+    totalItemsFound: discoveredItems.length,
+    itemsWithDisplayNames: discoveredItems.filter((item) => item.hasDisplayName).length,
+    unknownOrUnclassifiedItems: discoveredItems.filter((item) => !item.hasDisplayName || !item.category).length,
+    totalImagesDownloaded: discoveredItems.filter((item) => item.imageStatus === "downloaded").length,
+    totalImagesReused: discoveredItems.filter((item) => item.imageStatus === "reused").length,
+    failedImageDownloads: discoveredItems.filter((item) => item.imageStatus === "failed").length,
+    missingImages: discoveredItems.filter((item) => item.imageStatus === "missing").length,
+    durationMs: Date.now() - startedAt
+  };
+  const cache = { ok: true, generatedAt: new Date().toISOString(), version: APP_VERSION, items: discoveredItems, report };
+  fs.writeFileSync(DUNE_ITEMS_CACHE_PATH, JSON.stringify(cache, null, 2));
+  appendAdminAudit("gear_item_import_completed", report);
+  return { ...cache, items: discoveredItems.map(sanitizeGearItemForUi) };
 }
 
 async function dbQuery(sql, timeout = 45000) {
@@ -5838,6 +6427,8 @@ function appPage() {
     .player-card, .admin-item { display:grid; grid-template-columns:46px minmax(0,1fr); gap:10px; align-items:center; width:100%; border:1px solid rgba(214,166,69,.24); border-radius:0; padding:10px; background:rgba(255,255,255,.025); color:var(--text); text-align:left; clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
     .player-card.active, .admin-item.active { border-color:var(--gold); background:rgba(217,178,111,.13); box-shadow:0 0 18px rgba(240,197,107,.08); }
     .avatar { width:46px; height:46px; display:grid; place-items:center; border:1px solid var(--line-blue); border-radius:6px; background:linear-gradient(135deg, rgba(114,164,242,.18), rgba(217,178,111,.08)); color:var(--blue); font-weight:900; }
+    .gear-icon { width:46px; height:46px; display:grid; place-items:center; }
+    .gear-icon > * { grid-area:1 / 1; }
     .admin-item img { width:46px; height:46px; object-fit:contain; border-radius:6px; background:#0b0e12; }
     .admin-item span, .player-card span { color:var(--muted); font-size:12px; display:block; overflow-wrap:anywhere; }
     .detail-list { display:grid; gap:8px; margin-top:12px; }
@@ -6317,6 +6908,7 @@ function appPage() {
           <div class="field-grid mt">
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
             <label>Item Template Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
+            <label>Item Filter<select id="adminItemCategory" onchange="renderAdminItems()"><option value="">All discovered items</option></select></label>
             <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
             <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0" oninput="syncQualityWarning()"></label>
             <div id="qualityWarning" class="warning hidden">Quality/grade is unsupported by the live RabbitMQ grant path. Set quality back to 0 before sending a live grant.</div>
@@ -6330,6 +6922,11 @@ function appPage() {
         </div>
         <div class="panel pad">
           <div class="label">Item Templates</div>
+          <div id="gearDiscoveryStatus" class="empty mt">Item cache status unknown.</div>
+          <div class="action-row mt">
+            <button onclick="discoverGearItems()">Import Gear Items</button>
+            <button onclick="refreshAdmin()">Reload Cache</button>
+          </div>
           <div id="adminItems" class="admin-items mt"><div class="empty">Loading item templates...</div></div>
         </div>
       </div>
@@ -6935,7 +7532,7 @@ function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.vie
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false;
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false;
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
@@ -7121,7 +7718,7 @@ async function openRestoreLog(){const path=window.lastDatabaseRestoreLogPath||""
 async function pollDatabaseRestoreStatus(jobId){if(window.databaseRestorePolling===jobId)return;window.databaseRestorePolling=jobId;window.activeDatabaseRestoreJobId=jobId;localStorage.setItem("activeDatabaseRestoreJobId",jobId);setDatabaseRestoreRunning(true);let finalJob=null;let pollError=null;try{for(let i=0;i<720;i++){try{const job=await getJson("/api/database/import-status/"+encodeURIComponent(jobId),{timeoutMs:5000});window.lastDatabaseRestoreLogPath=job.logPath||job.result?.logPath||"";renderDatabaseRestoreStatus(job);if(job.status==="success"||job.status==="failed"){finalJob=job;break;}}catch(e){pollError=e;break;}await new Promise(resolve=>setTimeout(resolve,2000));}}finally{window.databaseRestorePolling="";setDatabaseRestoreRunning(false);window.activeDatabaseRestoreJobId="";localStorage.removeItem("activeDatabaseRestoreJobId");await refreshDatabaseImportReadiness().catch(()=>{});}const el=document.getElementById("dbRestoreResult");if(pollError){const msg=betterError(pollError);if(el){el.className="warning mt";el.textContent=/not found|was not found|missing/i.test(msg)?"Import job not found. Cleared stale import state.":msg;}const progress=document.getElementById("dbRestoreProgress");if(progress){progress.className="empty mt";progress.textContent="No import job running.";}addActivity("warn","Import status cleared",msg);return;}if(!finalJob){if(el){el.className="warning mt";el.textContent="Import status polling timed out. Check audit log for details.";}return;}if(el)el.innerHTML=restoreFinalSummaryHtml(finalJob);if(finalJob.status==="success"){document.getElementById("dbRestoreConfirm").value="";addActivity("database","Battlegroup import completed and verified",finalJob.jobId);await refreshDatabaseBackups();playUiSound("success");}else{addActivity("error","Battlegroup import failed",finalJob.error||finalJob.jobId);playUiSound("warning");}}
 async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="IMPORT")throw new Error("Type IMPORT before importing.");await ensureBattlegroupStoppedBeforeImport();if(!confirm("Import Battlegroup backup from this file? Stop the server first. A safety Battlegroup backup will be created first."))return;setDatabaseRestoreRunning(true);el.className="warning mt";el.textContent="Import job starting...";const data=await getJson("/api/database/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:15000});if(!data.jobId)throw new Error(data.error||"Import job was not created.");renderDatabaseRestoreStatus(data);addActivity("database","Battlegroup import started",data.jobId);await pollDatabaseRestoreStatus(data.jobId);}catch(e){setDatabaseRestoreRunning(false);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup import blocked",e.message);playUiSound("warning");}}
 function wireDatabaseImportControls(){const file=document.getElementById("dbRestoreFile");const confirm=document.getElementById("dbRestoreConfirm");if(file){file.addEventListener("input",()=>refreshDatabaseImportReadiness());file.addEventListener("change",()=>refreshDatabaseImportReadiness());}if(confirm){confirm.addEventListener("input",renderDatabaseImportControls);confirm.addEventListener("change",renderDatabaseImportControls);}renderDatabaseImportControls();}
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels]=await Promise.all([safeGet("/api/admin/probe",{ok:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]})]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function renderPlayerSelect(){const select=document.getElementById("adminPlayer");select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;}
@@ -7167,7 +7764,10 @@ function addReputation(){runReputationAction("add");}
 function setReputation(){runReputationAction("set");}
 function jumpToGive(){setView("give");renderPlayerSelect();}
 function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td><span class="badge '+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</span></td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
-function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const list=adminItems.filter(item=>(item.name+" "+item.id+" "+item.category+" "+item.detail).toLowerCase().includes(q)).slice(0,90);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+(item.icon?'<img src="'+esc(item.icon)+'" alt="">':'<div class="avatar">IT</div>')+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category)+' '+esc(item.tier)+'</span></div></button>').join(""):'<div class="empty">No matching item templates.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function renderAdminItemFilters(){const select=document.getElementById("adminItemCategory");if(!select)return;const current=select.value;const categories=[...new Set(adminItems.map(item=>item.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All discovered items</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");select.value=[...categories,"","__unknown"].includes(current)?current:"";}
+function renderGearDiscoveryStatus(){const el=document.getElementById("gearDiscoveryStatus");if(!el)return;const report=adminItemReport||{};const total=Number(report.totalItemsFound||adminItems.length||0);const named=Number(report.itemsWithDisplayNames||adminItems.filter(item=>item.hasDisplayName).length||0);const unknown=Number(report.unknownOrUnclassifiedItems||adminItems.filter(item=>!item.hasDisplayName||!item.category).length||0);const pages=Number(report.totalFilesScanned||(report.filesScanned||[]).length||0);const downloaded=Number(report.totalImagesDownloaded||0);const reused=Number(report.totalImagesReused||0);const failed=Number(report.failedImageDownloads||0);const missing=Number(report.missingImages||0);const cache=report.cachePath?'<div class="subtle env-path-value">'+esc(report.cachePath)+'</div>':"";el.className=total?"empty mt":"warning mt";el.innerHTML='<strong>Items imported: '+total+'</strong><div class="subtle">Pages scanned: '+pages+' / Display names: '+named+' / Unknown or unclassified: '+unknown+'</div><div class="subtle">Images downloaded: '+downloaded+' / Reused: '+reused+' / Failed: '+failed+' / Missing: '+missing+'</div>'+cache+(report.message?'<div class="subtle">'+esc(report.message)+'</div>':'');}
+async function discoverGearItems(){const status=document.getElementById("gearDiscoveryStatus");try{if(status){status.className="warning mt";status.textContent="Importing Gear items and caching local icons...";}const data=await getJson("/api/gear/discover",{method:"POST",timeoutMs:300000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Gear item import completed",(adminItemReport?.totalItemsFound||adminItems.length)+" items imported");playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Gear item import failed",e.message);playUiSound("warning");}}
+function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=document.getElementById("adminItemCategory")?.value||"";const filtered=adminItems.filter(item=>{const matchesSearch=(item.name+" "+item.id+" "+item.category+" "+(item.type||"")+" "+(item.subtype||"")+" "+item.detail).toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!item.category||!item.hasDisplayName):item.category===category);return matchesSearch&&matchesCategory;});const list=filtered.slice(0,120);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>{const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return '<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category||"Unknown")+' '+esc(item.tier||"")+'</span></div></button>';}).join(""):'<div class="empty">No matching cached item templates. Import Gear items to populate the local cache.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");if(!warning)return;const quality=Number(document.getElementById("adminQuality")?.value||0);warning.classList.toggle("hidden",!(quality>0));}
 function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
@@ -7469,8 +8069,18 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/admin/items" && req.method === "GET") {
-    const items = gearCatalog();
-    await json(res, { ok: true, items });
+    const cache = loadDuneItemsCache();
+    await json(res, { ok: cache.ok !== false, items: cache.items || [], report: cache.report || {}, generatedAt: cache.generatedAt || "" });
+    return;
+  }
+  if (url.pathname === "/api/gear/discovery" && req.method === "GET") {
+    const cache = loadDuneItemsCache();
+    await json(res, { ok: cache.ok !== false, items: cache.items || [], report: cache.report || {}, generatedAt: cache.generatedAt || "" });
+    return;
+  }
+  if (url.pathname === "/api/gear/discover" && req.method === "POST") {
+    try { await json(res, await discoverDuneItems()); }
+    catch (error) { await json(res, { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, error: error.message, filesScanned: [], totalItemsFound: 0 } }, 500); }
     return;
   }
   if (url.pathname === "/api/admin/tuned-channels" && req.method === "GET") {
@@ -7608,6 +8218,10 @@ async function route(req, res) {
   }
   if (url.pathname.startsWith("/gear-codex/")) {
     if (!serveStatic(res, CODEX_DIR, url.pathname.replace(/^\/gear-codex\//, ""))) send(res, 404, "text/plain", "Not found");
+    return;
+  }
+  if (url.pathname.startsWith("/gear-images/")) {
+    if (!serveStatic(res, GEAR_IMAGE_CACHE_DIR, decodeURIComponent(url.pathname.replace(/^\/gear-images\//, "")))) send(res, 404, "text/plain", "Not found");
     return;
   }
   send(res, 404, "text/plain", "Not found");

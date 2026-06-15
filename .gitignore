@@ -11,3 +11,5 @@ release/
 .electron-builder-cache/
 manager/*.pyc
 manager/__pycache__/
+data/dune-items-cache.json
+data/gear-images/

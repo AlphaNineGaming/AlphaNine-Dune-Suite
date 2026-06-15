@@ -40,6 +40,7 @@
       "stop-alphanine-suite.ps1",
       "electron/**",
       "assets/**",
+      "data/.gitkeep",
       "gear-codex/**",
       "manager/**",
       "receivers/**",

@@ -732,12 +732,34 @@ async function autoDiscovery() {
   };
 }
 
-async function connectionTest(target) {
+async function connectionTest(target, options = {}) {
   if (target === "database") {
+    const cfg = loadConfig();
+    const manual = manualDatabaseSettings(cfg);
+    if (manual.configured && options.autoDetect !== true) {
+      const tested = await testManualDatabaseConnection(manual);
+      return {
+        ...tested,
+        target,
+        mode: "manual",
+        warning: "Automatic detection skipped because manual database settings are configured. Tested manual database settings instead.",
+        autoDetectionSkipped: true
+      };
+    }
     try {
       const output = await dbQuery("select 1 as ok", 20000);
       return { ok: /1/.test(output), target, message: "Database connection passed.", detail: output || "select 1 completed" };
     } catch (error) {
+      if (manual.configured && /hyper-v|permission|administrator/i.test(error.message || "")) {
+        const tested = await testManualDatabaseConnection(manual);
+        return {
+          ...tested,
+          target,
+          mode: "manual",
+          warning: "Automatic detection unavailable due to Hyper-V permissions. Tested manual database settings instead.",
+          autoDetectionError: error.message
+        };
+      }
       return { ok: false, target, message: "Database connection failed.", error: error.message };
     }
   }
@@ -754,6 +776,113 @@ async function connectionTest(target) {
     }
   }
   return { ok: false, target, message: "Unknown connection test." };
+}
+
+function manualDatabaseSettings(configValue = loadConfig()) {
+  const host = String(configValue.databaseHost || "").trim();
+  const port = Number(configValue.databasePort || 15432);
+  return {
+    configured: Boolean(host),
+    host,
+    port,
+    database: String(configValue.databaseName || "dune").trim() || "dune",
+    user: String(configValue.databaseUser || "postgres").trim() || "postgres",
+    passwordConfigured: Boolean(configValue.databasePassword)
+  };
+}
+
+function postgresErrorMessage(buffer) {
+  const fields = {};
+  let index = 5;
+  while (index < buffer.length && buffer[index] !== 0) {
+    const code = String.fromCharCode(buffer[index]);
+    index += 1;
+    const end = buffer.indexOf(0, index);
+    if (end < 0) break;
+    fields[code] = buffer.slice(index, end).toString("utf8");
+    index = end + 1;
+  }
+  return fields.M || fields.S || "PostgreSQL returned an error response.";
+}
+
+async function testManualDatabaseConnection(settings, timeout = 8000) {
+  const started = Date.now();
+  const diagnostics = {
+    source: "manual",
+    host: settings.host,
+    port: settings.port,
+    database: settings.database,
+    user: settings.user,
+    passwordConfigured: settings.passwordConfigured,
+    hypervUsed: false,
+    autoDetectionUsed: false
+  };
+  if (!settings.host) {
+    return { ok: false, message: "Manual database host is not configured.", diagnostics };
+  }
+  if (!settings.port || settings.port < 1 || settings.port > 65535) {
+    return { ok: false, message: "Manual database port is invalid.", diagnostics };
+  }
+  const params = [
+    "user", settings.user,
+    "database", settings.database,
+    "application_name", "AlphaNine Dune Suite database test",
+    "client_encoding", "UTF8"
+  ];
+  const parts = [];
+  for (const value of params) parts.push(Buffer.from(String(value) + "\0", "utf8"));
+  parts.push(Buffer.from("\0", "utf8"));
+  const payload = Buffer.concat(parts);
+  const packet = Buffer.alloc(8 + payload.length);
+  packet.writeInt32BE(packet.length, 0);
+  packet.writeInt32BE(196608, 4);
+  payload.copy(packet, 8);
+  return await new Promise((resolve) => {
+    const socket = net.createConnection({ host: settings.host, port: settings.port });
+    let settled = false;
+    const finish = (body) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ durationMs: Date.now() - started, diagnostics, ...body });
+    };
+    const timer = setTimeout(() => finish({
+      ok: false,
+      message: "Manual database connection timed out.",
+      error: `Timed out connecting to ${settings.host}:${settings.port}.`
+    }), timeout);
+    socket.once("connect", () => socket.write(packet));
+    socket.once("error", (error) => finish({
+      ok: false,
+      message: "Manual database connection failed.",
+      error: error.message
+    }));
+    socket.once("data", (chunk) => {
+      const type = String.fromCharCode(chunk[0] || 0);
+      if (type === "R") {
+        const authCode = chunk.length >= 9 ? chunk.readInt32BE(5) : -1;
+        return finish({
+          ok: true,
+          message: "Manual database endpoint is reachable.",
+          detail: authCode === 0 ? "PostgreSQL accepted the startup request." : "PostgreSQL is reachable and requested authentication.",
+          authRequired: authCode !== 0
+        });
+      }
+      if (type === "E") {
+        return finish({
+          ok: false,
+          message: "Manual database endpoint returned a PostgreSQL error.",
+          error: postgresErrorMessage(chunk)
+        });
+      }
+      return finish({
+        ok: true,
+        message: "Manual database endpoint is reachable.",
+        detail: "PostgreSQL responded to the startup request."
+      });
+    });
+  });
 }
 
 function readRecentLog(filePath, maxBytes = 90000) {
@@ -8322,7 +8451,7 @@ async function route(req, res) {
     return;
   }
   if (url.pathname.startsWith("/api/test/") && req.method === "POST") {
-    await json(res, await connectionTest(url.pathname.replace("/api/test/", "")));
+    await json(res, await connectionTest(url.pathname.replace("/api/test/", ""), { autoDetect: url.searchParams.get("autoDetect") === "true" }));
     return;
   }
   if (url.pathname === "/api/receiver/status" && req.method === "GET") {

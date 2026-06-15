@@ -2538,7 +2538,7 @@ async function databaseRuntimeTarget() {
   const diagnostics = {
     selectedBattlegroup: "",
     selectedNamespace: "",
-    selectionReason: "",
+    selectionReason: "active Battlegroup resource",
     availableBattlegroups: [],
     dbPod: "",
     dbService: "",
@@ -2550,33 +2550,30 @@ async function databaseRuntimeTarget() {
     statusBattlegroup: "",
     statusCommandReturned: false
   };
-  const { candidates, command } = await listBattlegroupCandidates();
-  diagnostics.lastCommand = command;
-  diagnostics.availableBattlegroups = candidates.map(publicBattlegroupCandidate);
-  const configuredName = diagnostics.configuredBattlegroup;
-  const statusInfo = await activeBattlegroupFromStatus();
-  diagnostics.statusBattlegroup = statusInfo.name || "";
-  diagnostics.statusCommandReturned = Boolean(statusInfo.ok);
-  if (statusInfo.error) diagnostics.statusCommandError = statusInfo.error;
-  const configuredMatches = matchingBattlegroups(candidates, configuredName);
-  const statusMatches = matchingBattlegroups(candidates, statusInfo.name);
-  const healthy = candidates
-    .filter((candidate) => !candidate.hardOffline && (candidate.ready || candidate.rank === 0))
-    .sort((a, b) => a.rank - b.rank || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-  const newestNonStopped = mostRecentCandidate(candidates.filter((candidate) => !candidate.hardOffline));
-  const selected = await selectValidatedDatabaseCandidate(candidates, diagnostics, [
-    { reason: "configured Battlegroup", candidates: configuredMatches, requireUnique: true },
-    { reason: "Battlegroup reported by battlegroup status", candidates: statusMatches, requireUnique: true },
-    { reason: "healthy/running igwbg resource", candidates: healthy, requireUnique: true },
-    { reason: "most recently created non-stopped igwbg resource", candidates: newestNonStopped ? [newestNonStopped] : [] }
-  ]);
-  if (!selected) {
-    const error = new Error("Database target could not be confirmed. Check selected Battlegroup.");
-    diagnostics.failureReason = diagnostics.failureReason || error.message;
-    diagnostics.availableBattlegroups = candidates.map(publicBattlegroupCandidate);
+  let item;
+  try {
+    item = await battlegroupResource();
+  } catch (error) {
+    diagnostics.failureReason = error.message;
+    diagnostics.lastCommand = "battlegroupResource()";
     error.diagnostics = diagnostics;
     throw error;
   }
+  const selected = normalizeBattlegroupCandidate(item);
+  if (!selected.namespace || !selected.name) {
+    const error = new Error("Dune battlegroup database target was not detected.");
+    diagnostics.failureReason = error.message;
+    diagnostics.availableBattlegroups = selected.name || selected.namespace ? [publicBattlegroupCandidate(selected)] : [];
+    error.diagnostics = diagnostics;
+    throw error;
+  }
+  diagnostics.selectedBattlegroup = selected.name;
+  diagnostics.selectedNamespace = selected.namespace;
+  diagnostics.availableBattlegroups = [publicBattlegroupCandidate(selected)];
+  diagnostics.dbPod = selected.dbPod;
+  diagnostics.dbService = selected.dbService;
+  diagnostics.dbPodExists = null;
+  diagnostics.dbServiceExists = null;
   return {
     namespace: selected.namespace,
     name: selected.name,

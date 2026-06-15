@@ -7,7 +7,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
-const APP_VERSION = "0.2.9-beta";
+const APP_VERSION = "0.3.0-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -3421,6 +3421,43 @@ function mapServerSummaryStatus(summary) {
   return { label: "Warning", kind: "warn", online: false, phase: phaseStatus, checks };
 }
 
+function topServerStatusDecision({ vm = {}, status = null, raw = "", statusResult = null } = {}) {
+  const summary = status?.summary || {};
+  const keyComponents = {
+    phase: summary.phase || summary.status || "",
+    servergroup: summary.servergroup || "",
+    gateway: summary.gateway || "",
+    director: summary.director || ""
+  };
+  const hardOfflineReasons = Object.entries(keyComponents)
+    .filter(([, value]) => SERVER_STATUS_OFFLINE.has(String(value || "").trim().toLowerCase()))
+    .map(([key, value]) => `${key}:${value}`);
+  const rawText = String(raw || "");
+  const battlegroupStatusReturned = Boolean(rawText.trim() && (Object.keys(summary).length || /Battlegroup:|Battlegroup Info|Game Servers/i.test(rawText)));
+  const sshReachable = Boolean(statusResult?.ok || battlegroupStatusReturned);
+  const hypervRunning = String(vm?.state || vm?.status || "").toLowerCase() === "running";
+  const confirmationSources = {
+    hypervRunning,
+    sshReachable,
+    battlegroupStatusReturned,
+    parsedBattlegroupPhase: keyComponents.phase || "",
+    keyComponents
+  };
+  if (hardOfflineReasons.length) {
+    return { label: "Offline", kind: "bad", online: false, onlineDecisionReason: "Hard offline Battlegroup status/component detected.", hardOfflineReasons, confirmationSources };
+  }
+  if (battlegroupStatusReturned && sshReachable) {
+    return { label: "Online", kind: "ok", online: true, onlineDecisionReason: "SSH returned usable Battlegroup status output and no hard offline state was detected.", hardOfflineReasons, confirmationSources };
+  }
+  if (sshReachable) {
+    return { label: "Warning", kind: "warn", online: false, onlineDecisionReason: "SSH is reachable, but Battlegroup status output was not usable.", hardOfflineReasons, confirmationSources };
+  }
+  if (hypervRunning) {
+    return { label: "Warning", kind: "warn", online: false, onlineDecisionReason: "Hyper-V reports the VM is running, but Battlegroup status could not be confirmed.", hardOfflineReasons, confirmationSources };
+  }
+  return { label: "Offline", kind: "bad", online: false, onlineDecisionReason: "No reachable VM or SSH Battlegroup status path was confirmed.", hardOfflineReasons: ["no_reachable_vm_or_ssh_path"], confirmationSources };
+}
+
 function statusSummaryIsOnline(summary) {
   return mapServerSummaryStatus(summary).online;
 }
@@ -5924,7 +5961,7 @@ function appPage() {
       <div>
         <div class="kicker">About</div>
         <h2>AlphaNine Dune Suite</h2>
-        <div class="subtle">Version 0.2.9-beta</div>
+        <div class="subtle">Version 0.3.0-beta</div>
       </div>
       <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
@@ -6024,7 +6061,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.2.9-beta</span>
+        <span>Version 0.3.0-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -6732,7 +6769,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.9-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.3.0-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
@@ -7028,7 +7065,7 @@ function renderPlayerFeed(players){const wrap=document.getElementById("playerFee
 async function refreshPlayerFeed(){const stamp=document.getElementById("playerFeedStamp");try{const data=await getJson("/api/players/feed");renderPlayerFeed(data.players||[]);if(stamp)stamp.textContent="Updated "+new Date().toLocaleTimeString();}catch(e){const wrap=document.getElementById("playerFeed");if(wrap)wrap.innerHTML='<div class="empty">'+esc(betterError(e))+'</div>';if(stamp)stamp.textContent="Feed error";}}
 function renderVmStatus(vm){const status=vm?.state||vm?.status||"Unknown";tone("vm",status);tone("dashboardVmStatus","VM: "+status);setText("vmControlName",vm?.name||"Not configured");setText("vmControlStatus",status);setText("vmControlAddress",vm?.ip||"Unknown");setText("vmControlUptime",vm?.uptime||"Unknown");}
 function vmDisplayMessage(data){const vm=data?.vm||data||{};const status=vm.state||data?.status||"Unknown";const name=vm.name||data?.name||"Not configured";const lines=["VM: "+name,"Status: "+status];if(data?.message)lines.push(data.message);if(data?.error||vm.error)lines.push(data.error||vm.error);if((data?.errorCode||vm.errorCode)==="access_denied")lines.push("How to fix Hyper-V permissions: use the help link above.");return lines.filter(Boolean).join("\\n");}
-async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(mapped.label||"Warning"));document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
+async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(open){if(open===null||open===undefined)return"Not Configured";return open?"Open":"Closed";}
 function monitorMs(value){return Number.isFinite(Number(value))?Math.round(Number(value))+" ms":"-- ms";}
@@ -7172,15 +7209,17 @@ async function route(req, res) {
     const vm = await vmInfo();
     let status = null;
     let raw = "";
+    let statusResult = null;
     const canCheckBattlegroup = Boolean((vm.exists && vm.state === "Running") || VM_IP);
     if (canCheckBattlegroup) {
-      const result = await battlegroup("status");
-      raw = result.stdout || result.stderr || result.error || "";
+      statusResult = await battlegroup("status");
+      raw = statusResult.stdout || statusResult.stderr || statusResult.error || "";
       status = parseStatus(raw);
     }
     const runtimeTransport = await updateRuntimeGiveTransport({ vm, status, raw }, "status");
     const serverStatus = mapServerSummaryStatus(status?.summary || status);
-    await json(res, { vm, status, serverStatus, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
+    const topServerStatus = topServerStatusDecision({ vm, status, raw, statusResult });
+    await json(res, { vm, status, serverStatus, topServerStatus, onlineDecisionReason: topServerStatus.onlineDecisionReason, hardOfflineReasons: topServerStatus.hardOfflineReasons, confirmationSources: topServerStatus.confirmationSources, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
     return;
   }
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {

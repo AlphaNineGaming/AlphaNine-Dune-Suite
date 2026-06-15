@@ -7,7 +7,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
-const APP_VERSION = "0.2.8-beta";
+const APP_VERSION = "0.2.9-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -743,6 +743,46 @@ function run(command, args, options = {}) {
   });
 }
 
+function runWithStdin(command, args, inputPath, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const timeoutMs = options.timeout || 120000;
+    const maxBuffer = options.maxBuffer || 1024 * 1024 * 8;
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      resolve({ ok: false, code: 0, stdout, stderr, error: `Command timed out after ${timeoutMs} ms.` });
+    }, timeoutMs);
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(payload);
+    };
+    child.stdout.on("data", (chunk) => {
+      if (stdout.length < maxBuffer) stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < maxBuffer) stderr += chunk.toString();
+    });
+    child.on("error", (error) => finish({ ok: false, code: 0, stdout, stderr, error: String(error.message || error) }));
+    child.on("close", (code) => finish({ ok: code === 0, code, stdout, stderr, error: code === 0 ? "" : `Command exited with code ${code}.` }));
+    child.stdin.on("error", (error) => {
+      if (!settled && error.code !== "EPIPE") finish({ ok: false, code: 0, stdout, stderr, error: String(error.message || error) });
+    });
+    const input = fs.createReadStream(inputPath);
+    input.on("error", (error) => {
+      child.kill("SIGKILL");
+      finish({ ok: false, code: 0, stdout, stderr, error: String(error.message || error) });
+    });
+    input.pipe(child.stdin);
+  });
+}
+
 async function ps(script, timeout = 120000) {
   return run("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { timeout });
 }
@@ -1467,6 +1507,89 @@ async function dbQuery(sql, timeout = 45000) {
   return result.stdout.trim();
 }
 
+function shortOutput(value = "", max = 4000) {
+  const text = String(value || "");
+  return text.length > max ? text.slice(-max) : text;
+}
+
+async function timedDatabaseVerificationCommand(label, command, timeout = 20000, options = {}) {
+  const started = Date.now();
+  const displayCommand = options.displayCommand || command;
+  if (options.onSubstep) options.onSubstep(label, displayCommand);
+  databaseBackupAudit("database_verification_query", { label, command: displayCommand, timeoutMs: timeout, status: "opening_ssh_session" });
+  databaseBackupAudit("database_verification_query", { label, command: displayCommand, timeoutMs: timeout, status: "waiting_for_command" });
+  const result = await sshCommand(command, timeout, { maxBuffer: 1024 * 1024 });
+  const elapsedMs = Date.now() - started;
+  const payload = {
+    label,
+    command: displayCommand,
+    timeoutMs: timeout,
+    elapsedMs,
+    exitCode: result.code ?? null,
+    ok: Boolean(result.ok),
+    stdout: options.redactStdout ? "<redacted>" : shortOutput(result.stdout),
+    stderr: shortOutput(result.stderr),
+    error: result.error || ""
+  };
+  if (!result.ok && /timed out/i.test(`${result.error || ""} ${result.stderr || ""}`)) {
+    databaseBackupAudit("database_verification_timeout", payload);
+    const error = new Error(`Database verification command timed out after ${timeout} ms: ${command}`);
+    error.details = payload;
+    throw error;
+  }
+  if (!result.ok) {
+    databaseBackupAudit("database_verification_failed", payload);
+    const error = new Error(result.stderr || result.stdout || result.error || `Database verification command failed: ${label}`);
+    error.details = payload;
+    throw error;
+  }
+  databaseBackupAudit("database_verification_query", { ...payload, status: "completed" });
+  return { ...payload, raw: result };
+}
+
+async function verifyImportedDatabaseStatus(timeout = 20000, options = {}) {
+  const started = Date.now();
+  databaseBackupAudit("database_verification_started", { timeoutMs: timeout });
+  if (options.onSubstep) options.onSubstep("Locating DB target", "databaseRuntimeTarget()");
+  databaseBackupAudit("database_verification_query", { label: "locating database", command: "databaseRuntimeTarget()", timeoutMs: timeout, status: "started" });
+  const targetStarted = Date.now();
+  let target = null;
+  try {
+    target = await Promise.race([
+      databaseRuntimeTarget(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Database target discovery timed out.")), timeout))
+    ]);
+  } catch (error) {
+    const payload = { label: "locating database", command: "databaseRuntimeTarget()", timeoutMs: timeout, elapsedMs: Date.now() - targetStarted, error: error.message };
+    databaseBackupAudit(/timed out/i.test(error.message) ? "database_verification_timeout" : "database_verification_failed", payload);
+    error.details = payload;
+    throw error;
+  }
+  databaseBackupAudit("database_verification_query", {
+    label: "locating database",
+    command: "databaseRuntimeTarget()",
+    timeoutMs: timeout,
+    status: "completed",
+    elapsedMs: Date.now() - targetStarted,
+    namespace: target.namespace,
+    dbPod: target.dbPod,
+    dbSvc: target.dbSvc
+  });
+  const passwordCommand = `sudo kubectl exec -n ${shQuote(target.namespace)} ${shQuote(target.dbPod)} -- printenv POSTGRES_PASSWORD`;
+  await timedDatabaseVerificationCommand("Reading DB password", passwordCommand, timeout, { redactStdout: true, onSubstep: options.onSubstep });
+  const sql = "select current_database(), pg_size_pretty(pg_database_size(current_database())), (select count(*) from information_schema.tables where table_schema='dune'), now()::text";
+  const queryCommand = [
+    `PW=$(sudo kubectl exec -n ${shQuote(target.namespace)} ${shQuote(target.dbPod)} -- printenv POSTGRES_PASSWORD)`,
+    `sudo kubectl exec -n ${shQuote(target.namespace)} ${shQuote(target.dbPod)} -- env PGPASSWORD="$PW" psql -v ON_ERROR_STOP=1 -h ${shQuote(target.dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -c ${shQuote(sql)}`
+  ].join("; ");
+  const query = await timedDatabaseVerificationCommand("Running psql verification", queryCommand, timeout, { onSubstep: options.onSubstep });
+  const row = parseDbRows(query.raw.stdout.trim(), ["database", "size", "duneTables", "checkedAt"])[0] || {};
+  const result = { ok: true, durationMs: Date.now() - started, target, row, commands: { password: passwordCommand, query: queryCommand }, stdout: shortOutput(query.raw.stdout), stderr: shortOutput(query.raw.stderr) };
+  databaseBackupAudit("database_verification_success", result);
+  if (options.onSubstep) options.onSubstep("Verification complete", "");
+  return result;
+}
+
 async function databaseRuntimeTarget() {
   const item = await battlegroupResource();
   const namespace = item.metadata?.namespace;
@@ -1484,6 +1607,99 @@ function databaseBackupAudit(action, payload) {
   appendAdminAudit(action, payload);
 }
 
+const databaseRestoreJobs = new Map();
+const RESTORE_TIMELINE_STEPS = [
+  "Preparing import",
+  "Checking Battlegroup offline",
+  "Preparing backup source",
+  "Uploading backup if needed",
+  "Backup source ready",
+  "Creating safety backup",
+  "Safety backup complete",
+  "Safety backup verified",
+  "Importing Battlegroup backup",
+  "Verifying imported database",
+  "Completed"
+];
+
+function readableDuration(ms) {
+  const total = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours) return `${hours} hr ${minutes} min ${seconds} sec`;
+  if (minutes) return `${minutes} min ${seconds} sec`;
+  return `${seconds} sec`;
+}
+
+function publicRestoreJob(job) {
+  if (!job) return null;
+  const durationMs = job.durationMs || (job.startedAt ? Date.now() - new Date(job.startedAt).getTime() : 0);
+  return {
+    ok: job.status !== "failed",
+    jobId: job.jobId,
+    status: job.status,
+    step: job.step,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt || "",
+    durationMs,
+    elapsed: readableDuration(durationMs),
+    error: job.error || "",
+    verificationSubstep: job.verificationSubstep || "",
+    verificationDetail: job.verificationDetail || "",
+    history: job.history || [],
+    timeline: job.timeline || RESTORE_TIMELINE_STEPS,
+    result: job.result || null,
+    logPath: ADMIN_AUDIT_LOG
+  };
+}
+
+function restoreJobStep(job, step, extra = {}) {
+  job.step = step;
+  if (Object.prototype.hasOwnProperty.call(extra, "verificationSubstep")) job.verificationSubstep = extra.verificationSubstep || "";
+  if (Object.prototype.hasOwnProperty.call(extra, "verificationDetail")) job.verificationDetail = extra.verificationDetail || "";
+  job.updatedAt = new Date().toISOString();
+  job.history.push({ at: job.updatedAt, step, ...extra });
+  databaseBackupAudit("database_import_step_changed", { jobId: job.jobId, step, ...extra });
+}
+
+function finishRestoreJob(job, status, result = {}) {
+  job.status = status;
+  job.completedAt = new Date().toISOString();
+  job.durationMs = new Date(job.completedAt).getTime() - new Date(job.startedAt).getTime();
+  job.result = result;
+  if (status === "failed") job.error = result.error || "Restore failed or could not be verified.";
+}
+
+function startDatabaseRestoreJob(payload = {}) {
+  const jobId = `import-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const job = {
+    jobId,
+    status: "pending",
+    step: "Pending",
+    startedAt: new Date().toISOString(),
+    completedAt: "",
+    durationMs: 0,
+    error: "",
+    result: null,
+    payload: { filePath: String(payload.filePath || ""), confirmText: String(payload.confirmText || "") },
+    history: [],
+    timeline: RESTORE_TIMELINE_STEPS
+  };
+  databaseRestoreJobs.set(jobId, job);
+  databaseBackupAudit("database_import_started", { jobId, filePath: job.payload.filePath });
+  restoreJobStep(job, "Pending");
+  runDatabaseRestoreJob(job).catch((error) => {
+    finishRestoreJob(job, "failed", { ok: false, status: "failed", error: error.message, logPath: ADMIN_AUDIT_LOG });
+    databaseBackupAudit("database_import_failed", { jobId, error: error.message });
+  });
+  return publicRestoreJob(job);
+}
+
+function activeDatabaseImportJob() {
+  return [...databaseRestoreJobs.values()].find((job) => job.status === "pending" || job.status === "running") || null;
+}
+
 function databaseBackupDir(configValue = loadConfig()) {
   return expandEnvPath(configValue.databaseBackupLocation || DEFAULT_DATABASE_BACKUP_DIR);
 }
@@ -1496,7 +1712,7 @@ function ensureDatabaseBackupDir(folder = databaseBackupDir()) {
   return resolved;
 }
 
-function databaseBackupFilename(prefix = "dune-db-backup") {
+function databaseBackupFilename(prefix = "battlegroup-backup") {
   const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[:T]/g, "-").replace(/Z$/, "");
   return `${prefix}-${stamp}-${APP_VERSION}.zip`;
 }
@@ -1531,43 +1747,189 @@ async function databaseStatus() {
   }
 }
 
+function parseBattlegroupBackupOutput(output = "") {
+  const text = String(output || "");
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const backupIdMatch = text.match(/\b(?:backup(?:\s+name|\s+id)?|id|name)\s*[:=]\s*([A-Za-z0-9_.:-]+)/i);
+  const dumpOperationMatch = text.match(/\b(sh-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-dump-\d{8,}-\d{6,})\b/i);
+  const pathMatch = text.match(/((?:\/[^\s"'<>]+)+)/);
+  const fileMatch = text.match(/\b([A-Za-z0-9_.-]*backup[A-Za-z0-9_.-]*(?:\.zip|\.tar|\.backup|\.bgbackup)?)\b/i);
+  return {
+    backupId: backupIdMatch ? backupIdMatch[1] : (fileMatch ? fileMatch[1] : ""),
+    backupName: fileMatch ? fileMatch[1] : (backupIdMatch ? backupIdMatch[1] : ""),
+    dumpOperationName: dumpOperationMatch ? dumpOperationMatch[1] : "",
+    phase: /phase\s*[=:]\s*Succeeded/i.test(text) ? "Succeeded" : (/phase\s*[=:]\s*Failed/i.test(text) ? "Failed" : (/phase\s*[=:]\s*Ongoing/i.test(text) || /Still waiting/i.test(text) ? "Ongoing" : "")),
+    vmPath: pathMatch ? pathMatch[1] : "",
+    output: text,
+    lines
+  };
+}
+
+async function runningDumpOperations() {
+  const result = await sshCommand("sudo kubectl get dumps -A --no-headers 2>/dev/null || true", 15000, { maxBuffer: 1024 * 128 });
+  const rows = String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const running = rows.filter((line) => /\b(Ongoing|Running|Pending)\b/i.test(line)).map((line) => {
+    const parts = line.split(/\s+/);
+    return { namespace: parts[0] || "", name: parts[1] || parts[0] || "", phase: parts.find((part) => /^(Ongoing|Running|Pending)$/i.test(part)) || "Ongoing", raw: line };
+  });
+  return { ok: result.ok, running, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error || "" };
+}
+
+async function collectDumpDiagnostics(operationName = "") {
+  const name = String(operationName || "").trim();
+  const commands = [
+    { label: "dump operations", command: "sudo kubectl get dumps -A -o wide 2>&1 || true" },
+    { label: "dump details", command: name ? `sudo kubectl describe dumps -A ${shQuote(name)} 2>&1 || true` : "echo dump operation name unavailable" },
+    { label: "recent backup pods", command: "sudo kubectl get pods -A 2>&1 | grep -Ei 'dump|backup|postgres|db' | tail -n 80 || true" },
+    { label: "recent operator logs", command: "sudo kubectl logs -A --tail=120 -l control-plane=controller-manager 2>&1 || true" }
+  ];
+  const results = [];
+  for (const item of commands) {
+    const started = Date.now();
+    const result = await sshCommand(item.command, 20000, { maxBuffer: 1024 * 512 });
+    results.push({ ...item, ok: result.ok, elapsedMs: Date.now() - started, stdout: shortOutput(result.stdout), stderr: shortOutput(result.stderr), error: result.error || "" });
+  }
+  databaseBackupAudit("database_safety_backup_diagnostics", { operationName: name, results });
+  return results;
+}
+
+function vmBackupParts(vmPath = "", metadata = {}) {
+  const rawPath = String(metadata.vmBackupPath || metadata.vmPath || vmPath || "").trim();
+  const filename = String(metadata.vmBackupFilename || (rawPath ? path.posix.basename(rawPath) : "")).trim();
+  const dir = String(metadata.vmBackupDir || (rawPath ? path.posix.dirname(rawPath) : "")).trim();
+  const battlegroupId = String(metadata.battlegroupId || (dir ? path.posix.basename(dir) : "")).trim();
+  const fullPath = String(metadata.vmBackupPath || (dir && filename ? path.posix.join(dir, filename) : rawPath)).trim();
+  const yamlPath = String(metadata.vmYamlPath || (fullPath ? `${fullPath}.yaml` : "")).trim();
+  return { battlegroupId, vmBackupDir: dir, vmBackupFilename: filename, vmBackupPath: fullPath, vmYamlPath: yamlPath };
+}
+
+function databaseBackupMetadataFilename(prefix = "battlegroup-backup") {
+  return databaseBackupFilename(prefix).replace(/\.zip$/i, ".json");
+}
+
+function writeBattlegroupBackupMetadata(payload, prefix = "battlegroup-backup") {
+  const folder = ensureDatabaseBackupDir();
+  const metadataPath = path.join(folder, databaseBackupMetadataFilename(prefix));
+  fs.writeFileSync(metadataPath, JSON.stringify(payload, null, 2), "utf8");
+  return fileInfo(metadataPath);
+}
+
 async function createDatabaseBackup(options = {}) {
   const started = Date.now();
-  const folder = ensureDatabaseBackupDir(options.folder || databaseBackupDir());
-  const filename = databaseBackupFilename(options.prefix || "dune-db-backup");
-  const backupPath = path.join(folder, filename);
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-db-backup-"));
-  const sqlPath = path.join(tempDir, filename.replace(/\.zip$/i, ".sql"));
+  const timeout = Number(options.timeout || (options.safety ? 120000 : 240000));
+  const isSafety = Boolean(options.safety);
   try {
-    const { namespace, dbPod, dbSvc } = await databaseRuntimeTarget();
-    const command = [
-      `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
-      `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" pg_dump -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune --no-owner --no-privileges`
-    ].join("; ");
-    const result = await sshCommand(command, options.timeout || 600000, { maxBuffer: options.maxBuffer || 1024 * 1024 * 256 });
-    if (!result.ok || !result.stdout) throw new Error(result.stderr || result.error || "Database backup command failed.");
-    fs.writeFileSync(sqlPath, result.stdout, "utf8");
-    const zipResult = await ps(`Compress-Archive -LiteralPath '${psSingleQuote(sqlPath)}' -DestinationPath '${psSingleQuote(backupPath)}' -Force`, 180000);
-    if (!zipResult.ok) throw new Error(zipResult.stderr || zipResult.error || "Backup zip creation failed.");
-    const info = fileInfo(backupPath);
-    const payload = { ok: true, status: "created", durationMs: Date.now() - started, file: info, filePath: backupPath };
-    databaseBackupAudit(options.safety ? "database_safety_backup_created" : "database_backup_created", payload);
+    if (options.onStatus) options.onStatus("Starting", "Starting Battlegroup backup.");
+    if (isSafety) {
+      const running = await runningDumpOperations().catch((error) => ({ ok: false, running: [], error: error.message }));
+      if (running.running?.length) {
+        const message = "A backup operation is already running. Wait for it to finish or cancel it from the Battlegroup tools.";
+        databaseBackupAudit("database_safety_backup_blocked", { reason: "existing_dump_running", running: running.running, message });
+        throw new Error(message);
+      }
+    }
+    if (options.onStatus) options.onStatus("Ongoing", `Safety backup still running... 0s / ${Math.round(timeout / 1000)}s`);
+    const result = await sshCommand(`/home/dune/.dune/bin/battlegroup backup`, timeout, { maxBuffer: 1024 * 1024 * 32 });
+    const combinedOutput = `${result.stdout || ""}\n${result.stderr || ""}`;
+    const parsed = parseBattlegroupBackupOutput(combinedOutput);
+    if (parsed.dumpOperationName) databaseBackupAudit("database_safety_backup_dump_operation", { operationName: parsed.dumpOperationName, phase: parsed.phase || "Unknown" });
+    if (!result.ok) {
+      const timedOut = /timed out/i.test(`${result.error || ""} ${result.stderr || ""}`);
+      if (isSafety && timedOut) {
+        if (options.onStatus) options.onStatus("Timed out", `Safety backup still running... ${Math.round(timeout / 1000)}s / ${Math.round(timeout / 1000)}s`);
+        const diagnostics = await collectDumpDiagnostics(parsed.dumpOperationName).catch((error) => [{ label: "diagnostics", ok: false, error: error.message }]);
+        const message = "Pre-import safety backup did not finish within 120 seconds. Import was cancelled. Try again, or create a manual backup first.";
+        databaseBackupAudit("database_safety_backup_timeout", { operationName: parsed.dumpOperationName, phase: parsed.phase || "Ongoing", timeoutMs: timeout, stdout: shortOutput(result.stdout), stderr: shortOutput(result.stderr), diagnostics });
+        const error = new Error(message);
+        error.details = { operationName: parsed.dumpOperationName, diagnostics, stdout: shortOutput(result.stdout), stderr: shortOutput(result.stderr) };
+        throw error;
+      }
+      throw new Error(result.stderr || result.stdout || result.error || "Battlegroup backup command failed.");
+    }
+    if (options.onStatus) options.onStatus("Succeeded", "Safety backup completed successfully.");
+    const vmBackup = vmBackupParts(parsed.vmPath);
+    const metadata = {
+      ok: true,
+      type: "battlegroup-backup",
+      createdAt: new Date().toISOString(),
+      version: APP_VERSION,
+      backupId: parsed.backupId,
+      backupName: parsed.backupName,
+      dumpOperationName: parsed.dumpOperationName,
+      phase: parsed.phase || "Succeeded",
+      vmPath: parsed.vmPath,
+      battlegroupId: vmBackup.battlegroupId,
+      vmBackupDir: vmBackup.vmBackupDir,
+      vmBackupFilename: vmBackup.vmBackupFilename,
+      vmBackupPath: vmBackup.vmBackupPath,
+      vmYamlPath: vmBackup.vmYamlPath,
+      storage: parsed.vmPath ? "vm+local-metadata" : "vm-output+local-metadata",
+      output: result.stdout,
+      stderr: result.stderr,
+      note: "Backup was created using /home/dune/.dune/bin/battlegroup backup. Local file is metadata unless the Battlegroup command output exposes a downloadable file path."
+    };
+    const info = writeBattlegroupBackupMetadata(metadata, options.prefix || (options.safety ? "pre-import-safety" : "battlegroup-backup"));
+    const payload = {
+      ok: true,
+      status: "created",
+      method: "battlegroup",
+      durationMs: Date.now() - started,
+      elapsed: readableDuration(Date.now() - started),
+      backupId: parsed.backupId,
+      backupName: parsed.backupName,
+      dumpOperationName: parsed.dumpOperationName,
+      phase: parsed.phase || "Succeeded",
+      vmPath: parsed.vmPath,
+      battlegroupId: vmBackup.battlegroupId,
+      vmBackupDir: vmBackup.vmBackupDir,
+      vmBackupFilename: vmBackup.vmBackupFilename,
+      vmBackupPath: vmBackup.vmBackupPath,
+      vmYamlPath: vmBackup.vmYamlPath,
+      storage: metadata.storage,
+      output: result.stdout,
+      stderr: result.stderr,
+      file: info,
+      filePath: info.path,
+      localMetadataPath: info.path
+    };
+    databaseBackupAudit(options.safety ? "battlegroup_safety_backup_created" : "battlegroup_backup_created", payload);
     return payload;
   } catch (error) {
-    const payload = { ok: false, status: "failed", durationMs: Date.now() - started, error: error.message, filePath: backupPath };
-    databaseBackupAudit(options.safety ? "database_safety_backup_failed" : "database_backup_failed", payload);
+    if (options.onStatus) options.onStatus(/120 seconds|timed out/i.test(error.message) ? "Timed out" : "Failed", error.message);
+    const payload = { ok: false, status: "failed", method: "battlegroup", durationMs: Date.now() - started, elapsed: readableDuration(Date.now() - started), error: error.message, details: error.details || null };
+    databaseBackupAudit(options.safety ? "battlegroup_safety_backup_failed" : "battlegroup_backup_failed", payload);
     return payload;
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 }
 
 function listDatabaseBackups() {
   const folder = ensureDatabaseBackupDir();
-  const allowed = new Set([".zip", ".sql", ".dump", ".backup", ".tar"]);
+  const allowed = new Set([".zip", ".tar", ".backup", ".bgbackup", ".json"]);
   const backups = fs.readdirSync(folder, { withFileTypes: true })
     .filter((entry) => entry.isFile() && allowed.has(path.extname(entry.name).toLowerCase()))
-    .map((entry) => fileInfo(path.join(folder, entry.name)))
+    .map((entry) => {
+      const info = fileInfo(path.join(folder, entry.name));
+      if (path.extname(entry.name).toLowerCase() === ".json") {
+        try {
+          const metadata = JSON.parse(fs.readFileSync(info.path, "utf8"));
+          if (metadata.type === "battlegroup-backup") {
+            const vmBackup = vmBackupParts(metadata.vmBackupPath || metadata.vmPath || "", metadata);
+            info.type = "battlegroup-backup";
+            info.backupId = metadata.backupId || "";
+            info.backupName = metadata.backupName || "";
+            info.vmPath = vmBackup.vmBackupPath || metadata.vmPath || "";
+            info.battlegroupId = vmBackup.battlegroupId;
+            info.vmBackupDir = vmBackup.vmBackupDir;
+            info.vmBackupFilename = vmBackup.vmBackupFilename;
+            info.vmBackupPath = vmBackup.vmBackupPath;
+            info.vmYamlPath = vmBackup.vmYamlPath;
+            info.storage = metadata.storage || "local-metadata";
+            info.availability = "Metadata only";
+          }
+        } catch {}
+      }
+      return info;
+    })
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   return { ok: true, folder, backups };
 }
@@ -1575,42 +1937,82 @@ function listDatabaseBackups() {
 function validateRestoreFile(filePath) {
   const resolved = path.resolve(expandEnvPath(filePath || ""));
   const ext = path.extname(resolved).toLowerCase();
-  const allowed = new Set([".zip", ".sql", ".dump", ".backup", ".tar"]);
+  const allowed = new Set([".zip", ".tar", ".backup", ".bgbackup", ".json"]);
   if (!resolved) throw new Error("Backup file path is required.");
-  if (!allowed.has(ext)) throw new Error("Unsupported backup file type. Choose .zip, .sql, .dump, .backup, or .tar.");
+  if (!allowed.has(ext)) throw new Error("Unsupported Battlegroup backup file type. Choose .zip, .tar, .backup, .bgbackup, or Suite Battlegroup metadata .json.");
   if (!fs.existsSync(resolved)) throw new Error("Backup file was not found.");
   const stat = fs.statSync(resolved);
   if (!stat.isFile()) throw new Error("Selected backup path is not a file.");
   return { path: resolved, ext, size: stat.size };
 }
 
-async function extractRestoreSource(filePath) {
+async function resolveBattlegroupImportSource(filePath) {
   const source = validateRestoreFile(filePath);
-  if (source.ext !== ".zip") return { ...source, cleanup: () => {} };
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-db-restore-"));
-  const expand = await ps(`Expand-Archive -LiteralPath '${psSingleQuote(source.path)}' -DestinationPath '${psSingleQuote(tempDir)}' -Force`, 180000);
-  if (!expand.ok) {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-    throw new Error(expand.stderr || expand.error || "Backup zip extraction failed.");
+  if (source.ext === ".json") {
+    let metadata = null;
+    try { metadata = JSON.parse(fs.readFileSync(source.path, "utf8")); }
+    catch { throw new Error("Selected metadata file is not valid JSON."); }
+    if (metadata.type !== "battlegroup-backup") throw new Error("Selected JSON is not an AlphaNine Battlegroup backup metadata file.");
+    const vmBackup = vmBackupParts(metadata.vmBackupPath || metadata.vmPath || "", metadata);
+    if (!vmBackup.vmBackupPath) throw new Error("Selected Battlegroup metadata does not include a VM backup path. Choose the actual Battlegroup backup file or create a new backup.");
+    return { ...source, sourceType: "vm", remotePath: vmBackup.vmBackupPath, ...vmBackup, metadata };
   }
-  const candidates = [];
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if ([".sql", ".dump", ".backup", ".tar"].includes(path.extname(entry.name).toLowerCase())) candidates.push(full);
-    }
-  };
-  walk(tempDir);
-  if (!candidates.length) {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-    throw new Error("Zip backup did not contain a supported database restore file.");
-  }
-  const selected = candidates.sort((a, b) => fs.statSync(b).size - fs.statSync(a).size)[0];
-  return { path: selected, ext: path.extname(selected).toLowerCase(), size: fs.statSync(selected).size, cleanup: () => fs.rmSync(tempDir, { recursive: true, force: true }) };
+  return { ...source, sourceType: "local", metadata: null };
 }
 
-async function copyRestoreFileToVm(localPath) {
+function closestVmBackup(filename = "", listing = "") {
+  const files = String(listing || "").match(/[A-Za-z0-9_.-]+\.backup/g) || [];
+  if (!files.length) return "";
+  const stamp = String(filename || "").match(/\d{8}-\d{6}/)?.[0] || "";
+  if (stamp) {
+    const sameStamp = files.find((file) => file.includes(stamp));
+    if (sameStamp) return sameStamp;
+  }
+  const prefix = String(filename || "").replace(/-\d{8}-\d{6}\.backup$/i, "");
+  return files.find((file) => prefix && file.startsWith(prefix)) || files[0] || "";
+}
+
+async function listVmBackupDirectory(vmBackupDir) {
+  const dir = String(vmBackupDir || "").trim();
+  if (!dir) return { ok: false, listing: "", error: "VM backup directory is missing." };
+  const result = await sshCommand(`if [ -d ${shQuote(dir)} ]; then ls -lah ${shQuote(dir)}; else echo "__DIR_MISSING__"; fi`, 20000, { maxBuffer: 1024 * 256 });
+  return { ok: result.ok, listing: result.stdout || "", error: result.stderr || result.error || "", dir };
+}
+
+async function checkVmBackupAvailable(source = {}) {
+  const vmBackup = vmBackupParts(source.remotePath || source.vmBackupPath || "", source);
+  if (!vmBackup.vmBackupPath) return { known: true, available: false, backupExists: false, yamlExists: false, message: "Metadata is missing the real VM backup path.", ...vmBackup };
+  try {
+    const dir = await listVmBackupDirectory(vmBackup.vmBackupDir);
+    if (!dir.ok) return { known: false, available: false, backupExists: false, yamlExists: false, message: dir.error || "Could not list VM backup directory.", directoryListing: dir.listing, ...vmBackup };
+    const result = await sshCommand([
+      `test -f ${shQuote(vmBackup.vmBackupPath)} && echo "__BACKUP_OK__" || echo "__BACKUP_MISSING__"`,
+      `test -f ${shQuote(vmBackup.vmYamlPath)} && echo "__YAML_OK__" || echo "__YAML_MISSING__"`
+    ].join("; "), 15000, { maxBuffer: 1024 * 64 });
+    if (!result.ok) return { known: false, available: false, backupExists: false, yamlExists: false, message: result.stderr || result.stdout || result.error || "Could not verify VM backup file.", directoryListing: dir.listing, ...vmBackup };
+    const output = result.stdout || "";
+    const backupExists = output.includes("__BACKUP_OK__");
+    const yamlExists = output.includes("__YAML_OK__");
+    const available = backupExists && yamlExists;
+    const closest = available ? "" : closestVmBackup(vmBackup.vmBackupFilename, dir.listing);
+    const missing = !backupExists ? "real VM backup file" : "sidecar YAML file";
+    return {
+      known: true,
+      available,
+      backupExists,
+      yamlExists,
+      closest,
+      directoryListing: dir.listing,
+      message: available ? "Available on VM." : `Backup metadata exists locally, but the ${missing} was not found.${closest ? ` Closest available backup: ${closest}.` : ""}`,
+      ...vmBackup
+    };
+  } catch (error) {
+    return { known: false, available: false, backupExists: false, yamlExists: false, message: error.message, ...vmBackupParts(source.remotePath || source.vmBackupPath || "", source) };
+  }
+}
+
+async function copyBattlegroupImportFileToVm(localPath) {
+  const started = Date.now();
   const info = await vmInfo();
   const ip = info.ip || VM_IP;
   if (!info.exists && !ip) throw new Error(info.error || "VM not found.");
@@ -1618,45 +2020,327 @@ async function copyRestoreFileToVm(localPath) {
   if (!ip) throw new Error("VM IP address was not found.");
   const key = sshKeyStatus(SSH_KEY);
   if (!key.exists) throw new Error(key.message);
-  const remotePath = `/tmp/alphanine-restore-${Date.now()}-${path.basename(localPath).replace(/[^a-zA-Z0-9_.-]/g, "_")}`;
-  const result = await run("scp", ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=QUIET", "-i", key.path, localPath, `${SSH_USER}@${ip}:${remotePath}`], { timeout: 600000, maxBuffer: 1024 * 1024 * 32 });
-  if (!result.ok) throw new Error(result.stderr || result.error || "Could not copy backup file to VM.");
+  const remotePath = `/tmp/alphanine-import-${Date.now()}-${path.basename(localPath).replace(/[^a-zA-Z0-9_.-]/g, "_")}`;
+  const size = fs.statSync(localPath).size;
+  databaseBackupAudit("battlegroup_import_transfer_started", {
+    ok: true,
+    method: "ssh-stream",
+    reason: "Streaming Battlegroup backup over SSH stdin; no SFTP subsystem required.",
+    source: localPath,
+    remotePath,
+    size
+  });
+  const result = await runWithStdin("ssh", [
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "LogLevel=QUIET",
+    "-i", key.path,
+    `${SSH_USER}@${ip}`,
+    `umask 077; cat > ${shQuote(remotePath)}`
+  ], localPath, { timeout: 600000, maxBuffer: 1024 * 1024 * 32 });
+  if (!result.ok) {
+    const detail = result.stderr || result.error || "Could not stream Battlegroup backup file to VM.";
+    const sftpHint = /sftp-server|subsystem request failed|scp: connection closed/i.test(detail)
+      ? "SFTP is not available on this Dune Self-Hosting VM. Import uses SSH streaming; verify SSH shell access and file write permission to /tmp."
+      : detail;
+    databaseBackupAudit("battlegroup_import_transfer_failed", { ok: false, method: "ssh-stream", durationMs: Date.now() - started, remotePath, error: sftpHint, details: detail.slice(0, 2000) });
+    throw new Error(sftpHint);
+  }
+  databaseBackupAudit("battlegroup_import_transfer_completed", { ok: true, method: "ssh-stream", durationMs: Date.now() - started, remotePath, size, stdout: result.stdout.slice(-1000), stderr: result.stderr.slice(-1000) });
   return remotePath;
 }
 
-async function restoreDatabaseBackup(payload = {}) {
+async function verifyBattlegroupImport(context = {}) {
   const started = Date.now();
-  const filePath = String(payload.filePath || "").trim();
-  const confirmText = String(payload.confirmText || "").trim();
-  if (confirmText !== "RESTORE") throw new Error("Restore requires typing RESTORE.");
-  let restoreSource = null;
-  let remotePath = "";
+  const onSubstep = typeof context.onSubstep === "function" ? context.onSubstep : null;
+  const checks = {
+    importCommandCompleted: true,
+    gameServerOnlineRequired: false,
+    battlegroupHealthRequired: false,
+    databaseReachable: false,
+    databaseSizeReadable: false
+  };
+  databaseBackupAudit("battlegroup_import_verification_condition", {
+    condition: "database_status_query",
+    status: "pending",
+    note: "Final import verification checks database reachability. It does not wait for game server/Battlegroup health.",
+    remotePath: context.remotePath || "",
+    importArg: context.importArg || ""
+  });
+  let verification = null;
   try {
-    restoreSource = await extractRestoreSource(filePath);
-    const safety = await createDatabaseBackup({ prefix: "pre-restore-safety", safety: true });
-    if (!safety.ok) throw new Error(`Pre-restore safety backup failed: ${safety.error}`);
-    remotePath = await copyRestoreFileToVm(restoreSource.path);
-    const { namespace, dbPod, dbSvc } = await databaseRuntimeTarget();
-    const restoreCommand = [".dump", ".backup", ".tar"].includes(restoreSource.ext)
-      ? `cat ${shQuote(remotePath)} | sudo kubectl exec -i -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" pg_restore -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune --clean --if-exists --no-owner`
-      : `cat ${shQuote(remotePath)} | sudo kubectl exec -i -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" psql -v ON_ERROR_STOP=1 -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune`;
-    const command = [
-      `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
-      restoreCommand,
-      `rm -f ${shQuote(remotePath)}`
-    ].join("; ");
-    const result = await sshCommand(command, 900000, { maxBuffer: 1024 * 1024 * 64 });
-    if (!result.ok) throw new Error(result.stderr || result.error || "Database restore failed.");
-    const response = { ok: true, status: "restored", durationMs: Date.now() - started, restoredFrom: filePath, safetyBackup: safety.file, stdout: result.stdout.slice(-4000), stderr: result.stderr.slice(-4000) };
-    databaseBackupAudit("database_restore_success", response);
+    verification = await verifyImportedDatabaseStatus(20000, { onSubstep });
+  } catch (error) {
+    databaseBackupAudit("battlegroup_import_verification_condition", {
+      condition: "database_status_query",
+      status: "failed",
+      error: error.message,
+      details: error.details || null,
+      checks
+    });
+    throw error;
+  }
+  const database = { ok: true, status: "online", durationMs: verification.durationMs, ...verification.row };
+  checks.databaseReachable = true;
+  checks.databaseSizeReadable = Boolean(database.size);
+  databaseBackupAudit("battlegroup_import_verification_condition", {
+    condition: "database_status_query",
+    status: "success",
+    database,
+    commands: verification.commands,
+    checks
+  });
+  return {
+    ok: true,
+    status: "verified",
+    message: "Import completed successfully. You may now start the server.",
+    durationMs: Date.now() - started,
+    checks,
+    database,
+    commands: verification.commands,
+    stdout: verification.stdout,
+    stderr: verification.stderr
+  };
+}
+
+async function verifyBattlegroupImportWithTotalTimeout(context = {}, timeout = 30000) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      verifyBattlegroupImport(context),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error("Import finished, but database verification timed out after 30 seconds. You may need to refresh Database Status or start the server manually after checking logs.");
+          error.code = "DATABASE_VERIFICATION_TOTAL_TIMEOUT";
+          error.details = {
+            timeoutMs: timeout,
+            verificationSubstep: context.currentSubstep ? context.currentSubstep() : "",
+            command: context.currentCommand ? context.currentCommand() : ""
+          };
+          databaseBackupAudit("database_verification_total_timeout", error.details);
+          reject(error);
+        }, timeout);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function ensureBattlegroupOfflineForImport() {
+  const result = await battlegroup("status");
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Could not verify Battlegroup status before import.");
+  const parsed = parseStatus(result.stdout || "");
+  if (statusSummaryIsOnline(parsed.summary)) {
+    throw new Error("Stop the server before importing a Battlegroup backup.");
+  }
+  return { ok: true, summary: parsed.summary, raw: result.stdout };
+}
+
+async function databaseImportReadiness(payload = {}) {
+  const filePath = String(payload.filePath || "").trim();
+  const activeJob = activeDatabaseImportJob();
+  const conditions = {
+    backupSelected: Boolean(filePath),
+    backupValid: false,
+    backupResolved: false,
+    backupAvailable: false,
+    serverOffline: false,
+    noImportRunning: !activeJob,
+    statusKnown: false
+  };
+  const response = {
+    ok: false,
+    canTypeConfirmation: false,
+    canImport: false,
+    reasonCode: "",
+    message: "",
+    conditions,
+    activeJobId: activeJob?.jobId || "",
+    backup: null,
+    importSource: null,
+    server: null
+  };
+  const finish = (reasonCode, message) => {
+    response.reasonCode = reasonCode;
+    response.message = message;
+    response.canTypeConfirmation = Boolean(conditions.backupSelected && conditions.backupValid && conditions.backupResolved && conditions.backupAvailable && conditions.serverOffline && conditions.noImportRunning && conditions.statusKnown);
+    response.canImport = response.canTypeConfirmation;
+    response.ok = response.canImport;
+    if (!response.canImport) databaseBackupAudit("database_import_readiness", { import_disabled_reason: reasonCode, message, conditions, activeJobId: response.activeJobId });
+    else databaseBackupAudit("database_import_readiness", { import_enabled: true, conditions });
+    return response;
+  };
+  if (!conditions.backupSelected) return finish("no_backup_selected", "No backup selected.");
+  try {
+    const source = await resolveBattlegroupImportSource(filePath);
+    response.backup = { path: source.path, ext: source.ext, size: source.size };
+    response.importSource = {
+      sourceType: source.sourceType,
+      metadataPath: source.sourceType === "vm" ? source.path : "",
+      remotePath: source.remotePath || "",
+      vmBackupDir: source.vmBackupDir || "",
+      vmBackupFilename: source.vmBackupFilename || "",
+      vmBackupPath: source.vmBackupPath || source.remotePath || "",
+      vmYamlPath: source.vmYamlPath || "",
+      localPath: source.sourceType === "local" ? source.path : "",
+      backupName: source.metadata?.backupName || source.metadata?.backupId || path.basename(source.remotePath || source.path || ""),
+      storage: source.metadata?.storage || (source.sourceType === "vm" ? "vm+local-metadata" : "local-file"),
+      availability: { known: true, available: true, message: "Local backup file is available." }
+    };
+    conditions.backupValid = true;
+    conditions.backupResolved = true;
+    conditions.backupAvailable = source.sourceType === "local";
+    if (source.sourceType === "vm") {
+      if (!source.remotePath) {
+        conditions.backupResolved = false;
+        conditions.backupAvailable = false;
+        return finish("metadata_missing_real_backup_path", "Metadata is missing the real VM backup path.");
+      }
+      response.importSource.availability = { known: false, available: false, message: "Real VM backup file availability will be checked after the server is confirmed offline." };
+    }
+  } catch (error) {
+    const message = error.message || "Invalid backup selected.";
+    const reason = /metadata.*vm backup path|metadata.*real/i.test(message) ? "metadata_missing_real_backup_path" : "invalid_backup_selected";
+    return finish(reason, message);
+  }
+  if (!conditions.noImportRunning) return finish("import_running", "Another import is currently running.");
+  try {
+    const status = await battlegroup("status");
+    if (!status.ok) {
+      response.server = { ok: false, error: status.stderr || status.stdout || status.error || "Unable to determine server status." };
+      return finish("server_status_unknown", "Unable to determine server status.");
+    }
+    const parsed = parseStatus(status.stdout || "");
+    response.server = { ok: true, summary: parsed.summary, raw: status.stdout };
+    conditions.statusKnown = true;
+    conditions.serverOffline = !statusSummaryIsOnline(parsed.summary);
+    if (!conditions.serverOffline) return finish("server_online", "Server is still running.");
+    if (response.importSource?.sourceType === "vm") {
+      const availability = await checkVmBackupAvailable(response.importSource);
+      response.importSource.availability = availability;
+      conditions.backupAvailable = Boolean(availability.available);
+      if (!availability.available) return finish(availability.known ? "real_backup_unavailable" : "server_status_unknown", availability.message || "Could not verify the real VM backup file.");
+    }
+    return finish("ready", "Ready to type IMPORT and start import.");
+  } catch (error) {
+    response.server = { ok: false, error: error.message };
+    return finish("server_status_unknown", "Unable to determine server status.");
+  }
+}
+
+async function battlegroupImport(importTarget) {
+  const target = typeof importTarget === "string" ? { importArg: importTarget, remotePath: importTarget } : (importTarget || {});
+  const importArg = target.importArg || target.vmBackupFilename || target.remotePath || "";
+  const importFilename = String(importArg || "").split(/[\\/]/).filter(Boolean).pop() || "";
+  const readiness = serverControlConfigured();
+  if (!readiness.configured) return { ok: false, skipped: true, stdout: "", stderr: readiness.reason, error: readiness.reason };
+  appendAdminAudit("server_import_requested", { importArg: importFilename, originalImportArg: importArg, remotePath: target.remotePath || "", vmBackupDir: target.vmBackupDir || "", vmBackupFilename: target.vmBackupFilename || "", config: readiness.summary });
+  appendAdminAudit("battlegroup_import_confirmation_sent", { importArg: importFilename, confirmation: "yes" });
+  const command = `printf 'yes\\n' | /home/dune/.dune/bin/battlegroup import ${shQuote(importFilename)}`;
+  const result = await sshCommand(command, 900000, { maxBuffer: 1024 * 1024 * 32 });
+  const output = `${result.stdout || ""}\n${result.stderr || ""}\n${result.error || ""}`;
+  if (!result.ok && /Type 'yes' to continue:/i.test(output) && /timed out|timeout/i.test(output)) {
+    return { ...result, stderr: "Battlegroup import is waiting for confirmation input.", error: "Battlegroup import is waiting for confirmation input." };
+  }
+  return result;
+}
+
+async function runDatabaseRestoreJob(job) {
+  const started = Date.now();
+  const filePath = String(job.payload.filePath || "").trim();
+  const confirmText = String(job.payload.confirmText || "").trim();
+  job.status = "running";
+  if (confirmText !== "IMPORT") throw new Error("Import requires typing IMPORT.");
+  let importSource = null;
+  let remotePath = "";
+  let importArg = "";
+  let uploaded = false;
+  try {
+    restoreJobStep(job, "Preparing import");
+    importSource = await resolveBattlegroupImportSource(filePath);
+    restoreJobStep(job, "Checking Battlegroup offline");
+    const offline = await ensureBattlegroupOfflineForImport();
+    restoreJobStep(job, "Preparing backup source", { filePath, size: importSource.size, sourceType: importSource.sourceType, battlegroupStatus: offline.summary });
+    if (importSource.sourceType === "vm") {
+      remotePath = importSource.remotePath;
+      const availability = await checkVmBackupAvailable(importSource);
+      databaseBackupAudit("battlegroup_import_directory_checked", {
+        jobId: job.jobId,
+        vmBackupDir: importSource.vmBackupDir,
+        vmBackupFilename: importSource.vmBackupFilename,
+        vmBackupPath: importSource.vmBackupPath || importSource.remotePath,
+        vmYamlPath: importSource.vmYamlPath,
+        backupExists: availability.backupExists,
+        yamlExists: availability.yamlExists,
+        closest: availability.closest || "",
+        listing: availability.directoryListing || ""
+      });
+      if (!availability.available) throw new Error(availability.message || "Backup metadata exists locally, but the real VM backup file was not found.");
+      importArg = importSource.vmBackupFilename || path.posix.basename(remotePath);
+      restoreJobStep(job, "Uploading backup if needed", { skipped: true, reason: "Using Battlegroup backup already stored on VM.", remotePath });
+    } else {
+      restoreJobStep(job, "Uploading backup if needed", { filePath, size: importSource.size });
+      remotePath = await copyBattlegroupImportFileToVm(importSource.path);
+      importArg = remotePath;
+      uploaded = true;
+    }
+    restoreJobStep(job, "Backup source ready", { remotePath, importArg, sourceType: importSource.sourceType });
+    restoreJobStep(job, "Creating safety backup");
+    const safety = await createDatabaseBackup({
+      prefix: "pre-import-safety",
+      safety: true,
+      timeout: 120000,
+      onStatus: (status, detail) => restoreJobStep(job, "Creating safety backup", {
+        safetyBackupStatus: status,
+        verificationSubstep: `Safety backup: ${status}`,
+        verificationDetail: detail || ""
+      })
+    });
+    if (!safety.ok) throw new Error(safety.error || "Pre-import safety backup failed.");
+    restoreJobStep(job, "Safety backup complete", { safetyBackup: safety.file, safetyBackupStatus: "Succeeded", verificationSubstep: "", verificationDetail: "" });
+    if (!safety.file?.path || !fs.existsSync(safety.file.path)) throw new Error("Pre-import safety backup metadata could not be verified on disk.");
+    restoreJobStep(job, "Safety backup verified", { safetyBackup: safety.file.path });
+    restoreJobStep(job, "Importing Battlegroup backup");
+    const result = await battlegroupImport({ remotePath, importArg, sourceType: importSource.sourceType, vmBackupDir: importSource.vmBackupDir, vmBackupFilename: importSource.vmBackupFilename });
+    if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Battlegroup import failed.");
+    restoreJobStep(job, "Verifying imported database", {
+      pendingCondition: "database_status_query",
+      gameServerOnlineRequired: false,
+      battlegroupHealthRequired: false
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    let verificationSubstep = "";
+    let verificationCommand = "";
+    const verification = await verifyBattlegroupImportWithTotalTimeout({
+      remotePath,
+      importArg,
+      sourceType: importSource.sourceType,
+      onSubstep: (label, command) => {
+        verificationSubstep = label || "";
+        verificationCommand = command || "";
+        restoreJobStep(job, "Verifying imported database", {
+          verificationSubstep,
+          verificationDetail: verificationCommand,
+          pendingCondition: label || "database_status_query"
+        });
+      },
+      currentSubstep: () => verificationSubstep,
+      currentCommand: () => verificationCommand
+    }, 30000);
+    databaseBackupAudit("battlegroup_import_verified", { jobId: job.jobId, verification });
+    const response = { ok: true, status: "success", message: "Import completed successfully. You may now start the server.", durationMs: Date.now() - started, elapsed: readableDuration(Date.now() - started), importedFrom: filePath, remotePath, importArg, sourceType: importSource.sourceType, safetyBackup: safety.file, verification, stdout: result.stdout.slice(-4000), stderr: result.stderr.slice(-4000), logPath: ADMIN_AUDIT_LOG };
+    finishRestoreJob(job, "success", response);
+    restoreJobStep(job, "Completed", { verified: true });
+    databaseBackupAudit("battlegroup_import_completed", { jobId: job.jobId, ...response });
     return response;
   } catch (error) {
-    if (remotePath) await sshCommand(`rm -f ${shQuote(remotePath)}`, 30000).catch(() => {});
-    const response = { ok: false, status: "failed", durationMs: Date.now() - started, restoredFrom: filePath, error: error.message };
-    databaseBackupAudit("database_restore_failed", response);
+    if (uploaded && remotePath) await sshCommand(`rm -f ${shQuote(remotePath)}`, 30000).catch(() => {});
+    const verificationFailed = job.history.some((row) => row.step === "Verifying imported database");
+    const response = { ok: false, status: verificationFailed ? "verification_failed" : "failed", message: verificationFailed ? "Battlegroup import completed but database verification failed." : "Battlegroup import failed or could not be verified.", durationMs: Date.now() - started, elapsed: readableDuration(Date.now() - started), importedFrom: filePath, remotePath, importArg, error: error.message, logPath: ADMIN_AUDIT_LOG };
+    finishRestoreJob(job, "failed", response);
+    restoreJobStep(job, verificationFailed ? "Verification Failed" : "Failed", { error: error.message });
+    databaseBackupAudit("battlegroup_import_failed", { jobId: job.jobId, ...response });
     return response;
-  } finally {
-    if (restoreSource?.cleanup) restoreSource.cleanup();
   }
 }
 
@@ -5161,6 +5845,12 @@ function appPage() {
     .status-pill.ok { color:var(--good); border-color:rgba(89,213,139,.46); background:rgba(89,213,139,.08); }
     .status-pill.warn { color:var(--warn); border-color:rgba(255,184,77,.5); background:rgba(255,184,77,.08); }
     .status-pill.bad { color:var(--bad); border-color:rgba(255,102,102,.52); background:rgba(255,102,102,.08); }
+    .restore-timeline { display:grid; gap:7px; margin-top:12px; }
+    .restore-step { display:flex; align-items:center; gap:9px; padding:7px 9px; border:1px solid rgba(214,166,69,.18); background:rgba(0,0,0,.18); color:var(--muted); font-size:12px; }
+    .restore-step span { width:18px; color:currentColor; text-align:center; }
+    .restore-step.ok { color:var(--good); border-color:rgba(89,213,139,.34); background:rgba(89,213,139,.06); }
+    .restore-step.warn { color:var(--warn); border-color:rgba(255,184,77,.45); background:rgba(255,184,77,.08); }
+    .restore-step.bad { color:var(--bad); border-color:rgba(255,102,102,.48); background:rgba(255,102,102,.08); }
     .vm-details { margin-top:12px; border-top:1px solid rgba(214,166,69,.14); padding-top:10px; }
     .vm-details summary { cursor:pointer; color:var(--sand); text-transform:uppercase; letter-spacing:.08em; font-size:12px; font-weight:900; }
     .ping-graph { display:flex; align-items:end; gap:3px; min-height:70px; margin-top:10px; padding:8px; border:1px solid rgba(214,166,69,.16); background:rgba(0,0,0,.22); }
@@ -5234,7 +5924,7 @@ function appPage() {
       <div>
         <div class="kicker">About</div>
         <h2>AlphaNine Dune Suite</h2>
-        <div class="subtle">Version 0.2.8-beta</div>
+        <div class="subtle">Version 0.2.9-beta</div>
       </div>
       <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
@@ -5334,7 +6024,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.2.8-beta</span>
+        <span>Version 0.2.9-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -5939,29 +6629,32 @@ DUNE_RECEIVER_SSH_KEY</pre>
       </div>
       <div class="layout-3 mt">
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Backup Database</div><div class="subtle">Create a timestamped PostgreSQL dump archive in the selected folder.</div></div></div>
+          <div class="panel-head"><div><div class="label">Battlegroup Backup</div><div class="subtle">Create a backup using the Dune Self-Hosting Battlegroup backup mechanism.</div></div></div>
           <div class="action-row mt">
             <button class="primary" onclick="createDatabaseBackup()">Create Backup</button>
+            <button onclick="createSafetyBackupOnly()">Create Safety Backup Only</button>
             <button onclick="refreshDatabaseManagement()">Refresh</button>
           </div>
           <div id="dbBackupResult" class="empty mt">No backup created in this session.</div>
         </div>
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Import / Restore Database</div><div class="subtle">Restore requires RESTORE confirmation and creates a safety backup first.</div></div></div>
+          <div class="panel-head"><div><div class="label">Import Battlegroup Backup</div><div class="subtle">Import requires the server to be stopped, IMPORT confirmation, and a safety Battlegroup backup first.</div></div></div>
           <div class="field-grid">
-            <label>Backup File<input id="dbRestoreFile" placeholder="Choose a .zip, .sql, .dump, .backup, or .tar file"></label>
-            <label>Confirmation<input id="dbRestoreConfirm" placeholder="Type RESTORE before restoring"></label>
+            <label>Backup File<input id="dbRestoreFile" placeholder="Choose a Battlegroup .zip, .tar, .backup, .bgbackup, or metadata .json file"></label>
+            <label>Confirmation<input id="dbRestoreConfirm" placeholder="Type IMPORT before importing"></label>
           </div>
           <div class="action-row mt">
-            <button onclick="chooseDatabaseRestoreFile()">Choose Backup File</button>
-            <button class="danger" onclick="restoreDatabaseBackup()">Restore Database</button>
+            <button id="dbChooseRestoreFileButton" onclick="chooseDatabaseRestoreFile()">Choose Backup File</button>
+            <button id="dbRestoreButton" class="danger" onclick="restoreDatabaseBackup()">Import Battlegroup Backup</button>
           </div>
-          <div id="dbRestoreResult" class="warning mt">Restore is destructive. Confirm exact file and type RESTORE.</div>
+          <div id="dbRestoreResult" class="warning mt">Import is destructive. Stop the server, confirm the exact file, and type IMPORT.</div>
+          <div id="dbImportReadiness" class="warning mt">Checking import readiness...</div>
+          <div id="dbRestoreProgress" class="empty mt">No import job running.</div>
         </div>
       </div>
       <div class="layout-3 mt">
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Backup Location</div><div class="subtle">Choose where local database backup archives are saved.</div></div></div>
+          <div class="panel-head"><div><div class="label">Backup Location</div><div class="subtle">Choose where local Battlegroup backup metadata and supported copied files are saved.</div></div></div>
           <div class="detail-list">
             <div class="detail-row"><span class="subtle">Current path</span><strong id="dbBackupPath" class="env-path-value">Loading...</strong></div>
             <div class="detail-row"><span class="subtle">Default path</span><strong id="dbBackupDefaultPath" class="env-path-value">Loading...</strong></div>
@@ -5974,12 +6667,13 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div id="dbLocationResult" class="empty mt">Backup location ready.</div>
         </div>
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Safety / Warnings</div><div class="subtle">Restore is guarded; backups still require a healthy database path.</div></div></div>
-          <div class="warning">Restoring a database can overwrite live server data. The Suite requires explicit confirmation and creates a pre-restore safety backup before any restore attempt.</div>
+          <div class="panel-head"><div><div class="label">Safety / Warnings</div><div class="subtle">Import is guarded and uses the Battlegroup/self-hosted workflow.</div></div></div>
+          <div class="warning">Importing a Battlegroup backup can overwrite live server data. Stop the server first. The Suite requires explicit confirmation and creates a pre-import Battlegroup safety backup before any import attempt.</div>
           <div class="detail-list mt">
-            <div class="detail-row"><span class="subtle">Restore confirmation</span><strong>RESTORE</strong></div>
-            <div class="detail-row"><span class="subtle">Safety backup</span><strong>Required before restore</strong></div>
-            <div class="detail-row"><span class="subtle">Accepted files</span><strong>.zip, .sql, .dump, .backup, .tar</strong></div>
+            <div class="detail-row"><span class="subtle">Import confirmation</span><strong>IMPORT</strong></div>
+            <div class="detail-row"><span class="subtle">Safety backup</span><strong>Required before import</strong></div>
+            <div class="detail-row"><span class="subtle">Accepted files</span><strong>.zip, .tar, .backup, .bgbackup, .json metadata</strong></div>
+            <div class="detail-row"><span class="subtle">Write mode</span><strong>No SQL restore; Battlegroup import only</strong></div>
           </div>
         </div>
       </div>
@@ -6038,7 +6732,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.8-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.2.9-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
@@ -6192,7 +6886,7 @@ const viewCopy={
   give:["Give Item","Live item grants through the configured receiver."],
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
-  database:["Database","Backup, restore, and manage Dune database backup locations."],
+  database:["Database","Battlegroup backup, import, and backup location management."],
   server:["Server Status","Battlegroup controls, maps, and live server telemetry."],
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
@@ -6207,7 +6901,7 @@ function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.vie
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null;
+let adminItems=[],selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false;
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
@@ -6334,7 +7028,7 @@ function renderPlayerFeed(players){const wrap=document.getElementById("playerFee
 async function refreshPlayerFeed(){const stamp=document.getElementById("playerFeedStamp");try{const data=await getJson("/api/players/feed");renderPlayerFeed(data.players||[]);if(stamp)stamp.textContent="Updated "+new Date().toLocaleTimeString();}catch(e){const wrap=document.getElementById("playerFeed");if(wrap)wrap.innerHTML='<div class="empty">'+esc(betterError(e))+'</div>';if(stamp)stamp.textContent="Feed error";}}
 function renderVmStatus(vm){const status=vm?.state||vm?.status||"Unknown";tone("vm",status);tone("dashboardVmStatus","VM: "+status);setText("vmControlName",vm?.name||"Not configured");setText("vmControlStatus",status);setText("vmControlAddress",vm?.ip||"Unknown");setText("vmControlUptime",vm?.uptime||"Unknown");}
 function vmDisplayMessage(data){const vm=data?.vm||data||{};const status=vm.state||data?.status||"Unknown";const name=vm.name||data?.name||"Not configured";const lines=["VM: "+name,"Status: "+status];if(data?.message)lines.push(data.message);if(data?.error||vm.error)lines.push(data.error||vm.error);if((data?.errorCode||vm.errorCode)==="access_denied")lines.push("How to fix Hyper-V permissions: use the help link above.");return lines.filter(Boolean).join("\\n");}
-async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(mapped.label||"Warning"));document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);}}
+async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(mapped.label||"Warning"));document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(open){if(open===null||open===undefined)return"Not Configured";return open?"Open":"Closed";}
 function monitorMs(value){return Number.isFinite(Number(value))?Math.round(Number(value))+" ms":"-- ms";}
@@ -6360,20 +7054,38 @@ function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiv
 async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
 function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
 function renderDatabaseLocation(data){const folder=data?.folder||"";setText("dbBackupPath",folder||"Unknown");setText("dbBackupDefaultPath",data?.defaultFolder||"Unknown");tone("dbMgmtBackupFolderState",folder?"Configured":"Missing");}
-function renderDatabaseBackups(data){const rows=document.getElementById("dbBackupRows");if(!rows)return;const backups=data?.backups||[];window.databaseBackupRows=backups;if(!backups.length){rows.innerHTML='<tr><td colspan="5">No backups found in the selected folder.</td></tr>';return;}rows.innerHTML=backups.map((row,index)=>'<tr><td>'+esc(row.filename)+'</td><td>'+esc(new Date(row.date).toLocaleString())+'</td><td>'+esc(row.sizeLabel||row.size)+'</td><td>'+esc(row.path)+'</td><td><div class="action-row"><button onclick="copyDatabaseBackupPath('+index+')">Copy path</button><button onclick="selectDatabaseRestoreBackup('+index+')">Restore</button></div></td></tr>').join("");}
+function backupAvailabilityLabel(row){if(row?.availabilityStatus)return row.availabilityStatus;if(row?.vmBackupPath||row?.vmPath)return"Metadata only";return"Local file";}
+function importAvailabilityLabel(source){if(!source)return"Metadata only";if(source.sourceType==="local")return"Local file";if(source.availability?.available)return"Available on VM";if(source.availability?.known)return"Missing on VM";return"Metadata only";}
+function renderDatabaseBackups(data){const rows=document.getElementById("dbBackupRows");if(!rows)return;const backups=data?.backups||[];window.databaseBackupRows=backups;if(!backups.length){rows.innerHTML='<tr><td colspan="5">No backups found in the selected folder.</td></tr>';return;}rows.innerHTML=backups.map((row,index)=>{const target=row.vmBackupPath||row.vmPath?("VM: "+(row.vmBackupPath||row.vmPath)):row.path;const availability=backupAvailabilityLabel(row);return '<tr><td>'+esc(row.filename)+'<div class="subtle">'+esc(availability)+'</div></td><td>'+esc(new Date(row.date).toLocaleString())+'</td><td>'+esc(row.sizeLabel||row.size)+'</td><td><div class="env-path-value">'+esc(target)+'</div>'+(row.vmBackupFilename?'<div class="subtle">Import argument: '+esc(row.vmBackupFilename)+'</div>':'')+(row.vmPath?'<div class="subtle">Metadata: '+esc(row.path)+'</div>':'')+'</td><td><div class="action-row"><button onclick="copyDatabaseBackupPath('+index+')">Copy path</button><button onclick="selectDatabaseRestoreBackup('+index+')">Select for Import</button></div></td></tr>';}).join("");}
 async function refreshDatabaseStatus(){try{renderDatabaseStatus(await getJson("/api/database/status",{timeoutMs:15000}));}catch(e){renderDatabaseStatus({ok:false,status:"unavailable",error:betterError(e)});}}
 async function refreshDatabaseLocation(){try{renderDatabaseLocation(await getJson("/api/database/backup-location"));}catch(e){renderDatabaseLocation({ok:false,folder:"",defaultFolder:"",error:betterError(e)});setText("dbLocationResult",betterError(e));}}
 async function refreshDatabaseBackups(){try{const data=await getJson("/api/database/backups");renderDatabaseBackups(data);}catch(e){const rows=document.getElementById("dbBackupRows");if(rows)rows.innerHTML='<tr><td colspan="5">'+esc(betterError(e))+'</td></tr>';}}
-async function refreshDatabaseManagement(){await Promise.all([refreshDatabaseStatus(),refreshDatabaseLocation(),refreshDatabaseBackups()]);addActivity("database","Database management refreshed","Status, backup location, and recent backups loaded.");}
+async function refreshDatabaseManagement(){await Promise.all([refreshDatabaseStatus(),refreshDatabaseLocation(),refreshDatabaseBackups()]);await refreshDatabaseImportReadiness();const activeJob=window.activeDatabaseRestoreJobId||localStorage.getItem("activeDatabaseRestoreJobId")||"";if(activeJob){const el=document.getElementById("dbRestoreResult");if(el){el.className="warning mt";el.textContent="Import job is still running. Reconnecting to import status...";}pollDatabaseRestoreStatus(activeJob).catch(e=>setText("dbRestoreResult",betterError(e)));}addActivity("database","Database management refreshed","Status, backup location, and recent backups loaded.");}
 async function chooseDatabaseBackupFolder(){try{let folder="";if(window.alphaNineSuite?.chooseDatabaseBackupFolder){const result=await window.alphaNineSuite.chooseDatabaseBackupFolder();if(result?.canceled)return;folder=result.folderPath||"";}else{folder=prompt("Backup folder path","")||"";}if(!folder)return;const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({folder})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder saved: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
 async function openDatabaseBackupFolder(){try{const folder=document.getElementById("dbBackupPath")?.textContent||"";if(window.alphaNineSuite?.openPath)await window.alphaNineSuite.openPath(folder);else window.open("file:///"+folder.replace(/\\\\/g,"/"),"_blank");}catch(e){setText("dbLocationResult",betterError(e));}}
 async function resetDatabaseBackupFolder(){try{const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reset:true})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder reset: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
-async function createDatabaseBackup(){const el=document.getElementById("dbBackupResult");try{el.className="empty mt";el.textContent="Creating database backup...";const data=await getJson("/api/database/backup",{method:"POST",timeoutMs:900000});if(!data.ok)throw new Error(data.error||"Backup failed.");el.className="empty mt";el.textContent="Backup created.\\nFile: "+data.filePath+"\\nSize: "+(data.file?.sizeLabel||data.file?.size||"--")+"\\nDuration: "+data.durationMs+" ms";addActivity("database","Database backup created",data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){el.className="warning mt";el.textContent=betterError(e);addActivity("error","Database backup failed",e.message);playUiSound("warning");}}
-async function chooseDatabaseRestoreFile(){try{let filePath="";if(window.alphaNineSuite?.chooseDatabaseBackupFile){const result=await window.alphaNineSuite.chooseDatabaseBackupFile();if(result?.canceled)return;filePath=result.filePath||"";}else{filePath=prompt("Backup file path","")||"";}if(filePath)document.getElementById("dbRestoreFile").value=filePath;}catch(e){setText("dbRestoreResult",betterError(e));}}
-function selectDatabaseRestoreBackup(index){const row=(window.databaseBackupRows||[])[index];if(!row)return;document.getElementById("dbRestoreFile").value=row.path;document.getElementById("dbRestoreResult").textContent="Selected backup: "+row.filename+". Type RESTORE before restoring.";}
+async function createDatabaseBackup(){const el=document.getElementById("dbBackupResult");try{el.className="empty mt";el.textContent="Creating Battlegroup backup...";const data=await getJson("/api/database/backup",{method:"POST",timeoutMs:900000});if(!data.ok)throw new Error(data.error||"Backup failed.");el.className="empty mt";el.textContent="Battlegroup backup created.\\nBackup: "+(data.backupName||data.backupId||"--")+"\\nVM path: "+(data.vmPath||"Not reported by Battlegroup command")+"\\nLocal metadata: "+(data.localMetadataPath||data.filePath||"--")+"\\nStorage: "+(data.storage||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data))+"\\n\\nOutput:\\n"+(data.output||data.stderr||"--");addActivity("database","Battlegroup backup created",data.backupName||data.backupId||data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup backup failed",e.message);playUiSound("warning");}}
+async function createSafetyBackupOnly(){const el=document.getElementById("dbBackupResult");let timer=null;const started=Date.now();try{el.className="warning mt";el.textContent="Safety backup: Starting";timer=setInterval(()=>{const seconds=Math.floor((Date.now()-started)/1000);el.textContent="Safety backup still running... "+Math.min(seconds,120)+"s / 120s";},1000);const data=await getJson("/api/database/safety-backup",{method:"POST",timeoutMs:130000});if(timer){clearInterval(timer);timer=null;}if(!data.ok)throw new Error(data.error||"Safety backup failed.");el.className="empty mt";el.textContent="Safety backup succeeded.\\nOperation: "+(data.dumpOperationName||"--")+"\\nPhase: "+(data.phase||"Succeeded")+"\\nVM path: "+(data.vmPath||"Not reported by Battlegroup command")+"\\nLocal metadata: "+(data.localMetadataPath||data.filePath||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data));addActivity("database","Safety backup succeeded",data.dumpOperationName||data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){if(timer)clearInterval(timer);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Safety backup failed",e.message);playUiSound("warning");}}
+async function chooseDatabaseRestoreFile(){try{let filePath="";if(window.alphaNineSuite?.chooseDatabaseBackupFile){const result=await window.alphaNineSuite.chooseDatabaseBackupFile();if(result?.canceled)return;filePath=result.filePath||"";}else{filePath=prompt("Backup file path","")||"";}if(filePath)document.getElementById("dbRestoreFile").value=filePath;await refreshDatabaseImportReadiness();}catch(e){setText("dbRestoreResult",betterError(e));}}
+function selectDatabaseRestoreBackup(index){const row=(window.databaseBackupRows||[])[index];if(!row)return;document.getElementById("dbRestoreFile").value=row.path;document.getElementById("dbRestoreConfirm").value="";const vmPath=row.vmBackupPath||row.vmPath;const detail=vmPath?("Selected metadata: "+row.path+"\\nResolved VM backup: "+vmPath+"\\nImport argument: "+(row.vmBackupFilename||vmPath.split('/').pop())):("Selected backup file: "+row.path);document.getElementById("dbRestoreResult").textContent=detail+"\\nStop the server and type IMPORT before importing.";refreshDatabaseImportReadiness();}
 function copyDatabaseBackupPath(index){const row=(window.databaseBackupRows||[])[index];if(row)copyTextToClipboard(row.path);}
 async function copyTextToClipboard(text){try{if(navigator.clipboard)await navigator.clipboard.writeText(text);setText("dbLocationResult","Path copied.");playUiSound("click");}catch(e){setText("dbLocationResult",betterError(e));}}
-async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="RESTORE")throw new Error("Type RESTORE before restoring.");if(!confirm("Restore database from this backup? A safety backup will be created first."))return;el.className="warning mt";el.textContent="Creating safety backup and restoring database...";const data=await getJson("/api/database/restore",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:1200000});if(!data.ok)throw new Error(data.error||"Restore failed.");el.className="empty mt";el.textContent="Restore completed.\\nRestored from: "+data.restoredFrom+"\\nSafety backup: "+(data.safetyBackup?.path||"created")+"\\nDuration: "+data.durationMs+" ms";document.getElementById("dbRestoreConfirm").value="";addActivity("database","Database restore completed",data.restoredFrom);await refreshDatabaseBackups();playUiSound("success");}catch(e){el.className="warning mt";el.textContent=betterError(e);addActivity("error","Database restore failed",e.message);playUiSound("warning");}}
+function importReadinessRow(ok,label,detail){return '<div class="detail-row"><span class="'+(ok?'ok':'bad')+'">'+(ok?'&#10003;':'&#10007;')+'</span><strong>'+esc(label)+'</strong></div>'+(detail?'<div class="subtle">'+esc(detail)+'</div>':'');}
+function importSourceHtml(source){if(!source)return "";const rows=[];if(source.metadataPath)rows.push('<div class="detail-row"><span class="subtle">Metadata file</span><strong class="env-path-value">'+esc(source.metadataPath)+'</strong></div>');if(source.vmBackupPath||source.remotePath)rows.push('<div class="detail-row"><span class="subtle">Actual VM backup</span><strong class="env-path-value">'+esc(source.vmBackupPath||source.remotePath)+'</strong></div>');if(source.vmYamlPath)rows.push('<div class="detail-row"><span class="subtle">Sidecar YAML</span><strong class="env-path-value">'+esc(source.vmYamlPath)+'</strong></div>');if(source.vmBackupFilename)rows.push('<div class="detail-row"><span class="subtle">Import argument</span><strong class="env-path-value">'+esc(source.vmBackupFilename)+'</strong></div>');if(source.localPath)rows.push('<div class="detail-row"><span class="subtle">Local backup file</span><strong class="env-path-value">'+esc(source.localPath)+'</strong></div>');rows.push('<div class="detail-row"><span class="subtle">Backup availability</span><strong>'+esc(source.availability?.message||"Unknown")+'</strong></div>');return rows.length?'<div class="detail-list mt">'+rows.join("")+'</div>':"";}
+function renderDatabaseImportControls(){const filePath=getValue("dbRestoreFile");const confirmText=getValue("dbRestoreConfirm");const readiness=databaseImportReadiness||{conditions:{},message:"Checking import readiness.",reasonCode:"checking"};const c=readiness.conditions||{};const canType=Boolean(!databaseImportRunning&&readiness.canTypeConfirmation);const confirmationOk=confirmText==="IMPORT";const canImport=Boolean(canType&&confirmationOk);const file=document.getElementById("dbRestoreFile");const choose=document.getElementById("dbChooseRestoreFileButton");const confirm=document.getElementById("dbRestoreConfirm");const button=document.getElementById("dbRestoreButton");if(file)file.disabled=databaseImportRunning;if(choose)choose.disabled=databaseImportRunning;if(confirm)confirm.disabled=!canType;if(button)button.disabled=!canImport;const panel=document.getElementById("dbImportReadiness");if(panel){panel.className=canImport?"empty mt":"warning mt";const backupDetail=readiness.importSource?.remotePath?("Resolved to VM backup: "+readiness.importSource.remotePath):(filePath||"No backup selected.");const backupOk=Boolean(filePath&&c.backupSelected&&c.backupValid&&c.backupResolved);const runningOk=Boolean(c.noImportRunning&&!databaseImportRunning);const runningDetail=runningOk?"No import job running.":"Another import is currently running.";const confirmDetail=confirmationOk?"IMPORT entered.":(canType?"Type IMPORT to enable the import button.":"Confirmation is locked until backup, server, and job checks pass.");panel.innerHTML='<div class="label">Import Readiness</div><div class="detail-list mt">'+importReadinessRow(backupOk,"Backup selected",backupDetail)+importReadinessRow(Boolean(c.statusKnown&&c.serverOffline),"Server offline",c.statusKnown?(c.serverOffline?"Server is stopped.":"Server is still running."):"Unable to determine server status.")+importReadinessRow(runningOk,"No import running",runningDetail)+importReadinessRow(confirmationOk,confirmationOk?"Confirmation entered":"Confirmation missing",confirmDetail)+'</div>'+importSourceHtml(readiness.importSource)+'<div class="subtle mt">'+esc(readiness.message||"")+'</div>';}}
+function setDatabaseRestoreRunning(running){databaseImportRunning=Boolean(running);renderDatabaseImportControls();}
+async function refreshDatabaseImportReadiness(){const filePath=getValue("dbRestoreFile");try{databaseImportReadiness=await getJson("/api/database/import-readiness",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath}),timeoutMs:8000});}catch(e){databaseImportReadiness={ok:false,canTypeConfirmation:false,canImport:false,reasonCode:"server_status_unknown",message:betterError(e),conditions:{backupSelected:Boolean(filePath),backupValid:Boolean(filePath),serverOffline:false,noImportRunning:!databaseImportRunning,statusKnown:false}};}const selected=(window.databaseBackupRows||[]).find(row=>row.path===filePath);if(selected&&databaseImportReadiness?.importSource){selected.availabilityStatus=importAvailabilityLabel(databaseImportReadiness.importSource);renderDatabaseBackups({backups:window.databaseBackupRows});}renderDatabaseImportControls();return databaseImportReadiness;}
+async function ensureBattlegroupStoppedBeforeImport(){const data=await getJson("/api/status",{timeoutMs:5000});const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);if(mapped?.online)throw new Error("Server is online. Stop the server before importing a backup.");return data;}
+function restoreElapsed(job){if(job?.elapsed)return job.elapsed;const ms=Number(job?.durationMs||0);const total=Math.max(0,Math.floor(ms/1000));const h=Math.floor(total/3600);const m=Math.floor((total%3600)/60);const s=total%60;return h?(h+" hr "+m+" min "+s+" sec"):(m?(m+" min "+s+" sec"):(s+" sec"));}
+function restoreStatusBadge(job){const resultStatus=job?.result?.status||"";if(job?.status==="success")return '<span class="status-pill ok">Completed</span>';if(resultStatus==="verification_failed")return '<span class="status-pill warn">Verification Failed</span>';if(job?.status==="failed")return '<span class="status-pill bad">Failed</span>';return '<span class="status-pill warn">Running</span>';}
+function restoreTimelineHtml(job){const timeline=job?.timeline||["Preparing import","Checking Battlegroup offline","Preparing backup source","Uploading backup if needed","Backup source ready","Creating safety backup","Safety backup complete","Safety backup verified","Importing Battlegroup backup","Verifying imported database","Completed"];const history=(job?.history||[]).map(row=>row.step);const current=job?.step||"";const currentIndex=timeline.indexOf(current);const failed=job?.status==="failed";return '<div class="restore-timeline">'+timeline.map((step,index)=>{const done=history.includes(step)||job?.status==="success"||(currentIndex>-1&&index<currentIndex);const active=step===current&&job?.status!=="success"&&!failed;const icon=done?"&#10003;":(active?"&#9203;":"&#9633;");const cls=done?"ok":(active?"warn":"");return '<div class="restore-step '+cls+'"><span>'+icon+'</span><strong>'+esc(step)+'</strong></div>';}).join("")+(failed?'<div class="restore-step bad"><span>&#9888;</span><strong>'+esc(current||"Failed")+'</strong></div>':"")+'</div>';}
+function verificationSummaryHtml(verification){if(!verification)return '<div class="detail-row"><span class="subtle">Verification</span><strong>Not completed</strong></div>';const checks=verification.checks||{};const db=verification.database||{};return '<div class="detail-row"><span class="subtle">Import command</span><strong>&#10003; Completed</strong></div><div class="detail-row"><span class="subtle">Database reachable</span><strong>'+esc(checks.databaseReachable?"✓ Yes":"No")+'</strong></div><div class="detail-row"><span class="subtle">Database size</span><strong>'+esc(db.size||"--")+'</strong></div><div class="detail-row"><span class="subtle">Game server online required</span><strong>No</strong></div>';}
+function restoreFinalSummaryHtml(job){const result=job?.result||{};const ok=job?.status==="success";const verificationFailed=result.status==="verification_failed";const title=ok?"Import completed successfully. You may now start the server.":(verificationFailed?"Battlegroup import completed but database verification failed":"Battlegroup import failed or could not be verified");const path=result.importedFrom||"";const safety=result.safetyBackup?.path||result.safetyBackup?.filename||"";return '<div class="'+(ok?'empty':'warning')+' mt"><div class="panel-head"><div><strong>'+esc(title)+'</strong><div class="subtle">Elapsed: '+esc(result.elapsed||restoreElapsed(job))+'</div></div>'+restoreStatusBadge(job)+'</div><div class="detail-list mt"><div class="detail-row"><span class="subtle">Backup</span><strong class="env-path-value">'+esc(path||"--")+'</strong></div><div class="detail-row"><span class="subtle">VM import source</span><strong class="env-path-value">'+esc(result.remotePath||"--")+'</strong></div><div class="detail-row"><span class="subtle">Import argument</span><strong class="env-path-value">'+esc(result.importArg||"--")+'</strong></div><div class="detail-row"><span class="subtle">Safety Backup</span><strong class="env-path-value">'+esc(safety||"--")+'</strong></div>'+verificationSummaryHtml(result.verification)+'<div class="detail-row"><span class="subtle">Log</span><strong class="env-path-value">'+esc(job.logPath||result.logPath||"--")+'</strong></div></div>'+(result.error?'<div class="warning mt">'+esc(result.error)+'</div>':"")+'<button class="mt" onclick="openRestoreLog()">Open Import Log</button></div>';}
+function renderDatabaseRestoreStatus(job){const el=document.getElementById("dbRestoreProgress");if(!el)return;el.className=job.status==="failed"?"warning mt":(job.status==="success"?"empty mt":"warning mt");const verification=job.verificationSubstep?'<div class="detail-list mt"><div class="detail-row"><span class="subtle">Verification substep</span><strong>'+esc(job.verificationSubstep)+'</strong></div>'+(job.verificationDetail?'<div class="detail-row"><span class="subtle">Command</span><strong class="env-path-value">'+esc(job.verificationDetail)+'</strong></div>':'')+'</div>':"";el.innerHTML='<div class="panel-head"><div><strong>Import Status</strong><div class="subtle">Elapsed: '+esc(restoreElapsed(job))+'</div></div>'+restoreStatusBadge(job)+'</div>'+restoreTimelineHtml(job)+verification+(job.error?'<div class="warning mt">'+esc(job.error)+'</div>':"")+'<div class="subtle mt">Job: '+esc(job.jobId||"--")+'</div>';}
+async function openRestoreLog(){const path=window.lastDatabaseRestoreLogPath||"";try{if(!path)throw new Error("Import log path is unavailable.");if(window.alphaNineSuite?.openPath)await window.alphaNineSuite.openPath(path);else window.open("file:///"+path.replace(/\\\\/g,"/"),"_blank");}catch(e){setText("dbRestoreResult",betterError(e));}}
+async function pollDatabaseRestoreStatus(jobId){if(window.databaseRestorePolling===jobId)return;window.databaseRestorePolling=jobId;window.activeDatabaseRestoreJobId=jobId;localStorage.setItem("activeDatabaseRestoreJobId",jobId);setDatabaseRestoreRunning(true);let finalJob=null;let pollError=null;try{for(let i=0;i<720;i++){try{const job=await getJson("/api/database/import-status/"+encodeURIComponent(jobId),{timeoutMs:5000});window.lastDatabaseRestoreLogPath=job.logPath||job.result?.logPath||"";renderDatabaseRestoreStatus(job);if(job.status==="success"||job.status==="failed"){finalJob=job;break;}}catch(e){pollError=e;break;}await new Promise(resolve=>setTimeout(resolve,2000));}}finally{window.databaseRestorePolling="";setDatabaseRestoreRunning(false);window.activeDatabaseRestoreJobId="";localStorage.removeItem("activeDatabaseRestoreJobId");await refreshDatabaseImportReadiness().catch(()=>{});}const el=document.getElementById("dbRestoreResult");if(pollError){const msg=betterError(pollError);if(el){el.className="warning mt";el.textContent=/not found|was not found|missing/i.test(msg)?"Import job not found. Cleared stale import state.":msg;}const progress=document.getElementById("dbRestoreProgress");if(progress){progress.className="empty mt";progress.textContent="No import job running.";}addActivity("warn","Import status cleared",msg);return;}if(!finalJob){if(el){el.className="warning mt";el.textContent="Import status polling timed out. Check audit log for details.";}return;}if(el)el.innerHTML=restoreFinalSummaryHtml(finalJob);if(finalJob.status==="success"){document.getElementById("dbRestoreConfirm").value="";addActivity("database","Battlegroup import completed and verified",finalJob.jobId);await refreshDatabaseBackups();playUiSound("success");}else{addActivity("error","Battlegroup import failed",finalJob.error||finalJob.jobId);playUiSound("warning");}}
+async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="IMPORT")throw new Error("Type IMPORT before importing.");await ensureBattlegroupStoppedBeforeImport();if(!confirm("Import Battlegroup backup from this file? Stop the server first. A safety Battlegroup backup will be created first."))return;setDatabaseRestoreRunning(true);el.className="warning mt";el.textContent="Import job starting...";const data=await getJson("/api/database/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:15000});if(!data.jobId)throw new Error(data.error||"Import job was not created.");renderDatabaseRestoreStatus(data);addActivity("database","Battlegroup import started",data.jobId);await pollDatabaseRestoreStatus(data.jobId);}catch(e){setDatabaseRestoreRunning(false);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup import blocked",e.message);playUiSound("warning");}}
+function wireDatabaseImportControls(){const file=document.getElementById("dbRestoreFile");const confirm=document.getElementById("dbRestoreConfirm");if(file){file.addEventListener("input",()=>refreshDatabaseImportReadiness());file.addEventListener("change",()=>refreshDatabaseImportReadiness());}if(confirm){confirm.addEventListener("input",renderDatabaseImportControls);confirm.addEventListener("change",renderDatabaseImportControls);}renderDatabaseImportControls();}
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const [probe,players,items,channels]=await Promise.all([getJson("/api/admin/probe"),getJson("/api/admin/players"),getJson("/api/admin/items"),getJson("/api/admin/tuned-channels")]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItems();renderAdminChannels(channels.rows||[]);syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,players.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
@@ -6434,7 +7146,7 @@ async function startServerForGiveItem(){const log=document.getElementById("admin
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking server status...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server)){log.textContent="Server is offline. Start the server before using Give Item.";addActivity("grant","Give Item blocked","Server is offline.");playUiSound("warning");return;}const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();syncProgressionActionFields();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();syncProgressionActionFields();wireDatabaseImportControls();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>
@@ -6606,15 +7318,41 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === "/api/database/safety-backup" && req.method === "POST") {
+    try {
+      const result = await createDatabaseBackup({ prefix: "pre-import-safety", safety: true, timeout: 120000 });
+      await json(res, result, result.ok ? 200 : 500);
+    } catch (error) {
+      await json(res, { ok: false, status: "failed", error: error.message }, 500);
+    }
+    return;
+  }
   if (url.pathname === "/api/database/backups" && req.method === "GET") {
     try { await json(res, listDatabaseBackups()); }
     catch (error) { await json(res, { ok: false, backups: [], error: error.message }, 500); }
     return;
   }
-  if (url.pathname === "/api/database/restore" && req.method === "POST") {
+  if (url.pathname === "/api/database/import-readiness" && req.method === "POST") {
     try {
-      const result = await restoreDatabaseBackup(JSON.parse(await readBody(req) || "{}"));
-      await json(res, result, result.ok ? 200 : 400);
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await databaseImportReadiness(body));
+    } catch (error) {
+      databaseBackupAudit("database_import_readiness", { import_disabled_reason: "readiness_error", error: error.message });
+      await json(res, { ok: false, canTypeConfirmation: false, canImport: false, reasonCode: "readiness_error", message: error.message, conditions: { backupSelected: false, backupValid: false, serverOffline: false, noImportRunning: false, statusKnown: false } }, 500);
+    }
+    return;
+  }
+  if ((url.pathname.startsWith("/api/database/import-status/") || url.pathname.startsWith("/api/database/restore-status/")) && req.method === "GET") {
+    const jobId = decodeURIComponent(url.pathname.replace(/^\/api\/database\/(?:import-status|restore-status)\//, ""));
+    const job = databaseRestoreJobs.get(jobId);
+    if (!job) await json(res, { ok: false, status: "missing", error: "Import job was not found." }, 404);
+    else await json(res, publicRestoreJob(job));
+    return;
+  }
+  if ((url.pathname === "/api/database/import" || url.pathname === "/api/database/restore") && req.method === "POST") {
+    try {
+      const result = startDatabaseRestoreJob(JSON.parse(await readBody(req) || "{}"));
+      await json(res, result, 202);
     } catch (error) {
       await json(res, { ok: false, status: "failed", error: error.message }, 400);
     }

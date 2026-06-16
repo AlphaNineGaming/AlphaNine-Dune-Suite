@@ -4251,6 +4251,7 @@ async function progressionPlayerLookup(queryValue) {
   if (!query) return { ok: false, status: "not-found", reason: "Enter a character name, player name, actor id, or player id." };
   const timer = progressionLookupTimer(query);
   try {
+  const configValue = loadConfig();
   const safety = {
     readOnlyMode: true,
     liveEditingEnabled: Boolean(configValue.progressionEditingEnabled),

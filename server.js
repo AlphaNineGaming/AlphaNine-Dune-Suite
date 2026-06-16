@@ -22,6 +22,7 @@ const PROGRESSION_DATA_DIR = process.env.APPDATA
   : __dirname;
 const PROGRESSION_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "progression-backups");
 const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progression-audit.log");
+const PROGRESSION_SCHEMA_DEBUG_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progression-component-schema-debug.log");
 function packagedUnpackedPath(...parts) {
   if (!String(__dirname).includes("app.asar")) return path.join(__dirname, ...parts);
   return path.join(__dirname.replace("app.asar", "app.asar.unpacked"), ...parts);
@@ -4295,6 +4296,7 @@ async function progressionPlayerLookup(queryValue) {
       fglEntityLinks: [],
       componentNames: [],
       fLevelTarget: null,
+      componentSchemaDumps: [],
       fieldStatus: {}
     },
     warnings: [],
@@ -4331,6 +4333,7 @@ async function progressionPlayerLookup(queryValue) {
   result.progressionDebug.fglEntityLinks = characterScan.links;
   result.progressionDebug.componentNames = characterScan.componentNames;
   result.progressionDebug.fLevelTarget = characterScan.target || null;
+  result.progressionDebug.componentSchemaDumps = [...(result.progressionDebug.componentSchemaDumps || []), ...(characterScan.debugDumps || [])];
   result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...characterScan.fieldStatus };
   result.characterXp = characterScan.values;
   console.info("[progression/player] FLevel lookup", {
@@ -4348,6 +4351,7 @@ async function progressionPlayerLookup(queryValue) {
   }));
   result.progressionDebug.componentNames = [...new Set([...(result.progressionDebug.componentNames || []), ...techScan.componentNames])];
   result.progressionDebug.techKnowledgeTarget = techScan.target || null;
+  result.progressionDebug.componentSchemaDumps = [...(result.progressionDebug.componentSchemaDumps || []), ...(techScan.debugDumps || [])];
   result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...techScan.fieldStatus };
   result.techKnowledge = techScan.values;
   console.info("[progression/player] Tech lookup", {
@@ -4374,6 +4378,48 @@ function fieldFoundStatus(value, paths) {
   return value === "" || value == null
     ? `unsupported: field not found in scanned component JSON${paths ? `; paths checked ${paths}` : ""}`
     : "detected";
+}
+
+function progressionDecodeJson(value) {
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+function progressionRootKeys(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return Object.keys(value);
+  if (Array.isArray(value)) return value.map((_, index) => String(index));
+  return [];
+}
+
+function progressionDumpComponentSchema(componentType, rows) {
+  const dumps = (rows || []).filter((row) => row.kind === "debug_component").map((row) => {
+    const decoded = progressionDecodeJson(row.value || "");
+    return {
+      timestamp: new Date().toISOString(),
+      componentType,
+      actor_id: row.actor_id,
+      entity_id: row.entity_id,
+      slot: row.slot_name || "",
+      componentName: row.path || "",
+      rootKeys: progressionRootKeys(decoded),
+      decoded
+    };
+  });
+  if (!dumps.length) return [];
+  fs.mkdirSync(path.dirname(PROGRESSION_SCHEMA_DEBUG_LOG), { recursive: true });
+  for (const dump of dumps) {
+    const text = JSON.stringify(dump, null, 2);
+    console.info("[progression/component-schema]", text);
+    fs.appendFileSync(PROGRESSION_SCHEMA_DEBUG_LOG, text + "\n", "utf8");
+  }
+  return dumps.map((dump) => ({
+    componentType: dump.componentType,
+    actor_id: dump.actor_id,
+    entity_id: dump.entity_id,
+    slot: dump.slot,
+    componentName: dump.componentName,
+    rootKeys: dump.rootKeys,
+    debugLogPath: PROGRESSION_SCHEMA_DEBUG_LOG
+  }));
 }
 
 async function progressionCharacterComponentScan(actorIds) {
@@ -4422,12 +4468,18 @@ async function progressionCharacterComponentScan(actorIds) {
     from walk
     where array_length(path, 1) = 1
     union all
+    select 'debug_component', actor_id::text, coalesce(entity_id::text, ''), slot_name, path[1], value::text
+    from walk
+    where array_length(path, 1) = 1
+      and lower(path[1]) like '%levelcomponent%'
+    union all
     select 'field', actor_id::text, coalesce(entity_id::text, ''), slot_name, array_to_string(path, '.'), value #>> '{}'
     from walk
     where path[array_length(path, 1)] in ('TotalXPEarned', 'TotalSkillPoints', 'UnspentSkillPoints')
     order by 1, 2, 3, 4, 5;
   `;
   const rows = parseDbRows(await dbQuery(sql, 7000), ["kind", "actor_id", "entity_id", "slot_name", "path", "value"]);
+  const debugDumps = progressionDumpComponentSchema("FLevelComponent", rows);
   const links = rows.filter((row) => row.kind === "link").map((row) => ({
     actor_id: row.actor_id,
     entity_id: row.entity_id,
@@ -4463,6 +4515,7 @@ async function progressionCharacterComponentScan(actorIds) {
     },
     links,
     componentNames,
+    debugDumps,
     fieldStatus: {
       TotalXPEarned: fieldFoundStatus(values.TotalXPEarned, pathOf("TotalXPEarned")),
       TotalSkillPoints: fieldFoundStatus(values.TotalSkillPoints, pathOf("TotalSkillPoints")),
@@ -4504,12 +4557,22 @@ async function progressionTechKnowledgeScan(actorIds) {
     from walk
     where array_length(path, 1) = 1
     union all
+    select 'debug_component', actor_id::text, path[1], value::text
+    from walk
+    where array_length(path, 1) = 1
+      and lower(path[1]) like '%techknowledge%'
+    union all
     select 'field', actor_id::text, array_to_string(path, '.'), value #>> '{}'
     from walk
     where path[array_length(path, 1)] = 'm_TechKnowledgePoints'
     order by 1, 2, 3;
   `;
   const rows = parseDbRows(await dbQuery(sql, 7000), ["kind", "actor_id", "path", "value"]);
+  const debugDumps = progressionDumpComponentSchema("TechKnowledgePlayerComponent", rows.map((row) => ({
+    ...row,
+    entity_id: "",
+    slot_name: ""
+  })));
   const componentNames = [...new Set(rows.filter((row) => row.kind === "component").map((row) => row.path).filter(Boolean))];
   const fields = rows.filter((row) => row.kind === "field");
   const preferred = fields.find((row) => String(row.actor_id) === String(actorIds[0])) || fields[0];
@@ -4519,6 +4582,7 @@ async function progressionTechKnowledgeScan(actorIds) {
     values: { m_TechKnowledgePoints: value },
     componentNames,
     target: preferred ? { actor_id: preferred.actor_id, path: preferred.path, value } : null,
+    debugDumps,
     fieldStatus: { m_TechKnowledgePoints: fieldFoundStatus(value, paths) }
   };
 }
@@ -8871,7 +8935,7 @@ function renderProgressionInspector(data){const unavailable=document.getElementB
 async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});addActivity("warn","Progression database unavailable",e.message);}}
 function detailRows(rows){return Object.entries(rows||{}).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value||"--")+'</strong></div>').join("");}
 function renderProgressionPlayer(data){progressionPlayerState=data?.ok?data:null;progressionPreviewState=null;const status=document.getElementById("progressionPlayerStatus");if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Current values loaded into the guarded editor.":(data?.reason||data?.error||"Progression player lookup failed.");}const identity=document.getElementById("progressionPlayerIdentity");if(identity){const p=data?.player||{};identity.innerHTML=data?.ok?detailRows({"player_id":p.player_id,"actor_id":p.actor_id,"character_actor_id":p.character_actor_id,"character_name":p.character_name,"account_id":p.account_id,"controller_id":p.player_controller_id,"pawn_id":p.player_pawn_id,"online_status":p.online_status,"map":p.map}):'<div class="empty">No player selected.</div>';}const xp=document.getElementById("progressionCharacterXp");const character=data?.characterXp||{};const tech=data?.techKnowledge||{};if(xp){xp.innerHTML=data?.ok?(detailRows({"TotalXPEarned":character.TotalXPEarned||"Unsupported / not found","TotalSkillPoints":character.TotalSkillPoints||"Unsupported / not found","UnspentSkillPoints":character.UnspentSkillPoints||"Unsupported / not found","TechKnowledgePoints":tech.m_TechKnowledgePoints||"Unsupported / not found"})):'<div class="empty">No character XP loaded.</div>';}if(data?.ok){setValue("progressionTotalXp",character.TotalXPEarned||0);setValue("progressionTotalSkillPoints",character.TotalSkillPoints||0);setValue("progressionUnspentSkillPoints",character.UnspentSkillPoints||0);setValue("progressionTechKnowledgePoints",tech.m_TechKnowledgePoints||0);setValue("progressionConfirmText","");}const warnings=document.getElementById("progressionPlayerWarnings");if(warnings){const items=data?.warnings||[];warnings.innerHTML=items.length?items.map(item=>'<div class="warning">'+esc(item)+'</div>').join(""):'<div class="empty">No warnings.</div>';}renderProgressionCharacterDebug(data);const spec=document.getElementById("progressionSpecRows");if(spec)spec.innerHTML=data?.ok?((data.specializationTracks||[]).length?(data.specializationTracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this player.</td></tr>'):'<tr><td colspan="3">No player loaded.</td></tr>';const factions=document.getElementById("progressionFactionRows");if(factions)factions.innerHTML=data?.ok?((data.factionReputation||[]).length?(data.factionReputation||[]).map(row=>'<tr><td>'+esc(row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';}
-function renderProgressionCharacterDebug(data){const el=document.getElementById("progressionCharacterDebug");if(!el)return;const debug=data?.progressionDebug||{};if(!data?.ok){el.textContent="No progression player lookup debug data.";return;}el.textContent=JSON.stringify({checkedActorIds:debug.checkedActorIds||[],fglEntityLinks:debug.fglEntityLinks||[],componentNames:debug.componentNames||[],fLevelTarget:debug.fLevelTarget||null,techKnowledgeTarget:debug.techKnowledgeTarget||null,fieldStatus:debug.fieldStatus||{}},null,2);}
+function renderProgressionCharacterDebug(data){const el=document.getElementById("progressionCharacterDebug");if(!el)return;const debug=data?.progressionDebug||{};if(!data?.ok){el.textContent="No progression player lookup debug data.";return;}el.textContent=JSON.stringify({checkedActorIds:debug.checkedActorIds||[],fglEntityLinks:debug.fglEntityLinks||[],componentNames:debug.componentNames||[],fLevelTarget:debug.fLevelTarget||null,techKnowledgeTarget:debug.techKnowledgeTarget||null,componentSchemaDumps:debug.componentSchemaDumps||[],fieldStatus:debug.fieldStatus||{}},null,2);}
 async function lookupProgressionPlayer(){const query=document.getElementById("progressionPlayerQuery")?.value||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:20000});renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="timeout")addActivity("warn","Progression player lookup timed out",(data.step||"unknown step")+" / "+(data.hint||"Try exact character name."));else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||data.error||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup failed",e.message);}}
 setTimeout(()=>{const input=document.getElementById("progressionPlayerQuery");if(input)input.addEventListener("keydown",event=>{if(event.key==="Enter")lookupProgressionPlayer();});},0);
 function syncProgressionActionFields(){const actionEl=document.getElementById("progressionAction");if(actionEl)actionEl.value="character_xp_skill_points";document.querySelectorAll(".progression-character").forEach(el=>el.classList.remove("hidden"));progressionPreviewState=null;setText("progressionPreviewLog","No live progression preview generated.");}

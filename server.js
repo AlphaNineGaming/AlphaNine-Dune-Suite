@@ -4210,35 +4210,6 @@ function progressionLookupTimeoutResponse(error, query, step, timings = {}) {
   };
 }
 
-function progressionPlayerSearchText(player) {
-  return [
-    player?.name,
-    player?.character_name,
-    player?.account_id,
-    player?.id,
-    player?.fls_id,
-    player?.funcom_id,
-    player?.player_controller_id,
-    player?.character_id,
-    player?.player_pawn_id
-  ].filter(Boolean).map((value) => String(value));
-}
-
-function progressionFindPlayerFromAdminList(players, query) {
-  const needle = String(query || "").trim().toLowerCase();
-  if (!needle) return { matches: [], mode: "empty" };
-  const exact = [];
-  const partial = [];
-  for (const player of players || []) {
-    const fields = progressionPlayerSearchText(player);
-    if (fields.some((value) => value.toLowerCase() === needle)) exact.push(player);
-    else if (fields.some((value) => value.toLowerCase().includes(needle))) partial.push(player);
-  }
-  return exact.length
-    ? { matches: exact.slice(0, 10), mode: "exact" }
-    : { matches: partial.slice(0, 10), mode: "partial" };
-}
-
 function withProgressionStepTimeout(promise, timeoutMs, step) {
   return Promise.race([
     promise,
@@ -4263,10 +4234,9 @@ async function progressionPlayerLookup(queryValue) {
     query,
     source: adminPlayerData.source || "",
     playersReturned: (adminPlayerData.players || []).length,
-    durationMs: timer.timings.adminPlayers
+    durationMs: timer.timings.lookup
   });
-  const found = progressionFindPlayerFromAdminList(adminPlayerData.players || [], query);
-  let players = found.matches.map((row) => ({
+  let players = (adminPlayerData.players || []).slice(0, 5).map((row) => ({
     actor_id: row.player_controller_id || row.character_id || row.player_pawn_id || row.id || "",
     account_id: row.account_id || row.id || "",
     character_name: row.character_name || row.name || row.fls_id || row.id || "Unknown",
@@ -4279,11 +4249,10 @@ async function progressionPlayerLookup(queryValue) {
   }));
   if (!players.length) {
     timer.finish({ status: "not-found" });
-    return { ok: false, status: "not-found", query, players: [], reason: "No matching progression player found.", safety, timings: timer.timings };
+    return { ok: false, status: "not-found", query, players: [], reason: adminPlayerData.error || "adminPlayers returned no matching player.", safety, timings: timer.timings };
   }
   const player = players[0];
-  console.info("[progression/player] selected player identifiers", {
-    query,
+  const resolvedIdentifiers = {
     player_id: player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id || "",
     actor_id: player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id || "",
     pawn_id: player.player_pawn_id || "",
@@ -4292,7 +4261,9 @@ async function progressionPlayerLookup(queryValue) {
     player_controller_id: player.player_controller_id,
     character_id: player.character_id,
     player_pawn_id: player.player_pawn_id
-  });
+  };
+  console.info("[progression/player] adminPlayers returned", { query, ...resolvedIdentifiers });
+  console.info("[progression/player] player_state refinement", { SQL: "not run; using adminPlayers resolved identifiers", rows: 0 });
   timer.timings.player_state_refine = 0;
   const progressionActorId = Number(player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id);
   if (!Number.isSafeInteger(progressionActorId) || progressionActorId < 1) {
@@ -4362,6 +4333,13 @@ async function progressionPlayerLookup(queryValue) {
   result.progressionDebug.fLevelTarget = characterScan.target || null;
   result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...characterScan.fieldStatus };
   result.characterXp = characterScan.values;
+  console.info("[progression/player] FLevel lookup", {
+    actor_id: characterScan.target?.actor_id || resolvedIdentifiers.actor_id || "",
+    entity_id: characterScan.target?.entity_id || "",
+    rows: Array.isArray(characterScan.links) ? characterScan.links.length : 0,
+    target: characterScan.target || null,
+    durationMs: timer.timings.flevel_lookup
+  });
 
   const techScan = await timer.step("tech_lookup", () => withProgressionStepTimeout(progressionTechKnowledgeScan(actorIdsToCheck), 8000, "tech_lookup")).catch((error) => ({
     values: null,
@@ -4372,6 +4350,13 @@ async function progressionPlayerLookup(queryValue) {
   result.progressionDebug.techKnowledgeTarget = techScan.target || null;
   result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...techScan.fieldStatus };
   result.techKnowledge = techScan.values;
+  console.info("[progression/player] Tech lookup", {
+    actor_id: techScan.target?.actor_id || resolvedIdentifiers.actor_id || "",
+    entity_id: techScan.target?.entity_id || "",
+    rows: techScan.target ? 1 : 0,
+    target: techScan.target || null,
+    durationMs: timer.timings.tech_lookup
+  });
 
   await timer.step("response_build", async () => { result.timings = timer.timings; });
   timer.finish({ status: "found", actorId: result.player.actor_id });

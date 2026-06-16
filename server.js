@@ -4209,6 +4209,42 @@ function progressionLookupTimeoutResponse(error, query, step, timings = {}) {
   };
 }
 
+function progressionPlayerSearchText(player) {
+  return [
+    player?.name,
+    player?.character_name,
+    player?.account_id,
+    player?.id,
+    player?.fls_id,
+    player?.funcom_id,
+    player?.player_controller_id,
+    player?.character_id,
+    player?.player_pawn_id
+  ].filter(Boolean).map((value) => String(value));
+}
+
+function progressionFindPlayerFromAdminList(players, query) {
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) return { matches: [], mode: "empty" };
+  const exact = [];
+  const partial = [];
+  for (const player of players || []) {
+    const fields = progressionPlayerSearchText(player);
+    if (fields.some((value) => value.toLowerCase() === needle)) exact.push(player);
+    else if (fields.some((value) => value.toLowerCase().includes(needle))) partial.push(player);
+  }
+  return exact.length
+    ? { matches: exact.slice(0, 10), mode: "exact" }
+    : { matches: partial.slice(0, 10), mode: "partial" };
+}
+
+function withProgressionStepTimeout(promise, timeoutMs, step) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${step} timed out after ${timeoutMs}ms`)), timeoutMs))
+  ]);
+}
+
 async function progressionPlayerLookup(queryValue) {
   const query = String(queryValue || "").trim();
   if (!query) return { ok: false, status: "not-found", reason: "Enter a character name, player name, actor id, or player id." };
@@ -4228,90 +4264,61 @@ async function progressionPlayerLookup(queryValue) {
   if (!tableSet.has("dune.actors") || !hasColumn(columnSet, "dune", "actors", "id")) {
     return progressionUnsupported("dune.actors with id column is required for player lookup.", inspect);
   }
-  const columnType = new Map((inspect.columns || []).map((row) => [`${row.schema}.${row.table}.${row.column}`, row.udtName || row.dataType || ""]));
-
-  const hasActorsClass = hasColumn(columnSet, "dune", "actors", "class");
-  const hasActorsOwner = hasColumn(columnSet, "dune", "actors", "owner_account_id");
-  const hasActorsMap = hasColumn(columnSet, "dune", "actors", "map");
   const hasActorsProperties = hasColumn(columnSet, "dune", "actors", "properties");
   const hasPlayerState = tableSet.has("dune.player_state");
   const hasPsAccount = hasColumn(columnSet, "dune", "player_state", "account_id");
-  const hasPsName = hasColumn(columnSet, "dune", "player_state", "character_name");
   const hasPsController = hasColumn(columnSet, "dune", "player_state", "player_controller_id");
   const hasPsPawn = hasColumn(columnSet, "dune", "player_state", "player_pawn_id");
   const hasPsOnline = hasColumn(columnSet, "dune", "player_state", "online_status");
-  const hasAccounts = tableSet.has("dune.accounts");
-  const hasAccountsId = hasColumn(columnSet, "dune", "accounts", "id");
-  const hasAccountsUser = hasColumn(columnSet, "dune", "accounts", "user");
-  const hasAccountsFuncom = hasColumn(columnSet, "dune", "accounts", "funcom_id");
-  const hasEncrypted = tableSet.has("dune.encrypted_accounts");
-  const hasEncryptedId = hasColumn(columnSet, "dune", "encrypted_accounts", "id");
-  const hasEncryptedFuncom = hasColumn(columnSet, "dune", "encrypted_accounts", "encrypted_funcom_id")
-    && String(columnType.get("dune.encrypted_accounts.encrypted_funcom_id") || "").toLowerCase() === "bytea";
-
-  const joins = [];
-  if (hasPlayerState && hasPsAccount && hasActorsOwner) {
-    joins.push("left join dune.player_state ps on ps.account_id = a.owner_account_id");
-  }
-  if (hasAccounts && hasAccountsId && hasActorsOwner) {
-    joins.push("left join dune.accounts ac on ac.id = a.owner_account_id");
-  }
-  if (hasEncrypted && hasEncryptedId && hasActorsOwner) {
-    joins.push("left join dune.encrypted_accounts ea on ea.id = a.owner_account_id");
-  }
-
-  const search = sqlString(`%${query}%`);
-  const exact = sqlString(query);
-  const exactConditions = [`a.id::text = ${exact}`];
-  if (hasActorsOwner) exactConditions.push(`a.owner_account_id::text = ${exact}`);
-  if (hasPsController && joins.some((join) => join.includes("player_state"))) exactConditions.push(`ps.player_controller_id::text = ${exact}`);
-  if (hasPsPawn && joins.some((join) => join.includes("player_state"))) exactConditions.push(`ps.player_pawn_id::text = ${exact}`);
-  if (hasPsName && joins.some((join) => join.includes("player_state"))) exactConditions.push(`lower(ps.character_name) = lower(${exact})`);
-  if (hasAccountsUser && joins.some((join) => join.includes("dune.accounts"))) exactConditions.push(`lower(ac."user") = lower(${exact})`);
-  if (hasAccountsFuncom && joins.some((join) => join.includes("dune.accounts"))) exactConditions.push(`lower(ac.funcom_id) = lower(${exact})`);
-  if (hasEncryptedFuncom && joins.some((join) => join.includes("encrypted_accounts"))) exactConditions.push(`lower(convert_from(ea.encrypted_funcom_id, 'UTF8')) = lower(${exact})`);
-  const partialConditions = [];
-  if (hasPsName && joins.some((join) => join.includes("player_state"))) partialConditions.push(`ps.character_name ilike ${search}`);
-  if (hasAccountsUser && joins.some((join) => join.includes("dune.accounts"))) partialConditions.push(`ac."user" ilike ${search}`);
-  if (hasAccountsFuncom && joins.some((join) => join.includes("dune.accounts"))) partialConditions.push(`ac.funcom_id ilike ${search}`);
-  if (hasEncryptedFuncom && joins.some((join) => join.includes("encrypted_accounts"))) partialConditions.push(`convert_from(ea.encrypted_funcom_id, 'UTF8') ilike ${search}`);
-  const playerFilter = hasActorsClass ? "and a.class ilike '%Player%'" : "";
-  const nameExpr = firstExpression([
-    hasPsName && joins.some((join) => join.includes("player_state")) ? "ps.character_name" : "",
-    hasAccountsUser && joins.some((join) => join.includes("dune.accounts")) ? "ac.\"user\"" : "",
-    hasAccountsFuncom && joins.some((join) => join.includes("dune.accounts")) ? "ac.funcom_id" : "",
-    hasEncryptedFuncom && joins.some((join) => join.includes("encrypted_accounts")) ? "convert_from(ea.encrypted_funcom_id, 'UTF8')" : ""
-  ]);
-  const playerSql = (conditions, limit = 5) => `
-    select
-      a.id::text as actor_id,
-      ${hasActorsOwner ? "coalesce(a.owner_account_id::text, '')" : "''"} as account_id,
-      coalesce(${nameExpr}) as character_name,
-      ${hasPsController && joins.some((join) => join.includes("player_state")) ? "coalesce(ps.player_controller_id::text, '')" : "''"} as player_controller_id,
-      ${hasPsPawn && joins.some((join) => join.includes("player_state")) ? "coalesce(ps.player_pawn_id::text, '')" : "''"} as player_pawn_id,
-      ${hasPsOnline && joins.some((join) => join.includes("player_state")) ? "coalesce(ps.online_status::text, 'unknown')" : "'unknown'"} as online_status,
-      ${hasActorsMap ? "coalesce(a.map, '')" : "''"} as map
-    from dune.actors a
-    ${joins.join("\n")}
-    where (${conditions.join(" or ")})
-      ${playerFilter}
-    order by a.id
-    limit ${Number(limit) || 5};
-  `;
-  let players = await timer.step("player/account search", async () =>
-    parseDbRows(await dbQuery(playerSql(exactConditions, 5), 7000), ["actor_id", "account_id", "character_name", "player_controller_id", "player_pawn_id", "online_status", "map"])
-  );
-  if (!players.length && partialConditions.length) {
-    players = await timer.step("player/account partial search", async () =>
-      parseDbRows(await dbQuery(playerSql(partialConditions, 10), 7000), ["actor_id", "account_id", "character_name", "player_controller_id", "player_pawn_id", "online_status", "map"])
-    );
-  }
+  const hasPsMap = hasColumn(columnSet, "dune", "player_state", "map");
+  const hasPsStateId = hasColumn(columnSet, "dune", "player_state", "player_state_id");
+  const hasPsLastAvatarActivity = hasColumn(columnSet, "dune", "player_state", "last_avatar_activity");
+  const adminPlayerData = await timer.step("player/account search", () => withProgressionStepTimeout(adminPlayers(), 8000, "player/account search"));
+  const found = progressionFindPlayerFromAdminList(adminPlayerData.players || [], query);
+  let players = found.matches.map((row) => ({
+    actor_id: row.player_controller_id || row.character_id || row.player_pawn_id || row.id || "",
+    account_id: row.account_id || row.id || "",
+    character_name: row.character_name || row.name || row.fls_id || row.id || "Unknown",
+    player_controller_id: row.player_controller_id || "",
+    player_pawn_id: row.player_pawn_id || "",
+    character_id: row.character_id || "",
+    online_status: row.online_status || row.status || "unknown",
+    map: row.map || "",
+    source: adminPlayerData.source || "adminPlayers"
+  }));
   if (!players.length) {
     timer.finish({ status: "not-found" });
     return { ok: false, status: "not-found", query, players: [], reason: "No matching progression player found.", safety: inspect.safety, timings: timer.timings };
   }
   const player = players[0];
-  const progressionActorId = await timer.step("actor lookup", async () => Number(player.player_controller_id || player.actor_id));
+  if (hasPlayerState && (hasPsAccount || hasPsController)) {
+    const where = [];
+    if (hasPsAccount && player.account_id) where.push(`account_id::text = ${sqlString(player.account_id)}`);
+    if (hasPsController && player.player_controller_id) where.push(`player_controller_id::text = ${sqlString(player.player_controller_id)}`);
+    if (where.length) {
+      const stateSql = `
+        select
+          ${hasPsController ? "coalesce(player_controller_id::text, '')" : "''"} as player_controller_id,
+          ${hasPsPawn ? "coalesce(player_pawn_id::text, '')" : "''"} as player_pawn_id,
+          ${hasPsOnline ? "coalesce(online_status::text, 'unknown')" : "'unknown'"} as online_status,
+          ${hasPsMap ? "coalesce(map::text, '')" : "''"} as map
+        from dune.player_state
+        where ${where.join(" or ")}
+        order by ${hasPsLastAvatarActivity ? "last_avatar_activity desc nulls last" : (hasPsStateId ? "player_state_id nulls last" : "account_id")}
+        limit 1
+      `;
+      const rows = await timer.step("pawn/character lookup", async () =>
+        parseDbRows(await dbQuery(stateSql, 5000), ["player_controller_id", "player_pawn_id", "online_status", "map"])
+      );
+      if (rows[0]) {
+        player.player_controller_id = rows[0].player_controller_id || player.player_controller_id;
+        player.player_pawn_id = rows[0].player_pawn_id || player.player_pawn_id;
+        player.online_status = rows[0].online_status || player.online_status;
+        player.map = rows[0].map || player.map;
+      }
+    }
+  }
+  const progressionActorId = await timer.step("actor lookup", async () => Number(player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id));
   if (!Number.isSafeInteger(progressionActorId) || progressionActorId < 1) {
     return progressionUnsupported("Matched player did not expose a usable actor/player id.", inspect);
   }
@@ -4386,7 +4393,7 @@ async function progressionPlayerLookup(queryValue) {
   result.progressionDebug.checkedActorIds = actorIdsToCheck.map(String);
 
   if (inspect.supports?.characterXp?.status === "detected") {
-    const characterScan = await timer.step("FLevelComponent lookup", () => progressionCharacterComponentScan(actorIdsToCheck)).catch((error) => ({
+    const characterScan = await timer.step("FLevelComponent lookup", () => withProgressionStepTimeout(progressionCharacterComponentScan(actorIdsToCheck), 8000, "FLevelComponent lookup")).catch((error) => ({
       values: null,
       links: [],
       componentNames: [],
@@ -4409,7 +4416,7 @@ async function progressionPlayerLookup(queryValue) {
   }
 
   if (tableSet.has("dune.actors") && hasActorsProperties) {
-    const techScan = await timer.step("TechKnowledge lookup", () => progressionTechKnowledgeScan(actorIdsToCheck)).catch((error) => ({
+    const techScan = await timer.step("TechKnowledge lookup", () => withProgressionStepTimeout(progressionTechKnowledgeScan(actorIdsToCheck), 8000, "TechKnowledge lookup")).catch((error) => ({
       values: null,
       componentNames: [],
       fieldStatus: { m_TechKnowledgePoints: `Character XP component scan failed: ${error.message}` }
@@ -5573,6 +5580,7 @@ async function adminPlayers() {
       coalesce(ac.funcom_id, '') as funcom_id,
       coalesce(ps.player_controller_id::text, '') as player_controller_id,
       coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
+      coalesce(ps.player_pawn_id::text, '') as player_pawn_id,
       coalesce(nullif(ps.character_name, ''), a.account_id::text) as character_name,
       case when nullif(ps.character_name, '') is null then 'false' else 'true' end as resolved
     from account_ids a
@@ -5584,7 +5592,7 @@ async function adminPlayers() {
   try {
     const output = await dbQuery(characterQuery);
     const players = output ? output.split(/\r?\n/).filter(Boolean).map((line) => {
-      const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", characterName = "", resolved = "false"] = line.split("\t");
+      const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", playerPawnId = "", characterName = "", resolved = "false"] = line.split("\t");
       return {
         id: accountId,
         name: characterName || accountId || "Unknown",
@@ -5593,6 +5601,7 @@ async function adminPlayers() {
         funcom_id: funcomId,
         player_controller_id: playerControllerId,
         character_id: characterId,
+        player_pawn_id: playerPawnId,
         character_name: characterName || accountId || "Unknown",
         characterNameResolved: /^true$/i.test(resolved)
       };

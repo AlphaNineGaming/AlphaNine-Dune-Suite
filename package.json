@@ -5,6 +5,7 @@
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
   "scripts": {
+    "build:item-catalog": "node scripts/build-item-catalog.js",
     "build:win": "electron-builder --win nsis --x64 --publish never --config.win.signAndEditExecutable=false"
   },
   "dependencies": {
@@ -41,6 +42,8 @@
       "electron/**",
       "assets/**",
       "data/.gitkeep",
+      "data/dune-items-catalog.json",
+      "data/gear-images/**",
       "gear-codex/**",
       "manager/**",
       "receivers/**",

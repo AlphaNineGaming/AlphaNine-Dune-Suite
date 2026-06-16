@@ -41,11 +41,15 @@ const MANAGER_DIR = packagedUnpackedPath("manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
 const APPDATA_DIR = process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "";
 const DATA_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "data") : path.join(__dirname, "data");
+const BUNDLED_DATA_DIR = packagedAssetPath("data");
+const DUNE_ITEMS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-items-catalog.json");
 const DUNE_ITEMS_CACHE_PATH = path.join(DATA_DIR, "dune-items-cache.json");
 const GEAR_IMAGE_CACHE_DIR = path.join(DATA_DIR, "gear-images");
+const BUNDLED_GEAR_IMAGE_DIR = path.join(BUNDLED_DATA_DIR, "gear-images");
 const GEAR_IMPORT_URL = "https://dune.gaming.tools/items";
 const GEAR_DATA_ENTITIES_URL = "https://cdn-hosted.gaming.tools/dune/data/en/entities.d.json";
 const GEAR_CDN_ASSET_URL = "https://cdn-hosted.gaming.tools/dune";
+const ITEM_GRADES = ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Unique", "Unknown"];
 const LOCALAPPDATA_DIR = process.env.LOCALAPPDATA || process.env.APPDATA || "";
 const MANAGER_DATA_DIR = LOCALAPPDATA_DIR ? path.join(LOCALAPPDATA_DIR, "AlphaNine Dune Awakening Manager") : MANAGER_DIR;
 const MANAGER_CONFIG_PATH = path.join(MANAGER_DATA_DIR, "manager-config.json");
@@ -1761,6 +1765,47 @@ function gearCatalog() {
   return cache.items || [];
 }
 
+function firstItemText(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function normalizeItemGrade(...values) {
+  const raw = firstItemText(...values);
+  if (!raw) return "Unknown";
+  const normalized = raw.toLowerCase().replace(/[_-]+/g, " ").trim();
+  if (/\bunique\b|\bexotic\b/.test(normalized)) return "Unique";
+  if (/\blegendary\b|\blegend\b/.test(normalized)) return "Legendary";
+  if (/\bepic\b|\bpurple\b/.test(normalized)) return "Epic";
+  if (/\brare\b|\bblue\b/.test(normalized)) return "Rare";
+  if (/\buncommon\b|\bgreen\b/.test(normalized)) return "Uncommon";
+  if (/\bcommon\b|\bwhite\b|\bbasic\b/.test(normalized)) return "Common";
+  return "Unknown";
+}
+
+function emptyItemGradeCounts() {
+  return Object.fromEntries(ITEM_GRADES.map((grade) => [grade, 0]));
+}
+
+function itemGradeCounts(items = []) {
+  const counts = emptyItemGradeCounts();
+  for (const item of items) {
+    counts[normalizeItemGrade(item.grade, item.rarity, item.quality, item.tier, item.itemGrade, item.itemRarity)] += 1;
+  }
+  return counts;
+}
+
+function filterItemsByQuery(items = [], searchParams = new URLSearchParams()) {
+  const grade = normalizeItemGrade(searchParams.get("grade") || "all");
+  const rawGrade = String(searchParams.get("grade") || "all").trim().toLowerCase();
+  if (!rawGrade || rawGrade === "all") return items;
+  return items.filter((item) => normalizeItemGrade(item.grade, item.rarity, item.quality, item.tier, item.itemGrade, item.itemRarity) === grade);
+}
+
 function gearImageUrlFromPath(localPath) {
   if (!localPath) return "";
   const name = path.basename(String(localPath));
@@ -1779,23 +1824,111 @@ function sanitizeGearItemForUi(item = {}) {
     detail: String(item.detail || ""),
     tier: String(item.tier || ""),
     rarity: String(item.rarity || ""),
+    grade: normalizeItemGrade(item.grade, item.rarity, item.quality, item.tier, item.itemGrade, item.itemRarity),
     maxStack: String(item.maxStack || ""),
     imageLocalPath,
     icon,
-    hasDisplayName: item.hasDisplayName === true
+    hasDisplayName: item.hasDisplayName === true,
+    spawnable: item.spawnable !== false
   };
 }
 
+function normalizeBundledItemForUserCache(item = {}) {
+  const normalized = sanitizeGearItemForUi(item);
+  return {
+    ...item,
+    ...normalized,
+    detailUrl: String(item.detailUrl || ""),
+    imageUrl: String(item.imageUrl || ""),
+    imageStatus: String(item.imageStatus || ""),
+    imageError: String(item.imageError || ""),
+    source: "bundled"
+  };
+}
+
+function copyBundledGearImages() {
+  const result = { copied: 0, reused: 0, missingSource: false, errors: [] };
+  fs.mkdirSync(GEAR_IMAGE_CACHE_DIR, { recursive: true });
+  if (!fs.existsSync(BUNDLED_GEAR_IMAGE_DIR)) {
+    result.missingSource = true;
+    return result;
+  }
+  for (const entry of fs.readdirSync(BUNDLED_GEAR_IMAGE_DIR, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const source = path.join(BUNDLED_GEAR_IMAGE_DIR, entry.name);
+    const target = path.join(GEAR_IMAGE_CACHE_DIR, entry.name);
+    try {
+      if (fs.existsSync(target)) result.reused += 1;
+      else {
+        fs.copyFileSync(source, target);
+        result.copied += 1;
+      }
+    } catch (error) {
+      result.errors.push(`${entry.name}: ${error.message}`);
+    }
+  }
+  return result;
+}
+
+function seedDuneItemsCacheFromBundledCatalog({ force = false } = {}) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(DUNE_ITEMS_CATALOG_PATH)) return { seeded: false, reason: "Bundled item catalog is not present.", catalogPath: DUNE_ITEMS_CATALOG_PATH };
+  let catalog = null;
+  try {
+    catalog = JSON.parse(fs.readFileSync(DUNE_ITEMS_CATALOG_PATH, "utf8"));
+  } catch (error) {
+    return { seeded: false, reason: `Bundled item catalog could not be read: ${error.message}`, catalogPath: DUNE_ITEMS_CATALOG_PATH };
+  }
+  const catalogItems = Array.isArray(catalog.items) ? catalog.items.map(normalizeBundledItemForUserCache).filter((item) => item.id && item.name) : [];
+  if (!catalogItems.length) {
+    return { seeded: false, reason: "Bundled item catalog is empty. Run scripts/build-item-catalog.js during development/build before packaging.", catalogPath: DUNE_ITEMS_CATALOG_PATH };
+  }
+  let shouldSeed = force || !fs.existsSync(DUNE_ITEMS_CACHE_PATH);
+  if (!shouldSeed) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(DUNE_ITEMS_CACHE_PATH, "utf8"));
+      const existingItems = Array.isArray(existing.items) ? existing.items.length : 0;
+      const existingGenerated = Date.parse(existing.generatedAt || "1970-01-01T00:00:00Z") || 0;
+      const bundledGenerated = Date.parse(catalog.generatedAt || "1970-01-01T00:00:00Z") || 0;
+      shouldSeed = existingItems === 0 || bundledGenerated > existingGenerated;
+    } catch {
+      shouldSeed = true;
+    }
+  }
+  const imageCopy = copyBundledGearImages();
+  if (!shouldSeed) return { seeded: false, reason: "User item cache is current.", catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCopy };
+  const cache = {
+    ok: true,
+    generatedAt: catalog.generatedAt || new Date().toISOString(),
+    version: APP_VERSION,
+    source: "bundled-catalog",
+    items: catalogItems,
+    report: {
+      ...(catalog.report || {}),
+      cachePath: DUNE_ITEMS_CACHE_PATH,
+      catalogPath: DUNE_ITEMS_CATALOG_PATH,
+      imageCacheDir: GEAR_IMAGE_CACHE_DIR,
+      bundledImageDir: BUNDLED_GEAR_IMAGE_DIR,
+      totalItemsFound: catalogItems.length,
+      gradeCounts: itemGradeCounts(catalogItems),
+      imageCopy
+    }
+  };
+  fs.writeFileSync(DUNE_ITEMS_CACHE_PATH, JSON.stringify(cache, null, 2));
+  return { seeded: true, items: catalogItems.length, imageCopy, catalogPath: DUNE_ITEMS_CATALOG_PATH };
+}
+
 function loadDuneItemsCache() {
+  const seeded = seedDuneItemsCacheFromBundledCatalog();
   if (!fs.existsSync(DUNE_ITEMS_CACHE_PATH)) {
-    return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, totalItemsFound: 0, totalImagesDownloaded: 0, totalImagesReused: 0, failedImageDownloads: 0, message: "Item cache has not been generated yet. Run Import Gear Items." } };
+    return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, totalItemsFound: 0, totalImagesDownloaded: 0, totalImagesReused: 0, failedImageDownloads: 0, message: seeded.reason || "Bundled item catalog has not been generated yet. Run scripts/build-item-catalog.js during development/build." } };
   }
   try {
     const data = JSON.parse(fs.readFileSync(DUNE_ITEMS_CACHE_PATH, "utf8"));
     const items = (data.items || []).map(sanitizeGearItemForUi).filter((item) => item.id && item.name);
-    return { ok: true, items, report: data.report || {}, generatedAt: data.generatedAt || "" };
+    return { ok: true, items, report: data.report || {}, generatedAt: data.generatedAt || "", seeded };
   } catch (error) {
-    return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, error: error.message, totalItemsFound: 0 } };
+    return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, error: error.message, totalItemsFound: 0 } };
   }
 }
 
@@ -2313,6 +2446,7 @@ async function discoverDuneItems() {
     detail: gearItemDetail(entity),
     tier: entity.tier ? `Tier ${entity.tier}` : "",
     rarity: String(entity.rarity || ""),
+    grade: normalizeItemGrade(entity.grade, entity.rarity, entity.quality, entity.tier, entity.itemGrade, entity.itemRarity),
     maxStack: String(entity.maxStack || entity.maxStackSize || entity.stackSize || ""),
     detailUrl: `${GEAR_IMPORT_URL}/${encodeURIComponent(String(entity.id || ""))}`,
     imageUrl: gearImageUrlFromIconPath(entity.iconPath),
@@ -2331,6 +2465,7 @@ async function discoverDuneItems() {
       detail: String(item.detail || ""),
       tier: String(item.tier || ""),
       rarity: String(item.rarity || ""),
+      grade: normalizeItemGrade(item.grade, item.rarity, item.quality, item.tier, item.itemGrade, item.itemRarity),
       maxStack: String(item.maxStack || ""),
       detailUrl: String(item.detailUrl || ""),
       imageUrl: String(item.imageUrl || ""),
@@ -2354,6 +2489,7 @@ async function discoverDuneItems() {
     totalImagesReused: discoveredItems.filter((item) => item.imageStatus === "reused").length,
     failedImageDownloads: discoveredItems.filter((item) => item.imageStatus === "failed").length,
     missingImages: discoveredItems.filter((item) => item.imageStatus === "missing").length,
+    gradeCounts: itemGradeCounts(discoveredItems),
     durationMs: Date.now() - startedAt
   };
   const cache = { ok: true, generatedAt: new Date().toISOString(), version: APP_VERSION, items: discoveredItems, report };
@@ -6986,6 +7122,15 @@ function appPage() {
     .gear-icon > * { grid-area:1 / 1; }
     .admin-item img { width:46px; height:46px; object-fit:contain; border-radius:6px; background:#0b0e12; }
     .admin-item span, .player-card span { color:var(--muted); font-size:12px; display:block; overflow-wrap:anywhere; }
+    .item-grade-badge { display:inline-flex !important; width:max-content; margin-top:5px; border:1px solid rgba(214,166,69,.28); padding:3px 7px; color:var(--gold-bright) !important; background:rgba(214,166,69,.08); font-size:10.5px !important; line-height:1.1; text-transform:uppercase; letter-spacing:.07em; }
+    .item-db-layout { display:grid; grid-template-columns:minmax(300px,.42fr) minmax(0,1fr); gap:var(--panel-gap); align-items:start; }
+    .item-db-list { display:grid; gap:8px; max-height:calc(100vh - 330px); min-height:420px; overflow:auto; padding-right:4px; }
+    .item-db-card { display:grid; grid-template-columns:52px minmax(0,1fr); gap:11px; align-items:center; width:100%; border:1px solid rgba(214,166,69,.18); background:rgba(255,255,255,.022); color:var(--text); text-align:left; padding:10px; clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
+    .item-db-card.active { border-color:var(--gold); background:rgba(217,178,111,.12); box-shadow:0 0 18px rgba(240,197,107,.08); }
+    .item-db-icon { width:52px; height:52px; display:grid; place-items:center; border:1px solid rgba(114,164,242,.24); border-radius:6px; background:#0b0e12; color:var(--blue); font-weight:900; }
+    .item-db-icon img { width:48px; height:48px; object-fit:contain; }
+    .item-db-meta { display:flex; flex-wrap:wrap; gap:6px; color:var(--muted); font-size:11.5px; line-height:1.3; margin-top:4px; }
+    .item-db-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:12px; }
     .detail-list { display:grid; gap:8px; margin-top:12px; }
     .detail-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:8px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); }
     .env-stack { display:grid; gap:var(--panel-gap); max-width:var(--content-max); margin:0 auto; }
@@ -7096,7 +7241,7 @@ function appPage() {
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
-    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
     @media (max-width:720px) { .env-var-row{grid-template-columns:1fr;gap:5px}.env-var-value{font-size:12px}.env-help{font-size:11.5px} }
   </style>
 </head>
@@ -7221,7 +7366,7 @@ function appPage() {
       <button class="tab" data-view="server">Server Status</button>
       <button class="tab" data-view="live-map">Live Map</button>
       <button class="tab" data-view="management">Server Management</button>
-      <button class="tab" data-view="codex">Gear Codex</button>
+      <button class="tab" data-view="item-database">Item Database</button>
       <button class="tab" data-view="env">Env Setup</button>
       <button class="tab" data-view="logs">Logs</button>
       <button class="tab" data-view="diagnostics">Diagnostics</button>
@@ -7467,6 +7612,7 @@ function appPage() {
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
             <label>Item Template Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
             <label>Item Filter<select id="adminItemCategory" onchange="renderAdminItems()"><option value="">All discovered items</option></select></label>
+            <label>Grade<select id="adminItemGrade" onchange="renderAdminItems()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
             <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
             <label>Quality<input id="adminQuality" type="number" min="0" max="100" value="0" oninput="syncQualityWarning()"></label>
             <div id="qualityWarning" class="warning hidden">Quality/grade is unsupported by the live RabbitMQ grant path. Set quality back to 0 before sending a live grant.</div>
@@ -7909,6 +8055,36 @@ DUNE_RECEIVER_SSH_KEY</pre>
       </div>
     </section>
 
+    <section id="item-database" class="view">
+      <div class="panel pad">
+        <div class="panel-head">
+          <div>
+            <div class="label">Item Database</div>
+            <div class="subtle mt">Bundled offline item catalog used by Give Items. No server scan or internet connection required.</div>
+          </div>
+          <button onclick="refreshItemDatabase()">Refresh Items</button>
+        </div>
+        <div class="field-grid mt">
+          <label>Search<input id="itemDbSearch" placeholder="Search name, spawn code, category, stats" oninput="renderItemDatabase()"></label>
+          <label>Category<select id="itemDbCategory" onchange="renderItemDatabase()"><option value="">All categories</option></select></label>
+          <label>Grade<select id="itemDbGrade" onchange="renderItemDatabase()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
+          <label>Tier<select id="itemDbTier" onchange="renderItemDatabase()"><option value="">All tiers</option></select></label>
+          <label class="check-row"><input id="itemDbSpawnableOnly" type="checkbox" onchange="renderItemDatabase()"> Spawnable only</label>
+        </div>
+        <div id="itemDbStatus" class="empty mt">Item database not loaded.</div>
+      </div>
+      <div class="item-db-layout mt">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Items</div><div id="itemDbCount" class="subtle">0 loaded</div></div></div>
+          <div id="itemDbList" class="item-db-list"><div class="empty">Load the item database.</div></div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Item Details</div>
+          <div id="itemDbDetails" class="empty mt">Select an item to inspect spawn data, grade, category, and stats.</div>
+        </div>
+      </div>
+    </section>
+
     <section id="codex" class="view">
       <div class="panel pad">
         <div class="panel-head">
@@ -8089,17 +8265,18 @@ const viewCopy={
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
   codex:["Gear Codex","Item template reference and operations catalog."],
+  "item-database":["Item Database","Bundled offline item catalog with search, grade, and spawn-code filters."],
   env:["Env Setup","Live Give environment requirements and missing variables."],
   logs:["Logs","Recent grants, probe results, and errors."],
   diagnostics:["Diagnostics","Connection health, version info, and log viewer."],
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();}
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false;
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false;
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
@@ -8338,7 +8515,15 @@ function renderAdminChannels(rows){const body=document.getElementById("adminChan
 function renderAdminItemFilters(){const select=document.getElementById("adminItemCategory");if(!select)return;const current=select.value;const categories=[...new Set(adminItems.map(item=>item.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All discovered items</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");select.value=[...categories,"","__unknown"].includes(current)?current:"";}
 function renderGearDiscoveryStatus(){const el=document.getElementById("gearDiscoveryStatus");if(!el)return;const report=adminItemReport||{};const total=Number(report.totalItemsFound||adminItems.length||0);const named=Number(report.itemsWithDisplayNames||adminItems.filter(item=>item.hasDisplayName).length||0);const unknown=Number(report.unknownOrUnclassifiedItems||adminItems.filter(item=>!item.hasDisplayName||!item.category).length||0);const pages=Number(report.totalFilesScanned||(report.filesScanned||[]).length||0);const downloaded=Number(report.totalImagesDownloaded||0);const reused=Number(report.totalImagesReused||0);const failed=Number(report.failedImageDownloads||0);const missing=Number(report.missingImages||0);const cache=report.cachePath?'<div class="subtle env-path-value">'+esc(report.cachePath)+'</div>':"";el.className=total?"empty mt":"warning mt";el.innerHTML='<strong>Items imported: '+total+'</strong><div class="subtle">Pages scanned: '+pages+' / Display names: '+named+' / Unknown or unclassified: '+unknown+'</div><div class="subtle">Images downloaded: '+downloaded+' / Reused: '+reused+' / Failed: '+failed+' / Missing: '+missing+'</div>'+cache+(report.message?'<div class="subtle">'+esc(report.message)+'</div>':'');}
 async function discoverGearItems(){const status=document.getElementById("gearDiscoveryStatus");try{if(status){status.className="warning mt";status.textContent="Importing Gear items and caching local icons...";}const data=await getJson("/api/gear/discover",{method:"POST",timeoutMs:300000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Gear item import completed",(adminItemReport?.totalItemsFound||adminItems.length)+" items imported");playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Gear item import failed",e.message);playUiSound("warning");}}
-function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=document.getElementById("adminItemCategory")?.value||"";const filtered=adminItems.filter(item=>{const matchesSearch=(item.name+" "+item.id+" "+item.category+" "+(item.type||"")+" "+(item.subtype||"")+" "+item.detail).toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!item.category||!item.hasDisplayName):item.category===category);return matchesSearch&&matchesCategory;});const list=filtered.slice(0,120);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>{const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return '<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category||"Unknown")+' '+esc(item.tier||"")+'</span></div></button>';}).join(""):'<div class="empty">No matching cached item templates. Import Gear items to populate the local cache.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function normalizeUiGrade(value){const text=String(value||"").trim();return ["Common","Uncommon","Rare","Epic","Legendary","Unique","Unknown"].includes(text)?text:"Unknown";}
+function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=document.getElementById("adminItemCategory")?.value||"";const grade=document.getElementById("adminItemGrade")?.value||"all";const filtered=adminItems.filter(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const matchesSearch=(item.name+" "+item.id+" "+item.category+" "+(item.type||"")+" "+(item.subtype||"")+" "+item.detail+" "+itemGrade).toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!item.category||!item.hasDisplayName):item.category===category);const matchesGrade=!grade||grade==="all"||itemGrade===grade;return matchesSearch&&matchesCategory&&matchesGrade;});const list=filtered.slice(0,120);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return '<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join(""):'<div class="empty">No matching bundled item templates. Build the bundled catalog with npm run build:item-catalog.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function itemDbIcon(item){return item.icon?'<span class="item-db-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.remove();this.parentElement.textContent=&quot;IT&quot;"></span>':'<span class="item-db-icon">IT</span>';}
+function itemDbText(item){return [item.name,item.id,item.category,item.subtype,item.type,item.grade,item.rarity,item.tier,item.detail,item.description,item.spawnCode,item.itemCode].filter(Boolean).join(" ").toLowerCase();}
+function fillItemDbFilters(){const cat=document.getElementById("itemDbCategory");const tier=document.getElementById("itemDbTier");if(cat){const current=cat.value;const categories=[...new Set(itemDatabaseItems.map(item=>item.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b));cat.innerHTML='<option value="">All categories</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");cat.value=categories.includes(current)?current:"";}if(tier){const current=tier.value;const tiers=[...new Set(itemDatabaseItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"";}}
+function filteredItemDatabaseItems(){const q=(document.getElementById("itemDbSearch")?.value||"").trim().toLowerCase();const category=document.getElementById("itemDbCategory")?.value||"";const grade=document.getElementById("itemDbGrade")?.value||"all";const tier=document.getElementById("itemDbTier")?.value||"";const spawnableOnly=Boolean(document.getElementById("itemDbSpawnableOnly")?.checked);return itemDatabaseItems.filter(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);if(category&&item.category!==category)return false;if(grade&&grade!=="all"&&itemGrade!==grade)return false;if(tier&&item.tier!==tier)return false;if(spawnableOnly&&item.spawnable===false)return false;if(q&&!itemDbText({...item,grade:itemGrade}).includes(q))return false;return true;});}
+function renderItemDatabaseDetails(item){const detail=document.getElementById("itemDbDetails");if(!detail)return;if(!item){detail.className="empty mt";detail.textContent="Select an item to inspect spawn data, grade, category, and stats.";return;}const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const rows={"Name":item.name||item.id,"Spawn Code":item.spawnCode||item.itemCode||item.id,"Category":item.category||"Unknown","Subcategory":item.subtype||item.type||"--","Grade":itemGrade,"Tier":item.tier||"--","Max Stack":item.maxStack||"--","Spawnable":item.spawnable===false?"No":"Yes"};const stats=item.stats&&typeof item.stats==="object"?Object.entries(item.stats).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join(""):"";detail.className="mt";detail.innerHTML='<div class="detail-list">'+Object.entries(rows).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join("")+'</div>'+(item.description?'<div class="empty mt">'+esc(item.description)+'</div>':'')+(stats?'<div class="label mt">Stats</div><div class="detail-list">'+stats+'</div>':'');}
+function renderItemDatabase(){const rows=filteredItemDatabaseItems();const list=document.getElementById("itemDbList");const count=document.getElementById("itemDbCount");if(count)count.textContent=rows.length+" shown / "+itemDatabaseItems.length+" loaded";if(!selectedItemDatabaseId&&rows[0])selectedItemDatabaseId=rows[0].id;if(list){list.innerHTML=rows.slice(0,250).map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);return '<button type="button" class="item-db-card '+(selectedItemDatabaseId===item.id?'active':'')+'" data-item-db-id="'+esc(item.id)+'">'+itemDbIcon(item)+'<span><strong>'+esc(item.name||item.id)+'</strong><span class="item-db-meta"><span class="item-grade-badge">'+esc(itemGrade)+'</span><span>'+esc(item.category||"Unknown")+'</span><span>'+esc(item.subtype||item.type||"")+'</span><span>'+esc(item.tier||"")+'</span></span><span class="subtle env-path-value">'+esc(item.id||"")+'</span></span></button>';}).join("")||'<div class="empty">No items match the current filters.</div>';list.querySelectorAll("[data-item-db-id]").forEach(el=>el.addEventListener("click",()=>{selectedItemDatabaseId=el.dataset.itemDbId;renderItemDatabase();}));}renderItemDatabaseDetails(itemDatabaseItems.find(item=>item.id===selectedItemDatabaseId)||rows[0]);}
+async function refreshItemDatabase(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Loading bundled item database...";}const data=await getJson("/api/item-database/items?grade=all");itemDatabaseItems=data.items||[];if(!selectedItemDatabaseId&&itemDatabaseItems[0])selectedItemDatabaseId=itemDatabaseItems[0].id;fillItemDbFilters();renderItemDatabase();if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML='<strong>'+esc(itemDatabaseItems.length)+' items loaded.</strong><div class="subtle">Source: shared bundled/user item catalog. No server scan required.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");if(!warning)return;const quality=Number(document.getElementById("adminQuality")?.value||0);warning.classList.toggle("hidden",!(quality>0));}
 function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),quality:Number(document.getElementById("adminQuality").value||0)};if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
@@ -8653,14 +8838,22 @@ async function route(req, res) {
     catch (error) { await json(res, { ok: false, players: [], error: error.message }, 500); }
     return;
   }
-  if (url.pathname === "/api/admin/items" && req.method === "GET") {
+  if (["/api/admin/items", "/api/give-items", "/api/gear-codex/items", "/api/item-database/items"].includes(url.pathname) && req.method === "GET") {
     const cache = loadDuneItemsCache();
-    await json(res, { ok: cache.ok !== false, items: cache.items || [], report: cache.report || {}, generatedAt: cache.generatedAt || "" });
+    const items = filterItemsByQuery(cache.items || [], url.searchParams);
+    await json(res, { ok: cache.ok !== false, items, totalItems: (cache.items || []).length, gradeCounts: itemGradeCounts(cache.items || []), report: cache.report || {}, generatedAt: cache.generatedAt || "" });
     return;
   }
   if (url.pathname === "/api/gear/discovery" && req.method === "GET") {
     const cache = loadDuneItemsCache();
-    await json(res, { ok: cache.ok !== false, items: cache.items || [], report: cache.report || {}, generatedAt: cache.generatedAt || "" });
+    const items = filterItemsByQuery(cache.items || [], url.searchParams);
+    await json(res, { ok: cache.ok !== false, items, totalItems: (cache.items || []).length, gradeCounts: itemGradeCounts(cache.items || []), report: cache.report || {}, generatedAt: cache.generatedAt || "" });
+    return;
+  }
+  if (url.pathname === "/api/items/catalog/status" && req.method === "GET") {
+    const cache = loadDuneItemsCache();
+    const items = cache.items || [];
+    await json(res, { ok: cache.ok !== false, generatedAt: cache.generatedAt || "", totalItems: items.length, cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, gradeCounts: itemGradeCounts(items), report: cache.report || {} });
     return;
   }
   if (url.pathname === "/api/gear/discover" && req.method === "POST") {
@@ -8806,7 +8999,8 @@ async function route(req, res) {
     return;
   }
   if (url.pathname.startsWith("/gear-images/")) {
-    if (!serveStatic(res, GEAR_IMAGE_CACHE_DIR, decodeURIComponent(url.pathname.replace(/^\/gear-images\//, "")))) send(res, 404, "text/plain", "Not found");
+    const imageName = decodeURIComponent(url.pathname.replace(/^\/gear-images\//, ""));
+    if (!serveStatic(res, GEAR_IMAGE_CACHE_DIR, imageName) && !serveStatic(res, BUNDLED_GEAR_IMAGE_DIR, imageName)) send(res, 404, "text/plain", "Not found");
     return;
   }
   send(res, 404, "text/plain", "Not found");

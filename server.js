@@ -119,8 +119,22 @@ function effectiveTeleportCommandTemplate(value) {
   return template === TELEPORT_PLACEHOLDER_COMMAND ? "" : template;
 }
 
+function normalizeSelectedBattlegroup(value) {
+  if (!value || typeof value !== "object") return null;
+  const namespace = String(value.namespace || "").trim();
+  const name = String(value.name || "").trim();
+  if (!namespace || !name) return null;
+  return {
+    namespace,
+    name,
+    title: String(value.title || "").trim(),
+    status: String(value.status || "").trim(),
+    selectedAt: String(value.selectedAt || "").trim() || new Date().toISOString()
+  };
+}
+
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiSoundsEnabled", "uiSoundVolume"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
   const clean = {};
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(nextConfig, key)) clean[key] = nextConfig[key];
@@ -161,6 +175,7 @@ function saveConfig(nextConfig) {
   clean.databaseBackupLocation = expandEnvPath(String(clean.databaseBackupLocation || DEFAULT_DATABASE_BACKUP_DIR).trim());
   clean.uiSoundsEnabled = clean.uiSoundsEnabled === true || clean.uiSoundsEnabled === "true";
   clean.uiSoundVolume = Math.max(0, Math.min(100, Number(clean.uiSoundVolume) || 0));
+  clean.selectedBattlegroup = normalizeSelectedBattlegroup(clean.selectedBattlegroup);
   if (clean.port < 1 || clean.port > 65535) throw new Error("Port must be between 1 and 65535.");
   if (clean.databasePort < 1 || clean.databasePort > 65535) throw new Error("Database port must be between 1 and 65535.");
   if (clean.receiverPort < 1 || clean.receiverPort > 65535) throw new Error("Receiver port must be between 1 and 65535.");
@@ -1533,7 +1548,12 @@ async function battlegroupResource() {
   let data = null;
   try { data = JSON.parse(result.stdout || "{}"); }
   catch { throw new Error("Could not parse battlegroup resource."); }
-  const item = data.items && data.items[0];
+  const items = Array.isArray(data.items) ? data.items : [];
+  const selected = configuredBattlegroupSelection();
+  const item = selected
+    ? items.find((row) => row.metadata?.namespace === selected.namespace && row.metadata?.name === selected.name)
+    : (items.length === 1 ? items[0] : null);
+  if (!selected && items.length > 1) throw new Error("Multiple battlegroups were detected. Select a battlegroup in Settings before running this operation.");
   if (!item) throw new Error("No battlegroup resource was found.");
   return item;
 }
@@ -2637,16 +2657,27 @@ async function verifyImportedDatabaseStatus(timeout = 20000, options = {}) {
 
 function configuredBattlegroupName() {
   const cfg = loadConfig();
+  const selected = normalizeSelectedBattlegroup(cfg.selectedBattlegroup);
   return String(
     process.env.ALPHANINE_BATTLEGROUP ||
     process.env.ALPHANINE_BATTLEGROUP_NAME ||
     process.env.DUNE_BATTLEGROUP ||
     process.env.DUNE_BATTLEGROUP_NAME ||
+    selected?.name ||
     cfg.databaseBattlegroup ||
     cfg.battlegroup ||
     cfg.battlegroupName ||
     ""
   ).trim();
+}
+
+function configuredBattlegroupSelection() {
+  const cfg = loadConfig();
+  const selected = normalizeSelectedBattlegroup(cfg.selectedBattlegroup);
+  if (selected) return selected;
+  const namespace = String(process.env.ALPHANINE_BATTLEGROUP_NAMESPACE || process.env.DUNE_BATTLEGROUP_NAMESPACE || "").trim();
+  const name = configuredBattlegroupName();
+  return namespace && name ? { namespace, name, title: "", status: "", selectedAt: "" } : null;
 }
 
 function battlegroupStatusRank(value) {
@@ -2656,6 +2687,80 @@ function battlegroupStatusRank(value) {
   if (["pending", "initializing"].includes(key)) return 10;
   if (SERVER_STATUS_OFFLINE.has(key)) return 100;
   return 30;
+}
+
+function battlegroupTitleFromItem(item = {}) {
+  const annotations = item.metadata?.annotations || {};
+  const labels = item.metadata?.labels || {};
+  const spec = item.spec || {};
+  const candidates = [
+    spec.title,
+    spec.serverTitle,
+    spec.serverName,
+    spec.displayName,
+    spec.name,
+    spec.values?.title,
+    spec.values?.serverTitle,
+    spec.values?.serverName,
+    spec.config?.title,
+    spec.config?.serverTitle,
+    spec.config?.serverName,
+    annotations.title,
+    annotations.serverTitle,
+    annotations.serverName,
+    annotations["dune.funcom.com/title"],
+    annotations["dune.funcom.com/server-title"],
+    annotations["funcom.com/title"],
+    annotations["funcom.com/server-title"],
+    labels.title,
+    labels.serverTitle,
+    labels.serverName
+  ];
+  return String(candidates.find((value) => String(value || "").trim()) || "").trim();
+}
+
+function findBattlegroupTitlePatchPath(item = {}) {
+  const annotations = item.metadata?.annotations || {};
+  const specs = [
+    ["spec", "title"],
+    ["spec", "serverTitle"],
+    ["spec", "serverName"],
+    ["spec", "displayName"],
+    ["spec", "name"],
+    ["spec", "values", "title"],
+    ["spec", "values", "serverTitle"],
+    ["spec", "values", "serverName"],
+    ["spec", "config", "title"],
+    ["spec", "config", "serverTitle"],
+    ["spec", "config", "serverName"]
+  ];
+  for (const pathParts of specs) {
+    let current = item;
+    let exists = true;
+    for (const part of pathParts) {
+      if (!current || !Object.prototype.hasOwnProperty.call(current, part)) {
+        exists = false;
+        break;
+      }
+      current = current[part];
+    }
+    if (exists) return `/${pathParts.map((part) => part.replace(/~/g, "~0").replace(/\//g, "~1")).join("/")}`;
+  }
+  const annotationKeys = [
+    "dune.funcom.com/title",
+    "dune.funcom.com/server-title",
+    "funcom.com/title",
+    "funcom.com/server-title",
+    "title",
+    "serverTitle",
+    "serverName"
+  ];
+  for (const key of annotationKeys) {
+    if (Object.prototype.hasOwnProperty.call(annotations, key)) {
+      return `/metadata/annotations/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`;
+    }
+  }
+  return "/spec/title";
 }
 
 function battlegroupItemStatus(item = {}) {
@@ -2684,10 +2789,12 @@ function normalizeBattlegroupCandidate(item = {}) {
   const status = battlegroupItemStatus(item);
   const statusValue = status.phase || (status.ready ? status.readyType : "") || (status.failed ? status.failedType : "");
   const createdAt = item.metadata?.creationTimestamp || "";
+  const title = battlegroupTitleFromItem(item);
   const hardOffline = status.failed || SERVER_STATUS_OFFLINE.has(String(statusValue || "").toLowerCase());
   return {
     namespace,
     name,
+    title,
     createdAt,
     status: statusValue || "Unknown",
     phase: status.phase || "",
@@ -2697,6 +2804,7 @@ function normalizeBattlegroupCandidate(item = {}) {
     rank: hardOffline ? 100 : battlegroupStatusRank(statusValue),
     dbPod: name ? `${name}-db-dbdepl-sts-0` : "",
     dbService: name ? `${name}-db-dbdepl-svc` : "",
+    titlePatchPath: findBattlegroupTitlePatchPath(item),
     conditions: status.conditions
   };
 }
@@ -2705,6 +2813,7 @@ function publicBattlegroupCandidate(candidate = {}) {
   return {
     name: candidate.name || "",
     namespace: candidate.namespace || "",
+    title: candidate.title || "",
     status: candidate.status || "Unknown",
     phase: candidate.phase || "",
     ready: Boolean(candidate.ready),
@@ -2715,6 +2824,7 @@ function publicBattlegroupCandidate(candidate = {}) {
     dbService: candidate.dbService || "",
     dbPodExists: candidate.dbPodExists === true,
     dbServiceExists: candidate.dbServiceExists === true,
+    titlePatchPath: candidate.titlePatchPath || "",
     validationError: candidate.validationError || ""
   };
 }
@@ -2741,6 +2851,127 @@ async function listBattlegroupCandidates() {
     throw error;
   }
   return { candidates, command };
+}
+
+async function battlegroupsStatus({ autoSelect = true } = {}) {
+  const listed = await listBattlegroupCandidates();
+  const cfg = loadConfig();
+  const selected = normalizeSelectedBattlegroup(cfg.selectedBattlegroup);
+  let selectedCandidate = selected
+    ? listed.candidates.find((candidate) => candidate.namespace === selected.namespace && candidate.name === selected.name)
+    : null;
+  let autoSelected = false;
+  if (!selectedCandidate && autoSelect && listed.candidates.length === 1) {
+    selectedCandidate = listed.candidates[0];
+    const saved = saveConfig({
+      ...cfg,
+      selectedBattlegroup: {
+        namespace: selectedCandidate.namespace,
+        name: selectedCandidate.name,
+        title: selectedCandidate.title,
+        status: selectedCandidate.status,
+        selectedAt: new Date().toISOString()
+      }
+    });
+    autoSelected = true;
+    appendAdminAudit("battlegroup_auto_selected", { selectedBattlegroup: saved.selectedBattlegroup });
+  }
+  return {
+    ok: true,
+    command: listed.command,
+    battlegroups: listed.candidates.map(publicBattlegroupCandidate),
+    selectedBattlegroup: selectedCandidate ? publicBattlegroupCandidate(selectedCandidate) : selected,
+    requiresSelection: listed.candidates.length > 1 && !selectedCandidate,
+    autoSelected,
+    message: listed.candidates.length > 1 && !selectedCandidate ? "Multiple battlegroups detected. Select one to control." : "Battlegroup detection complete."
+  };
+}
+
+async function selectedBattlegroupStatus() {
+  const cfg = loadConfig();
+  const selected = normalizeSelectedBattlegroup(cfg.selectedBattlegroup);
+  return {
+    ok: Boolean(selected),
+    selectedBattlegroup: selected,
+    configPath: CONFIG_PATH,
+    message: selected ? "Selected battlegroup loaded from config." : "No battlegroup is selected."
+  };
+}
+
+async function selectBattlegroup(body = {}) {
+  const namespace = String(body.namespace || "").trim();
+  const name = String(body.name || "").trim();
+  if (!namespace || !name) throw new Error("Battlegroup namespace and name are required.");
+  const listed = await listBattlegroupCandidates();
+  const match = listed.candidates.find((candidate) => candidate.namespace === namespace && candidate.name === name);
+  if (!match) throw new Error(`Battlegroup ${namespace}/${name} was not found.`);
+  const saved = saveConfig({
+    ...loadConfig(),
+    selectedBattlegroup: {
+      namespace: match.namespace,
+      name: match.name,
+      title: match.title,
+      status: match.status,
+      selectedAt: new Date().toISOString()
+    }
+  });
+  appendAdminAudit("battlegroup_selected", { selectedBattlegroup: saved.selectedBattlegroup });
+  return {
+    ok: true,
+    selectedBattlegroup: saved.selectedBattlegroup,
+    battlegroups: listed.candidates.map(publicBattlegroupCandidate),
+    configPath: CONFIG_PATH
+  };
+}
+
+function battlegroupBackupDir() {
+  const folder = path.join(APP_DATA, "backups", "battlegroups");
+  fs.mkdirSync(folder, { recursive: true });
+  return folder;
+}
+
+async function saveBattlegroupTitle(body = {}) {
+  const title = String(body.title || "").trim();
+  if (!title) throw new Error("Server title is required.");
+  if (title.length > 120) throw new Error("Server title must be 120 characters or fewer.");
+  const selected = normalizeSelectedBattlegroup(body.selectedBattlegroup) || normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup);
+  if (!selected) throw new Error("Select a battlegroup before changing the title.");
+  const listed = await listBattlegroupCandidates();
+  const current = listed.candidates.find((candidate) => candidate.namespace === selected.namespace && candidate.name === selected.name);
+  if (!current) throw new Error(`Selected battlegroup ${selected.namespace}/${selected.name} was not found.`);
+  const yamlCommand = `sudo kubectl get igwbg -n ${shQuote(current.namespace)} ${shQuote(current.name)} -o yaml`;
+  const yaml = await sshCommand(yamlCommand, 30000, { maxBuffer: 1024 * 1024 * 4 });
+  if (!yaml.ok) throw new Error(yaml.stderr || yaml.stdout || yaml.error || "Could not read current battlegroup YAML.");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = path.join(battlegroupBackupDir(), `${current.namespace}-${current.name}-${stamp}.yaml`);
+  fs.writeFileSync(backupPath, yaml.stdout || "", "utf8");
+  const patch = [{ op: current.titlePatchPath === "/spec/title" && !current.title ? "add" : "replace", path: current.titlePatchPath || "/spec/title", value: title }];
+  const patchCommand = `sudo kubectl patch igwbg -n ${shQuote(current.namespace)} ${shQuote(current.name)} --type=json -p ${shQuote(JSON.stringify(patch))}`;
+  const patched = await sshCommand(patchCommand, 30000, { maxBuffer: 1024 * 512 });
+  if (!patched.ok) throw new Error(patched.stderr || patched.stdout || patched.error || "Battlegroup title patch failed.");
+  const refreshed = await battlegroupsStatus({ autoSelect: false });
+  const updated = refreshed.battlegroups.find((candidate) => candidate.namespace === current.namespace && candidate.name === current.name);
+  const saved = saveConfig({
+    ...loadConfig(),
+    selectedBattlegroup: {
+      namespace: current.namespace,
+      name: current.name,
+      title: updated?.title || title,
+      status: updated?.status || current.status,
+      selectedAt: new Date().toISOString()
+    }
+  });
+  appendAdminAudit("battlegroup_title_updated", { namespace: current.namespace, name: current.name, title, backupPath, patchPath: current.titlePatchPath || "/spec/title" });
+  return {
+    ok: true,
+    title: updated?.title || title,
+    selectedBattlegroup: saved.selectedBattlegroup,
+    backupPath,
+    patchPath: current.titlePatchPath || "/spec/title",
+    stdout: patched.stdout || "",
+    stderr: patched.stderr || "",
+    battlegroups: refreshed.battlegroups
+  };
 }
 
 async function activeBattlegroupFromStatus() {
@@ -8206,6 +8437,21 @@ DUNE_RECEIVER_SSH_KEY</pre>
           </div>
         </div>
         <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Battlegroup Selection</div><div id="battlegroupStatus" class="micro">Not refreshed</div></div><button type="button" onclick="refreshBattlegroups()">Refresh Battlegroups</button></div>
+          <div class="field-grid mt">
+            <label>Detected Battlegroups<select id="settingsBattlegroupSelect" onchange="renderBattlegroupSelection()"><option value="">Refresh to detect battlegroups</option></select></label>
+            <label>Current Server Title<input id="settingsCurrentServerTitle" readonly placeholder="Title not found in YAML"></label>
+            <label>New Server Title<input id="settingsNewServerTitle" placeholder="New server title"></label>
+          </div>
+          <div id="battlegroupCards" class="detail-list mt"><div class="empty">Refresh Battlegroups to inspect detected servers.</div></div>
+          <div class="action-row mt">
+            <button type="button" onclick="useSelectedBattlegroup()">Use Selected Battlegroup</button>
+            <button type="button" onclick="saveBattlegroupTitle()">Save Title</button>
+            <button type="button" onclick="refreshBattlegroups()">Refresh Title</button>
+          </div>
+          <pre id="battlegroupLog" class="mt">Selected battlegroup appears on Dashboard diagnostics and is saved in config.json.</pre>
+        </div>
+        <div class="panel pad">
           <div class="label">Database</div>
           <div class="field-grid mt">
             <label>Host<input id="settingsDatabaseHost"></label>
@@ -8334,7 +8580,7 @@ function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.vie
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false;
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
@@ -8422,6 +8668,12 @@ async function refreshServerInstallPathWarning(inputId,warningId){try{const path
 async function browseServerInstallPath(inputId,warningId){try{if(!window.alphaNineSuite?.chooseServerInstallFolder)throw new Error("Folder picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseServerInstallFolder();if(result?.folderPath){setValue(inputId,result.folderPath);await refreshServerInstallPathWarning(inputId,warningId);}}catch(e){setServerInstallPathWarning(warningId,{valid:false,message:betterError(e)});}}
 function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);setValue("settingsReceiverSshHost",config.receiverSshHost||"");setValue("settingsReceiverSshUser",config.receiverSshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setChecked("settingsProgressionEditingEnabled",config.progressionEditingEnabled===true);setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("settingsServerInstallPathWarning",config.serverInstallPathStatus);}
 function collectSettings(){const payload=configPayload("settings");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.liveTeleportEnabled=document.getElementById("settingsLiveTeleportEnabled")?.checked===true;payload.teleportEndpointPath=getValue("settingsTeleportEndpointPath");payload.teleportCommandTemplate=getValue("settingsTeleportCommandTemplate");payload.teleportPayloadTemplate=getValue("settingsTeleportPayloadTemplate");payload.progressionEditingEnabled=document.getElementById("settingsProgressionEditingEnabled")?.checked===true;payload.setupComplete=true;return payload;}
+function battlegroupKey(row){return row?String(row.namespace||"")+"/"+String(row.name||""):"";}
+function selectedBattlegroupFromUi(){const key=getValue("settingsBattlegroupSelect");return (battlegroupData.battlegroups||[]).find(row=>battlegroupKey(row)===key)||null;}
+function renderBattlegroupSelection(){const select=document.getElementById("settingsBattlegroupSelect");const cards=document.getElementById("battlegroupCards");const selected=selectedBattlegroupFromUi()||battlegroupData.selectedBattlegroup||null;if(select){const current=select.value||battlegroupKey(selected);select.innerHTML=(battlegroupData.battlegroups||[]).length?(battlegroupData.battlegroups||[]).map(row=>'<option value="'+esc(battlegroupKey(row))+'">'+esc((row.title||"Title not found")+" / "+row.namespace+" / "+row.name+" / "+(row.status||"Unknown"))+'</option>').join(""):'<option value="">No battlegroups detected</option>';select.value=[...(battlegroupData.battlegroups||[]).map(battlegroupKey)].includes(current)?current:battlegroupKey(selected);}const active=selectedBattlegroupFromUi()||selected;if(active){setValue("settingsCurrentServerTitle",active.title||"Title not found in YAML");if(!getValue("settingsNewServerTitle"))setValue("settingsNewServerTitle",active.title||"");}else{setValue("settingsCurrentServerTitle","");}if(cards){cards.innerHTML=(battlegroupData.battlegroups||[]).length?(battlegroupData.battlegroups||[]).map(row=>'<div class="detail-row"><span class="subtle">'+esc(row.title||"Title not found in YAML")+'<br>'+esc(row.namespace)+'</span><strong>'+esc(row.name)+'<br><span class="badge '+statusClass(row.status)+'">'+esc(row.status||"Unknown")+'</span></strong></div>').join(""):'<div class="empty">No battlegroups detected. Check SSH/kubectl access.</div>';}}
+async function refreshBattlegroups(){const log=document.getElementById("battlegroupLog");try{setText("battlegroupStatus","Detecting battlegroups...");if(log)log.textContent="Running sudo kubectl get igwbg -A -o json ...";const data=await getJson("/api/battlegroups",{timeoutMs:35000});battlegroupData={battlegroups:data.battlegroups||[],selectedBattlegroup:data.selectedBattlegroup||null};renderBattlegroupSelection();setText("battlegroupStatus",data.requiresSelection?"Selection required":(data.selectedBattlegroup?"Selected: "+(data.selectedBattlegroup.title||data.selectedBattlegroup.name):"Detection complete"));if(log)log.textContent=JSON.stringify({message:data.message,selectedBattlegroup:data.selectedBattlegroup,requiresSelection:data.requiresSelection,autoSelected:data.autoSelected,command:data.command},null,2);addActivity("battlegroup","Battlegroups refreshed",(data.battlegroups||[]).length+" found");return data;}catch(e){setText("battlegroupStatus","Battlegroup detection failed");if(log)log.textContent=betterError(e);addActivity("error","Battlegroup refresh failed",e.message);return null;}}
+async function useSelectedBattlegroup(){const selected=selectedBattlegroupFromUi();const log=document.getElementById("battlegroupLog");try{if(!selected)throw new Error("Select a battlegroup first.");const data=await getJson("/api/battlegroups/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({namespace:selected.namespace,name:selected.name}),timeoutMs:35000});battlegroupData.selectedBattlegroup=data.selectedBattlegroup;battlegroupData.battlegroups=data.battlegroups||battlegroupData.battlegroups;appConfig={...(appConfig||{}),selectedBattlegroup:data.selectedBattlegroup};renderBattlegroupSelection();setText("battlegroupStatus","Selected: "+(data.selectedBattlegroup?.title||data.selectedBattlegroup?.name||"Battlegroup"));if(log)log.textContent="Saved selected battlegroup to config.json:\\n"+JSON.stringify(data.selectedBattlegroup,null,2);addActivity("battlegroup","Battlegroup selected",data.selectedBattlegroup?.namespace+"/"+data.selectedBattlegroup?.name);playUiSound("success");refresh();}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
+async function saveBattlegroupTitle(){const selected=selectedBattlegroupFromUi()||battlegroupData.selectedBattlegroup;const title=getValue("settingsNewServerTitle");const log=document.getElementById("battlegroupLog");try{if(!selected)throw new Error("Select a battlegroup first.");if(!title.trim())throw new Error("Enter a new server title.");const data=await getJson("/api/battlegroups/title",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({namespace:selected.namespace,name:selected.name,title}),timeoutMs:45000});battlegroupData.selectedBattlegroup=data.selectedBattlegroup;battlegroupData.battlegroups=data.battlegroups||battlegroupData.battlegroups;appConfig={...(appConfig||{}),selectedBattlegroup:data.selectedBattlegroup};renderBattlegroupSelection();setText("battlegroupStatus","Title saved: "+(data.title||title));if(log)log.textContent="Title saved and refreshed. Backup: "+(data.backupPath||"--")+"\\nPatch path: "+(data.patchPath||"--");addActivity("battlegroup","Server title saved",data.title||title);playUiSound("success");refresh();}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 function updateSetupStep(){document.querySelectorAll(".setup-page").forEach((p,i)=>p.classList.toggle("active",i===setupStep));document.querySelectorAll(".setup-step").forEach((p,i)=>p.classList.toggle("active",i===setupStep));}
 function setupNext(){setupStep=Math.min(4,setupStep+1);updateSetupStep();}
 function setupPrev(){setupStep=Math.max(0,setupStep-1);updateSetupStep();}
@@ -8435,7 +8687,7 @@ async function initSetup(){try{const data=await getJson("/api/setup/status");con
 async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.installPath){setValue("setupServerInstallPath",data.server.installPath);await refreshServerInstallPathWarning("setupServerInstallPath","setupServerInstallPathWarning");}if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}
 async function finishSetup(){try{const payload={...configPayload("setup"),setupComplete:true};const pathCheck=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload.serverInstallPath||""));setServerInstallPathWarning("setupServerInstallPathWarning",pathCheck.serverInstallPath);if(!pathCheck.serverInstallPath?.valid)throw new Error("Selected folder does not appear to be a valid Dune Awakening server installation.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified)throw new Error("Setup config save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);fillSettings(data.config||payload);closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
-async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);refreshReceiverStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
+async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);refreshReceiverStatus();refreshBattlegroups();}catch(e){setText("settingsSaveStatus",betterError(e));}}
 async function saveSettings(){try{const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...appConfig,...collectSettings()})});fillSettings(data.config||{});setText("settingsSaveStatus","Settings saved. Restart the suite for receiver startup environment changes.");playUiSound("success");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
 async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");const label=data.ok?"Receiver Online":"Receiver Offline";setText("receiverManagerStatus",label+" / "+data.healthUrl);setText("settingsReceiver",label);tone("receiverState",label);if(!data.ok)tone("rabbitState","Dry Run Active");return data;}catch(e){setText("receiverManagerStatus",betterError(e));tone("receiverState","Receiver Offline");tone("rabbitState","Dry Run Active");}}
 async function receiverAction(action){try{if(action==="start")await saveSettings();const data=await getJson("/api/receiver/"+action,{method:"POST"});setText("receiverManagerStatus",data.message||data.status||"Receiver action complete");await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){setText("receiverManagerStatus",betterError(e));playUiSound("warning");}}
@@ -8462,7 +8714,7 @@ async function refreshPlayerFeed(){const stamp=document.getElementById("playerFe
 function vmDisplayStatus(vm){const raw=String(vm?.state||vm?.status||vm?.label||"").trim().toLowerCase();return ["running","started","online","healthy"].includes(raw)?"Running":"Offline";}
 function renderVmStatus(vm){const status=vmDisplayStatus(vm);tone("vm",status);tone("dashboardVmStatus",status);setText("vmControlStatus",status);}
 function vmDisplayMessage(data){return vmDisplayStatus(data?.vm||data||{});}
-async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
+async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?((selected.title||"Title not found")+" / "+selected.namespace+" / "+selected.name):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+(s.database||"Unknown")+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(open){if(open===null||open===undefined)return"Not Configured";return open?"Open":"Closed";}
 function monitorMs(value){return Number.isFinite(Number(value))?Math.round(Number(value))+" ms":"-- ms";}
@@ -8631,7 +8883,7 @@ async function route(req, res) {
     const runtimeTransport = await updateRuntimeGiveTransport({ vm, status, raw }, "status");
     const serverStatus = mapServerSummaryStatus(status?.summary || status);
     const topServerStatus = topServerStatusDecision({ vm, status, raw, statusResult });
-    await json(res, { vm, status, serverStatus, topServerStatus, onlineDecisionReason: topServerStatus.onlineDecisionReason, hardOfflineReasons: topServerStatus.hardOfflineReasons, confirmationSources: topServerStatus.confirmationSources, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
+    await json(res, { vm, status, serverStatus, topServerStatus, selectedBattlegroup: normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup), onlineDecisionReason: topServerStatus.onlineDecisionReason, hardOfflineReasons: topServerStatus.hardOfflineReasons, confirmationSources: topServerStatus.confirmationSources, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
     return;
   }
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {
@@ -8733,6 +8985,25 @@ async function route(req, res) {
   if (url.pathname === "/api/diagnostics" && req.method === "GET") {
     try { await json(res, await diagnosticsSnapshot()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/battlegroups" && req.method === "GET") {
+    try { await json(res, await battlegroupsStatus()); }
+    catch (error) { await json(res, { ok: false, battlegroups: [], selectedBattlegroup: null, error: error.message, diagnostics: error.diagnostics || null }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/battlegroups/selected" && req.method === "GET") {
+    await json(res, await selectedBattlegroupStatus());
+    return;
+  }
+  if (url.pathname === "/api/battlegroups/select" && req.method === "POST") {
+    try { await json(res, await selectBattlegroup(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/battlegroups/title" && req.method === "POST") {
+    try { await json(res, await saveBattlegroupTitle(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
     return;
   }
   if (url.pathname === "/api/database/status" && req.method === "GET") {

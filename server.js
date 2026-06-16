@@ -3932,6 +3932,7 @@ async function progressionFactionComponentScan() {
         from jsonb_array_elements(case when jsonb_typeof(w.value) = 'array' then w.value else '[]'::jsonb end) with ordinality a(value, ordinality)
       ) child
       where jsonb_typeof(w.value) in ('object', 'array')
+        and coalesce(array_length(w.path, 1), 0) < 16
     )
     select 'component', actor_id::text, array_to_string(path, '.'), ''
     from walk
@@ -4172,10 +4173,48 @@ function progressionUnsupported(reason, inspect = null) {
   };
 }
 
+function progressionLookupTimer(query) {
+  const started = Date.now();
+  const timings = {};
+  let currentStep = "starting";
+  return {
+    timings,
+    get currentStep() { return currentStep; },
+    async step(name, fn) {
+      currentStep = name;
+      const stepStarted = Date.now();
+      try {
+        return await fn();
+      } finally {
+        timings[name] = Date.now() - stepStarted;
+      }
+    },
+    finish(extra = {}) {
+      timings.total = Date.now() - started;
+      console.info("[progression/player] lookup timing", { query, currentStep, timings, ...extra });
+      return timings;
+    }
+  };
+}
+
+function progressionLookupTimeoutResponse(error, query, step, timings = {}) {
+  console.warn("[progression/player] lookup failed", { query, step, timings, error: error.message });
+  return {
+    ok: false,
+    status: /timed out|timeout/i.test(error.message) ? "timeout" : "error",
+    error: /timed out|timeout/i.test(error.message) ? "Player lookup timed out" : error.message,
+    step,
+    timings,
+    hint: "Try exact character name or check DB connection"
+  };
+}
+
 async function progressionPlayerLookup(queryValue) {
   const query = String(queryValue || "").trim();
   if (!query) return { ok: false, status: "not-found", reason: "Enter a character name, player name, actor id, or player id." };
-  const inspect = await progressionInspector();
+  const timer = progressionLookupTimer(query);
+  try {
+  const inspect = await timer.step("DB connect", () => progressionInspector());
   if (!inspect.ok) {
     return {
       ok: false,
@@ -4223,14 +4262,19 @@ async function progressionPlayerLookup(queryValue) {
 
   const search = sqlString(`%${query}%`);
   const exact = sqlString(query);
-  const conditions = [`a.id::text = ${exact}`];
-  if (hasActorsOwner) conditions.push(`a.owner_account_id::text = ${exact}`);
-  if (hasPsController && joins.some((join) => join.includes("player_state"))) conditions.push(`ps.player_controller_id::text = ${exact}`);
-  if (hasPsPawn && joins.some((join) => join.includes("player_state"))) conditions.push(`ps.player_pawn_id::text = ${exact}`);
-  if (hasPsName && joins.some((join) => join.includes("player_state"))) conditions.push(`ps.character_name ilike ${search}`);
-  if (hasAccountsUser && joins.some((join) => join.includes("dune.accounts"))) conditions.push(`ac."user" ilike ${search}`);
-  if (hasAccountsFuncom && joins.some((join) => join.includes("dune.accounts"))) conditions.push(`ac.funcom_id ilike ${search}`);
-  if (hasEncryptedFuncom && joins.some((join) => join.includes("encrypted_accounts"))) conditions.push(`convert_from(ea.encrypted_funcom_id, 'UTF8') ilike ${search}`);
+  const exactConditions = [`a.id::text = ${exact}`];
+  if (hasActorsOwner) exactConditions.push(`a.owner_account_id::text = ${exact}`);
+  if (hasPsController && joins.some((join) => join.includes("player_state"))) exactConditions.push(`ps.player_controller_id::text = ${exact}`);
+  if (hasPsPawn && joins.some((join) => join.includes("player_state"))) exactConditions.push(`ps.player_pawn_id::text = ${exact}`);
+  if (hasPsName && joins.some((join) => join.includes("player_state"))) exactConditions.push(`lower(ps.character_name) = lower(${exact})`);
+  if (hasAccountsUser && joins.some((join) => join.includes("dune.accounts"))) exactConditions.push(`lower(ac."user") = lower(${exact})`);
+  if (hasAccountsFuncom && joins.some((join) => join.includes("dune.accounts"))) exactConditions.push(`lower(ac.funcom_id) = lower(${exact})`);
+  if (hasEncryptedFuncom && joins.some((join) => join.includes("encrypted_accounts"))) exactConditions.push(`lower(convert_from(ea.encrypted_funcom_id, 'UTF8')) = lower(${exact})`);
+  const partialConditions = [];
+  if (hasPsName && joins.some((join) => join.includes("player_state"))) partialConditions.push(`ps.character_name ilike ${search}`);
+  if (hasAccountsUser && joins.some((join) => join.includes("dune.accounts"))) partialConditions.push(`ac."user" ilike ${search}`);
+  if (hasAccountsFuncom && joins.some((join) => join.includes("dune.accounts"))) partialConditions.push(`ac.funcom_id ilike ${search}`);
+  if (hasEncryptedFuncom && joins.some((join) => join.includes("encrypted_accounts"))) partialConditions.push(`convert_from(ea.encrypted_funcom_id, 'UTF8') ilike ${search}`);
   const playerFilter = hasActorsClass ? "and a.class ilike '%Player%'" : "";
   const nameExpr = firstExpression([
     hasPsName && joins.some((join) => join.includes("player_state")) ? "ps.character_name" : "",
@@ -4238,7 +4282,7 @@ async function progressionPlayerLookup(queryValue) {
     hasAccountsFuncom && joins.some((join) => join.includes("dune.accounts")) ? "ac.funcom_id" : "",
     hasEncryptedFuncom && joins.some((join) => join.includes("encrypted_accounts")) ? "convert_from(ea.encrypted_funcom_id, 'UTF8')" : ""
   ]);
-  const playerSql = `
+  const playerSql = (conditions, limit = 5) => `
     select
       a.id::text as actor_id,
       ${hasActorsOwner ? "coalesce(a.owner_account_id::text, '')" : "''"} as account_id,
@@ -4252,14 +4296,22 @@ async function progressionPlayerLookup(queryValue) {
     where (${conditions.join(" or ")})
       ${playerFilter}
     order by a.id
-    limit 20;
+    limit ${Number(limit) || 5};
   `;
-  const players = parseDbRows(await dbQuery(playerSql, 20000), ["actor_id", "account_id", "character_name", "player_controller_id", "player_pawn_id", "online_status", "map"]);
+  let players = await timer.step("player/account search", async () =>
+    parseDbRows(await dbQuery(playerSql(exactConditions, 5), 7000), ["actor_id", "account_id", "character_name", "player_controller_id", "player_pawn_id", "online_status", "map"])
+  );
+  if (!players.length && partialConditions.length) {
+    players = await timer.step("player/account partial search", async () =>
+      parseDbRows(await dbQuery(playerSql(partialConditions, 10), 7000), ["actor_id", "account_id", "character_name", "player_controller_id", "player_pawn_id", "online_status", "map"])
+    );
+  }
   if (!players.length) {
-    return { ok: false, status: "not-found", query, players: [], reason: "No matching progression player found.", safety: inspect.safety };
+    timer.finish({ status: "not-found" });
+    return { ok: false, status: "not-found", query, players: [], reason: "No matching progression player found.", safety: inspect.safety, timings: timer.timings };
   }
   const player = players[0];
-  const progressionActorId = Number(player.player_controller_id || player.actor_id);
+  const progressionActorId = await timer.step("actor lookup", async () => Number(player.player_controller_id || player.actor_id));
   if (!Number.isSafeInteger(progressionActorId) || progressionActorId < 1) {
     return progressionUnsupported("Matched player did not expose a usable actor/player id.", inspect);
   }
@@ -4292,7 +4344,8 @@ async function progressionPlayerLookup(queryValue) {
       fieldStatus: {}
     },
     warnings: [],
-    safety: inspect.safety
+    safety: inspect.safety,
+    timings: timer.timings
   };
 
   const onlineText = String(player.online_status || "").toLowerCase();
@@ -4301,24 +4354,24 @@ async function progressionPlayerLookup(queryValue) {
   }
 
   if (inspect.supports?.specializationXp?.status === "detected") {
-    const rows = parseDbRows(await dbQuery(`
+    const rows = await timer.step("specialization lookup", async () => parseDbRows(await dbQuery(`
       select track_type::text, xp_amount::text, level::text
       from dune.specialization_tracks
       where player_id = ${progressionActorId}
       order by track_type
-    `, 20000), ["track_type", "xp_amount", "level"]);
+    `, 7000), ["track_type", "xp_amount", "level"]));
     result.specializationTracks = rows;
   } else {
     result.specializationStatus = inspect.supports?.specializationXp?.status || "unsupported";
   }
 
   if (inspect.supports?.factionReputation?.status === "detected") {
-    const rows = parseDbRows(await dbQuery(`
+    const rows = await timer.step("faction lookup", async () => parseDbRows(await dbQuery(`
       select faction_id::text, reputation_amount::text
       from dune.player_faction_reputation
       where actor_id = ${progressionActorId}
       order by faction_id
-    `, 20000), ["faction_id", "reputation_amount"]);
+    `, 7000), ["faction_id", "reputation_amount"]));
     result.factionReputation = rows;
   } else {
     result.factionReputationStatus = inspect.supports?.factionReputation?.status || "unsupported";
@@ -4333,7 +4386,7 @@ async function progressionPlayerLookup(queryValue) {
   result.progressionDebug.checkedActorIds = actorIdsToCheck.map(String);
 
   if (inspect.supports?.characterXp?.status === "detected") {
-    const characterScan = await progressionCharacterComponentScan(actorIdsToCheck).catch((error) => ({
+    const characterScan = await timer.step("FLevelComponent lookup", () => progressionCharacterComponentScan(actorIdsToCheck)).catch((error) => ({
       values: null,
       links: [],
       componentNames: [],
@@ -4356,7 +4409,7 @@ async function progressionPlayerLookup(queryValue) {
   }
 
   if (tableSet.has("dune.actors") && hasActorsProperties) {
-    const techScan = await progressionTechKnowledgeScan(actorIdsToCheck).catch((error) => ({
+    const techScan = await timer.step("TechKnowledge lookup", () => progressionTechKnowledgeScan(actorIdsToCheck)).catch((error) => ({
       values: null,
       componentNames: [],
       fieldStatus: { m_TechKnowledgePoints: `Character XP component scan failed: ${error.message}` }
@@ -4370,7 +4423,12 @@ async function progressionPlayerLookup(queryValue) {
     result.progressionDebug.fieldStatus.m_TechKnowledgePoints = "unsupported: actors.properties not detected";
   }
 
+  await timer.step("response build", async () => { result.timings = timer.timings; });
+  timer.finish({ status: "found", actorId: result.player.actor_id });
   return result;
+  } catch (error) {
+    return progressionLookupTimeoutResponse(error, query, timer.currentStep, timer.finish({ status: "failed" }));
+  }
 }
 
 function sqlValuesList(numbers) {
@@ -4434,7 +4492,7 @@ async function progressionCharacterComponentScan(actorIds) {
     where path[array_length(path, 1)] in ('TotalXPEarned', 'TotalSkillPoints', 'UnspentSkillPoints')
     order by 1, 2, 3, 4, 5;
   `;
-  const rows = parseDbRows(await dbQuery(sql, 20000), ["kind", "actor_id", "entity_id", "slot_name", "path", "value"]);
+  const rows = parseDbRows(await dbQuery(sql, 7000), ["kind", "actor_id", "entity_id", "slot_name", "path", "value"]);
   const links = rows.filter((row) => row.kind === "link").map((row) => ({
     actor_id: row.actor_id,
     entity_id: row.entity_id,
@@ -4505,6 +4563,7 @@ async function progressionTechKnowledgeScan(actorIds) {
         from jsonb_array_elements(case when jsonb_typeof(w.value) = 'array' then w.value else '[]'::jsonb end) with ordinality a(value, ordinality)
       ) child
       where jsonb_typeof(w.value) in ('object', 'array')
+        and coalesce(array_length(w.path, 1), 0) < 16
     )
     select distinct 'component', actor_id::text, path[1], ''
     from walk
@@ -4515,7 +4574,7 @@ async function progressionTechKnowledgeScan(actorIds) {
     where path[array_length(path, 1)] = 'm_TechKnowledgePoints'
     order by 1, 2, 3;
   `;
-  const rows = parseDbRows(await dbQuery(sql, 20000), ["kind", "actor_id", "path", "value"]);
+  const rows = parseDbRows(await dbQuery(sql, 7000), ["kind", "actor_id", "path", "value"]);
   const componentNames = [...new Set(rows.filter((row) => row.kind === "component").map((row) => row.path).filter(Boolean))];
   const fields = rows.filter((row) => row.kind === "field");
   const preferred = fields.find((row) => String(row.actor_id) === String(actorIds[0])) || fields[0];
@@ -8820,7 +8879,7 @@ async function refreshProgressionInspector(){addActivity("progression","Progress
 function detailRows(rows){return Object.entries(rows||{}).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value||"--")+'</strong></div>').join("");}
 function renderProgressionPlayer(data){progressionPlayerState=data?.ok?data:null;progressionPreviewState=null;const status=document.getElementById("progressionPlayerStatus");if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Current values loaded into the guarded editor.":(data?.reason||data?.error||"Progression player lookup failed.");}const identity=document.getElementById("progressionPlayerIdentity");if(identity){const p=data?.player||{};identity.innerHTML=data?.ok?detailRows({"player_id":p.player_id,"actor_id":p.actor_id,"character_actor_id":p.character_actor_id,"character_name":p.character_name,"account_id":p.account_id,"controller_id":p.player_controller_id,"pawn_id":p.player_pawn_id,"online_status":p.online_status,"map":p.map}):'<div class="empty">No player selected.</div>';}const xp=document.getElementById("progressionCharacterXp");const character=data?.characterXp||{};const tech=data?.techKnowledge||{};if(xp){xp.innerHTML=data?.ok?(detailRows({"TotalXPEarned":character.TotalXPEarned||"Unsupported / not found","TotalSkillPoints":character.TotalSkillPoints||"Unsupported / not found","UnspentSkillPoints":character.UnspentSkillPoints||"Unsupported / not found","TechKnowledgePoints":tech.m_TechKnowledgePoints||"Unsupported / not found"})):'<div class="empty">No character XP loaded.</div>';}if(data?.ok){setValue("progressionTotalXp",character.TotalXPEarned||0);setValue("progressionTotalSkillPoints",character.TotalSkillPoints||0);setValue("progressionUnspentSkillPoints",character.UnspentSkillPoints||0);setValue("progressionTechKnowledgePoints",tech.m_TechKnowledgePoints||0);setValue("progressionConfirmText","");}const warnings=document.getElementById("progressionPlayerWarnings");if(warnings){const items=data?.warnings||[];warnings.innerHTML=items.length?items.map(item=>'<div class="warning">'+esc(item)+'</div>').join(""):'<div class="empty">No warnings.</div>';}renderProgressionCharacterDebug(data);const spec=document.getElementById("progressionSpecRows");if(spec)spec.innerHTML=data?.ok?((data.specializationTracks||[]).length?(data.specializationTracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this player.</td></tr>'):'<tr><td colspan="3">No player loaded.</td></tr>';const factions=document.getElementById("progressionFactionRows");if(factions)factions.innerHTML=data?.ok?((data.factionReputation||[]).length?(data.factionReputation||[]).map(row=>'<tr><td>'+esc(row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';}
 function renderProgressionCharacterDebug(data){const el=document.getElementById("progressionCharacterDebug");if(!el)return;const debug=data?.progressionDebug||{};if(!data?.ok){el.textContent="No progression player lookup debug data.";return;}el.textContent=JSON.stringify({checkedActorIds:debug.checkedActorIds||[],fglEntityLinks:debug.fglEntityLinks||[],componentNames:debug.componentNames||[],fLevelTarget:debug.fLevelTarget||null,techKnowledgeTarget:debug.techKnowledgeTarget||null,fieldStatus:debug.fieldStatus||{}},null,2);}
-async function lookupProgressionPlayer(){const query=document.getElementById("progressionPlayerQuery")?.value||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query));renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup unsupported",e.message);}}
+async function lookupProgressionPlayer(){const query=document.getElementById("progressionPlayerQuery")?.value||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:20000});renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="timeout")addActivity("warn","Progression player lookup timed out",(data.step||"unknown step")+" / "+(data.hint||"Try exact character name."));else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||data.error||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup failed",e.message);}}
 setTimeout(()=>{const input=document.getElementById("progressionPlayerQuery");if(input)input.addEventListener("keydown",event=>{if(event.key==="Enter")lookupProgressionPlayer();});},0);
 function syncProgressionActionFields(){const actionEl=document.getElementById("progressionAction");if(actionEl)actionEl.value="character_xp_skill_points";document.querySelectorAll(".progression-character").forEach(el=>el.classList.remove("hidden"));progressionPreviewState=null;setText("progressionPreviewLog","No live progression preview generated.");}
 function progressionPayload(){return{action:"character_xp_skill_points",query:document.getElementById("progressionPlayerQuery")?.value||"",totalXpEarned:document.getElementById("progressionTotalXp")?.value||0,totalSkillPoints:document.getElementById("progressionTotalSkillPoints")?.value||0,unspentSkillPoints:document.getElementById("progressionUnspentSkillPoints")?.value||0,techKnowledgePoints:document.getElementById("progressionTechKnowledgePoints")?.value||0,advancedOverride:document.getElementById("progressionAdvancedOverride")?.checked===true};}
@@ -9246,7 +9305,20 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/progression/player" && req.method === "GET") {
-    await json(res, await progressionPlayerLookup(url.searchParams.get("query")));
+    const query = url.searchParams.get("query");
+    const timeoutMs = 14000;
+    const result = await Promise.race([
+      progressionPlayerLookup(query),
+      new Promise((resolve) => setTimeout(() => resolve({
+        ok: false,
+        status: "timeout",
+        error: "Player lookup timed out",
+        step: "lookup",
+        timings: { total: timeoutMs },
+        hint: "Try exact character name or check DB connection"
+      }), timeoutMs))
+    ]);
+    await json(res, result, result?.status === "timeout" ? 504 : 200);
     return;
   }
   if (url.pathname === "/api/progression/preview" && req.method === "POST") {

@@ -4199,10 +4199,11 @@ function progressionLookupTimer(query) {
 
 function progressionLookupTimeoutResponse(error, query, step, timings = {}) {
   console.warn("[progression/player] lookup failed", { query, step, timings, error: error.message });
+  const timedOut = /timed out|timeout/i.test(error.message);
   return {
     ok: false,
-    status: /timed out|timeout/i.test(error.message) ? "timeout" : "error",
-    error: /timed out|timeout/i.test(error.message) ? "Player lookup timed out" : error.message,
+    status: timedOut ? "timeout" : "error",
+    error: timedOut ? `${step} timed out` : error.message,
     step,
     timings,
     hint: "Try exact character name or check DB connection"
@@ -4250,31 +4251,13 @@ async function progressionPlayerLookup(queryValue) {
   if (!query) return { ok: false, status: "not-found", reason: "Enter a character name, player name, actor id, or player id." };
   const timer = progressionLookupTimer(query);
   try {
-  const inspect = await timer.step("DB connect", () => progressionInspector());
-  if (!inspect.ok) {
-    return {
-      ok: false,
-      status: "unavailable",
-      reason: "Progression database unavailable",
-      database: inspect.database,
-      safety: inspect.safety
-    };
-  }
-  const { tableSet, columnSet } = progressionSets(inspect);
-  if (!tableSet.has("dune.actors") || !hasColumn(columnSet, "dune", "actors", "id")) {
-    return progressionUnsupported("dune.actors with id column is required for player lookup.", inspect);
-  }
-  const hasActorsProperties = hasColumn(columnSet, "dune", "actors", "properties");
-  const hasPlayerState = tableSet.has("dune.player_state");
-  const hasPsAccount = hasColumn(columnSet, "dune", "player_state", "account_id");
-  const hasPsController = hasColumn(columnSet, "dune", "player_state", "player_controller_id");
-  const hasPsPawn = hasColumn(columnSet, "dune", "player_state", "player_pawn_id");
-  const hasPsOnline = hasColumn(columnSet, "dune", "player_state", "online_status");
-  const hasPsMap = hasColumn(columnSet, "dune", "player_state", "map");
-  const hasPsStateId = hasColumn(columnSet, "dune", "player_state", "player_state_id");
-  const hasPsLastAvatarActivity = hasColumn(columnSet, "dune", "player_state", "last_avatar_activity");
+  const safety = {
+    readOnlyMode: true,
+    liveEditingEnabled: Boolean(configValue.progressionEditingEnabled),
+    rawSqlInputEnabled: false
+  };
   console.info("[progression/player] query input", { query, helper: "adminPlayers", mode: "queried", limit: 5 });
-  const adminPlayerData = await timer.step("adminPlayers", () => withProgressionStepTimeout(adminPlayers({ query, limit: 5 }), 8000, "adminPlayers"));
+  const adminPlayerData = await timer.step("lookup", () => withProgressionStepTimeout(adminPlayers({ query, limit: 5 }), 8000, "lookup"));
   console.info("[progression/player] adminPlayers result", {
     query,
     source: adminPlayerData.source || "",
@@ -4295,47 +4278,24 @@ async function progressionPlayerLookup(queryValue) {
   }));
   if (!players.length) {
     timer.finish({ status: "not-found" });
-    return { ok: false, status: "not-found", query, players: [], reason: "No matching progression player found.", safety: inspect.safety, timings: timer.timings };
+    return { ok: false, status: "not-found", query, players: [], reason: "No matching progression player found.", safety, timings: timer.timings };
   }
   const player = players[0];
   console.info("[progression/player] selected player identifiers", {
     query,
+    player_id: player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id || "",
+    actor_id: player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id || "",
+    pawn_id: player.player_pawn_id || "",
     account_id: player.account_id,
     character_name: player.character_name,
     player_controller_id: player.player_controller_id,
     character_id: player.character_id,
     player_pawn_id: player.player_pawn_id
   });
-  if (hasPlayerState && (hasPsAccount || hasPsController)) {
-    const where = [];
-    if (hasPsAccount && player.account_id) where.push(`account_id::text = ${sqlString(player.account_id)}`);
-    if (hasPsController && player.player_controller_id) where.push(`player_controller_id::text = ${sqlString(player.player_controller_id)}`);
-    if (where.length) {
-      const stateSql = `
-        select
-          ${hasPsController ? "coalesce(player_controller_id::text, '')" : "''"} as player_controller_id,
-          ${hasPsPawn ? "coalesce(player_pawn_id::text, '')" : "''"} as player_pawn_id,
-          ${hasPsOnline ? "coalesce(online_status::text, 'unknown')" : "'unknown'"} as online_status,
-          ${hasPsMap ? "coalesce(map::text, '')" : "''"} as map
-        from dune.player_state
-        where ${where.join(" or ")}
-        order by ${hasPsLastAvatarActivity ? "last_avatar_activity desc nulls last" : (hasPsStateId ? "player_state_id nulls last" : "account_id")}
-        limit 1
-      `;
-      const rows = await timer.step("pawn/character lookup", async () =>
-        parseDbRows(await dbQuery(stateSql, 5000), ["player_controller_id", "player_pawn_id", "online_status", "map"])
-      );
-      if (rows[0]) {
-        player.player_controller_id = rows[0].player_controller_id || player.player_controller_id;
-        player.player_pawn_id = rows[0].player_pawn_id || player.player_pawn_id;
-        player.online_status = rows[0].online_status || player.online_status;
-        player.map = rows[0].map || player.map;
-      }
-    }
-  }
-  const progressionActorId = await timer.step("actor lookup", async () => Number(player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id));
+  timer.timings.player_state_refine = 0;
+  const progressionActorId = Number(player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id);
   if (!Number.isSafeInteger(progressionActorId) || progressionActorId < 1) {
-    return progressionUnsupported("Matched player did not expose a usable actor/player id.", inspect);
+    return { ok: false, status: "unsupported", reason: "Matched player did not expose a usable actor/player id.", query, players, safety, timings: timer.timings };
   }
 
   const result = {
@@ -4366,7 +4326,7 @@ async function progressionPlayerLookup(queryValue) {
       fieldStatus: {}
     },
     warnings: [],
-    safety: inspect.safety,
+    safety,
     timings: timer.timings
   };
 
@@ -4375,29 +4335,8 @@ async function progressionPlayerLookup(queryValue) {
     result.warnings.push("Character XP editing requires the player to be offline.");
   }
 
-  if (inspect.supports?.specializationXp?.status === "detected") {
-    const rows = await timer.step("specialization lookup", async () => parseDbRows(await dbQuery(`
-      select track_type::text, xp_amount::text, level::text
-      from dune.specialization_tracks
-      where player_id = ${progressionActorId}
-      order by track_type
-    `, 7000), ["track_type", "xp_amount", "level"]));
-    result.specializationTracks = rows;
-  } else {
-    result.specializationStatus = inspect.supports?.specializationXp?.status || "unsupported";
-  }
-
-  if (inspect.supports?.factionReputation?.status === "detected") {
-    const rows = await timer.step("faction lookup", async () => parseDbRows(await dbQuery(`
-      select faction_id::text, reputation_amount::text
-      from dune.player_faction_reputation
-      where actor_id = ${progressionActorId}
-      order by faction_id
-    `, 7000), ["faction_id", "reputation_amount"]));
-    result.factionReputation = rows;
-  } else {
-    result.factionReputationStatus = inspect.supports?.factionReputation?.status || "unsupported";
-  }
+  result.specializationStatus = "not-loaded";
+  result.factionReputationStatus = "not-loaded";
 
   const actorIdsToCheck = [...new Set([
     player.actor_id,
@@ -4407,45 +4346,33 @@ async function progressionPlayerLookup(queryValue) {
   ].map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))];
   result.progressionDebug.checkedActorIds = actorIdsToCheck.map(String);
 
-  if (inspect.supports?.characterXp?.status === "detected") {
-    const characterScan = await timer.step("FLevelComponent lookup", () => withProgressionStepTimeout(progressionCharacterComponentScan(actorIdsToCheck), 8000, "FLevelComponent lookup")).catch((error) => ({
-      values: null,
-      links: [],
-      componentNames: [],
-      fieldStatus: {
-        TotalXPEarned: `Character XP component scan failed: ${error.message}`,
-        TotalSkillPoints: `Character XP component scan failed: ${error.message}`,
-        UnspentSkillPoints: `Character XP component scan failed: ${error.message}`
-      }
-    }));
-    result.progressionDebug.fglEntityLinks = characterScan.links;
-    result.progressionDebug.componentNames = characterScan.componentNames;
-    result.progressionDebug.fLevelTarget = characterScan.target || null;
-    result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...characterScan.fieldStatus };
-    result.characterXp = characterScan.values;
-  } else {
-    result.characterXpStatus = inspect.supports?.characterXp?.status || "unsupported";
-    result.progressionDebug.fieldStatus.TotalXPEarned = "unsupported: character XP schema not detected";
-    result.progressionDebug.fieldStatus.TotalSkillPoints = "unsupported: character XP schema not detected";
-    result.progressionDebug.fieldStatus.UnspentSkillPoints = "unsupported: character XP schema not detected";
-  }
+  const characterScan = await timer.step("flevel_lookup", () => withProgressionStepTimeout(progressionCharacterComponentScan(actorIdsToCheck), 8000, "flevel_lookup")).catch((error) => ({
+    values: null,
+    links: [],
+    componentNames: [],
+    fieldStatus: {
+      TotalXPEarned: `Character XP component scan failed: ${error.message}`,
+      TotalSkillPoints: `Character XP component scan failed: ${error.message}`,
+      UnspentSkillPoints: `Character XP component scan failed: ${error.message}`
+    }
+  }));
+  result.progressionDebug.fglEntityLinks = characterScan.links;
+  result.progressionDebug.componentNames = characterScan.componentNames;
+  result.progressionDebug.fLevelTarget = characterScan.target || null;
+  result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...characterScan.fieldStatus };
+  result.characterXp = characterScan.values;
 
-  if (tableSet.has("dune.actors") && hasActorsProperties) {
-    const techScan = await timer.step("TechKnowledge lookup", () => withProgressionStepTimeout(progressionTechKnowledgeScan(actorIdsToCheck), 8000, "TechKnowledge lookup")).catch((error) => ({
-      values: null,
-      componentNames: [],
-      fieldStatus: { m_TechKnowledgePoints: `Character XP component scan failed: ${error.message}` }
-    }));
-    result.progressionDebug.componentNames = [...new Set([...(result.progressionDebug.componentNames || []), ...techScan.componentNames])];
-    result.progressionDebug.techKnowledgeTarget = techScan.target || null;
-    result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...techScan.fieldStatus };
-    result.techKnowledge = techScan.values;
-  } else {
-    result.techKnowledgeStatus = inspect.supports?.techKnowledgePoints?.status || "unsupported";
-    result.progressionDebug.fieldStatus.m_TechKnowledgePoints = "unsupported: actors.properties not detected";
-  }
+  const techScan = await timer.step("tech_lookup", () => withProgressionStepTimeout(progressionTechKnowledgeScan(actorIdsToCheck), 8000, "tech_lookup")).catch((error) => ({
+    values: null,
+    componentNames: [],
+    fieldStatus: { m_TechKnowledgePoints: `Character XP component scan failed: ${error.message}` }
+  }));
+  result.progressionDebug.componentNames = [...new Set([...(result.progressionDebug.componentNames || []), ...techScan.componentNames])];
+  result.progressionDebug.techKnowledgeTarget = techScan.target || null;
+  result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...techScan.fieldStatus };
+  result.techKnowledge = techScan.values;
 
-  await timer.step("response build", async () => { result.timings = timer.timings; });
+  await timer.step("response_build", async () => { result.timings = timer.timings; });
   timer.finish({ status: "found", actorId: result.player.actor_id });
   return result;
   } catch (error) {
@@ -5570,7 +5497,7 @@ async function liveGiveEnvStatus() {
 }
 
 function normalizeAdminPlayerRow(line) {
-  const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", playerPawnId = "", characterName = "", resolved = "false"] = String(line || "").split("\t");
+  const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", playerPawnId = "", onlineStatus = "", map = "", characterName = "", resolved = "false"] = String(line || "").split("\t");
   return {
     id: accountId,
     name: characterName || accountId || "Unknown",
@@ -5580,6 +5507,8 @@ function normalizeAdminPlayerRow(line) {
     player_controller_id: playerControllerId,
     character_id: characterId,
     player_pawn_id: playerPawnId,
+    online_status: onlineStatus || "unknown",
+    map,
     character_name: characterName || accountId || "Unknown",
     characterNameResolved: /^true$/i.test(resolved)
   };
@@ -5608,6 +5537,8 @@ async function adminPlayers(options = {}) {
       coalesce(ps.player_controller_id::text, '') as player_controller_id,
       coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
       coalesce(ps.player_pawn_id::text, '') as player_pawn_id,
+      coalesce(ps.online_status::text, 'unknown') as online_status,
+      coalesce(ps.map::text, '') as map,
       coalesce(nullif(ps.character_name, ''), a.account_id::text) as character_name,
       case when nullif(ps.character_name, '') is null then 'false' else 'true' end as resolved`;
   const queriedPlayerSql = (partial = false) => {
@@ -9381,19 +9312,7 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/progression/player" && req.method === "GET") {
-    const query = url.searchParams.get("query");
-    const timeoutMs = 14000;
-    const result = await Promise.race([
-      progressionPlayerLookup(query),
-      new Promise((resolve) => setTimeout(() => resolve({
-        ok: false,
-        status: "timeout",
-        error: "Player lookup timed out",
-        step: "lookup",
-        timings: { total: timeoutMs },
-        hint: "Try exact character name or check DB connection"
-      }), timeoutMs))
-    ]);
+    const result = await progressionPlayerLookup(url.searchParams.get("query"));
     await json(res, result, result?.status === "timeout" ? 504 : 200);
     return;
   }

@@ -177,6 +177,10 @@ function loadEnvironment() {
   if (cfg.receiverSshHost && !process.env.DUNE_RECEIVER_SSH_HOST) process.env.DUNE_RECEIVER_SSH_HOST = cfg.receiverSshHost;
   if (cfg.receiverSshUser && !process.env.DUNE_RECEIVER_SSH_USER) process.env.DUNE_RECEIVER_SSH_USER = cfg.receiverSshUser;
   if (cfg.receiverSshKey && !process.env.DUNE_RECEIVER_SSH_KEY) process.env.DUNE_RECEIVER_SSH_KEY = cfg.receiverSshKey;
+  if (cfg.selectedBattlegroup && typeof cfg.selectedBattlegroup === "object") {
+    if (cfg.selectedBattlegroup.namespace) process.env.DUNE_RECEIVER_BG_NAMESPACE = String(cfg.selectedBattlegroup.namespace);
+    if (cfg.selectedBattlegroup.name) process.env.DUNE_RECEIVER_BG_NAME = String(cfg.selectedBattlegroup.name);
+  }
   if (cfg.receiverHost && !process.env.DUNE_RECEIVER_HOST) process.env.DUNE_RECEIVER_HOST = cfg.receiverHost;
   if (cfg.receiverPort && !process.env.DUNE_RECEIVER_PORT) process.env.DUNE_RECEIVER_PORT = String(cfg.receiverPort);
   process.env.DUNE_RECEIVER_TOKEN = cfg.receiverToken || process.env.DUNE_RECEIVER_TOKEN || "";

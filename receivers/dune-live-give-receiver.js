@@ -12,7 +12,7 @@ const PORT = Number(process.env.DUNE_RECEIVER_PORT || 5055);
 const TOKEN = String(process.env.DUNE_RECEIVER_TOKEN || "").trim();
 const SSH_HOST = String(process.env.DUNE_RECEIVER_SSH_HOST || "").trim();
 const SSH_USER = String(process.env.DUNE_RECEIVER_SSH_USER || "dune").trim();
-const SSH_KEY = expandEnvPath(process.env.DUNE_RECEIVER_SSH_KEY || path.join(os.homedir(), "AppData", "Local", "DuneAwakeningServer", "sshKey"));
+const SSH_KEY = expandEnvPath(process.env.DUNE_RECEIVER_SSH_KEY || "");
 const MQ_NAMESPACE = String(process.env.DUNE_RECEIVER_MQ_NAMESPACE || "").trim();
 const MQ_POD = String(process.env.DUNE_RECEIVER_MQ_POD || "").trim();
 const BG_NAMESPACE = String(process.env.DUNE_RECEIVER_BG_NAMESPACE || "").trim();
@@ -679,36 +679,94 @@ async function resolveDunePlayerId(playerId) {
 }
 
 async function probeReceiver() {
-  const missing = [];
-  if (!SSH_HOST) missing.push("DUNE_RECEIVER_SSH_HOST");
-  if (!SSH_USER) missing.push("DUNE_RECEIVER_SSH_USER");
-  if (!SSH_KEY) missing.push("DUNE_RECEIVER_SSH_KEY");
   const config = receiverConfigDiagnostics();
-  if (missing.length) return { ok: false, missing, config, reason: "Receiver SSH config is incomplete." };
+  let detected = { battlegroups: [], selectedBattlegroup: null, error: "" };
+  if (config.sshConfigured && config.sshKeyExists) {
+    try {
+      detected = await Promise.race([
+        detectBattlegroups(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Receiver battlegroup detection timed out.")), Math.min(TIMEOUT_MS, 5000)))
+      ]);
+    } catch (error) {
+      detected.error = error.message;
+    }
+  }
+  config.selectedBattlegroup = detected.selectedBattlegroup || config.selectedBattlegroup;
+  config.battlegroupsDetected = detected.battlegroups.length;
+  config.battlegroups = detected.battlegroups;
+  if (detected.selectedBattlegroup) {
+    config.battlegroupNamespace = detected.selectedBattlegroup.namespace || "";
+    config.battlegroupName = detected.selectedBattlegroup.name || "";
+  }
   try {
-    const target = await Promise.race([
-      resolveMqTarget(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Receiver MQ target probe timed out.")), Math.min(TIMEOUT_MS, 5000)))
-    ]);
-    return { ok: true, config, target };
+    let target = null;
+    if (config.sshConfigured && config.sshKeyExists) {
+      target = await Promise.race([
+        resolveMqTarget(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Receiver MQ target probe timed out.")), Math.min(TIMEOUT_MS, 5000)))
+      ]);
+    }
+    return {
+      ok: Boolean(TOKEN),
+      receiverOnline: true,
+      tokenConfigured: Boolean(TOKEN),
+      sshConfigured: config.sshConfigured,
+      sshKeyExists: config.sshKeyExists,
+      selectedBattlegroup: config.selectedBattlegroup,
+      battlegroupsDetected: config.battlegroupsDetected,
+      battlegroupNamespace: config.battlegroupNamespace || "",
+      battlegroupName: config.battlegroupName || "",
+      mgNamespace: target?.namespace || config.mqNamespace || "",
+      mgPod: target?.pod || config.mqPod || "",
+      database: { status: config.selectedBattlegroup ? "target-detected" : "unknown" },
+      teleport: config.teleport,
+      config,
+      target,
+      warning: !config.sshConfigured ? "SSH key is not configured" : (!config.sshKeyExists ? `SSH key file does not exist: ${SSH_KEY}` : (detected.error || ""))
+    };
   } catch (error) {
-    return { ok: false, config, error: error.message };
+    return {
+      ok: Boolean(TOKEN),
+      receiverOnline: true,
+      tokenConfigured: Boolean(TOKEN),
+      sshConfigured: config.sshConfigured,
+      sshKeyExists: config.sshKeyExists,
+      selectedBattlegroup: config.selectedBattlegroup,
+      battlegroupsDetected: config.battlegroupsDetected,
+      battlegroupNamespace: config.battlegroupNamespace || "",
+      battlegroupName: config.battlegroupName || "",
+      mgNamespace: config.mqNamespace || "",
+      mgPod: config.mqPod || "",
+      database: { status: "unknown" },
+      teleport: config.teleport,
+      config,
+      error: error.message
+    };
   }
 }
 
 function receiverConfigDiagnostics() {
+  const sshConfigured = Boolean(SSH_HOST && SSH_USER && SSH_KEY);
+  const sshKeyExists = Boolean(SSH_KEY && fs.existsSync(SSH_KEY));
+  const selectedBattlegroup = BG_NAMESPACE && BG_NAME ? { namespace: BG_NAMESPACE, name: BG_NAME } : null;
   return {
     host: HOST,
     port: PORT,
     sshHost: SSH_HOST || "",
     sshUser: SSH_USER || "",
+    sshConfigured,
     sshKeyConfigured: Boolean(SSH_KEY),
+    sshKeyExists,
+    sshKeyPath: SSH_KEY ? "<set>" : "",
     tokenConfigured: Boolean(TOKEN),
     startedBySuite: /^(true|1|yes)$/i.test(String(process.env.ALPHANINE_RECEIVER_STARTED_BY_SUITE || "")),
     mqNamespace: MQ_NAMESPACE || "",
     mqPod: MQ_POD || "",
     battlegroupNamespace: BG_NAMESPACE || "",
     battlegroupName: BG_NAME || "",
+    selectedBattlegroup,
+    battlegroupsDetected: 0,
+    database: { status: selectedBattlegroup ? "target-configured" : "unknown" },
     teleport: {
       dryRunSupported: true,
       teleportSupported: LIVE_TELEPORT_ENABLED,
@@ -718,6 +776,49 @@ function receiverConfigDiagnostics() {
       offlineDbFunction: "dune.admin_move_offline_player_to_partition"
     }
   };
+}
+
+function battlegroupStatus(item = {}) {
+  const status = item.status || {};
+  const condition = Array.isArray(status.conditions) ? status.conditions.find((row) => /^(Ready|Healthy|Reconciled)$/i.test(String(row.type || ""))) : null;
+  return status.phase || status.status || status.state || (condition && String(condition.status || "").toLowerCase() === "true" ? condition.type : "") || "Unknown";
+}
+
+function battlegroupTitle(item = {}) {
+  const paths = [
+    item.spec?.title,
+    item.spec?.serverName,
+    item.spec?.name,
+    item.spec?.values?.title,
+    item.spec?.values?.serverName,
+    item.spec?.values?.server?.title,
+    item.spec?.values?.server?.name
+  ];
+  const direct = paths.find((value) => typeof value === "string" && value.trim());
+  if (direct) return direct.trim();
+  for (const [key, value] of Object.entries(item.metadata?.annotations || {})) {
+    if (/title|server[-_.]?name|display[-_.]?name/i.test(key) && String(value || "").trim()) return String(value).trim();
+  }
+  return "";
+}
+
+async function detectBattlegroups() {
+  const bgJson = await ssh("sudo kubectl get igwbg -A -o json", Math.min(TIMEOUT_MS, 10000));
+  let data;
+  try {
+    data = JSON.parse(bgJson.stdout || "{}");
+  } catch (error) {
+    throw new Error(`Could not parse battlegroup resources: ${error.message}`);
+  }
+  const battlegroups = (data.items || []).map((item) => ({
+    namespace: item.metadata?.namespace || "",
+    name: item.metadata?.name || "",
+    title: battlegroupTitle(item),
+    status: battlegroupStatus(item)
+  })).filter((item) => item.namespace && item.name);
+  const configured = BG_NAMESPACE && BG_NAME ? battlegroups.find((item) => item.namespace === BG_NAMESPACE && item.name === BG_NAME) : null;
+  const selectedBattlegroup = configured || (battlegroups.length === 1 ? battlegroups[0] : null);
+  return { battlegroups, selectedBattlegroup };
 }
 
 async function resolveMqTarget() {
@@ -747,20 +848,14 @@ async function resolveMqTarget() {
 
 async function resolveBattlegroup() {
   if (BG_NAMESPACE && BG_NAME) return { namespace: BG_NAMESPACE, name: BG_NAME };
-  const bgJson = await ssh("sudo kubectl get igwbg -A -o json", TIMEOUT_MS);
-  let data;
-  try {
-    data = JSON.parse(bgJson.stdout || "{}");
-  } catch (error) {
-    throw new Error(`Could not parse battlegroup resource: ${error.message}`);
+  const detected = await detectBattlegroups();
+  if (detected.selectedBattlegroup) {
+    return { namespace: detected.selectedBattlegroup.namespace, name: detected.selectedBattlegroup.name };
   }
-  const item = (data.items || [])[0];
-  const namespace = item?.metadata?.namespace || "";
-  const name = item?.metadata?.name || "";
-  if (!namespace || !name) {
+  if (!detected.battlegroups.length) {
     throw new Error("Could not find the Dune battlegroup resource. Set DUNE_RECEIVER_BG_NAMESPACE and DUNE_RECEIVER_BG_NAME manually.");
   }
-  return { namespace, name };
+  throw new Error("Multiple Dune battlegroups were detected. Select one in the Suite so DUNE_RECEIVER_BG_NAMESPACE and DUNE_RECEIVER_BG_NAME are set.");
 }
 
 async function runDuneSql(bg, sql) {
@@ -839,6 +934,10 @@ function buildRabbitEval(serverCommand, requestId) {
 
 function ssh(command, timeout) {
   return new Promise((resolve, reject) => {
+    if (!SSH_HOST) return reject(new Error("DUNE_RECEIVER_SSH_HOST is required."));
+    if (!SSH_USER) return reject(new Error("DUNE_RECEIVER_SSH_USER is required."));
+    if (!SSH_KEY) return reject(new Error("SSH key is not configured"));
+    if (!fs.existsSync(SSH_KEY)) return reject(new Error(`SSH key file does not exist: ${SSH_KEY}`));
     const args = [
       "-o", "StrictHostKeyChecking=no",
       "-o", "LogLevel=QUIET",

@@ -4218,7 +4218,7 @@ function withProgressionStepTimeout(promise, timeoutMs, step) {
   ]);
 }
 
-async function progressionPlayerLookup(queryValue) {
+async function progressionPlayerLookup(queryValue, options = {}) {
   const query = String(queryValue || "").trim();
   if (!query) return { ok: false, status: "not-found", reason: "Enter a character name, player name, actor id, or player id." };
   const timer = progressionLookupTimer(query);
@@ -4320,7 +4320,8 @@ async function progressionPlayerLookup(queryValue) {
   ].map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))];
   result.progressionDebug.checkedActorIds = actorIdsToCheck.map(String);
 
-  const characterScan = await timer.step("flevel_lookup", () => withProgressionStepTimeout(progressionCharacterComponentScan(actorIdsToCheck), 8000, "flevel_lookup")).catch((error) => ({
+  const includeDecodedComponents = options.debug === true || options.debug === "true";
+  const characterScan = await timer.step("flevel_lookup", () => withProgressionStepTimeout(progressionCharacterComponentScan(actorIdsToCheck, { includeDecoded: includeDecodedComponents }), 8000, "flevel_lookup")).catch((error) => ({
     values: null,
     links: [],
     componentNames: [],
@@ -4344,7 +4345,7 @@ async function progressionPlayerLookup(queryValue) {
     durationMs: timer.timings.flevel_lookup
   });
 
-  const techScan = await timer.step("tech_lookup", () => withProgressionStepTimeout(progressionTechKnowledgeScan(actorIdsToCheck), 8000, "tech_lookup")).catch((error) => ({
+  const techScan = await timer.step("tech_lookup", () => withProgressionStepTimeout(progressionTechKnowledgeScan(actorIdsToCheck, { includeDecoded: includeDecodedComponents }), 8000, "tech_lookup")).catch((error) => ({
     values: null,
     componentNames: [],
     fieldStatus: { m_TechKnowledgePoints: `Character XP component scan failed: ${error.message}` }
@@ -4354,6 +4355,26 @@ async function progressionPlayerLookup(queryValue) {
   result.progressionDebug.componentSchemaDumps = [...(result.progressionDebug.componentSchemaDumps || []), ...(techScan.debugDumps || [])];
   result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...techScan.fieldStatus };
   result.techKnowledge = techScan.values;
+  if (includeDecodedComponents) {
+    const flevelDump = (characterScan.debugDumps || []).find((dump) => dump.decoded !== undefined) || null;
+    const techDump = (techScan.debugDumps || []).find((dump) => dump.decoded !== undefined) || null;
+    result.debug = {
+      flevelComponent: flevelDump ? {
+        actor_id: flevelDump.actor_id,
+        entity_id: flevelDump.entity_id,
+        slot: flevelDump.slot,
+        rootKeys: flevelDump.rootKeys,
+        decoded: flevelDump.decoded
+      } : null,
+      techKnowledgeComponent: techDump ? {
+        actor_id: techDump.actor_id,
+        entity_id: techDump.entity_id,
+        slot: techDump.slot,
+        rootKeys: techDump.rootKeys,
+        decoded: techDump.decoded
+      } : null
+    };
+  }
   console.info("[progression/player] Tech lookup", {
     actor_id: techScan.target?.actor_id || resolvedIdentifiers.actor_id || "",
     entity_id: techScan.target?.entity_id || "",
@@ -4390,7 +4411,8 @@ function progressionRootKeys(value) {
   return [];
 }
 
-function progressionDumpComponentSchema(componentType, rows) {
+function progressionDumpComponentSchema(componentType, rows, options = {}) {
+  const includeDecoded = options.includeDecoded === true;
   const dumps = (rows || []).filter((row) => row.kind === "debug_component").map((row) => {
     const decoded = progressionDecodeJson(row.value || "");
     return {
@@ -4418,11 +4440,12 @@ function progressionDumpComponentSchema(componentType, rows) {
     slot: dump.slot,
     componentName: dump.componentName,
     rootKeys: dump.rootKeys,
-    debugLogPath: PROGRESSION_SCHEMA_DEBUG_LOG
+    debugLogPath: PROGRESSION_SCHEMA_DEBUG_LOG,
+    ...(includeDecoded ? { decoded: dump.decoded } : {})
   }));
 }
 
-async function progressionCharacterComponentScan(actorIds) {
+async function progressionCharacterComponentScan(actorIds, options = {}) {
   if (!actorIds.length) {
     return {
       values: null,
@@ -4479,7 +4502,7 @@ async function progressionCharacterComponentScan(actorIds) {
     order by 1, 2, 3, 4, 5;
   `;
   const rows = parseDbRows(await dbQuery(sql, 7000), ["kind", "actor_id", "entity_id", "slot_name", "path", "value"]);
-  const debugDumps = progressionDumpComponentSchema("FLevelComponent", rows);
+  const debugDumps = progressionDumpComponentSchema("FLevelComponent", rows, { includeDecoded: options.includeDecoded === true });
   const links = rows.filter((row) => row.kind === "link").map((row) => ({
     actor_id: row.actor_id,
     entity_id: row.entity_id,
@@ -4524,7 +4547,7 @@ async function progressionCharacterComponentScan(actorIds) {
   };
 }
 
-async function progressionTechKnowledgeScan(actorIds) {
+async function progressionTechKnowledgeScan(actorIds, options = {}) {
   if (!actorIds.length) {
     return { values: null, componentNames: [], target: null, fieldStatus: { m_TechKnowledgePoints: "unsupported: no actor ids available" } };
   }
@@ -4572,7 +4595,7 @@ async function progressionTechKnowledgeScan(actorIds) {
     ...row,
     entity_id: "",
     slot_name: ""
-  })));
+  })), { includeDecoded: options.includeDecoded === true });
   const componentNames = [...new Set(rows.filter((row) => row.kind === "component").map((row) => row.path).filter(Boolean))];
   const fields = rows.filter((row) => row.kind === "field");
   const preferred = fields.find((row) => String(row.actor_id) === String(actorIds[0])) || fields[0];
@@ -9362,7 +9385,7 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/progression/player" && req.method === "GET") {
-    const result = await progressionPlayerLookup(url.searchParams.get("query"));
+    const result = await progressionPlayerLookup(url.searchParams.get("query"), { debug: url.searchParams.get("debug") === "true" });
     await json(res, result, result?.status === "timeout" ? 504 : 200);
     return;
   }

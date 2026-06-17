@@ -4725,124 +4725,175 @@ async function progressionPlayerComponentSupport(actorId) {
 }
 
 async function progressionPreview(payload) {
-  const action = String(payload?.action || "").trim();
-  if (!["specialization_xp", "faction_reputation", "character_xp_skill_points"].includes(action)) {
-    throw new Error("Unsupported progression action.");
-  }
-  const query = String(payload?.query || payload?.playerId || "").trim();
-  const playerData = await progressionPlayerLookup(query);
-  if (!playerData.ok) return progressionUnsupported(playerData.reason || "Player lookup failed.");
-  const inspect = await progressionInspector();
-  const actorId = requireInteger(playerData.player.actor_id, "actor_id", 1);
-  const componentSupport = await progressionPlayerComponentSupport(actorId).catch(() => ({ factionComponent: false, techKnowledgeComponent: false }));
-  const previewId = crypto.randomBytes(16).toString("hex");
-  let oldValues = {};
-  let newValues = {};
-  let sqlPreview = "";
+  const timer = progressionPhaseTimer("progression/preview");
+  let action = "";
+  const fail = (error) => {
+    const timedOut = /timed out|timeout/i.test(error.message);
+    const failedStep = timer.currentStep;
+    timer.finish({ status: timedOut ? "timeout" : "error", action, step: failedStep, error: error.message });
+    return {
+      ok: false,
+      status: timedOut ? "timeout" : "error",
+      step: failedStep,
+      timings: timer.timings,
+      error: error.message
+    };
+  };
+  try {
+    await timer.step("config_load", async () => loadConfig());
+    await timer.step("safety_check", async () => {});
+    action = await timer.step("request_validate", async () => {
+      const requestedAction = String(payload?.action || "").trim();
+      if (!["specialization_xp", "faction_reputation", "character_xp_skill_points"].includes(requestedAction)) {
+        throw new Error("Unsupported progression action.");
+      }
+      return requestedAction;
+    });
 
-  if (action === "specialization_xp") {
-    if (inspect.supports?.specializationXp?.status !== "detected") return progressionUnsupported("Specialization XP schema/function support was not detected.", inspect);
-    const track = String(payload?.trackType || "").trim();
-    if (!track) throw new Error("trackType is required.");
-    const xp = Math.round(clampNumber(payload?.xpAmount, "xpAmount", 0, 44182));
-    const level = clampNumber(payload?.level, "level", 0, 100);
-    const current = (playerData.specializationTracks || []).find((row) => row.track_type === track) || null;
-    oldValues = current || { track_type: track, xp_amount: "0", level: "0", missing: true };
-    newValues = { track_type: track, xp_amount: xp, level };
-    sqlPreview = `SELECT dune.set_specialization_xp_and_level(${actorId}, ${sqlString(track)}::dune.specializationtracktype, ${xp}, ${level});`;
-  }
-
-  if (action === "faction_reputation") {
-    if (inspect.supports?.factionReputation?.status !== "detected") return progressionUnsupported("Faction reputation schema/function support was not detected.", inspect);
-    if (!componentSupport.factionComponent) return progressionUnsupported("FactionPlayerComponent cache sync support was not detected for this player; refusing live reputation write.", inspect);
-    const factionId = requireInteger(payload?.factionId, "factionId", 1, 32767);
-    const reputationAmount = Math.round(clampNumber(payload?.reputationAmount, "reputationAmount", 0, 12474));
-    const current = (playerData.factionReputation || []).find((row) => String(row.faction_id) === String(factionId)) || null;
-    oldValues = current || { faction_id: String(factionId), reputation_amount: "0", missing: true };
-    newValues = { faction_id: factionId, reputation_amount: reputationAmount };
-    sqlPreview = `SELECT dune.set_player_faction_reputation(${actorId}, ${factionId}, ${reputationAmount}); plus FactionPlayerComponent cache rebuild.`;
-  }
-
-  if (action === "character_xp_skill_points") {
-    if (inspect.supports?.characterXp?.status !== "detected") return progressionUnsupported("Character XP FLevelComponent support was not detected.", inspect);
-    if (String(playerData.player.online_status || "").toLowerCase().includes("online")) {
-      return progressionUnsupported("Character XP editing requires the player to be offline.", inspect);
+    if (action !== "character_xp_skill_points") {
+      const query = String(payload?.query || payload?.playerId || "").trim();
+      const playerData = await timer.step("selected_target_validate", () => withProgressionStepTimeout(progressionPlayerLookup(query), 8000, "selected_target_validate"));
+      if (!playerData.ok) return progressionUnsupported(playerData.reason || "Player lookup failed.");
+      const inspect = await timer.step("safety_check", () => withProgressionStepTimeout(progressionInspector(), 10000, "safety_check"));
+      const actorId = requireInteger(playerData.player.actor_id, "actor_id", 1);
+      const componentSupport = await progressionPlayerComponentSupport(actorId).catch(() => ({ factionComponent: false, techKnowledgeComponent: false }));
+      const previewId = crypto.randomBytes(16).toString("hex");
+      let oldValues = {};
+      let newValues = {};
+      let sqlPreview = "";
+      if (action === "specialization_xp") {
+        if (inspect.supports?.specializationXp?.status !== "detected") return progressionUnsupported("Specialization XP schema/function support was not detected.", inspect);
+        const track = String(payload?.trackType || "").trim();
+        if (!track) throw new Error("trackType is required.");
+        const xp = Math.round(clampNumber(payload?.xpAmount, "xpAmount", 0, 44182));
+        const level = clampNumber(payload?.level, "level", 0, 100);
+        const current = (playerData.specializationTracks || []).find((row) => row.track_type === track) || null;
+        oldValues = current || { track_type: track, xp_amount: "0", level: "0", missing: true };
+        newValues = { track_type: track, xp_amount: xp, level };
+        sqlPreview = `SELECT dune.set_specialization_xp_and_level(${actorId}, ${sqlString(track)}::dune.specializationtracktype, ${xp}, ${level});`;
+      } else if (action === "faction_reputation") {
+        if (inspect.supports?.factionReputation?.status !== "detected") return progressionUnsupported("Faction reputation schema/function support was not detected.", inspect);
+        if (!componentSupport.factionComponent) return progressionUnsupported("FactionPlayerComponent cache sync support was not detected for this player; refusing live reputation write.", inspect);
+        const factionId = requireInteger(payload?.factionId, "factionId", 1, 32767);
+        const reputationAmount = Math.round(clampNumber(payload?.reputationAmount, "reputationAmount", 0, 12474));
+        const current = (playerData.factionReputation || []).find((row) => String(row.faction_id) === String(factionId)) || null;
+        oldValues = current || { faction_id: String(factionId), reputation_amount: "0", missing: true };
+        newValues = { faction_id: factionId, reputation_amount: reputationAmount };
+        sqlPreview = `SELECT dune.set_player_faction_reputation(${actorId}, ${factionId}, ${reputationAmount}); plus FactionPlayerComponent cache rebuild.`;
+      }
+      const backupPath = progressionBackupPath(actorId, action, previewId);
+      await timer.step("backup_create", async () => fs.writeFileSync(backupPath, JSON.stringify({ createdAt: new Date().toISOString(), action, player: playerData.player, oldValues, source: "progression-preview", readOnlyBackup: true }, null, 2), "utf8"));
+      const preview = await timer.step("response_build", async () => ({
+        ok: true,
+        status: "preview",
+        previewId,
+        backupPath,
+        action,
+        player: playerData.player,
+        playerOffline: !String(playerData.player?.online_status || "").toLowerCase().includes("online"),
+        oldValues,
+        newValues,
+        fLevelTarget: null,
+        techKnowledgeTarget: null,
+        auditLogPath: PROGRESSION_AUDIT_LOG,
+        sqlPreview,
+        warning: `Live progression editing can corrupt player data. Backup first. Type ${PROGRESSION_CONFIRM_TEXT} before applying.`
+      }));
+      preview.timings = timer.finish({ status: "preview", action });
+      progressionPreviews.set(previewId, { ...preview, createdAt: Date.now(), componentSupport });
+      return preview;
     }
-    const techTarget = playerData.progressionDebug?.techKnowledgeTarget || null;
-    const fLevelTarget = playerData.progressionDebug?.fLevelTarget || null;
-    const xpDetected = playerData.characterXp
-      && playerData.characterXp.TotalXPEarned !== ""
-      && playerData.characterXp.TotalSkillPoints !== ""
-      && playerData.characterXp.UnspentSkillPoints !== ""
-      && playerData.techKnowledge
-      && playerData.techKnowledge.m_TechKnowledgePoints !== "";
-    const fLevelFields = fLevelTarget?.fields || {};
-    const fLevelDetected = fLevelTarget?.entity_id
-      && fLevelFields.TotalXPEarned?.path
-      && fLevelFields.TotalSkillPoints?.path
-      && fLevelFields.UnspentSkillPoints?.path;
-    if (!xpDetected || !fLevelDetected || !techTarget?.actor_id || !techTarget?.path) {
-      return {
-        ...progressionUnsupported("Character XP fields were not detected correctly for this player. Live character XP editing remains blocked.", inspect),
-        mismatchDebug: {
-          lookupDetectedCharacterXp: playerData.characterXp || null,
-          lookupFLevelTarget: fLevelTarget,
-          lookupDetectedTechKnowledge: playerData.techKnowledge || null,
-          lookupTechKnowledgeTarget: techTarget,
-          fieldStatus: playerData.progressionDebug?.fieldStatus || {},
-          checkedActorIds: playerData.progressionDebug?.checkedActorIds || []
-        }
-      };
-    }
-    const totalXp = progressionInteger(payload?.totalXpEarned, "TotalXPEarned", CHARACTER_PROGRESSION_LIMITS.TotalXPEarned);
-    const totalSkillPoints = progressionInteger(payload?.totalSkillPoints, "TotalSkillPoints", CHARACTER_PROGRESSION_LIMITS.TotalSkillPoints);
-    const unspentSkillPoints = progressionInteger(payload?.unspentSkillPoints, "UnspentSkillPoints", CHARACTER_PROGRESSION_LIMITS.UnspentSkillPoints);
-    const techKnowledgePoints = progressionInteger(payload?.techKnowledgePoints, "TechKnowledgePoints", CHARACTER_PROGRESSION_LIMITS.m_TechKnowledgePoints);
+
+    const selected = await timer.step("selected_target_validate", async () => {
+      const selectedPlayer = payload?.selectedPlayer || null;
+      if (!selectedPlayer?.player) throw new Error("Progression player target is missing. Reload the player in Progression Inspector before preview.");
+      if (!selectedPlayer?.fLevelTarget?.entity_id) throw new Error("Selected FLevelComponent target is missing. Reload the player before preview.");
+      if (!selectedPlayer?.techKnowledgeTarget?.actor_id || !selectedPlayer?.techKnowledgeTarget?.path) throw new Error("Selected TechKnowledge target is missing. Reload the player before preview.");
+      const fLevelFields = selectedPlayer.fLevelTarget.fields || {};
+      for (const key of ["TotalXPEarned", "TotalSkillPoints", "UnspentSkillPoints"]) {
+        if (!fLevelFields[key]?.path) throw new Error(`Selected FLevelComponent path is missing for ${key}.`);
+      }
+      if (String(selectedPlayer.player.online_status || "").toLowerCase().includes("online")) {
+        throw new Error("Character XP editing requires the player to be offline.");
+      }
+      return selectedPlayer;
+    });
+    const player = selected.player;
+    const actorId = requireInteger(player.actor_id, "actor_id", 1);
+    const currentCharacter = selected.characterXp || {};
+    const currentTech = selected.techKnowledge || {};
+    const targetValues = {
+      TotalXPEarned: progressionInteger(payload?.totalXpEarned, "TotalXPEarned", CHARACTER_PROGRESSION_LIMITS.TotalXPEarned),
+      TotalSkillPoints: progressionInteger(payload?.totalSkillPoints, "TotalSkillPoints", CHARACTER_PROGRESSION_LIMITS.TotalSkillPoints),
+      UnspentSkillPoints: progressionInteger(payload?.unspentSkillPoints, "UnspentSkillPoints", CHARACTER_PROGRESSION_LIMITS.UnspentSkillPoints),
+      m_TechKnowledgePoints: progressionInteger(payload?.techKnowledgePoints, "TechKnowledgePoints", CHARACTER_PROGRESSION_LIMITS.m_TechKnowledgePoints)
+    };
     const advancedOverride = payload?.advancedOverride === true || payload?.advancedOverride === "true";
-    if (unspentSkillPoints > totalSkillPoints && !advancedOverride) {
+    if (targetValues.UnspentSkillPoints > targetValues.TotalSkillPoints && !advancedOverride) {
       throw new Error("UnspentSkillPoints must not exceed TotalSkillPoints unless advanced override is enabled.");
     }
-    oldValues = {
-      ...(playerData.characterXp || {}),
-      ...(playerData.techKnowledge || {})
+    const diff = await timer.step("diff_build", async () => {
+      const oldAll = {
+        TotalXPEarned: currentCharacter.TotalXPEarned ?? "",
+        TotalSkillPoints: currentCharacter.TotalSkillPoints ?? "",
+        UnspentSkillPoints: currentCharacter.UnspentSkillPoints ?? "",
+        m_TechKnowledgePoints: currentTech.m_TechKnowledgePoints ?? ""
+      };
+      const oldValues = {};
+      const newValues = {};
+      for (const [key, value] of Object.entries(targetValues)) {
+        if (String(oldAll[key]) !== String(value)) {
+          oldValues[key] = oldAll[key];
+          newValues[key] = value;
+        }
+      }
+      if (!Object.keys(newValues).length) throw new Error("No changed progression values were selected.");
+      return { oldAll, oldValues, newValues };
+    });
+    const previewId = crypto.randomBytes(16).toString("hex");
+    const backupPath = progressionBackupPath(actorId, action, previewId);
+    await timer.step("backup_create", async () => {
+      const backup = {
+        createdAt: new Date().toISOString(),
+        action,
+        player,
+        oldValues: diff.oldValues,
+        fLevelTarget: selected.fLevelTarget,
+        techKnowledgeTarget: selected.techKnowledgeTarget,
+        source: "progression-preview",
+        readOnlyBackup: true
+      };
+      fs.writeFileSync(backupPath, JSON.stringify(backup, null, 2), "utf8");
+    });
+    const changedDescriptions = Object.keys(diff.newValues).map((key) => `${key}: ${diff.oldValues[key]} -> ${diff.newValues[key]}`);
+    const componentSupport = {
+      fLevelTarget: selected.fLevelTarget,
+      techKnowledgeTarget: selected.techKnowledgeTarget,
+      advancedOverride
     };
-    newValues = { TotalXPEarned: totalXp, TotalSkillPoints: totalSkillPoints, UnspentSkillPoints: unspentSkillPoints, m_TechKnowledgePoints: techKnowledgePoints };
-    sqlPreview = `Update FLevelComponent at actor ${fLevelTarget.actor_id} entity ${fLevelTarget.entity_id} paths ${fLevelFields.TotalXPEarned.path}, ${fLevelFields.TotalSkillPoints.path}, ${fLevelFields.UnspentSkillPoints.path}; update TechKnowledge at actor ${techTarget.actor_id} path ${techTarget.path}.`;
-    componentSupport.fLevelTarget = fLevelTarget;
-    componentSupport.techKnowledgeTarget = techTarget;
-    componentSupport.advancedOverride = advancedOverride;
+    await timer.step("audit_preview_write", async () => progressionAudit("progression_preview_created", { action, player, oldValues: diff.oldValues, newValues: diff.newValues, backupFilePath: backupPath, fLevelTarget: selected.fLevelTarget, techKnowledgeTarget: selected.techKnowledgeTarget }));
+    const preview = await timer.step("response_build", async () => ({
+      ok: true,
+      status: "preview",
+      previewId,
+      backupPath,
+      action,
+      player,
+      playerOffline: !String(player?.online_status || "").toLowerCase().includes("online"),
+      oldValues: diff.oldValues,
+      newValues: diff.newValues,
+      fLevelTarget: selected.fLevelTarget,
+      techKnowledgeTarget: selected.techKnowledgeTarget,
+      auditLogPath: PROGRESSION_AUDIT_LOG,
+      sqlPreview: `Selected target diff only:\n${changedDescriptions.join("\n")}`,
+      warning: `Live progression editing can corrupt player data. Backup first. Type ${PROGRESSION_CONFIRM_TEXT} before applying.`
+    }));
+    progressionPreviews.set(previewId, { ...preview, createdAt: Date.now(), componentSupport });
+    preview.timings = timer.finish({ status: "preview", action, changedFields: Object.keys(diff.newValues) });
+    return preview;
+  } catch (error) {
+    return fail(error);
   }
-
-  const backup = {
-    createdAt: new Date().toISOString(),
-    action,
-    player: playerData.player,
-    oldValues,
-    fLevelTarget: componentSupport.fLevelTarget || null,
-    techKnowledgeTarget: componentSupport.techKnowledgeTarget || null,
-    source: "progression-preview",
-    readOnlyBackup: true
-  };
-  const backupPath = progressionBackupPath(actorId, action, previewId);
-  fs.writeFileSync(backupPath, JSON.stringify(backup, null, 2), "utf8");
-  const preview = {
-    ok: true,
-    status: "preview",
-    previewId,
-    backupPath,
-    action,
-    player: playerData.player,
-    playerOffline: !String(playerData.player?.online_status || "").toLowerCase().includes("online"),
-    oldValues,
-    newValues,
-    fLevelTarget: componentSupport.fLevelTarget || null,
-    techKnowledgeTarget: componentSupport.techKnowledgeTarget || null,
-    auditLogPath: PROGRESSION_AUDIT_LOG,
-    sqlPreview,
-    warning: `Live progression editing can corrupt player data. Backup first. Type ${PROGRESSION_CONFIRM_TEXT} before applying.`
-  };
-  progressionPreviews.set(previewId, { ...preview, createdAt: Date.now(), componentSupport });
-  return preview;
 }
 
 function factionComponentArraySql(actorId) {
@@ -4971,13 +5022,14 @@ async function progressionApply(payload) {
         { key: "TotalXPEarned", path: fLevelFields.TotalXPEarned.path, value: preview.newValues.TotalXPEarned },
         { key: "TotalSkillPoints", path: fLevelFields.TotalSkillPoints.path, value: preview.newValues.TotalSkillPoints },
         { key: "UnspentSkillPoints", path: fLevelFields.UnspentSkillPoints.path, value: preview.newValues.UnspentSkillPoints }
-      ].filter((field) => {
+      ].filter((field) => Object.prototype.hasOwnProperty.call(preview.newValues || {}, field.key)).filter((field) => {
         const changed = String(preview.oldValues?.[field.key] ?? "") !== String(field.value);
         (changed ? changedFields : skippedFields).push(field.key);
         return changed;
       });
-      const techChanged = String(preview.oldValues?.m_TechKnowledgePoints ?? "") !== String(preview.newValues.m_TechKnowledgePoints);
-      (techChanged ? changedFields : skippedFields).push("m_TechKnowledgePoints");
+      const techInPreview = Object.prototype.hasOwnProperty.call(preview.newValues || {}, "m_TechKnowledgePoints");
+      const techChanged = techInPreview && String(preview.oldValues?.m_TechKnowledgePoints ?? "") !== String(preview.newValues.m_TechKnowledgePoints);
+      if (techInPreview) (techChanged ? changedFields : skippedFields).push("m_TechKnowledgePoints");
       if (fLevelChanges.length) {
         let fLevelExpression = "components";
         for (const field of fLevelChanges) {
@@ -9164,7 +9216,7 @@ function renderProgressionCharacterDebug(data){const el=document.getElementById(
 async function lookupProgressionPlayer(){const query=document.getElementById("progressionPlayerQuery")?.value||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:20000});renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="timeout")addActivity("warn","Progression player lookup timed out",(data.step||"unknown step")+" / "+(data.hint||"Try exact character name."));else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||data.error||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup failed",e.message);}}
 setTimeout(()=>{const input=document.getElementById("progressionPlayerQuery");if(input)input.addEventListener("keydown",event=>{if(event.key==="Enter")lookupProgressionPlayer();});},0);
 function syncProgressionActionFields(){const actionEl=document.getElementById("progressionAction");if(actionEl)actionEl.value="character_xp_skill_points";document.querySelectorAll(".progression-character").forEach(el=>el.classList.remove("hidden"));progressionPreviewState=null;setText("progressionPreviewLog","No live progression preview generated.");}
-function progressionPayload(){return{action:"character_xp_skill_points",query:document.getElementById("progressionPlayerQuery")?.value||"",totalXpEarned:document.getElementById("progressionTotalXp")?.value||0,totalSkillPoints:document.getElementById("progressionTotalSkillPoints")?.value||0,unspentSkillPoints:document.getElementById("progressionUnspentSkillPoints")?.value||0,techKnowledgePoints:document.getElementById("progressionTechKnowledgePoints")?.value||0,advancedOverride:document.getElementById("progressionAdvancedOverride")?.checked===true};}
+function progressionPayload(){const selected=progressionPlayerState?{player:progressionPlayerState.player||null,characterXp:progressionPlayerState.characterXp||null,techKnowledge:progressionPlayerState.techKnowledge||null,fLevelTarget:progressionPlayerState.progressionDebug?.fLevelTarget||null,techKnowledgeTarget:progressionPlayerState.progressionDebug?.techKnowledgeTarget||null,fieldStatus:progressionPlayerState.progressionDebug?.fieldStatus||{}}:null;return{action:"character_xp_skill_points",query:document.getElementById("progressionPlayerQuery")?.value||"",selectedPlayer:selected,totalXpEarned:document.getElementById("progressionTotalXp")?.value||0,totalSkillPoints:document.getElementById("progressionTotalSkillPoints")?.value||0,unspentSkillPoints:document.getElementById("progressionUnspentSkillPoints")?.value||0,techKnowledgePoints:document.getElementById("progressionTechKnowledgePoints")?.value||0,advancedOverride:document.getElementById("progressionAdvancedOverride")?.checked===true};}
 async function previewProgressionApply(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before generating a preview.");const data=await getJson("/api/progression/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(progressionPayload())});if(!data.ok)throw new Error(data.reason||data.error||"Progression preview failed.");progressionPreviewState=data;const target={player:data.player,playerOffline:data.playerOffline,fLevelTarget:data.fLevelTarget,techKnowledgeTarget:data.techKnowledgeTarget,auditLogPath:data.auditLogPath};setText("progressionPreviewLog","Preview generated. Backup created before any write.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nTarget paths:\\n"+JSON.stringify(target,null,2)+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nOperation:\\n"+data.sqlPreview+"\\n\\nType APPLY PROGRESSION before applying.");addActivity("progression","Progression backup created",data.backupPath);playUiSound("success");}catch(e){progressionPreviewState=null;setText("progressionPreviewLog",betterError(e));addActivity("error","Progression preview failed",e.message);playUiSound("warning");}}
 async function applyProgressionLive(){try{if(!progressionPreviewState)throw new Error("Generate Preview + Backup first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionPreviewState.previewId,confirmText:document.getElementById("progressionConfirmText")?.value||""})});if(!data.ok)throw new Error((data.warning||data.error||"Progression apply failed")+"\\n"+JSON.stringify(data.debug||{},null,2));setText("progressionPreviewLog","Live progression apply succeeded.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nRead-back verification:\\n"+JSON.stringify(data.debug?.readBackValues||{},null,2));addActivity("progression","Progression live edit applied",data.action);progressionPreviewState=null;document.getElementById("progressionConfirmText").value="";await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionPreviewLog",betterError(e));addActivity("error","Progression live edit failed",e.message);playUiSound("warning");}}
 function skillRepQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}

@@ -4218,6 +4218,30 @@ function withProgressionStepTimeout(promise, timeoutMs, step) {
   ]);
 }
 
+function progressionPhaseTimer(scope = "progression") {
+  const started = Date.now();
+  const timings = {};
+  let currentStep = "starting";
+  return {
+    timings,
+    get currentStep() { return currentStep; },
+    async step(name, fn) {
+      currentStep = name;
+      const stepStarted = Date.now();
+      try {
+        return await fn();
+      } finally {
+        timings[name] = Date.now() - stepStarted;
+      }
+    },
+    finish(extra = {}) {
+      timings.total = Date.now() - started;
+      console.info(`[${scope}] timing`, { currentStep, timings, ...extra });
+      return timings;
+    }
+  };
+}
+
 async function progressionPlayerLookup(queryValue, options = {}) {
   const query = String(queryValue || "").trim();
   if (!query) return { ok: false, status: "not-found", reason: "Enter a character name, player name, actor id, or player id." };
@@ -4847,122 +4871,207 @@ function factionComponentArraySql(actorId) {
 }
 
 async function progressionApply(payload) {
-  const configValue = loadConfig();
+  const timer = progressionPhaseTimer("progression/apply");
+  let configValue = null;
+  let preview = null;
+  let action = "";
   const previewId = String(payload?.previewId || "").trim();
-  const preview = progressionPreviews.get(previewId);
-  if (!configValue.progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
-  if (!preview) throw new Error("Dry-run preview was not generated first or has expired.");
-  if (!fs.existsSync(preview.backupPath)) throw new Error("Matching backup file is missing.");
-  if (payload?.confirmText !== PROGRESSION_CONFIRM_TEXT) throw new Error(`Type ${PROGRESSION_CONFIRM_TEXT} before applying.`);
-  if (Date.now() - preview.createdAt > 1000 * 60 * 30) throw new Error("Dry-run preview expired. Generate a new preview.");
-  const inspect = await progressionInspector();
-  if (!inspect.ok) throw new Error("Progression schema inspection failed.");
-  const actorId = requireInteger(preview.player.actor_id, "actor_id", 1);
-  const action = preview.action;
-  let sql = "";
-  if (action === "specialization_xp") {
-    if (inspect.supports?.specializationXp?.status !== "detected") throw new Error("Specialization XP support is no longer detected.");
-    sql = `
-      begin;
-      select dune.set_specialization_xp_and_level(${actorId}, ${sqlString(preview.newValues.track_type)}::dune.specializationtracktype, ${preview.newValues.xp_amount}, ${preview.newValues.level});
-      commit;
-    `;
-  } else if (action === "faction_reputation") {
-    if (inspect.supports?.factionReputation?.status !== "detected") throw new Error("Faction reputation support is no longer detected.");
-    if (!preview.componentSupport?.factionComponent) throw new Error("FactionPlayerComponent cache sync support was not detected.");
-    sql = `
-      begin;
-      select dune.set_player_faction_reputation(${actorId}, ${preview.newValues.faction_id}, ${preview.newValues.reputation_amount});
-      ${factionComponentArraySql(actorId)}
-      commit;
-    `;
-  } else if (action === "character_xp_skill_points") {
-    if (inspect.supports?.characterXp?.status !== "detected") throw new Error("Character XP support is no longer detected.");
-    const fresh = await progressionPlayerLookup(actorId);
-    if (String(fresh.player?.online_status || "").toLowerCase().includes("online")) throw new Error("Character XP editing requires the player to be offline.");
-    const fLevelTarget = preview.componentSupport?.fLevelTarget;
-    const fLevelFields = fLevelTarget?.fields || {};
-    if (!fLevelTarget?.entity_id
-      || !fLevelFields.TotalXPEarned?.path
-      || !fLevelFields.TotalSkillPoints?.path
-      || !fLevelFields.UnspentSkillPoints?.path) {
-      throw new Error("Preview did not include a resolved FLevelComponent path.");
+  const rowsAffected = {};
+  const skippedFields = [];
+  const changedFields = [];
+  let verificationDebug = {};
+  const fail = async (error) => {
+    const timedOut = /timed out|timeout/i.test(error.message);
+    const failedStep = timer.currentStep;
+    timer.finish({ status: timedOut ? "timeout" : "error", previewId, action, step: failedStep, error: error.message });
+    if (preview) {
+      try {
+        await timer.step("audit_write", () => Promise.resolve(progressionAudit("progression_apply_failure", {
+          action,
+          player: preview.player,
+          oldValues: preview.oldValues,
+          newValues: preview.newValues,
+          backupFilePath: preview.backupPath,
+          success: false,
+          step: failedStep,
+          timings: timer.timings,
+          error: error.message
+        })));
+      } catch {}
     }
-    const techTarget = preview.componentSupport?.techKnowledgeTarget;
-    if (!techTarget?.actor_id || !techTarget?.path) throw new Error("Preview did not include a resolved TechKnowledge component path.");
-    const fLevelEntityId = requireSqlIntegerLiteral(fLevelTarget.entity_id, "fLevel_entity_id");
-    sql = `
-      begin;
-      with updated_flevel as (
-        update dune.fgl_entities
-        set components = jsonb_set(jsonb_set(jsonb_set(
-        components,
-        ${sqlTextArrayPath(fLevelFields.TotalXPEarned.path)}, to_jsonb(${preview.newValues.TotalXPEarned}::bigint), false),
-        ${sqlTextArrayPath(fLevelFields.TotalSkillPoints.path)}, to_jsonb(${preview.newValues.TotalSkillPoints}::bigint), false),
-        ${sqlTextArrayPath(fLevelFields.UnspentSkillPoints.path)}, to_jsonb(${preview.newValues.UnspentSkillPoints}::bigint), false)
-        where entity_id = ${fLevelEntityId}
-        returning 1
-      )
-      select 'flevel_rows', count(*)::text from updated_flevel;
-      with updated_tech as (
-        update dune.actors
-        set properties = jsonb_set(
-        properties,
-        ${sqlTextArrayPath(techTarget.path)},
-        to_jsonb(${preview.newValues.m_TechKnowledgePoints}::bigint),
-        false)
-        where id = ${requireInteger(techTarget.actor_id, "tech_knowledge_actor_id", 1)}
-        returning 1
-      )
-      select 'tech_rows', count(*)::text from updated_tech;
-      commit;
-    `;
-  } else {
-    throw new Error("Unsupported progression action.");
-  }
+    return {
+      ok: false,
+      status: timedOut ? "timeout" : "error",
+      step: failedStep,
+      timings: timer.timings,
+      action,
+      backupPath: preview?.backupPath || "",
+      auditLogPath: PROGRESSION_AUDIT_LOG,
+      error: error.message,
+      debug: verificationDebug
+    };
+  };
   try {
-    const output = await dbQuery(sql, 30000);
-    const debugRows = parseDbRows(output, ["key", "value"]);
-    const rowsAffected = Object.fromEntries(debugRows.filter((row) => /_rows$/.test(row.key || "")).map((row) => [row.key, Number(row.value) || 0]));
-    if (action === "character_xp_skill_points") {
-      const readBack = await progressionPlayerLookup(actorId);
-      const readBackValues = {
-        TotalXPEarned: readBack.characterXp?.TotalXPEarned ?? "",
-        TotalSkillPoints: readBack.characterXp?.TotalSkillPoints ?? "",
-        UnspentSkillPoints: readBack.characterXp?.UnspentSkillPoints ?? "",
-        m_TechKnowledgePoints: readBack.techKnowledge?.m_TechKnowledgePoints ?? ""
-      };
-      const expected = {
-        TotalXPEarned: String(preview.newValues.TotalXPEarned),
-        TotalSkillPoints: String(preview.newValues.TotalSkillPoints),
-        UnspentSkillPoints: String(preview.newValues.UnspentSkillPoints),
-        m_TechKnowledgePoints: String(preview.newValues.m_TechKnowledgePoints)
-      };
+    configValue = await timer.step("config_load", () => Promise.resolve(loadConfig()));
+    await timer.step("safety_check", async () => {
+      if (!configValue.progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+    });
+    preview = await timer.step("request_validate", async () => {
+      const storedPreview = progressionPreviews.get(previewId);
+      if (!storedPreview) throw new Error("Dry-run preview was not generated first or has expired.");
+      if (payload?.confirmText !== PROGRESSION_CONFIRM_TEXT) throw new Error(`Type ${PROGRESSION_CONFIRM_TEXT} before applying.`);
+      if (Date.now() - storedPreview.createdAt > 1000 * 60 * 30) throw new Error("Dry-run preview expired. Generate a new preview.");
+      action = storedPreview.action;
+      return storedPreview;
+    });
+    await timer.step("backup_create", async () => {
+      if (!fs.existsSync(preview.backupPath)) throw new Error("Matching backup file is missing.");
+    });
+    const actorId = requireInteger(preview.player.actor_id, "actor_id", 1);
+    if (action === "specialization_xp") {
+      await timer.step("safety_check", async () => {
+        const inspect = await withProgressionStepTimeout(progressionInspector(), 10000, "safety_check");
+        if (inspect.supports?.specializationXp?.status !== "detected") throw new Error("Specialization XP support is no longer detected.");
+      });
+      await timer.step("flevel_update", async () => withProgressionStepTimeout(dbQuery(`
+        begin;
+        select dune.set_specialization_xp_and_level(${actorId}, ${sqlString(preview.newValues.track_type)}::dune.specializationtracktype, ${preview.newValues.xp_amount}, ${preview.newValues.level});
+        commit;
+      `, 20000), 22000, "flevel_update"));
+    } else if (action === "faction_reputation") {
+      await timer.step("safety_check", async () => {
+        const inspect = await withProgressionStepTimeout(progressionInspector(), 10000, "safety_check");
+        if (inspect.supports?.factionReputation?.status !== "detected") throw new Error("Faction reputation support is no longer detected.");
+        if (!preview.componentSupport?.factionComponent) throw new Error("FactionPlayerComponent cache sync support was not detected.");
+      });
+      await timer.step("flevel_update", async () => withProgressionStepTimeout(dbQuery(`
+        begin;
+        select dune.set_player_faction_reputation(${actorId}, ${preview.newValues.faction_id}, ${preview.newValues.reputation_amount});
+        ${factionComponentArraySql(actorId)}
+        commit;
+      `, 20000), 22000, "flevel_update"));
+    } else if (action === "character_xp_skill_points") {
+      await timer.step("player_offline_check", async () => {
+        if (!preview.playerOffline || String(preview.player?.online_status || "").toLowerCase().includes("online")) {
+          throw new Error("Character XP editing requires the player to be offline.");
+        }
+      });
+      const fLevelTarget = preview.componentSupport?.fLevelTarget;
+      const fLevelFields = fLevelTarget?.fields || {};
+      if (!fLevelTarget?.entity_id
+        || !fLevelFields.TotalXPEarned?.path
+        || !fLevelFields.TotalSkillPoints?.path
+        || !fLevelFields.UnspentSkillPoints?.path) {
+        throw new Error("Preview did not include a resolved FLevelComponent path.");
+      }
+      const techTarget = preview.componentSupport?.techKnowledgeTarget;
+      if (!techTarget?.actor_id || !techTarget?.path) throw new Error("Preview did not include a resolved TechKnowledge component path.");
+      const fLevelEntityId = requireSqlIntegerLiteral(fLevelTarget.entity_id, "fLevel_entity_id");
+      const fLevelChanges = [
+        { key: "TotalXPEarned", path: fLevelFields.TotalXPEarned.path, value: preview.newValues.TotalXPEarned },
+        { key: "TotalSkillPoints", path: fLevelFields.TotalSkillPoints.path, value: preview.newValues.TotalSkillPoints },
+        { key: "UnspentSkillPoints", path: fLevelFields.UnspentSkillPoints.path, value: preview.newValues.UnspentSkillPoints }
+      ].filter((field) => {
+        const changed = String(preview.oldValues?.[field.key] ?? "") !== String(field.value);
+        (changed ? changedFields : skippedFields).push(field.key);
+        return changed;
+      });
+      const techChanged = String(preview.oldValues?.m_TechKnowledgePoints ?? "") !== String(preview.newValues.m_TechKnowledgePoints);
+      (techChanged ? changedFields : skippedFields).push("m_TechKnowledgePoints");
+      if (fLevelChanges.length) {
+        let fLevelExpression = "components";
+        for (const field of fLevelChanges) {
+          fLevelExpression = `jsonb_set(${fLevelExpression}, ${sqlTextArrayPath(field.path)}, to_jsonb(${field.value}::bigint), false)`;
+        }
+        const output = await timer.step("flevel_update", async () => withProgressionStepTimeout(dbQuery(`
+          begin;
+          with updated_flevel as (
+            update dune.fgl_entities
+            set components = ${fLevelExpression}
+            where entity_id = ${fLevelEntityId}
+            returning 1
+          )
+          select 'flevel_rows', count(*)::text from updated_flevel;
+          commit;
+        `, 20000), 22000, "flevel_update"));
+        const debugRows = parseDbRows(output, ["key", "value"]);
+        Object.assign(rowsAffected, Object.fromEntries(debugRows.filter((row) => /_rows$/.test(row.key || "")).map((row) => [row.key, Number(row.value) || 0])));
+      } else {
+        timer.timings.flevel_update = 0;
+      }
+      if (techChanged) {
+        const output = await timer.step("tech_update", async () => withProgressionStepTimeout(dbQuery(`
+          begin;
+          with updated_tech as (
+            update dune.actors
+            set properties = jsonb_set(
+              properties,
+              ${sqlTextArrayPath(techTarget.path)},
+              to_jsonb(${preview.newValues.m_TechKnowledgePoints}::bigint),
+              false)
+            where id = ${requireInteger(techTarget.actor_id, "tech_knowledge_actor_id", 1)}
+            returning 1
+          )
+          select 'tech_rows', count(*)::text from updated_tech;
+          commit;
+        `, 20000), 22000, "tech_update"));
+        const debugRows = parseDbRows(output, ["key", "value"]);
+        Object.assign(rowsAffected, Object.fromEntries(debugRows.filter((row) => /_rows$/.test(row.key || "")).map((row) => [row.key, Number(row.value) || 0])));
+      } else {
+        timer.timings.tech_update = 0;
+      }
+      const readBackValues = await timer.step("verify_readback", async () => withProgressionStepTimeout((async () => {
+        const fLevelSelects = [
+          `coalesce(components #>> ${sqlTextArrayPath(fLevelFields.TotalXPEarned.path)}, '')`,
+          `coalesce(components #>> ${sqlTextArrayPath(fLevelFields.TotalSkillPoints.path)}, '')`,
+          `coalesce(components #>> ${sqlTextArrayPath(fLevelFields.UnspentSkillPoints.path)}, '')`
+        ].join(", ");
+        const fLevelOutput = await dbQuery(`select ${fLevelSelects} from dune.fgl_entities where entity_id = ${fLevelEntityId} limit 1`, 15000);
+        const [TotalXPEarned = "", TotalSkillPoints = "", UnspentSkillPoints = ""] = String(fLevelOutput || "").split("\t");
+        const techOutput = await dbQuery(`select coalesce(properties #>> ${sqlTextArrayPath(techTarget.path)}, '') from dune.actors where id = ${requireInteger(techTarget.actor_id, "tech_knowledge_actor_id", 1)} limit 1`, 15000);
+        return { TotalXPEarned, TotalSkillPoints, UnspentSkillPoints, m_TechKnowledgePoints: String(techOutput || "").trim() };
+      })(), 30000, "verify_readback"));
+      const expected = {};
+      for (const field of fLevelChanges) expected[field.key] = String(field.value);
+      if (techChanged) expected.m_TechKnowledgePoints = String(preview.newValues.m_TechKnowledgePoints);
       const verified = Object.keys(expected).every((key) => String(readBackValues[key]) === expected[key]);
-      const verificationDebug = {
-        fLevelTarget: preview.componentSupport?.fLevelTarget || null,
-        techKnowledgeTarget: preview.componentSupport?.techKnowledgeTarget || null,
+      verificationDebug = {
+        fLevelTarget,
+        techKnowledgeTarget: techTarget,
+        changedFields,
+        skippedFields,
         rowsAffected,
         readBackValues,
-        expectedValues: expected,
-        readBackFieldStatus: readBack.progressionDebug?.fieldStatus || {}
+        expectedValues: expected
       };
       if (!verified) {
         progressionPreviews.delete(previewId);
-        progressionAudit("progression_apply_verification_failed", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: false, verificationFailed: true, debug: verificationDebug });
-        return { ok: false, status: "verification_failed", action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath, auditLogPath: PROGRESSION_AUDIT_LOG, debug: verificationDebug, warning: "Database write completed, but read-back did not match the requested values." };
+        await timer.step("audit_write", async () => progressionAudit("progression_apply_verification_failed", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: false, verificationFailed: true, timings: timer.timings, debug: verificationDebug }));
+        timer.finish({ status: "verification_failed", previewId, action });
+        return { ok: false, status: "verification_failed", step: "verify_readback", timings: timer.timings, action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath, auditLogPath: PROGRESSION_AUDIT_LOG, debug: verificationDebug, warning: "Database write completed, but read-back did not match the requested values." };
       }
-      progressionPreviews.delete(previewId);
-      progressionAudit("progression_apply_success", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: true, debug: verificationDebug });
-      return { ok: true, status: "applied", action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath, auditLogPath: PROGRESSION_AUDIT_LOG, debug: verificationDebug };
+    } else {
+      throw new Error("Unsupported progression action.");
     }
     progressionPreviews.delete(previewId);
-    progressionAudit("progression_apply_success", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: true });
-    return { ok: true, status: "applied", action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath, auditLogPath: PROGRESSION_AUDIT_LOG };
+    await timer.step("audit_write", async () => progressionAudit("progression_apply_success", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: true, timings: timer.timings, debug: verificationDebug }));
+    const response = await timer.step("response_build", async () => ({
+      ok: true,
+      status: "applied",
+      step: "response_build",
+      timings: { ...timer.timings },
+      action,
+      player: preview.player,
+      oldValues: preview.oldValues,
+      newValues: preview.newValues,
+      backupPath: preview.backupPath,
+      auditLogPath: PROGRESSION_AUDIT_LOG,
+      debug: verificationDebug
+    }));
+    response.timings = timer.finish({ status: "applied", previewId, action });
+    return response;
   } catch (error) {
-    try { await dbQuery("rollback;", 10000); } catch {}
-    progressionAudit("progression_apply_failure", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: false, error: error.message });
-    throw error;
+    return await fail(error);
   }
 }
 

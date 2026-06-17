@@ -4246,6 +4246,7 @@ async function progressionPlayerLookup(queryValue, options = {}) {
     character_id: row.character_id || "",
     online_status: row.online_status || row.status || "unknown",
     map: row.map || "",
+    matched_column: row.matched_column || "",
     source: adminPlayerData.source || "adminPlayers"
   }));
   if (!players.length) {
@@ -4253,6 +4254,33 @@ async function progressionPlayerLookup(queryValue, options = {}) {
     return { ok: false, status: "not-found", query, players: [], reason: adminPlayerData.error || "adminPlayers returned no matching player.", safety, timings: timer.timings };
   }
   const player = players[0];
+  const nonNumericQuery = !/^\d+$/.test(query);
+  if (nonNumericQuery) {
+    const characterName = String(player.character_name || "");
+    const matchedColumn = String(player.matched_column || "");
+    const nameMatches = characterName.toLowerCase().includes(query.toLowerCase());
+    const idOnlyMatch = /(^|_)(id|account_id|player_controller_id|player_pawn_id|player_state_id)$/i.test(matchedColumn);
+    if (!nameMatches || idOnlyMatch) {
+      timer.finish({ status: "not-found" });
+      console.warn("[progression/player] rejected non-name player match", {
+        query,
+        character_name: characterName,
+        matched_column: matchedColumn,
+        account_id: player.account_id,
+        actor_id: player.actor_id,
+        player_controller_id: player.player_controller_id
+      });
+      return {
+        ok: false,
+        status: "not-found",
+        query,
+        players,
+        reason: "Player lookup returned a row that did not match the requested character/player name.",
+        safety,
+        timings: timer.timings
+      };
+    }
+  }
   const resolvedIdentifiers = {
     player_id: player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id || "",
     actor_id: player.player_controller_id || player.actor_id || player.character_id || player.player_pawn_id || "",
@@ -5570,7 +5598,7 @@ async function liveGiveEnvStatus() {
 }
 
 function normalizeAdminPlayerRow(line) {
-  const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", playerPawnId = "", onlineStatus = "", map = "", characterName = "", resolved = "false"] = String(line || "").split("\t");
+  const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", playerPawnId = "", onlineStatus = "", map = "", characterName = "", resolved = "false", matchedColumn = ""] = String(line || "").split("\t");
   return {
     id: accountId,
     name: characterName || accountId || "Unknown",
@@ -5583,13 +5611,15 @@ function normalizeAdminPlayerRow(line) {
     online_status: onlineStatus || "unknown",
     map,
     character_name: characterName || accountId || "Unknown",
-    characterNameResolved: /^true$/i.test(resolved)
+    characterNameResolved: /^true$/i.test(resolved),
+    matched_column: matchedColumn
   };
 }
 
 async function adminPlayers(options = {}) {
   const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
   const query = String(options.query || "").trim();
+  const numericQuery = /^\d+$/.test(query);
   const limit = Math.max(1, Math.min(Number(options.limit || (query ? 20 : 200)) || 20, query ? 50 : 200));
   const diagnostics = {
     serverPath: DEFAULT_SERVER_ROOT || "",
@@ -5612,37 +5642,63 @@ async function adminPlayers(options = {}) {
       coalesce(ps.player_pawn_id::text, '') as player_pawn_id,
       coalesce(ps.online_status::text, 'unknown') as online_status,
       coalesce(ps.map::text, '') as map,
-      coalesce(nullif(ps.character_name, ''), a.account_id::text) as character_name,
-      case when nullif(ps.character_name, '') is null then 'false' else 'true' end as resolved`;
+      coalesce(nullif(ps.character_name, ''), nullif(ac."user", ''), a.account_id::text) as character_name,
+      case when coalesce(nullif(ps.character_name, ''), nullif(ac."user", '')) is null then 'false' else 'true' end as resolved`;
   const queriedPlayerSql = (partial = false) => {
     const value = partial ? sqlString(`%${query}%`) : sqlString(query);
     const op = partial ? "ilike" : "=";
     const loweredOp = partial ? "ilike" : "=";
+    const namePredicate = partial
+      ? `(ps.character_name ilike ${value} or ac."user" ilike ${value})`
+      : `(lower(ps.character_name) = lower(${value}) or lower(ac."user") = lower(${value}))`;
+    const idPredicate = numericQuery
+      ? `
+          or a.account_id::text = ${sqlString(query)}
+          or ps.account_id::text = ${sqlString(query)}
+          or ps.player_controller_id::text = ${sqlString(query)}
+          or ps.player_pawn_id::text = ${sqlString(query)}
+          or ps.player_state_id::text = ${sqlString(query)}
+        `
+      : "";
     return `
-      select ${selectPlayerColumns}
+      select ${selectPlayerColumns},
+        case
+          when lower(coalesce(ps.character_name, '')) ${loweredOp} lower(${value}) then 'character_name'
+          when ${partial ? `ac."user" ${op} ${value}` : `lower(coalesce(ac."user", '')) = lower(${value})`} then 'account_user'
+          ${numericQuery ? `
+          when a.account_id::text = ${sqlString(query)} then 'account_id'
+          when ps.player_controller_id::text = ${sqlString(query)} then 'player_controller_id'
+          when ps.player_pawn_id::text = ${sqlString(query)} then 'player_pawn_id'
+          when ps.player_state_id::text = ${sqlString(query)} then 'player_state_id'` : ""}
+          else 'unknown'
+        end as matched_column
       from (
         select account_id from dune.player_state
-        where account_id::text = ${sqlString(query)}
+        where ${partial ? "character_name ilike " + value : "lower(character_name) = lower(" + value + ")"}
+          ${numericQuery ? `
+          or account_id::text = ${sqlString(query)}
           or player_controller_id::text = ${sqlString(query)}
           or player_pawn_id::text = ${sqlString(query)}
-          or player_state_id::text = ${sqlString(query)}
-          or ${partial ? "character_name ilike " + value : "lower(character_name) = lower(" + value + ")"}
+          or player_state_id::text = ${sqlString(query)}` : ""}
         union
         select id as account_id from dune.accounts
-        where id::text = ${sqlString(query)}
-          or ${partial ? "\"user\" ilike " + value : "lower(\"user\") = lower(" + value + ")"}
-          or ${partial ? "funcom_id ilike " + value : "lower(funcom_id) = lower(" + value + ")"}
+        where ${partial ? "\"user\" ilike " + value : "lower(\"user\") = lower(" + value + ")"}
+          ${numericQuery ? `
+          or id::text = ${sqlString(query)}
+          or ${partial ? "funcom_id ilike " + value : "lower(funcom_id) = lower(" + value + ")"}` : ""}
         union
         select account_id from dune.communinet_player
-        where account_id::text = ${sqlString(query)}
+        where ${numericQuery ? `account_id::text = ${sqlString(query)}` : "false"}
       ) a
       left join dune.player_state ps on ps.account_id = a.account_id
       left join dune.accounts ac on ac.id = a.account_id
+      where ${namePredicate}
+        ${idPredicate}
       order by
         case
           when lower(coalesce(ps.character_name, '')) ${loweredOp} lower(${value}) then 0
-          when ac."user" ${op} ${value} then 1
-          when ac.funcom_id ${op} ${value} then 2
+          when ${partial ? `ac."user" ${op} ${value}` : `lower(coalesce(ac."user", '')) = lower(${value})`} then 1
+          ${numericQuery ? `when ac.funcom_id ${op} ${value} then 2` : ""}
           else 3
         end,
         ps.last_avatar_activity desc nulls last,
@@ -5673,7 +5729,19 @@ async function adminPlayers(options = {}) {
       output = await dbQuery(queriedPlayerSql(true), 7000);
       players = output ? output.split(/\r?\n/).filter(Boolean).map(normalizeAdminPlayerRow).filter((player) => player.id) : [];
     }
-    console.info("[admin/players] player lookup SQL completed", { query, limit, rows: players.length, durationMs: Date.now() - started });
+    console.info("[admin/players] player lookup SQL completed", {
+      query,
+      limit,
+      numericQuery,
+      rows: players.length,
+      durationMs: Date.now() - started,
+      sqlParameters: { exact: query, partial: query ? `%${query}%` : "" },
+      matchedColumns: players.map((player) => ({
+        account_id: player.account_id,
+        character_name: player.character_name,
+        matched_column: player.matched_column || ""
+      }))
+    });
     const resolvedCount = players.filter((player) => player.characterNameResolved).length;
     diagnostics.sourcesChecked.push({
       type: "database",

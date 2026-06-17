@@ -5641,7 +5641,7 @@ async function adminPlayers(options = {}) {
       coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
       coalesce(ps.player_pawn_id::text, '') as player_pawn_id,
       coalesce(ps.online_status::text, 'unknown') as online_status,
-      coalesce(ps.map::text, '') as map,
+      '' as map,
       coalesce(nullif(ps.character_name, ''), nullif(ac."user", ''), a.account_id::text) as character_name,
       case when coalesce(nullif(ps.character_name, ''), nullif(ac."user", '')) is null then 'false' else 'true' end as resolved`;
   const queriedPlayerSql = (partial = false) => {
@@ -5774,6 +5774,19 @@ async function adminPlayers(options = {}) {
       };
     }
     diagnostics.reason = "No account/player rows were found in dune.communinet_player or dune.player_state.";
+    if (query && !numericQuery) {
+      return {
+        ok: true,
+        source: "dune.player_state",
+        query,
+        joinPath: diagnostics.joinPathUsed,
+        characterNamesResolved: 0,
+        players: [],
+        diagnostics,
+        error: diagnostics.reason,
+        details: playerDiagnosticLines(diagnostics)
+      };
+    }
   } catch (error) {
     diagnostics.sourcesChecked.push({
       type: "database",
@@ -5787,6 +5800,18 @@ async function adminPlayers(options = {}) {
       error: error.message
     });
     diagnostics.errors.push(`dune.player_state character query: ${error.message}`);
+    if (query && !numericQuery) {
+      diagnostics.reason = "Player name query failed. Refusing to fall back to ID-only player discovery for a non-numeric query.";
+      return {
+        ok: false,
+        source: "dune.player_state",
+        query,
+        players: [],
+        diagnostics,
+        error: `${diagnostics.reason} ${error.message}`,
+        details: playerDiagnosticLines(diagnostics)
+      };
+    }
   }
   const metaSql = `
     select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)

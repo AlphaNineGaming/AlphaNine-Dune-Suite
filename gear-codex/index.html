@@ -113,6 +113,17 @@
       gap: 10px;
       margin-bottom: 14px;
     }
+    .custom-form {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) 150px 150px 120px 120px auto auto;
+      gap: 10px;
+      align-items: center;
+      margin: -2px 0 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      background: rgba(12, 14, 10, .72);
+    }
+    .custom-form .field { height: 38px; }
     .field, textarea, select {
       min-width: 0;
       height: 42px;
@@ -319,7 +330,7 @@
     }
     @media (max-width: 780px) {
       header { position: static; }
-      .top, .toolbar, .layout { grid-template-columns: 1fr; }
+      .top, .toolbar, .custom-form, .layout { grid-template-columns: 1fr; }
       .actions { justify-content: flex-start; }
       .list { height: 360px; min-height: 360px; }
       .grid, .compare, .side-body { grid-template-columns: 1fr; }
@@ -353,6 +364,15 @@
       <select id="category"></select>
       <select id="rarity"></select>
       <select id="tier"></select>
+    </div>
+    <div id="customItemForm" class="custom-form hidden">
+      <input id="customItemName" class="field" type="text" placeholder="Item name">
+      <input id="customItemCategory" class="field" type="text" placeholder="Category" value="Weapons">
+      <input id="customItemDetail" class="field" type="text" placeholder="Type/detail">
+      <input id="customItemTier" class="field" type="text" placeholder="Tier">
+      <input id="customItemRarity" class="field" type="text" placeholder="Rarity">
+      <button class="btn primary" id="saveCustomItemBtn" type="button">Save</button>
+      <button class="btn" id="cancelCustomItemBtn" type="button">Cancel</button>
     </div>
     <div class="layout">
       <section class="panel">
@@ -21121,6 +21141,12 @@
       favCount: document.getElementById("favCount"),
       loadoutCount: document.getElementById("loadoutCount"),
       baseCount: document.getElementById("baseCount"),
+      customForm: document.getElementById("customItemForm"),
+      customName: document.getElementById("customItemName"),
+      customCategory: document.getElementById("customItemCategory"),
+      customDetail: document.getElementById("customItemDetail"),
+      customTier: document.getElementById("customItemTier"),
+      customRarity: document.getElementById("customItemRarity"),
       toast: document.getElementById("toast")
     };
 
@@ -21280,18 +21306,35 @@
       setTimeout(() => els.toast.classList.remove("show"), 1700);
     }
     function addCustom() {
-      const name = prompt("Item name");
-      if (!name) return;
-      const category = prompt("Category", "Weapons") || "Other";
-      const detail = prompt("Type/detail", "") || "";
-      const tier = prompt("Tier", "") || "";
-      const rarity = prompt("Rarity", "") || "";
+      els.customForm.classList.remove("hidden");
+      els.customName.focus();
+    }
+    function cancelCustom() {
+      els.customForm.classList.add("hidden");
+    }
+    function saveCustomItem() {
+      const name = els.customName.value.trim();
+      if (!name) {
+        toast("Enter an item name");
+        els.customName.focus();
+        return;
+      }
+      const category = els.customCategory.value.trim() || "Other";
+      const detail = els.customDetail.value.trim();
+      const tier = els.customTier.value.trim();
+      const rarity = els.customRarity.value.trim();
       const uid = `custom-${Date.now()}`;
       userData.custom.push({ uid, id: uid, name, category, detail, tier, rarity, maxStack: "1", tags: { value: ["Player.Custom"] } });
       selected = uid;
       items = mergeItems();
       initFilters();
       saveUserData();
+      els.customName.value = "";
+      els.customCategory.value = "Weapons";
+      els.customDetail.value = "";
+      els.customTier.value = "";
+      els.customRarity.value = "";
+      els.customForm.classList.add("hidden");
       renderList();
       toast("Custom item added");
     }
@@ -21326,6 +21369,12 @@
     });
     [els.search, els.category, els.rarity, els.tier].forEach(el => el.addEventListener("input", renderList));
     document.getElementById("addCustomBtn").addEventListener("click", addCustom);
+    document.getElementById("saveCustomItemBtn").addEventListener("click", saveCustomItem);
+    document.getElementById("cancelCustomItemBtn").addEventListener("click", cancelCustom);
+    els.customForm.addEventListener("keydown", event => {
+      if (event.key === "Enter") saveCustomItem();
+      if (event.key === "Escape") cancelCustom();
+    });
     document.getElementById("exportBtn").addEventListener("click", () => {
       const blob = new Blob([JSON.stringify(userData, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);

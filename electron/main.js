@@ -1,5 +1,5 @@
-const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell, utilityProcess } = require("electron");
-const { spawn } = require("child_process");
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell } = require("electron");
+const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -21,6 +21,8 @@ let tray = null;
 let shuttingDown = false;
 const childErrors = new Map();
 const ALREADY_RUNNING_MESSAGE = "AlphaNine Dune Suite is already running. Close the existing elevated instance first.";
+const WINDOWS_ADMIN_REQUIRED_MESSAGE = "AlphaNine Dune Suite requires Administrator privileges to manage Hyper-V, networking, and server operations.";
+let electronElevated = null;
 
 function appPath(...parts) {
   return path.join(app.getAppPath(), ...parts);
@@ -201,6 +203,10 @@ function loadEnvironment() {
     appendLog("desktop", "Receiver token environment is incomplete after startup configuration load.");
   }
   process.env.PORT = String(APP_PORT);
+  electronElevated = detectElectronElevated();
+  process.env.ALPHANINE_ELECTRON_PID = String(process.pid);
+  process.env.ALPHANINE_ELECTRON_ELEVATED = electronElevated === null ? "unknown" : String(electronElevated);
+  appendLog("desktop", `Electron process elevation: ${process.env.ALPHANINE_ELECTRON_ELEVATED}; pid=${process.pid}`);
 }
 
 function childEnv(extra = {}) {
@@ -208,6 +214,40 @@ function childEnv(extra = {}) {
     ...process.env,
     ...extra
   };
+}
+
+function detectElectronElevated() {
+  if (process.platform !== "win32") return null;
+  try {
+    const script = "$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent()); $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)";
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      windowsHide: true,
+      encoding: "utf8",
+      timeout: 10000
+    });
+    if (result.error || result.status !== 0) {
+      appendLog("desktop", `Electron elevation probe failed: ${result.error?.message || result.stderr || result.status}`);
+      return null;
+    }
+    return /^true$/i.test(String(result.stdout || "").trim());
+  } catch (error) {
+    appendLog("desktop", `Electron elevation probe error: ${error.stack || error.message}`);
+    return null;
+  }
+}
+
+function isRunningElevated() {
+  if (process.platform !== "win32") return true;
+  const detected = detectElectronElevated();
+  return detected === true;
+}
+
+function enforceAdministratorPrivileges() {
+  if (isRunningElevated()) return true;
+  appendLog("desktop", WINDOWS_ADMIN_REQUIRED_MESSAGE);
+  dialog.showErrorBox("Administrator privileges required", WINDOWS_ADMIN_REQUIRED_MESSAGE);
+  app.quit();
+  return false;
 }
 
 function pipeChildLogs(child, label) {
@@ -243,21 +283,21 @@ function spawnDevelopmentNodeScript(scriptPath, label, extraEnv = {}) {
 }
 
 function forkPackagedNodeScript(scriptPath, label, extraEnv = {}) {
-  const child = utilityProcess.fork(scriptPath, [], {
+  const child = spawn(process.execPath, [scriptPath], {
     cwd: childCwd(),
-    env: childEnv(extraEnv),
+    env: childEnv({ ELECTRON_RUN_AS_NODE: "1", ...extraEnv }),
     stdio: ["ignore", "pipe", "pipe"],
-    serviceName: `AlphaNine ${label}`
+    windowsHide: true
   });
   pipeChildLogs(child, label);
-  child.on("error", (type, location, report) => {
-    const message = `${type || "UtilityProcessError"} ${location || ""}`.trim();
+  child.on("error", (error) => {
+    const message = error?.message || "Packaged child process failed to start.";
     childErrors.set(label, message);
-    appendLog(label, `utility process error: ${message}\n${report || ""}`.trim());
-    appendLog("desktop", `${label} utility process error: ${message}`);
+    appendLog(label, `spawn error: ${error?.stack || message}`);
+    appendLog("desktop", `${label} spawn error: ${error?.stack || message}`);
   });
   child.on("spawn", () => {
-    appendLog(label, `${label} started with Electron utilityProcess. pid=${child.pid || ""}`);
+    appendLog(label, `${label} started with Electron executable as Node. pid=${child.pid || ""}; electronElevated=${process.env.ALPHANINE_ELECTRON_ELEVATED}`);
   });
   return child;
 }
@@ -537,6 +577,7 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
+    if (!enforceAdministratorPrivileges()) return;
     boot().catch((error) => {
       appendLog("desktop", `Startup failed: ${error.stack || error.message}`);
       dialog.showErrorBox("AlphaNine Dune Suite failed to start", startupErrorMessage(error));

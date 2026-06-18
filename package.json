@@ -1,12 +1,12 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "0.3.2-beta",
+  "version": "0.3.3-beta",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
   "scripts": {
     "build:item-catalog": "node scripts/build-item-catalog.js",
-    "build:win": "electron-builder --win nsis --x64 --publish never --config.win.signAndEditExecutable=false"
+    "build:win": "electron-builder --win nsis portable --x64 --publish never --config.win.signAndEditExecutable=false && node scripts/ensure-admin-manifest.js"
   },
   "dependencies": {
     "express": "^5.2.1",
@@ -65,9 +65,18 @@
     "asarUnpack": [
       "manager/**"
     ],
+    "afterPack": "scripts/ensure-admin-manifest.js",
     "win": {
-      "target": "nsis",
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "requestedExecutionLevel": "requireAdministrator",
       "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "AlphaNine Dune Suite Portable ${version}.${ext}",
+      "requestExecutionLevel": "admin"
     },
     "nsis": {
       "oneClick": false,

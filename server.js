@@ -7,7 +7,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
-const APP_VERSION = "0.3.2-beta";
+const APP_VERSION = "0.3.3-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -56,6 +56,7 @@ const MANAGER_CONFIG_PATH = path.join(MANAGER_DATA_DIR, "manager-config.json");
 const MANAGER_APPLIED_PROFILE_PATH = path.join(MANAGER_DATA_DIR, "applied-profile.json");
 const MANAGER_APPLIED_SETTINGS_PATH = path.join(MANAGER_DATA_DIR, "applied-server-settings.json");
 const DEFAULT_DATABASE_BACKUP_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "database-backups") : path.join(__dirname, "database-backups");
+const GIVE_QUEUE_PRESET_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "give-queue-presets") : path.join(__dirname, "give-queue-presets");
 
 const defaultConfig = {
   setupComplete: false,
@@ -1104,20 +1105,28 @@ function normalizeVmState(value) {
   return raw;
 }
 
-function vmUserError(message) {
+function vmUserError(message, context = {}) {
   const text = String(message || "").trim();
   if (!text) return { code: "unknown", message: "VM command failed. Check Hyper-V and PowerShell permissions." };
+  const elevated = context.elevated === true;
   if (/you do not have the required permission/i.test(text)) {
     return {
       code: "access_denied",
-      message: "Hyper-V access denied. Run AlphaNine Dune Suite as Administrator or grant the current Windows account membership in Hyper-V Administrators."
+      message: elevated
+        ? `Hyper-V permission blocked: ${text}`
+        : "Hyper-V access denied. Run AlphaNine Dune Suite as Administrator or grant the current Windows account membership in Hyper-V Administrators."
     };
   }
   if (/hyper-v not detected|not recognized|get-vm|start-vm|stop-vm|restart-vm/i.test(text) && /not recognized|not found|not available|not detected/i.test(text)) {
-    return { code: "hyperv_unavailable", message: "Hyper-V not detected on this system." };
+    return { code: "hyperv_module_unavailable", message: "Hyper-V module unavailable." };
   }
   if (/access is denied|permission|administrator|elevat/i.test(text)) {
-    return { code: "access_denied", message: "Hyper-V access denied. Run AlphaNine Dune Suite as Administrator or grant the current Windows account membership in Hyper-V Administrators." };
+    return {
+      code: "access_denied",
+      message: elevated
+        ? `Hyper-V permission blocked: ${text}`
+        : "Hyper-V access denied. Run AlphaNine Dune Suite as Administrator or grant the current Windows account membership in Hyper-V Administrators."
+    };
   }
   if (/cannot find|was not found|does not exist|not found/i.test(text)) {
     return { code: "vm_not_found", message: "VM not found. Check the VM Name in Settings." };
@@ -1135,21 +1144,74 @@ function configuredVmName() {
   return String(loadConfig().vmName || VM_NAME || "").trim();
 }
 
+async function backendElevationStatus() {
+  if (process.platform !== "win32") return { elevated: null, supported: false, message: "Elevation diagnostics are only available on Windows." };
+  const script = "$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent()); $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)";
+  const result = await ps(script, 10000);
+  if (!result.ok) {
+    return {
+      elevated: null,
+      supported: true,
+      error: result.stderr || result.error || result.stdout,
+      exitCode: result.code
+    };
+  }
+  return {
+    elevated: /^true$/i.test(String(result.stdout || "").trim()),
+    supported: true,
+    stdout: result.stdout,
+    stderr: result.stderr || "",
+    exitCode: result.code
+  };
+}
+
+async function backendDiagnostics() {
+  const elevation = await backendElevationStatus();
+  const electronValue = String(process.env.ALPHANINE_ELECTRON_ELEVATED || "").trim().toLowerCase();
+  const electronElevated = electronValue === "true" ? true : electronValue === "false" ? false : null;
+  return {
+    ok: true,
+    electronElevated,
+    electronElevatedRaw: process.env.ALPHANINE_ELECTRON_ELEVATED || "",
+    backendElevated: elevation.elevated,
+    backendPid: process.pid,
+    parentPid: process.ppid,
+    electronPid: process.env.ALPHANINE_ELECTRON_PID || "",
+    processExecPath: process.execPath,
+    cwd: process.cwd(),
+    elevation
+  };
+}
+
 async function hyperVStatus() {
   if (process.platform !== "win32") {
     return { ok: false, available: false, code: "unsupported_platform", message: "Hyper-V controls are only available on Windows." };
   }
-  const result = await ps("if (Get-Command Get-VM -ErrorAction SilentlyContinue) { 'available' } else { 'missing' }", 10000);
+  const script = `
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $cmd = Get-Command Get-VM -ErrorAction SilentlyContinue
+    @{ elevated=$isAdmin; moduleAvailable=[bool]$cmd; command='Get-Command Get-VM'; commandName=($cmd.Name); moduleName=($cmd.ModuleName); source=($cmd.Source) } | ConvertTo-Json -Compress
+  `;
+  const result = await ps(script, 10000);
   if (!result.ok) {
     const error = vmUserError(result.stderr || result.error || result.stdout);
-    return { ok: false, available: false, code: error.code, message: error.message };
+    return { ok: false, available: false, elevated: false, code: error.code, message: error.message, diagnostics: { command: "Get-Command Get-VM", stdout: result.stdout, stderr: result.stderr || result.error, exitCode: result.code } };
   }
-  const available = /available/i.test(result.stdout);
+  let parsed = {};
+  try {
+    parsed = JSON.parse(result.stdout.trim() || "{}");
+  } catch {
+    parsed = {};
+  }
+  const available = Boolean(parsed.moduleAvailable);
   return {
     ok: available,
     available,
-    code: available ? "available" : "hyperv_unavailable",
-    message: available ? "Hyper-V PowerShell cmdlets detected." : "Hyper-V not detected on this system."
+    elevated: Boolean(parsed.elevated),
+    code: available ? "available" : "hyperv_module_unavailable",
+    message: available ? "Hyper-V PowerShell cmdlets detected." : "Hyper-V module unavailable.",
+    diagnostics: { ...parsed, stdout: result.stdout, stderr: result.stderr || "", exitCode: result.code }
   };
 }
 
@@ -1160,26 +1222,33 @@ async function vmInfo(vmNameValue = configuredVmName()) {
   if (!hyperv.available) return { ok: false, configured: true, exists: false, name: vmName, state: "Unknown", status: "Unknown", hyperv, error: hyperv.message };
   const script = `
     try {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $vm = Get-VM -Name '${psSingleQuote(vmName)}' -ErrorAction Stop
-    $ips = @(Get-VMNetworkAdapter -VMName '${psSingleQuote(vmName)}' | Select-Object -ExpandProperty IPAddresses | Where-Object { $_ -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' })
-    @{ ok=$true; configured=$true; exists=$true; name="$($vm.Name)"; state="$($vm.State)"; status="$($vm.State)"; uptime="$($vm.Uptime)"; memory=$vm.MemoryAssigned; ip=($ips | Select-Object -First 1) } | ConvertTo-Json -Compress
+    $ips = @()
+    try {
+      $ips = @(Get-VMNetworkAdapter -VMName '${psSingleQuote(vmName)}' | Select-Object -ExpandProperty IPAddresses | Where-Object { $_ -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' })
+    } catch {}
+    @{ ok=$true; configured=$true; exists=$true; name="$($vm.Name)"; state="$($vm.State)"; status="$($vm.State)"; uptime="$($vm.Uptime)"; memory=$vm.MemoryAssigned; ip=($ips | Select-Object -First 1); elevated=$isAdmin; diagnostics=@{ command="Get-VM -Name '${psSingleQuote(vmName)}'"; vmName='${psSingleQuote(vmName)}'; hypervModuleAvailable=$true; elevated=$isAdmin; stdout=''; stderr=''; exitCode=0 } } | ConvertTo-Json -Compress -Depth 4
     } catch {
-      @{ ok=$false; configured=$true; exists=$false; name='${psSingleQuote(vmName)}'; state='Unknown'; status='Unknown'; needsAdmin=$true; error="$($_.Exception.Message)" } | ConvertTo-Json -Compress
+      $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+      $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+      @{ ok=$false; configured=$true; exists=$false; name='${psSingleQuote(vmName)}'; state='Unknown'; status='Unknown'; elevated=$isAdmin; error="$($_.Exception.Message)"; fullyQualifiedErrorId="$($_.FullyQualifiedErrorId)"; diagnostics=@{ command="Get-VM -Name '${psSingleQuote(vmName)}'"; vmName='${psSingleQuote(vmName)}'; hypervModuleAvailable=$true; elevated=$isAdmin; stdout=''; stderr="$($_.Exception.Message)"; exitCode=1; fullyQualifiedErrorId="$($_.FullyQualifiedErrorId)" } } | ConvertTo-Json -Compress -Depth 4
     }
   `;
   const result = await ps(script, 30000);
   if (!result.ok) {
-    const error = vmUserError(result.stderr || result.error);
-    return { ok: false, configured: true, exists: false, name: vmName, state: "Unknown", status: "Unknown", needsAdmin: error.code === "access_denied", hyperv, error: error.message, errorCode: error.code };
+    const error = vmUserError(result.stderr || result.error, { elevated: hyperv.elevated });
+    return { ok: false, configured: true, exists: false, name: vmName, state: "Unknown", status: "Unknown", needsAdmin: error.code === "access_denied" && !hyperv.elevated, elevated: Boolean(hyperv.elevated), hyperv, error: error.message, errorCode: error.code, diagnostics: { command: `Get-VM -Name '${vmName}'`, vmName, stdout: result.stdout, stderr: result.stderr || result.error, exitCode: result.code, elevated: Boolean(hyperv.elevated), hypervModuleAvailable: Boolean(hyperv.available) } };
   }
   try {
     const parsed = JSON.parse(result.stdout.trim() || "{}");
     const state = normalizeVmState(parsed.state || parsed.status);
-    const parsedError = parsed.ok || parsed.exists ? null : vmUserError(parsed.error);
-    return { ...parsed, ok: Boolean(parsed.ok || parsed.exists), configured: true, name: parsed.name || vmName, state, status: state, hyperv, error: parsedError ? parsedError.message : parsed.error, errorCode: parsedError ? parsedError.code : parsed.errorCode };
+    const parsedError = parsed.ok || parsed.exists ? null : vmUserError(parsed.error, { elevated: parsed.elevated });
+    return { ...parsed, ok: Boolean(parsed.ok || parsed.exists), configured: true, name: parsed.name || vmName, state, status: state, needsAdmin: parsedError?.code === "access_denied" && !parsed.elevated, elevated: Boolean(parsed.elevated), hyperv, error: parsedError ? parsedError.message : parsed.error, errorCode: parsedError ? parsedError.code : parsed.errorCode };
   } catch {
-    const error = vmUserError(result.stdout || result.stderr);
-    return { ok: false, configured: true, exists: false, name: vmName, state: "Unknown", status: "Unknown", hyperv, error: error.message, errorCode: error.code };
+    const error = vmUserError(result.stdout || result.stderr, { elevated: hyperv.elevated });
+    return { ok: false, configured: true, exists: false, name: vmName, state: "Unknown", status: "Unknown", needsAdmin: error.code === "access_denied" && !hyperv.elevated, elevated: Boolean(hyperv.elevated), hyperv, error: error.message, errorCode: error.code, diagnostics: { command: `Get-VM -Name '${vmName}'`, vmName, stdout: result.stdout, stderr: result.stderr, exitCode: result.code, elevated: Boolean(hyperv.elevated), hypervModuleAvailable: Boolean(hyperv.available) } };
   }
 }
 
@@ -6762,6 +6831,211 @@ async function adminGiveItem(payload) {
   }
 }
 
+function giveItemDisplayName(template) {
+  const item = gearCatalog().find((row) => row.id === template);
+  return item?.name || template;
+}
+
+async function adminGiveQueue(payload) {
+  const playerId = String(payload?.playerId || "").trim();
+  const mode = String(payload?.mode || "dry-run").toLowerCase();
+  const confirmed = payload?.confirmed === true || payload?.confirmed === "true";
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  if (!playerId) throw new Error("Choose a player first.");
+  if (!items.length) throw new Error("Add at least one item to the Give Queue.");
+  if (items.length > 100) throw new Error("Give Queue supports up to 100 items at a time.");
+  if (mode === "execute" && !confirmed) throw new Error("Confirm real Live Give execution before sending the queue.");
+
+  const results = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index] || {};
+    const itemPayload = {
+      playerId,
+      template: item.template || item.itemId || item.id,
+      qty: item.qty ?? item.quantity ?? 1,
+      mode,
+      confirmed
+    };
+    if (Object.prototype.hasOwnProperty.call(item, "quality")) itemPayload.quality = item.quality;
+    const startedAt = new Date().toISOString();
+    try {
+      const result = await adminGiveItem(itemPayload);
+      const command = result.command || itemPayload;
+      const success = Boolean(result.ok || result.dryRun);
+      results.push({
+        index,
+        itemId: command.template || itemPayload.template,
+        itemName: giveItemDisplayName(command.template || itemPayload.template),
+        quantity: command.qty || Number(itemPayload.qty || 1),
+        quality: command.quality,
+        success,
+        status: result.status || (success ? "ok" : "failed"),
+        error: success ? "" : (result.error || result.stderr || "Give item failed."),
+        result,
+        startedAt,
+        completedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      const itemId = String(itemPayload.template || "").trim();
+      results.push({
+        index,
+        itemId,
+        itemName: giveItemDisplayName(itemId),
+        quantity: Number(itemPayload.qty || 1),
+        quality: itemPayload.quality,
+        success: false,
+        status: "failed",
+        error: error.message,
+        startedAt,
+        completedAt: new Date().toISOString()
+      });
+    }
+  }
+  const succeeded = results.filter((row) => row.success).length;
+  const failed = results.length - succeeded;
+  const response = {
+    ok: failed === 0,
+    status: failed ? "queue-completed-with-failures" : "queue-completed",
+    playerId,
+    mode,
+    total: results.length,
+    processed: results.length,
+    succeeded,
+    failed,
+    results
+  };
+  appendAdminAudit("give_item_queue_completed", {
+    playerId,
+    mode,
+    total: response.total,
+    succeeded,
+    failed,
+    items: results.map((row) => ({ itemId: row.itemId, quantity: row.quantity, success: row.success, status: row.status, error: row.error || "" }))
+  });
+  return response;
+}
+
+function giveQueuePresetSlug(name) {
+  const slug = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  if (!slug) throw new Error("Preset name is required.");
+  return slug;
+}
+
+function giveQueuePresetPath(name) {
+  return path.join(GIVE_QUEUE_PRESET_DIR, `${giveQueuePresetSlug(name)}.json`);
+}
+
+function normalizeGiveQueuePresetItems(items) {
+  if (!Array.isArray(items) || !items.length) throw new Error("Preset must contain at least one queue item.");
+  if (items.length > 100) throw new Error("Preset supports up to 100 queue items.");
+  return items.map((item, index) => {
+    const template = String(item?.template || item?.itemId || item?.id || "").trim();
+    const qty = Number(item?.qty ?? item?.quantity ?? 1);
+    if (!template) throw new Error(`Preset item ${index + 1} is missing an item template.`);
+    if (!gearCatalog().some((row) => row.id === template)) throw new Error(`Preset item ${index + 1} template was not found in the local Gear Codex catalog: ${template}`);
+    if (!Number.isInteger(qty) || qty < 1 || qty > 9999) throw new Error(`Preset item ${index + 1} quantity must be a whole number between 1 and 9999.`);
+    const normalized = {
+      template,
+      name: String(item?.name || giveItemDisplayName(template)),
+      qty
+    };
+    if (Object.prototype.hasOwnProperty.call(item || {}, "quality") && item.quality !== "" && item.quality !== null && item.quality !== undefined) {
+      const quality = Number(item.quality);
+      if (!Number.isInteger(quality) || quality < 0 || quality > 100) throw new Error(`Preset item ${index + 1} quality must be a whole number between 0 and 100.`);
+      normalized.quality = quality;
+    }
+    return normalized;
+  });
+}
+
+function normalizeGiveQueuePreset(payload, existing = null) {
+  const name = String(payload?.name || payload?.presetName || "").trim();
+  if (!name || name.length > 80) throw new Error("Preset name must be 1-80 characters.");
+  const items = normalizeGiveQueuePresetItems(payload?.items);
+  const now = new Date().toISOString();
+  return {
+    version: 1,
+    name,
+    createdAt: existing?.createdAt || payload?.createdAt || now,
+    updatedAt: now,
+    items
+  };
+}
+
+function readGiveQueuePresetFile(filePath) {
+  const preset = JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+  return normalizeGiveQueuePreset(preset, preset);
+}
+
+function listGiveQueuePresets() {
+  fs.mkdirSync(GIVE_QUEUE_PRESET_DIR, { recursive: true });
+  const presets = [];
+  for (const entry of fs.readdirSync(GIVE_QUEUE_PRESET_DIR)) {
+    if (!entry.toLowerCase().endsWith(".json")) continue;
+    try {
+      const filePath = path.join(GIVE_QUEUE_PRESET_DIR, entry);
+      const preset = readGiveQueuePresetFile(filePath);
+      presets.push({
+        name: preset.name,
+        itemCount: preset.items.length,
+        updatedAt: preset.updatedAt,
+        createdAt: preset.createdAt,
+        fileName: entry
+      });
+    } catch {
+      // Ignore malformed local preset files in the list; import/load reports validation errors.
+    }
+  }
+  presets.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return presets;
+}
+
+function findGiveQueuePresetPath(name) {
+  const direct = giveQueuePresetPath(name);
+  if (fs.existsSync(direct)) return direct;
+  fs.mkdirSync(GIVE_QUEUE_PRESET_DIR, { recursive: true });
+  const target = String(name || "").trim();
+  for (const entry of fs.readdirSync(GIVE_QUEUE_PRESET_DIR)) {
+    if (!entry.toLowerCase().endsWith(".json")) continue;
+    const filePath = path.join(GIVE_QUEUE_PRESET_DIR, entry);
+    try {
+      const preset = readGiveQueuePresetFile(filePath);
+      if (preset.name === target) return filePath;
+    } catch {}
+  }
+  return direct;
+}
+
+function saveGiveQueuePreset(payload) {
+  fs.mkdirSync(GIVE_QUEUE_PRESET_DIR, { recursive: true });
+  const filePath = giveQueuePresetPath(payload?.name);
+  let existing = null;
+  if (fs.existsSync(filePath)) {
+    try { existing = readGiveQueuePresetFile(filePath); } catch {}
+  }
+  const preset = normalizeGiveQueuePreset(payload, existing);
+  fs.writeFileSync(filePath, JSON.stringify(preset, null, 2), "utf8");
+  return { ok: true, preset, path: filePath };
+}
+
+function loadGiveQueuePreset(name) {
+  const filePath = findGiveQueuePresetPath(name);
+  if (!fs.existsSync(filePath)) throw new Error("Give Queue preset was not found.");
+  return { ok: true, preset: readGiveQueuePresetFile(filePath), path: filePath };
+}
+
+function deleteGiveQueuePreset(name) {
+  const filePath = findGiveQueuePresetPath(name);
+  if (!fs.existsSync(filePath)) throw new Error("Give Queue preset was not found.");
+  fs.unlinkSync(filePath);
+  return { ok: true, deleted: String(name || ""), path: filePath };
+}
+
 function sqlString(value) {
   return `'${String(value || "").replace(/'/g, "''")}'`;
 }
@@ -7723,6 +7997,13 @@ function appPage() {
     .dashboard-footer a, .support-links a { color:var(--gold-bright); overflow-wrap:anywhere; }
     .about-overlay { position:fixed; inset:0; z-index:5100; background:rgba(3,4,5,.76); backdrop-filter:blur(8px); display:grid; place-items:center; padding:20px; }
     .about-card { width:min(560px,100%); border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.94)); box-shadow:var(--shadow); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
+    .suite-modal-overlay { position:fixed; inset:0; z-index:5200; background:rgba(3,4,5,.78); backdrop-filter:blur(8px); display:grid; place-items:center; padding:20px; }
+    .suite-modal-card { width:min(520px,100%); border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.96)); box-shadow:var(--shadow); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
+    .suite-modal-card h3 { margin:0; font-size:18px; color:var(--gold-bright); letter-spacing:0; }
+    .suite-modal-card p { margin:10px 0 0; color:var(--muted); line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .inline-validation { min-height:18px; color:var(--warn); font-size:12px; line-height:1.35; }
+    .preset-actions { display:grid; gap:10px; margin-top:12px; }
+    .preset-name-row { display:grid; grid-template-columns:minmax(180px,1fr) auto; gap:10px; align-items:end; }
     .support-links { display:grid; gap:8px; margin-top:12px; color:var(--muted); font-size:13px; }
     .field-grid { display:grid; gap:10px; }
     label { display:grid; gap:6px; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
@@ -7873,7 +8154,7 @@ function appPage() {
       <div>
         <div class="kicker">About</div>
         <h2>AlphaNine Dune Suite</h2>
-        <div class="subtle">Version 0.3.2-beta</div>
+        <div class="subtle">Version 0.3.3-beta</div>
       </div>
       <button type="button" onclick="closeAboutDialog()">Close</button>
     </div>
@@ -7883,6 +8164,16 @@ function appPage() {
       <div>YouTube: <a href="https://www.youtube.com/@AlphanineGaming" target="_blank" rel="noopener">https://www.youtube.com/@AlphanineGaming</a></div>
     </div>
     <div class="legal-notice mt">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
+  </div>
+</div>
+<div id="suiteConfirmDialog" class="suite-modal-overlay hidden" role="dialog" aria-modal="true" aria-label="Confirm action">
+  <div class="suite-modal-card">
+    <h3 id="suiteConfirmTitle">Confirm</h3>
+    <p id="suiteConfirmMessage"></p>
+    <div class="action-row mt">
+      <button id="suiteConfirmOk" class="primary" type="button">Continue</button>
+      <button id="suiteConfirmCancel" type="button">Cancel</button>
+    </div>
   </div>
 </div>
 <div id="setupWizard" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-label="AlphaNine Dune Suite setup wizard">
@@ -7973,7 +8264,7 @@ function appPage() {
       <h1>AlphaNine Dune Suite</h1>
       <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
-        <span>Version 0.3.2-beta</span>
+        <span>Version 0.3.3-beta</span>
         <span>Build b92e5a3</span>
       </div>
     </div>
@@ -8243,8 +8534,39 @@ function appPage() {
             <div id="liveGiveTransportStatus" class="warning">Live Give transport: Checking</div>
             <button id="liveGiveStartServerButton" onclick="startServerForGiveItem()">Start Server</button>
             <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
+            <button id="addGiveQueueButton" onclick="addSelectedItemToGiveQueue()">Add to Queue</button>
             <button onclick="refreshAdmin()">Refresh Admin Data</button>
           </div>
+          <div class="divider"></div>
+          <div class="label">Give Queue</div>
+          <div class="subtle mt">Queue multiple item grants for the selected player. Items are sent sequentially.</div>
+          <div id="giveQueueList" class="detail-list mt"><div class="empty">Queue is empty.</div></div>
+          <div class="preset-actions">
+            <div class="preset-name-row">
+              <label>Preset Name<input id="giveQueuePresetName" placeholder="Builder Kit" oninput="setGiveQueuePresetValidation('')"></label>
+              <button onclick="saveGiveQueuePreset()">Save</button>
+            </div>
+            <div id="giveQueuePresetValidation" class="inline-validation"></div>
+          </div>
+          <div class="field-grid mt">
+            <label>Preset<select id="giveQueuePresetSelect"></select></label>
+            <label>Load Mode<select id="giveQueuePresetLoadMode"><option value="replace">Replace Queue</option><option value="append">Append to Queue</option></select></label>
+          </div>
+          <div class="action-row mt">
+            <button id="giveQueueButton" class="primary" onclick="giveQueuedItems()">Give Queue</button>
+            <button onclick="clearGiveQueue()">Clear Queue</button>
+            <button id="retryGiveQueueButton" onclick="retryFailedGiveQueueItems()" disabled>Retry Failed Items</button>
+            <button onclick="copyGiveQueueLog()">Copy Result Log</button>
+          </div>
+          <div class="action-row mt">
+            <button onclick="loadGiveQueuePreset()">Load</button>
+            <button onclick="deleteGiveQueuePreset()">Delete</button>
+            <button onclick="exportGiveQueuePreset()">Export</button>
+            <button onclick="document.getElementById('giveQueuePresetImportFile').click()">Import</button>
+            <input id="giveQueuePresetImportFile" type="file" accept="application/json,.json" class="hidden" onchange="importGiveQueuePresetFile(event)">
+          </div>
+          <div id="giveQueueSummary" class="empty mt">Progress: 0 / 0 · Succeeded: 0 · Failed: 0</div>
+          <textarea id="giveQueueLog" class="mt" rows="10" readonly placeholder="Queue results will appear here."></textarea>
         </div>
         <div class="panel pad">
           <div class="label">Item Templates</div>
@@ -8724,7 +9046,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
-            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.3.2-beta</strong></div>
+            <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">0.3.3-beta</strong></div>
           </div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
@@ -8909,7 +9231,8 @@ function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.vie
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 if(location.hash.slice(1)) setView(location.hash.slice(1));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+function appConfirm(title,message,okText="Continue",cancelText="Cancel"){return new Promise(resolve=>{const dialog=document.getElementById("suiteConfirmDialog");const titleEl=document.getElementById("suiteConfirmTitle");const messageEl=document.getElementById("suiteConfirmMessage");const ok=document.getElementById("suiteConfirmOk");const cancel=document.getElementById("suiteConfirmCancel");if(!dialog||!ok||!cancel){resolve(false);return;}titleEl.textContent=title||"Confirm";messageEl.textContent=message||"";ok.textContent=okText;cancel.textContent=cancelText;const cleanup=result=>{dialog.classList.add("hidden");ok.onclick=null;cancel.onclick=null;document.removeEventListener("keydown",onKey,true);resolve(result);};const onKey=event=>{if(event.key==="Escape")cleanup(false);if(event.key==="Enter")cleanup(true);};ok.onclick=()=>cleanup(true);cancel.onclick=()=>cleanup(false);document.addEventListener("keydown",onKey,true);dialog.classList.remove("hidden");ok.focus();});}
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
@@ -9040,9 +9363,9 @@ function wireUiSounds(){document.addEventListener("pointerover",(event)=>{const 
 function relativeTime(value){if(!value)return"";const date=new Date(value);if(Number.isNaN(date.getTime()))return value;const seconds=Math.max(0,Math.floor((Date.now()-date.getTime())/1000));if(seconds<60)return"just now";const minutes=Math.floor(seconds/60);if(minutes<60)return minutes+"m ago";const hours=Math.floor(minutes/60);if(hours<24)return hours+"h ago";const days=Math.floor(hours/24);return days+"d ago";}
 function renderPlayerFeed(players){const wrap=document.getElementById("playerFeed");if(!wrap)return;if(!players.length){wrap.innerHTML='<div class="empty">No players discovered yet.</div>';return;}wrap.innerHTML=players.map(p=>{const status=["online","offline","unknown"].includes(p.status)?p.status:"unknown";const level=p.level?"Level "+esc(p.level):"Level: Unknown";const id=p.character_id||p.player_controller_id||p.account_id||p.id||"";const offline=status==="offline"&&p.last_seen?(" - Last seen "+relativeTime(p.last_seen)):"";const statusText=status.charAt(0).toUpperCase()+status.slice(1)+offline;return '<div class="feed-row"><span class="feed-dot '+esc(status)+'"></span><div class="feed-name"><strong>'+esc(p.name||p.character_name||p.account_id||"Unknown")+'</strong><div class="feed-id">'+(id?"ID "+esc(id):"ID unavailable")+'</div></div><div class="feed-level">'+level+'</div><div class="feed-status '+esc(status)+'">'+esc(statusText)+'</div></div>';}).join("");}
 async function refreshPlayerFeed(){const stamp=document.getElementById("playerFeedStamp");try{const data=await getJson("/api/players/feed");renderPlayerFeed(data.players||[]);if(stamp)stamp.textContent="Updated "+new Date().toLocaleTimeString();}catch(e){const wrap=document.getElementById("playerFeed");if(wrap)wrap.innerHTML='<div class="empty">'+esc(betterError(e))+'</div>';if(stamp)stamp.textContent="Feed error";}}
-function vmDisplayStatus(vm){const raw=String(vm?.state||vm?.status||vm?.label||"").trim().toLowerCase();return ["running","started","online","healthy"].includes(raw)?"Running":"Offline";}
+function vmDisplayStatus(vm){const raw=String(vm?.state||vm?.status||vm?.label||"").trim().toLowerCase();if(["running","started","online","healthy"].includes(raw))return"Running";if(["off","stopped","saved","offline"].includes(raw))return"Offline";if(vm?.errorCode==="vm_not_found")return"VM not found";if(vm?.errorCode==="hyperv_module_unavailable"||vm?.hyperv?.code==="hyperv_module_unavailable")return"Hyper-V module unavailable";if(vm?.errorCode==="access_denied")return vm?.needsAdmin?"Admin required":"Hyper-V blocked";return raw&&raw!=="unknown"?String(vm.state||vm.status||vm.label):"Unknown";}
 function renderVmStatus(vm){const status=vmDisplayStatus(vm);tone("vm",status);tone("dashboardVmStatus",status);setText("vmControlStatus",status);}
-function vmDisplayMessage(data){return vmDisplayStatus(data?.vm||data||{});}
+function vmDisplayMessage(data){const vm=data?.vm||data||{};const status=vmDisplayStatus(vm);return vm?.error?status+": "+vm.error:status;}
 async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?((selected.title||"Title not found")+" / "+selected.namespace+" / "+selected.name):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+(s.database||"Unknown")+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(open){if(open===null||open===undefined)return"Not Configured";return open?"Open":"Closed";}
@@ -9053,8 +9376,8 @@ function renderPingGraph(history){const graph=document.getElementById("vmPingGra
 async function refreshVmMonitor(){try{const data=await getJson("/api/vm-monitor");const kind=monitorKindClass(data.kind);setText("vmMonitorStatus",data.status||"Unknown");setText("vmMonitorAddress",data.vm?.address||"Unknown");setText("vmMonitorHost",data.vm?.hostname||"Unknown");setText("vmUptime",data.vm?.uptime||"Unknown");setText("vmHealthScore",Number.isFinite(Number(data.healthScore))?Math.round(Number(data.healthScore))+"%":"--");setText("vmPingCurrent",monitorMs(data.latency?.current));setText("vmPingAverage",monitorMs(data.latency?.average));setText("vmPingMin",monitorMs(data.latency?.min));setText("vmPingMax",monitorMs(data.latency?.max));setText("vmMonitorStamp","Last check "+new Date(data.checkedAt||Date.now()).toLocaleTimeString());setText("vmLastSuccess",data.lastSuccessfulConnection&&data.lastSuccessfulConnection!=="None yet"?new Date(data.lastSuccessfulConnection).toLocaleString():data.lastSuccessfulConnection||"None yet");["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card "+kind;});const ports=data.ports||[];const services=data.services||{};document.getElementById("vmPortList").innerHTML=renderMonitorRows(ports);document.getElementById("vmServiceList").innerHTML=renderServiceRows(services);document.getElementById("vmPortDetailList").innerHTML=ports.length?ports.map(row=>'<div>'+esc(row.label)+": "+esc(monitorStatusLabel(row.open))+" / "+esc(row.responseMs!=null?monitorMs(row.responseMs):row.error||"No response")+'</div>').join(""):'<div>No configured ports.</div>';document.getElementById("vmErrorList").innerHTML=(data.lastErrors||[]).length?data.lastErrors.map(error=>'<div>'+esc(error)+'</div>').join(""):'<div>No recent connection errors.</div>';renderPingGraph(data.latency?.history||[]);badge("topSsh",services.ssh?.reachable?"SSH reachable":"SSH offline");addActivity("vm","VM connection monitor",(data.status||"Unknown")+" / "+Math.round(Number(data.healthScore)||0)+"%");}catch(e){setText("vmMonitorStatus","Monitor error");setText("vmMonitorStamp",betterError(e));const card=document.getElementById("vmStatusCard");if(card)card.className="vm-status-card bad";addActivity("error","VM monitor failed",e.message);}}
 function betterError(e){return e&&e.message?e.message:"Command failed. Check that the suite is running as Administrator and the Dune VM is reachable.";}
 async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status");renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
-async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!confirm("Are you sure you want to "+action+" the VM?"))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}
-async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!confirm("VM is stopped. Start VM first?"))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
+async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!(await appConfirm("Confirm VM action","Are you sure you want to "+action+" the VM?","Run "+action,"Cancel")))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}
+async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";syncLogs();addActivity("action",action+" completed",(data.error||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
 async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>'<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td></tr>').join(""):'<tr><td colspan="5">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
@@ -9068,7 +9391,7 @@ function yesNo(value){return value?"Yes":"No";}
 function renderReceiverTokenStatus(data=null){const token=data?.receiverToken||liveGiveEnvDiagnostics?.receiverToken||{};const wrap=document.getElementById("envReceiverTokenStatus");const warn=document.getElementById("envReceiverTokenWarning");if(!wrap)return;wrap.innerHTML=['<div class="detail-row"><span class="subtle">Receiver Token Configured</span><strong>'+esc(yesNo(token.receiverTokenConfigured))+'</strong></div>','<div class="detail-row"><span class="subtle">Source</span><strong>'+esc(token.configurationSource||"Unknown")+'</strong></div>','<div class="detail-row"><span class="subtle">Receiver /health tokenConfigured</span><strong>'+esc(yesNo(token.receiverHealthTokenConfigured))+'</strong></div>','<div class="detail-row"><span class="subtle">Suite token present</span><strong>'+esc(yesNo(token.suiteTokenConfigured))+'</strong></div>','<div class="detail-row"><span class="subtle">Tokens match</span><strong>'+esc(yesNo(token.tokensMatch))+'</strong></div>','<div class="detail-row"><span class="subtle">Receiver started by Suite</span><strong>'+esc(yesNo(token.receiverStartedBySuite))+'</strong></div>'].join("");if(warn){const show=token.receiverHealthTokenConfigured===false;warn.classList.toggle("hidden",!show);warn.textContent=show?"Receiver started without a configured authentication token.":"";}}
 function renderEnvSetup(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagnostics=data;const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong class="env-path-value">'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}renderReceiverTokenStatus(data);const runtime=(data?.activeRuntimeConfig||liveGiveEnvDiagnostics?.activeRuntimeConfig||{});const help=(data?.requiredModesHelp||liveGiveEnvDiagnostics?.requiredModesHelp||null);const overview=document.getElementById("envRuntimeOverview");const paths=document.getElementById("envRuntimePaths");const values=document.getElementById("envRuntimeValues");const priority=document.getElementById("envSourcePriority");const guide=document.getElementById("envLiveGuide");if(overview){overview.innerHTML=['<div class="env-card"><span>Active config</span><strong>'+esc(runtime.activeConfigPath||"Unknown")+'</strong></div>','<div class="env-card"><span>App data</span><strong>'+esc(runtime.appDataDir||"Unknown")+'</strong></div>','<div class="env-card"><span>Manager data</span><strong>'+esc(runtime.managerDataDir||"Unknown")+'</strong></div>'].join("");}if(paths){const envFiles=(runtime.envFiles||[]).map(file=>'<div class="detail-row"><span class="subtle">'+esc(file.label)+(file.override?" override":"")+'</span><strong class="env-path-value">'+esc((file.exists?"Found: ":"Missing: ")+(file.path||""))+'</strong></div>').join("");paths.innerHTML='<div class="detail-row"><span class="subtle">Backend config</span><strong class="env-path-value">'+esc(runtime.backendConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Manager config</span><strong class="env-path-value">'+esc(runtime.managerConfigPath||"Unknown")+'</strong></div>'+envFiles;}if(values){const envValues=runtime.loadedEnvironmentVariables||runtime.values||[];values.innerHTML=envValues.length?envValues.map(envValueRow).join(""):'<div class="empty">No runtime environment details returned.</div>';}if(priority){priority.innerHTML=(runtime.sourcePriority||[]).map((item,index)=>'<div class="detail-row"><span class="subtle">'+(index+1)+'</span><strong class="env-path-value">'+esc(item)+'</strong></div>').join("")||'<div class="empty">No source priority returned.</div>';}if(guide&&help){guide.textContent=[help.note||"",...(help.lines||[])].filter(Boolean).join("\\n\\n");}}
 async function restartReceiverWithCurrentConfig(){const box=document.getElementById("envReceiverTokenWarning");try{if(box){box.classList.remove("hidden");box.textContent="Restarting receiver with current configuration...";}const data=await getJson("/api/receiver/restart",{method:"POST"});if(box)box.textContent=data.message||"Receiver restart requested.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
-async function regenerateReceiverToken(){const box=document.getElementById("envReceiverTokenWarning");try{if(!confirm("Regenerate the receiver token and restart the managed receiver?"))return;if(box){box.classList.remove("hidden");box.textContent="Regenerating receiver token...";}const data=await getJson("/api/receiver/token/regenerate",{method:"POST"});if(box)box.textContent=data.message||"Receiver token regenerated.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
+async function regenerateReceiverToken(){const box=document.getElementById("envReceiverTokenWarning");try{if(!(await appConfirm("Regenerate receiver token","Regenerate the receiver token and restart the managed receiver?","Regenerate","Cancel")))return;if(box){box.classList.remove("hidden");box.textContent="Regenerating receiver token...";}const data=await getJson("/api/receiver/token/regenerate",{method:"POST"});if(box)box.textContent=data.message||"Receiver token regenerated.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
 function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=adminLiveGiveAvailable?"empty mt":"warning mt";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
 async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
 function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.message||data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
@@ -9080,12 +9403,12 @@ async function refreshDatabaseStatus(){try{renderDatabaseStatus(await getJson("/
 async function refreshDatabaseLocation(){try{renderDatabaseLocation(await getJson("/api/database/backup-location"));}catch(e){renderDatabaseLocation({ok:false,folder:"",defaultFolder:"",error:betterError(e)});setText("dbLocationResult",betterError(e));}}
 async function refreshDatabaseBackups(){try{const data=await getJson("/api/database/backups");renderDatabaseBackups(data);}catch(e){const rows=document.getElementById("dbBackupRows");if(rows)rows.innerHTML='<tr><td colspan="5">'+esc(betterError(e))+'</td></tr>';}}
 async function refreshDatabaseManagement(){await Promise.all([refreshDatabaseStatus(),refreshDatabaseLocation(),refreshDatabaseBackups()]);await refreshDatabaseImportReadiness();const activeJob=window.activeDatabaseRestoreJobId||localStorage.getItem("activeDatabaseRestoreJobId")||"";if(activeJob){const el=document.getElementById("dbRestoreResult");if(el){el.className="warning mt";el.textContent="Import job is still running. Reconnecting to import status...";}pollDatabaseRestoreStatus(activeJob).catch(e=>setText("dbRestoreResult",betterError(e)));}addActivity("database","Database management refreshed","Status, backup location, and recent backups loaded.");}
-async function chooseDatabaseBackupFolder(){try{let folder="";if(window.alphaNineSuite?.chooseDatabaseBackupFolder){const result=await window.alphaNineSuite.chooseDatabaseBackupFolder();if(result?.canceled)return;folder=result.folderPath||"";}else{folder=prompt("Backup folder path","")||"";}if(!folder)return;const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({folder})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder saved: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
+async function chooseDatabaseBackupFolder(){try{let folder="";if(window.alphaNineSuite?.chooseDatabaseBackupFolder){const result=await window.alphaNineSuite.chooseDatabaseBackupFolder();if(result?.canceled)return;folder=result.folderPath||"";}else{throw new Error("Folder picker is not available in this desktop build.");}if(!folder)return;const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({folder})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder saved: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
 async function openDatabaseBackupFolder(){try{const folder=document.getElementById("dbBackupPath")?.textContent||"";if(window.alphaNineSuite?.openPath)await window.alphaNineSuite.openPath(folder);else window.open("file:///"+folder.replace(/\\\\/g,"/"),"_blank");}catch(e){setText("dbLocationResult",betterError(e));}}
 async function resetDatabaseBackupFolder(){try{const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reset:true})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder reset: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
 async function createDatabaseBackup(){const el=document.getElementById("dbBackupResult");try{el.className="empty mt";el.textContent="Creating Battlegroup backup...";const data=await getJson("/api/database/backup",{method:"POST",timeoutMs:900000});if(!data.ok)throw new Error(data.error||"Backup failed.");el.className="empty mt";el.textContent="Battlegroup backup created.\\nBackup: "+(data.backupName||data.backupId||"--")+"\\nVM path: "+(data.vmPath||"Not reported by Battlegroup command")+"\\nLocal metadata: "+(data.localMetadataPath||data.filePath||"--")+"\\nStorage: "+(data.storage||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data))+"\\n\\nOutput:\\n"+(data.output||data.stderr||"--");addActivity("database","Battlegroup backup created",data.backupName||data.backupId||data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup backup failed",e.message);playUiSound("warning");}}
 async function createSafetyBackupOnly(){const el=document.getElementById("dbBackupResult");let timer=null;const started=Date.now();try{el.className="warning mt";el.textContent="Safety backup: Starting";timer=setInterval(()=>{const seconds=Math.floor((Date.now()-started)/1000);el.textContent="Safety backup still running... "+Math.min(seconds,120)+"s / 120s";},1000);const data=await getJson("/api/database/safety-backup",{method:"POST",timeoutMs:130000});if(timer){clearInterval(timer);timer=null;}if(!data.ok)throw new Error(data.error||"Safety backup failed.");el.className="empty mt";el.textContent="Safety backup succeeded.\\nOperation: "+(data.dumpOperationName||"--")+"\\nPhase: "+(data.phase||"Succeeded")+"\\nVM path: "+(data.vmPath||"Not reported by Battlegroup command")+"\\nLocal metadata: "+(data.localMetadataPath||data.filePath||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data));addActivity("database","Safety backup succeeded",data.dumpOperationName||data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){if(timer)clearInterval(timer);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Safety backup failed",e.message);playUiSound("warning");}}
-async function chooseDatabaseRestoreFile(){try{let filePath="";if(window.alphaNineSuite?.chooseDatabaseBackupFile){const result=await window.alphaNineSuite.chooseDatabaseBackupFile();if(result?.canceled)return;filePath=result.filePath||"";}else{filePath=prompt("Backup file path","")||"";}if(filePath)document.getElementById("dbRestoreFile").value=filePath;await refreshDatabaseImportReadiness();}catch(e){setText("dbRestoreResult",betterError(e));}}
+async function chooseDatabaseRestoreFile(){try{let filePath="";if(window.alphaNineSuite?.chooseDatabaseBackupFile){const result=await window.alphaNineSuite.chooseDatabaseBackupFile();if(result?.canceled)return;filePath=result.filePath||"";}else{throw new Error("File picker is not available in this desktop build.");}if(filePath)document.getElementById("dbRestoreFile").value=filePath;await refreshDatabaseImportReadiness();}catch(e){setText("dbRestoreResult",betterError(e));}}
 function selectDatabaseRestoreBackup(index){const row=(window.databaseBackupRows||[])[index];if(!row)return;document.getElementById("dbRestoreFile").value=row.path;document.getElementById("dbRestoreConfirm").value="";const vmPath=row.vmBackupPath||row.vmPath;const detail=vmPath?("Selected metadata: "+row.path+"\\nResolved VM backup: "+vmPath+"\\nImport argument: "+(row.vmBackupFilename||vmPath.split('/').pop())):("Selected backup file: "+row.path);document.getElementById("dbRestoreResult").textContent=detail+"\\nStop the server and type IMPORT before importing.";refreshDatabaseImportReadiness();}
 function copyDatabaseBackupPath(index){const row=(window.databaseBackupRows||[])[index];if(row)copyTextToClipboard(row.path);}
 async function copyTextToClipboard(text){try{if(navigator.clipboard)await navigator.clipboard.writeText(text);setText("dbLocationResult","Path copied.");playUiSound("click");}catch(e){setText("dbLocationResult",betterError(e));}}
@@ -9103,7 +9426,7 @@ function restoreFinalSummaryHtml(job){const result=job?.result||{};const ok=job?
 function renderDatabaseRestoreStatus(job){const el=document.getElementById("dbRestoreProgress");if(!el)return;el.className=job.status==="failed"?"warning mt":(job.status==="success"?"empty mt":"warning mt");const verification=job.verificationSubstep?'<div class="detail-list mt"><div class="detail-row"><span class="subtle">Verification substep</span><strong>'+esc(job.verificationSubstep)+'</strong></div>'+(job.verificationDetail?'<div class="detail-row"><span class="subtle">Command</span><strong class="env-path-value">'+esc(job.verificationDetail)+'</strong></div>':'')+'</div>':"";el.innerHTML='<div class="panel-head"><div><strong>Import Status</strong><div class="subtle">Elapsed: '+esc(restoreElapsed(job))+'</div></div>'+restoreStatusBadge(job)+'</div>'+restoreTimelineHtml(job)+verification+(job.error?'<div class="warning mt">'+esc(job.error)+'</div>':"")+'<div class="subtle mt">Job: '+esc(job.jobId||"--")+'</div>';}
 async function openRestoreLog(){const path=window.lastDatabaseRestoreLogPath||"";try{if(!path)throw new Error("Import log path is unavailable.");if(window.alphaNineSuite?.openPath)await window.alphaNineSuite.openPath(path);else window.open("file:///"+path.replace(/\\\\/g,"/"),"_blank");}catch(e){setText("dbRestoreResult",betterError(e));}}
 async function pollDatabaseRestoreStatus(jobId){if(window.databaseRestorePolling===jobId)return;window.databaseRestorePolling=jobId;window.activeDatabaseRestoreJobId=jobId;localStorage.setItem("activeDatabaseRestoreJobId",jobId);setDatabaseRestoreRunning(true);let finalJob=null;let pollError=null;try{for(let i=0;i<720;i++){try{const job=await getJson("/api/database/import-status/"+encodeURIComponent(jobId),{timeoutMs:5000});window.lastDatabaseRestoreLogPath=job.logPath||job.result?.logPath||"";renderDatabaseRestoreStatus(job);if(job.status==="success"||job.status==="failed"){finalJob=job;break;}}catch(e){pollError=e;break;}await new Promise(resolve=>setTimeout(resolve,2000));}}finally{window.databaseRestorePolling="";setDatabaseRestoreRunning(false);window.activeDatabaseRestoreJobId="";localStorage.removeItem("activeDatabaseRestoreJobId");await refreshDatabaseImportReadiness().catch(()=>{});}const el=document.getElementById("dbRestoreResult");if(pollError){const msg=betterError(pollError);if(el){el.className="warning mt";el.textContent=/not found|was not found|missing/i.test(msg)?"Import job not found. Cleared stale import state.":msg;}const progress=document.getElementById("dbRestoreProgress");if(progress){progress.className="empty mt";progress.textContent="No import job running.";}addActivity("warn","Import status cleared",msg);return;}if(!finalJob){if(el){el.className="warning mt";el.textContent="Import status polling timed out. Check audit log for details.";}return;}if(el)el.innerHTML=restoreFinalSummaryHtml(finalJob);if(finalJob.status==="success"){document.getElementById("dbRestoreConfirm").value="";addActivity("database","Battlegroup import completed and verified",finalJob.jobId);await refreshDatabaseBackups();playUiSound("success");}else{addActivity("error","Battlegroup import failed",finalJob.error||finalJob.jobId);playUiSound("warning");}}
-async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="IMPORT")throw new Error("Type IMPORT before importing.");await ensureBattlegroupStoppedBeforeImport();if(!confirm("Import Battlegroup backup from this file? Stop the server first. A safety Battlegroup backup will be created first."))return;setDatabaseRestoreRunning(true);el.className="warning mt";el.textContent="Import job starting...";const data=await getJson("/api/database/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:15000});if(!data.jobId)throw new Error(data.error||"Import job was not created.");renderDatabaseRestoreStatus(data);addActivity("database","Battlegroup import started",data.jobId);await pollDatabaseRestoreStatus(data.jobId);}catch(e){setDatabaseRestoreRunning(false);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup import blocked",e.message);playUiSound("warning");}}
+async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="IMPORT")throw new Error("Type IMPORT before importing.");await ensureBattlegroupStoppedBeforeImport();if(!(await appConfirm("Import Battlegroup backup","Import Battlegroup backup from this file? Stop the server first. A safety Battlegroup backup will be created first.","Import","Cancel")))return;setDatabaseRestoreRunning(true);el.className="warning mt";el.textContent="Import job starting...";const data=await getJson("/api/database/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:15000});if(!data.jobId)throw new Error(data.error||"Import job was not created.");renderDatabaseRestoreStatus(data);addActivity("database","Battlegroup import started",data.jobId);await pollDatabaseRestoreStatus(data.jobId);}catch(e){setDatabaseRestoreRunning(false);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup import blocked",e.message);playUiSound("warning");}}
 function wireDatabaseImportControls(){const file=document.getElementById("dbRestoreFile");const confirm=document.getElementById("dbRestoreConfirm");if(file){file.addEventListener("input",()=>refreshDatabaseImportReadiness());file.addEventListener("change",()=>refreshDatabaseImportReadiness());}if(confirm){confirm.addEventListener("input",renderDatabaseImportControls);confirm.addEventListener("change",renderDatabaseImportControls);}renderDatabaseImportControls();}
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
@@ -9164,20 +9487,43 @@ function filteredItemDatabaseItems(){const q=(document.getElementById("itemDbSea
 function renderItemDatabaseDetails(item){const detail=document.getElementById("itemDbDetails");if(!detail)return;if(!item){detail.className="empty mt";detail.textContent="Select an item to inspect spawn data, grade, category, and stats.";return;}const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const rows={"Name":item.name||item.id,"Spawn Code":item.spawnCode||item.itemCode||item.id,"Category":item.category||"Unknown","Subcategory":item.subtype||item.type||"--","Grade":itemGrade,"Tier":item.tier||"--","Max Stack":item.maxStack||"--","Spawnable":item.spawnable===false?"No":"Yes"};const stats=item.stats&&typeof item.stats==="object"?Object.entries(item.stats).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join(""):"";detail.className="mt";detail.innerHTML='<div class="detail-list">'+Object.entries(rows).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join("")+'</div>'+(item.description?'<div class="empty mt">'+esc(item.description)+'</div>':'')+(stats?'<div class="label mt">Stats</div><div class="detail-list">'+stats+'</div>':'');}
 function renderItemDatabase(){const rows=filteredItemDatabaseItems();const list=document.getElementById("itemDbList");const count=document.getElementById("itemDbCount");if(count)count.textContent=rows.length+" shown / "+itemDatabaseItems.length+" loaded";if(!selectedItemDatabaseId&&rows[0])selectedItemDatabaseId=rows[0].id;if(list){list.innerHTML=rows.slice(0,250).map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);return '<button type="button" class="item-db-card '+(selectedItemDatabaseId===item.id?'active':'')+'" data-item-db-id="'+esc(item.id)+'">'+itemDbIcon(item)+'<span><strong>'+esc(item.name||item.id)+'</strong><span class="item-db-meta"><span class="item-grade-badge">'+esc(itemGrade)+'</span><span>'+esc(item.category||"Unknown")+'</span><span>'+esc(item.subtype||item.type||"")+'</span><span>'+esc(item.tier||"")+'</span></span><span class="subtle env-path-value">'+esc(item.id||"")+'</span></span></button>';}).join("")||'<div class="empty">No items match the current filters.</div>';list.querySelectorAll("[data-item-db-id]").forEach(el=>el.addEventListener("click",()=>{selectedItemDatabaseId=el.dataset.itemDbId;renderItemDatabase();}));}renderItemDatabaseDetails(itemDatabaseItems.find(item=>item.id===selectedItemDatabaseId)||rows[0]);}
 async function refreshItemDatabase(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Loading bundled item database...";}const data=await getJson("/api/item-database/items?grade=all");itemDatabaseItems=data.items||[];if(!selectedItemDatabaseId&&itemDatabaseItems[0])selectedItemDatabaseId=itemDatabaseItems[0].id;fillItemDbFilters();renderItemDatabase();if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML='<strong>'+esc(itemDatabaseItems.length)+' items loaded.</strong><div class="subtle">Source: shared bundled/user item catalog. No server scan required.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
-function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();}
+function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();syncGiveItemControls();}
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(input){input.disabled=!supported;if(!supported)input.value=0;}if(!warning)return;warning.classList.toggle("hidden",supported);warning.textContent=supported?"":"Quality giving is not supported by the current receiver method.";}
 function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1)};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
+function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / quality "+row.quality:"");}
+function updateGiveQueueSummary(processed=0,total=giveQueue.length,succeeded=0,failed=0){const el=document.getElementById("giveQueueSummary");if(el)el.textContent="Progress: "+processed+" / "+total+" · Succeeded: "+succeeded+" · Failed: "+failed;const retry=document.getElementById("retryGiveQueueButton");if(retry)retry.disabled=!lastGiveQueueFailedItems.length||liveGiveBusy;syncGiveItemControls();}
+function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span></span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
+function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1]);addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
+function removeGiveQueueItem(index){giveQueue.splice(index,1);renderGiveQueue();updateGiveQueueSummary();}
+function clearGiveQueue(){giveQueue=[];lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const log=document.getElementById("giveQueueLog");if(log)log.value="Give Queue cleared.";}
+function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
+async function giveQueuedItems(itemsOverride=null){const log=document.getElementById("giveQueueLog");if(liveGiveBusy)return;const items=itemsOverride||giveQueue;if(!items.length){if(log)log.value="Give Queue is empty.";playUiSound("warning");return;}try{liveGiveBusy=true;syncGiveItemControls();updateGiveQueueSummary(0,items.length,0,0);if(log)log.value="Checking server status before Give Queue...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server))throw new Error("Server is offline. Start the server before using Give Queue.");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"&&!adminLiveGiveAvailable)throw new Error(liveGiveUnavailableMessage||"Live Give unavailable.");if(mode==="execute"&&!(await appConfirm("Confirm Live Give Queue","Send "+items.length+" queued item(s) to the selected player?","Give Queue","Cancel")))return;const playerId=document.getElementById("adminPlayer").value;if(!playerId)throw new Error("Choose a player first.");if(log)log.value="Processing Give Queue 0 / "+items.length+"...";addActivity("grant","Give Queue started",items.length+" item(s)");const data=await getJson("/api/live-give/queue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,mode,confirmed:mode==="execute",items}),timeoutMs:300000});lastGiveQueueFailedItems=(data.results||[]).filter(row=>!row.success).map(row=>({template:row.itemId,name:row.itemName,qty:row.quantity,quality:row.quality}));updateGiveQueueSummary(data.processed||0,data.total||items.length,data.succeeded||0,data.failed||0);if(log)log.value=queueResultLog(data);if(!itemsOverride&&data.failed===0)giveQueue=[];renderGiveQueue();addActivity("grant","Give Queue completed",(data.succeeded||0)+" succeeded / "+(data.failed||0)+" failed");playUiSound(data.failed?"warning":"success");}catch(e){if(log)log.value=betterError(e);addActivity("error","Give Queue failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
+function retryFailedGiveQueueItems(){if(!lastGiveQueueFailedItems.length)return;giveQueuedItems(lastGiveQueueFailedItems.slice());}
+async function copyGiveQueueLog(){const text=document.getElementById("giveQueueLog")?.value||"";if(!text)return;try{await navigator.clipboard.writeText(text);playUiSound("success");}catch{const log=document.getElementById("giveQueueLog");if(log){log.focus();log.select();document.execCommand("copy");}}}
+function renderGiveQueuePresets(){const select=document.getElementById("giveQueuePresetSelect");if(!select)return;const current=select.value;select.innerHTML=giveQueuePresets.length?giveQueuePresets.map(p=>'<option value="'+esc(p.name)+'">'+esc(p.name+" ("+p.itemCount+")")+'</option>').join(""):'<option value="">No saved presets</option>';if(giveQueuePresets.some(p=>p.name===current))select.value=current;}
+async function refreshGiveQueuePresets(){try{const data=await getJson("/api/live-give/queue-presets");giveQueuePresets=data.presets||[];renderGiveQueuePresets();}catch(e){const log=document.getElementById("giveQueueLog");if(log)log.value=betterError(e);}}
+function selectedGiveQueuePresetName(){return document.getElementById("giveQueuePresetSelect")?.value||"";}
+function giveQueuePresetInputName(){return String(document.getElementById("giveQueuePresetName")?.value||"").trim();}
+function setGiveQueuePresetValidation(message){const el=document.getElementById("giveQueuePresetValidation");if(el)el.textContent=message||"";}
+function setGiveQueuePresetName(name){const input=document.getElementById("giveQueuePresetName");if(input)input.value=name||"";}
+function giveQueuePresetExists(name){const target=String(name||"").toLowerCase();return giveQueuePresets.some(p=>String(p.name||"").toLowerCase()===target);}
+function normalizeClientPresetItems(items){if(!Array.isArray(items)||!items.length)throw new Error("Preset JSON must contain an items array.");return items.map((item,index)=>{const template=String(item?.template||item?.itemId||item?.id||"").trim();const qty=Number(item?.qty??item?.quantity??1);if(!template)throw new Error("Imported preset item "+(index+1)+" is missing a template.");if(!Number.isInteger(qty)||qty<1||qty>9999)throw new Error("Imported preset item "+(index+1)+" has an invalid quantity.");const row={template,name:String(item?.name||template),qty};if(item&&Object.prototype.hasOwnProperty.call(item,"quality")&&item.quality!==""&&item.quality!==null&&item.quality!==undefined){const quality=Number(item.quality);if(!Number.isInteger(quality)||quality<0||quality>100)throw new Error("Imported preset item "+(index+1)+" has an invalid quality.");row.quality=quality;}return row;});}
+async function saveGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{setGiveQueuePresetValidation("");if(!giveQueue.length)throw new Error("Queue is empty.");const name=giveQueuePresetInputName();if(!name){setGiveQueuePresetValidation("Enter a preset name.");document.getElementById("giveQueuePresetName")?.focus();playUiSound("warning");return;}if(giveQueuePresetExists(name)&&!(await appConfirm("Overwrite preset","A preset named '"+name+"' already exists. Overwrite it?","Overwrite","Cancel")))return;const data=await getJson("/api/live-give/queue-presets/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,items:giveQueue})});if(log)log.value="Saved Give Queue preset: "+data.preset.name+"\\nItems: "+data.preset.items.length;await refreshGiveQueuePresets();const select=document.getElementById("giveQueuePresetSelect");if(select)select.value=data.preset.name;setGiveQueuePresetName(data.preset.name);playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
+async function loadGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{const name=selectedGiveQueuePresetName();if(!name)throw new Error("Choose a preset first.");const data=await getJson("/api/live-give/queue-presets/get?name="+encodeURIComponent(name));const items=normalizeClientPresetItems(data.preset?.items||[]);const mode=document.getElementById("giveQueuePresetLoadMode")?.value||"replace";giveQueue=mode==="append"?giveQueue.concat(items):items;lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();setGiveQueuePresetName(data.preset.name);setGiveQueuePresetValidation("");if(log)log.value=(mode==="append"?"Appended":"Loaded")+" preset: "+data.preset.name+"\\nItems: "+items.length;playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
+async function deleteGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{const name=selectedGiveQueuePresetName();if(!name)throw new Error("Choose a preset first.");if(!(await appConfirm("Delete preset","Delete Give Queue preset '"+name+"'?","Delete","Cancel")))return;await getJson("/api/live-give/queue-presets?name="+encodeURIComponent(name),{method:"DELETE"});if(log)log.value="Deleted preset: "+name;if(giveQueuePresetInputName().toLowerCase()===name.toLowerCase())setGiveQueuePresetName("");setGiveQueuePresetValidation("");await refreshGiveQueuePresets();playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
+async function exportGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{const name=selectedGiveQueuePresetName();if(!name)throw new Error("Choose a preset first.");const data=await getJson("/api/live-give/queue-presets/get?name="+encodeURIComponent(name));const json=JSON.stringify(data.preset,null,2);const blob=new Blob([json],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=(data.preset.name||"give-queue-preset").replace(/[^A-Za-z0-9_.-]+/g,"-")+".json";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);if(log)log.value="Exported preset: "+data.preset.name;playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
+async function importGiveQueuePresetFile(event){const input=event.target;const log=document.getElementById("giveQueueLog");try{setGiveQueuePresetValidation("");const file=input.files&&input.files[0];if(!file)return;const text=await file.text();const preset=JSON.parse(text);preset.items=normalizeClientPresetItems(preset.items);preset.name=String(preset.name||giveQueuePresetInputName()||file.name.replace(/\\.json$/i,"")).trim();if(!preset.name){setGiveQueuePresetValidation("Enter a preset name before importing this file.");document.getElementById("giveQueuePresetName")?.focus();playUiSound("warning");return;}if(giveQueuePresetExists(preset.name)&&!(await appConfirm("Overwrite preset","A preset named '"+preset.name+"' already exists. Overwrite it?","Overwrite","Cancel")))return;const data=await getJson("/api/live-give/queue-presets/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({preset})});if(log)log.value="Imported preset: "+data.preset.name+"\\nItems: "+data.preset.items.length;await refreshGiveQueuePresets();const select=document.getElementById("giveQueuePresetSelect");if(select)select.value=data.preset.name;setGiveQueuePresetName(data.preset.name);playUiSound("success");}catch(e){if(log)log.value="Import failed: "+betterError(e);playUiSound("warning");}finally{if(input)input.value="";}}
 function isServerOnlineStatus(data){if(data?.runtimeTransport&&typeof data.runtimeTransport.serverOnline==="boolean")return data.runtimeTransport.serverOnline;return mapServerSummary(data).online;}
 function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";syncLiveGiveTransportStatus();syncGiveItemControls();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=kind==="ok"?"empty mt":"warning mt";}
-function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(give)give.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||!liveGiveServerOnline||(mode==="execute"&&!adminLiveGiveAvailable);if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
+function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||!liveGiveServerOnline||(mode==="execute"&&!adminLiveGiveAvailable);if(give)give.disabled=blocked;if(add)add.disabled=liveGiveBusy||!selectedAdminItem;if(queue)queue.disabled=blocked||!giveQueue.length;if(retry)retry.disabled=blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const data=await getJson("/api/status");liveGiveServerOnline=isServerOnlineStatus(data);setGiveServerStatus(liveGiveServerOnline?"Server Status: Online. Give Item is available.":"Server Status: Offline. Start the server before using Give Item.",liveGiveServerOnline?"ok":"warn");await refreshLiveGiveEnv();return data;}catch(e){liveGiveServerOnline=false;setGiveServerStatus("Server Status: Offline. "+betterError(e),"warn");return null;}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
-async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;syncLiveGiveMode();await checkGiveItemServerStatus();syncLiveGiveTransportStatus();}
+async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncLiveGiveMode();await checkGiveItemServerStatus();syncLiveGiveTransportStatus();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking server status...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server)){log.textContent="Server is offline. Start the server before using Give Item.";addActivity("grant","Give Item blocked","Server is offline.");playUiSound("warning");return;}const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();syncProgressionActionFields();wireDatabaseImportControls();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>
@@ -9613,15 +9959,68 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === "/api/live-give/queue" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await adminGiveQueue(body);
+      await json(res, result, result.ok ? 200 : 207);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/live-give/queue-presets" && req.method === "GET") {
+    await json(res, { ok: true, presetDir: GIVE_QUEUE_PRESET_DIR, presets: listGiveQueuePresets() });
+    return;
+  }
+  if (url.pathname === "/api/live-give/queue-presets/get" && req.method === "GET") {
+    try {
+      await json(res, loadGiveQueuePreset(url.searchParams.get("name") || ""));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 404);
+    }
+    return;
+  }
+  if (url.pathname === "/api/live-give/queue-presets/save" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, saveGiveQueuePreset(body));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/live-give/queue-presets/import" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, saveGiveQueuePreset(body.preset || body));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/live-give/queue-presets" && req.method === "DELETE") {
+    try {
+      await json(res, deleteGiveQueuePreset(url.searchParams.get("name") || ""));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 404);
+    }
+    return;
+  }
   if (url.pathname.startsWith("/api/action/") && req.method === "POST") {
     const action = decodeURIComponent(url.pathname.split("/").pop());
     const result = await battlegroup(action);
     await json(res, result, result.ok ? 200 : 500);
     return;
   }
+  if (url.pathname === "/api/backend/diagnostics" && req.method === "GET") {
+    await json(res, await backendDiagnostics());
+    return;
+  }
   if (url.pathname === "/api/vm/status" && req.method === "GET") {
     const vm = await vmInfo();
-    await json(res, { ok: Boolean(vm.ok || vm.exists), status: vm.state || "Unknown", vm });
+    const diagnostics = await backendDiagnostics();
+    await json(res, { ok: Boolean(vm.ok || vm.exists), status: vm.state || "Unknown", vm, diagnostics });
     return;
   }
   if (url.pathname.startsWith("/api/vm/") && req.method === "POST") {

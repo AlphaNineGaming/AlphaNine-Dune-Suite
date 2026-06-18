@@ -6,7 +6,7 @@ const root = path.join(__dirname, "..");
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const outputDir = path.join(root, "installer-output");
 const appExe = path.join(outputDir, "win-unpacked", `${packageJson.build.productName}.exe`);
-const portableExe = path.join(outputDir, `${packageJson.build.productName} Portable ${packageJson.version}.exe`);
+const installerExe = path.join(outputDir, `${packageJson.build.productName} Setup ${packageJson.version}.exe`);
 const requiredLevel = "requireAdministrator";
 
 function findRcedit() {
@@ -53,5 +53,5 @@ exports.default = async function afterPack(context) {
 
 if (require.main === module) {
   setExecutionLevel(appExe, "Installed app executable");
-  verifyExecutionLevel(portableExe, "Portable executable");
+  assertFile(installerExe, "NSIS installer");
 }

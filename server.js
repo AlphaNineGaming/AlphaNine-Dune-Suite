@@ -4477,6 +4477,7 @@ async function progressionCharacterComponentScan(actorIds) {
     select distinct 'component', '', '', '', path[1], ''
     from walk
     where array_length(path, 1) = 1
+    union all
     select 'field', actor_id::text, coalesce(entity_id::text, ''), slot_name, array_to_string(path, '.'), value #>> '{}'
     from walk
     where path[array_length(path, 1)] in ('TotalXPEarned', 'TotalSkillPoints', 'UnspentSkillPoints')
@@ -4558,6 +4559,7 @@ async function progressionTechKnowledgeScan(actorIds) {
     select distinct 'component', actor_id::text, path[1], ''
     from walk
     where array_length(path, 1) = 1
+    union all
     select 'field', actor_id::text, array_to_string(path, '.'), value #>> '{}'
     from walk
     where path[array_length(path, 1)] = 'm_TechKnowledgePoints'

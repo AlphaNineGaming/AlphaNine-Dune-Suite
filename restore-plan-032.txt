@@ -1,0 +1,35 @@
+﻿Restore plan snapshot before 0.3.2 revert
+Timestamp: 2026-06-18T11:07:28.4638531+03:00
+Repo: C:\Users\Khader\Documents\Codex\2026-06-03\make-me-a-dune-awakening-manager\outputs\alphanine-dune-suite
+
+HEAD:
+0380e5b8e3203d1ab9bbbf07d0ff092c8e6cb6fe
+
+Current branch:
+dev
+
+Status short:
+ M assets/world-map-overland.png
+ M config.json
+ M package.json
+ M server.js
+?? assets/live-map-coordinates.js
+?? data/default-map-alignment.json
+?? data/map-calibration.json
+?? tools/
+?? world-map-overland.png
+
+Diff stat vs HEAD:
+ assets/world-map-overland.png | Bin 9160924 -> 37985409 bytes
+ config.json                   |  31 +++-
+ package.json                  |   2 +
+ server.js                     | 362 +++++++++++++++++++++++++++++++++++++++++-
+ 4 files changed, 384 insertions(+), 11 deletions(-)
+
+Untracked files:
+assets/live-map-coordinates.js
+data/default-map-alignment.json
+data/map-calibration.json
+tools/live-map-test.html
+tools/map-align.html
+world-map-overland.png

@@ -25,9 +25,22 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
-### 0.3.3-beta
+### 0.3.4-beta
 
-Live Map has been rebuilt using Red-Blink-style map calibration and marker APIs, but real DB marker validation is still pending. Debug/demo marker mode exists only for UI testing.
+#### Live Map
+
+- Complete Live Map overhaul based on Red-Blink architecture.
+- New backend marker API for Players, Vehicles, and Bases.
+- Local map assets bundled with no runtime GitHub dependency.
+- Added improved Live Map diagnostics.
+- Fixed Suite UI startup regression caused by Live Map initialization.
+- Corrected Hagga Basin Y-axis orientation so player movement matches in-game direction.
+- Validated against a live database with real player, vehicle, and base data.
+
+#### Other
+
+- Improved overall Live Map stability.
+- No changes to Live Give, Progression, Database, or Receiver functionality.
 
 ## Requirements
 

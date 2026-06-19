@@ -84,21 +84,106 @@ function readEnvFile(filePath, override = false) {
   }
 }
 
+function expandEnvPath(value) {
+  return String(value || "").replace(/%([^%]+)%/g, (_whole, key) => process.env[key] || _whole);
+}
+
+function quoteEnvValue(value) {
+  const text = String(value ?? "");
+  return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n")}"`;
+}
+
+function normalizeSelectedBattlegroup(value) {
+  if (!value || typeof value !== "object") return null;
+  const namespace = String(value.namespace || "").trim();
+  const name = String(value.name || "").trim();
+  if (!namespace || !name) return null;
+  return { namespace, name };
+}
+
+function receiverUrlsFromConfig(cfg) {
+  const host = String(cfg.receiverHost || RECEIVER_DEFAULT_HOST).trim();
+  const port = String(cfg.receiverPort || RECEIVER_DEFAULT_PORT).trim();
+  return {
+    host,
+    port,
+    giveUrl: `http://${host}:${port}/api/give-item`,
+    healthUrl: `http://${host}:${port}/health`
+  };
+}
+
+function managedEnvValues(cfg) {
+  const receiver = receiverUrlsFromConfig(cfg);
+  const sshHost = String(cfg.receiverSshHost || cfg.sshHost || cfg.vmIp || "").trim();
+  const sshUser = String(cfg.receiverSshUser || cfg.sshUser || "dune").trim();
+  const sshKey = expandEnvPath(cfg.receiverSshKey || cfg.sshKey || "");
+  const receiverToken = String(cfg.receiverToken || "").trim();
+  const adminToken = String(cfg.adminGiveItemToken || receiverToken || "").trim();
+  const selected = normalizeSelectedBattlegroup(cfg.selectedBattlegroup);
+  const values = {
+    DUNE_RECEIVER_HOST: receiver.host,
+    DUNE_RECEIVER_PORT: receiver.port,
+    DUNE_RECEIVER_URL: `http://${receiver.host}:${receiver.port}`,
+    DUNE_RECEIVER_SSH_HOST: sshHost,
+    DUNE_RECEIVER_SSH_USER: sshUser,
+    DUNE_RECEIVER_SSH_KEY: sshKey,
+    DUNE_DATABASE_HOST: String(cfg.databaseHost || "").trim(),
+    DUNE_DATABASE_PORT: String(cfg.databasePort || 15432).trim(),
+    DUNE_DATABASE_NAME: String(cfg.databaseName || "dune").trim(),
+    DUNE_DATABASE_USER: String(cfg.databaseUser || "postgres").trim(),
+    DUNE_DATABASE_PASSWORD: String(cfg.databasePassword || ""),
+    DUNE_ADMIN_DATABASE_PORT: String(cfg.databasePort || 15432).trim(),
+    DUNE_RECEIVER_TOKEN: receiverToken,
+    DUNE_ADMIN_GIVE_ITEM_TOKEN: adminToken,
+    DUNE_ADMIN_GIVE_ITEM_TRANSPORT: "http-json",
+    DUNE_ADMIN_GIVE_ITEM_URL: receiver.giveUrl,
+    DUNE_ADMIN_GIVE_ITEM_HEALTH_URL: receiver.healthUrl,
+    DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: cfg.liveTeleportEnabled ? "true" : "false",
+    DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET: String(cfg.teleportSafeZOffset || 1000),
+    DUNE_SERVER_INSTALL_PATH: expandEnvPath(cfg.serverInstallPath || ""),
+    DUNE_AWAKENING_SERVER_PATH: expandEnvPath(cfg.serverInstallPath || "")
+  };
+  if (selected) {
+    values.DUNE_RECEIVER_BG_NAMESPACE = selected.namespace;
+    values.DUNE_RECEIVER_BG_NAME = selected.name;
+    values.DUNE_BATTLEGROUP_NAMESPACE = selected.namespace;
+    values.DUNE_BATTLEGROUP_NAME = selected.name;
+  }
+  return values;
+}
+
+function writeManagedEnvFile(cfg) {
+  const envPath = userPath(".env");
+  const values = managedEnvValues(cfg);
+  const lines = [
+    "# AlphaNine Dune Suite managed environment",
+    "# Generated from Setup Wizard/config.json. Do not edit by hand; use the Setup Wizard.",
+    "# Precedence: defaults < managed .env < .env.local/process overrides < config.json runtime mapping.",
+    ""
+  ];
+  for (const [name, value] of Object.entries(values)) lines.push(`${name}=${quoteEnvValue(value)}`);
+  fs.writeFileSync(envPath, `${lines.join("\n")}\n`, "utf8");
+  return envPath;
+}
+
+function applyConfigRuntimeEnv(cfg) {
+  const values = managedEnvValues(cfg);
+  for (const [name, value] of Object.entries(values)) process.env[name] = String(value ?? "");
+}
+
 function createFirstRunFiles() {
   const dataDir = app.getPath("userData");
   ensureDir(dataDir);
 
   const envLocal = userPath(".env.local");
   if (!fs.existsSync(envLocal)) {
-    const source = appPath(".env.example");
     const header = [
-      "# AlphaNine Dune Suite local configuration",
-      "# Edit this file for installed desktop app settings.",
-      "# Secrets stay on this machine and are not committed.",
+      "# AlphaNine Dune Suite advanced local overrides",
+      "# Normal configuration is saved by the Setup Wizard to config.json and mirrored to .env.",
+      "# Put advanced, non-wizard overrides here only when support asks you to.",
       ""
     ].join("\n");
-    const body = fs.existsSync(source) ? fs.readFileSync(source, "utf8") : "";
-    fs.writeFileSync(envLocal, `${header}${body}`, "utf8");
+    fs.writeFileSync(envLocal, header, "utf8");
   }
 
   const configPath = userPath("config.json");
@@ -114,6 +199,7 @@ function createFirstRunFiles() {
         port: APP_PORT,
         vmName: "dune-awakening",
         vmIp: "",
+        sshHost: "",
         sshUser: "dune",
         sshKey: "",
         databaseHost: "",
@@ -124,6 +210,7 @@ function createFirstRunFiles() {
         receiverHost: "127.0.0.1",
         receiverPort: RECEIVER_DEFAULT_PORT,
         receiverToken: "",
+        adminGiveItemToken: "",
         receiverSshHost: "",
         receiverSshUser: "dune",
         receiverSshKey: "",
@@ -175,30 +262,9 @@ function loadEnvironment() {
   readEnvFile(userPath(".env"));
   readEnvFile(userPath(".env.local"), true);
   const cfg = ensureReceiverTokenConfig();
-  if (cfg.vmIp && !process.env.DUNE_RECEIVER_SSH_HOST) process.env.DUNE_RECEIVER_SSH_HOST = cfg.vmIp;
-  if (cfg.receiverSshHost && !process.env.DUNE_RECEIVER_SSH_HOST) process.env.DUNE_RECEIVER_SSH_HOST = cfg.receiverSshHost;
-  if (cfg.receiverSshUser && !process.env.DUNE_RECEIVER_SSH_USER) process.env.DUNE_RECEIVER_SSH_USER = cfg.receiverSshUser;
-  if (cfg.receiverSshKey && !process.env.DUNE_RECEIVER_SSH_KEY) process.env.DUNE_RECEIVER_SSH_KEY = cfg.receiverSshKey;
-  if (cfg.selectedBattlegroup && typeof cfg.selectedBattlegroup === "object") {
-    if (cfg.selectedBattlegroup.namespace) process.env.DUNE_RECEIVER_BG_NAMESPACE = String(cfg.selectedBattlegroup.namespace);
-    if (cfg.selectedBattlegroup.name) process.env.DUNE_RECEIVER_BG_NAME = String(cfg.selectedBattlegroup.name);
-  }
-  if (cfg.receiverHost && !process.env.DUNE_RECEIVER_HOST) process.env.DUNE_RECEIVER_HOST = cfg.receiverHost;
-  if (cfg.receiverPort && !process.env.DUNE_RECEIVER_PORT) process.env.DUNE_RECEIVER_PORT = String(cfg.receiverPort);
-  process.env.DUNE_RECEIVER_TOKEN = cfg.receiverToken || process.env.DUNE_RECEIVER_TOKEN || "";
-  process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = cfg.receiverToken || process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || process.env.DUNE_RECEIVER_TOKEN || "";
-  if (cfg.liveTeleportEnabled === true || cfg.liveTeleportEnabled === "true") {
-    process.env.DUNE_RECEIVER_LIVE_TELEPORT_ENABLED = "true";
-  } else if (Object.prototype.hasOwnProperty.call(cfg, "liveTeleportEnabled")) {
-    process.env.DUNE_RECEIVER_LIVE_TELEPORT_ENABLED = "false";
-  }
-  if (cfg.teleportSafeZOffset) {
-    process.env.DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET = String(cfg.teleportSafeZOffset);
-  }
-  const receiverHost = process.env.DUNE_RECEIVER_HOST || RECEIVER_DEFAULT_HOST;
-  const receiverPort = process.env.DUNE_RECEIVER_PORT || String(RECEIVER_DEFAULT_PORT);
-  process.env.DUNE_ADMIN_GIVE_ITEM_URL = process.env.DUNE_ADMIN_GIVE_ITEM_URL || `http://${receiverHost}:${receiverPort}/api/give-item`;
-  process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL = process.env.DUNE_ADMIN_GIVE_ITEM_HEALTH_URL || `http://${receiverHost}:${receiverPort}/health`;
+  const managedEnvPath = writeManagedEnvFile(cfg);
+  applyConfigRuntimeEnv(cfg);
+  appendLog("desktop", `Managed runtime environment regenerated at ${managedEnvPath}.`);
   if (!process.env.DUNE_RECEIVER_TOKEN || !process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN) {
     appendLog("desktop", "Receiver token environment is incomplete after startup configuration load.");
   }

@@ -25,11 +25,17 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 0.3.5-beta
+
+- Unified Live Map and Live Teleport coordinate handling.
+- Added safe elevation provenance and preview diagnostics.
+- Live Teleport now requires a matching preview with a known Z/elevation source.
+
 ### 0.3.4-beta
 
 #### Live Map
 
-- Complete Live Map overhaul based on Red-Blink architecture.
+- Complete Live Map overhaul.
 - New backend marker API for Players, Vehicles, and Bases.
 - Local map assets bundled with no runtime GitHub dependency.
 - Added improved Live Map diagnostics.

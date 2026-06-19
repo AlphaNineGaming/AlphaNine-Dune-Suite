@@ -23,6 +23,21 @@ const PROGRESSION_DATA_DIR = process.env.APPDATA
   : __dirname;
 const PROGRESSION_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "progression-backups");
 const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progression-audit.log");
+const DATABASE_TUNNEL_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "database-tunnel.log");
+let databaseTunnelStartPromise = null;
+const databaseTunnelRuntime = {
+  state: "idle",
+  source: "",
+  attemptCount: 0,
+  startedPid: "",
+  lastError: "",
+  lastExitCode: null,
+  resolvedSshHost: "",
+  sshHostSource: "",
+  hostDiscoveryAttempted: false,
+  startedAt: "",
+  updatedAt: ""
+};
 function packagedUnpackedPath(...parts) {
   if (!String(__dirname).includes("app.asar")) return path.join(__dirname, ...parts);
   return path.join(__dirname.replace("app.asar", "app.asar.unpacked"), ...parts);
@@ -845,13 +860,17 @@ async function testManualDatabaseConnection(settings, timeout = 8000) {
     return { ok: false, message: "Manual database port is invalid.", diagnostics };
   }
   if (isLocalDbHost(settings.host)) {
-    const tunnel = await databaseTunnelStatus({ databaseHost: settings.host, databasePort: settings.port });
+    let tunnel = await databaseTunnelStatus({ databaseHost: settings.host, databasePort: settings.port });
+    if (!tunnel.running) {
+      diagnostics.tunnelStartup = await ensureDatabaseTunnelForFeature("database-test");
+      tunnel = await databaseTunnelStatus({ databaseHost: settings.host, databasePort: settings.port });
+    }
     diagnostics.tunnel = tunnel;
     if (!tunnel.running) {
       return {
         ok: false,
-        message: "Database tunnel is not running. Click Start first or start the DB tunnel.",
-        error: `Database tunnel is not running. Click Start first or start the DB tunnel. Port ${settings.port} is closed.`,
+        message: "Database tunnel startup failed.",
+        error: diagnostics.tunnelStartup?.error || tunnel.lastError || `Port ${settings.port} is closed.`,
         diagnostics
       };
     }
@@ -1042,6 +1061,9 @@ async function liveMapDbConfigDiagnostics(cfg = loadConfig(), manual = manualDat
     tunnelExpected: Boolean(tunnel.localTunnelExpected || isLocalDbHost(manual.host || "127.0.0.1")),
     tunnelListening: Boolean(tunnel.running),
     tunnelPid: tunnel.pid || "",
+    tunnelState: tunnel.state || "idle",
+    tunnelLastError: tunnel.lastError || "",
+    tunnelAttemptCount: Number(tunnel.attemptCount || 0),
     tunnel,
     didCallGetVM: false
   };
@@ -1050,11 +1072,16 @@ async function liveMapDbConfigDiagnostics(cfg = loadConfig(), manual = manualDat
 async function liveMapDirectDbSettings() {
   const cfg = loadConfig();
   const manual = manualDatabaseSettings(cfg);
-  const diagnostics = await liveMapDbConfigDiagnostics(cfg, manual);
-  const tunnel = diagnostics.tunnel;
+  let diagnostics = await liveMapDbConfigDiagnostics(cfg, manual);
+  let tunnel = diagnostics.tunnel;
+  if (diagnostics.tunnelExpected && !tunnel.running) {
+    const startup = await ensureDatabaseTunnelForFeature("live-map-query");
+    diagnostics = { ...(await liveMapDbConfigDiagnostics(cfg, manual)), tunnelStartup: startup };
+    tunnel = diagnostics.tunnel;
+  }
   if (manual.configured) {
     if (isLocalDbHost(manual.host) && !tunnel.running) {
-      const error = new Error(`Database tunnel is not running. Click Start first or start the DB tunnel. Port ${manual.port} is closed.`);
+      const error = new Error(diagnostics.tunnelStartup?.error || tunnel.lastError || `Database tunnel startup failed. Port ${manual.port} is closed.`);
       error.debug = { ...diagnostics, connectionSource: "manual-config", lastDbError: error.message };
       throw error;
     }
@@ -1072,7 +1099,7 @@ async function liveMapDirectDbSettings() {
       ...diagnostics
     };
   }
-  const error = new Error("Database configuration is unavailable for Live Map. Configure manual DB settings or start the DB tunnel.");
+  const error = new Error(diagnostics.tunnelStartup?.error || tunnel.lastError || "Database configuration is unavailable for Live Map. Configure manual DB settings or retry the DB tunnel.");
   error.debug = { ...diagnostics, connectionSource: "none", lastDbError: error.message };
   throw error;
 }
@@ -1290,22 +1317,44 @@ function isLocalDbHost(host) {
 async function databaseTunnelStatus(configValue = loadConfig()) {
   const port = Number(configValue.databasePort || 15432);
   const host = String(configValue.databaseHost || "127.0.0.1").trim() || "127.0.0.1";
-  const pid = isLocalDbHost(host) ? await listeningPidOnPort(port) : "";
+  const localTunnelExpected = isLocalDbHost(host);
+  const pid = localTunnelExpected ? await listeningPidOnPort(port) : "";
   const listening = Boolean(pid);
+  if (listening) {
+    Object.assign(databaseTunnelRuntime, { state: "running", startedPid: pid, lastError: "", lastExitCode: null, updatedAt: new Date().toISOString() });
+  } else if (databaseTunnelRuntime.state === "running") {
+    Object.assign(databaseTunnelRuntime, { state: "idle", startedPid: "", updatedAt: new Date().toISOString() });
+  }
+  const state = !localTunnelExpected ? "direct" : (listening ? "running" : (databaseTunnelStartPromise ? "starting" : databaseTunnelRuntime.state));
   return {
     ok: true,
     running: listening,
-    status: listening ? "Running" : "Not Running",
+    ready: listening || !localTunnelExpected,
+    state,
+    status: !localTunnelExpected ? "Direct Database" : (listening ? "Running" : (state === "starting" ? "Starting" : "Not Running")),
     host,
     port,
     pid,
-    localTunnelExpected: isLocalDbHost(host),
-    message: listening ? `DB tunnel is running on 127.0.0.1:${port}.` : `DB tunnel is not running on 127.0.0.1:${port}.`
+    localTunnelExpected,
+    source: databaseTunnelRuntime.source,
+    attemptCount: databaseTunnelRuntime.attemptCount,
+    startedPid: databaseTunnelRuntime.startedPid,
+    lastError: databaseTunnelRuntime.lastError,
+    lastExitCode: databaseTunnelRuntime.lastExitCode,
+    resolvedSshHost: databaseTunnelRuntime.resolvedSshHost,
+    sshHostSource: databaseTunnelRuntime.sshHostSource,
+    startedAt: databaseTunnelRuntime.startedAt,
+    updatedAt: databaseTunnelRuntime.updatedAt,
+    logPath: DATABASE_TUNNEL_LOG,
+    message: !localTunnelExpected
+      ? `Direct database host ${host}:${port} is configured; a local tunnel is not required.`
+      : (listening ? `DB tunnel is running on 127.0.0.1:${port}.` : (state === "starting" ? "Starting database tunnel..." : `DB tunnel is not running on 127.0.0.1:${port}.`))
   };
 }
 
 function databaseTunnelSshSettings(configValue = loadConfig()) {
-  const host = String(configValue.vmIp || VM_IP || configValue.receiverSshHost || "").trim();
+  const configuredHost = String(configValue.vmIp || VM_IP || configValue.receiverSshHost || "").trim();
+  const host = configuredHost || databaseTunnelRuntime.resolvedSshHost;
   const user = String(configValue.sshUser || configValue.receiverSshUser || SSH_USER || "dune").trim();
   const keyPath = expandEnvPath(configValue.sshKey || configValue.receiverSshKey || SSH_KEY || defaultSshKeyPath());
   const localPort = Number(configValue.databasePort || 15432);
@@ -1319,46 +1368,183 @@ function databaseTunnelSshSettings(configValue = loadConfig()) {
   };
 }
 
-async function startDatabaseTunnel() {
+async function resolveDatabaseTunnelSshSettings(configValue = loadConfig(), options = {}) {
+  let settings = databaseTunnelSshSettings(configValue);
+  if (settings.host) {
+    if (!databaseTunnelRuntime.resolvedSshHost) {
+      databaseTunnelRuntime.resolvedSshHost = settings.host;
+      databaseTunnelRuntime.sshHostSource = String(configValue.vmIp || VM_IP || "").trim() ? "configured-vm-ip" : "configured-receiver-ssh-host";
+    }
+    return settings;
+  }
+  if (databaseTunnelRuntime.hostDiscoveryAttempted && options.refreshDiscovery !== true) return settings;
+  databaseTunnelRuntime.hostDiscoveryAttempted = true;
+  const vm = await vmInfo(configValue.vmName || configuredVmName());
+  if (vm.ok && vm.ip) {
+    databaseTunnelRuntime.resolvedSshHost = String(vm.ip).trim();
+    databaseTunnelRuntime.sshHostSource = "configured-vm-discovery";
+    databaseTunnelRuntime.lastError = "";
+    settings = databaseTunnelSshSettings(configValue);
+  } else {
+    databaseTunnelRuntime.lastError = vm.error || "Configured VM did not report an SSH address.";
+    databaseTunnelRuntime.sshHostSource = "configured-vm-discovery";
+  }
+  databaseTunnelRuntime.updatedAt = new Date().toISOString();
+  return settings;
+}
+
+function databaseTunnelLogTail() {
+  try {
+    if (!fs.existsSync(DATABASE_TUNNEL_LOG)) return "";
+    return fs.readFileSync(DATABASE_TUNNEL_LOG, "utf8").split(/\r?\n/).filter(Boolean).slice(-8).join(" | ");
+  } catch {
+    return "";
+  }
+}
+
+async function waitForDatabaseTunnel(configValue, childState, timeoutMs = 10000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const status = await databaseTunnelStatus(configValue);
+    if (status.running) return status;
+    if (childState.exited || childState.error) break;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return await databaseTunnelStatus(configValue);
+}
+
+async function runDatabaseTunnelStart(configValue, settings, options) {
+  const source = String(options.source || "manual");
+  const maxAttempts = Math.max(1, Math.min(4, Number(options.maxAttempts || 2)));
+  const retryDelayMs = Math.max(250, Number(options.retryDelayMs || 1500));
+  const attempts = [];
+  let lastStatus = await databaseTunnelStatus(configValue);
+  let lastError = "";
+
+  fs.mkdirSync(path.dirname(DATABASE_TUNNEL_LOG), { recursive: true });
+  fs.writeFileSync(DATABASE_TUNNEL_LOG, "", "utf8");
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    lastStatus = await databaseTunnelStatus(configValue);
+    if (lastStatus.running) {
+      return { ok: true, alreadyRunning: true, reused: true, tunnel: lastStatus, attempts, message: lastStatus.message };
+    }
+    if (attempt > 1) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+
+    Object.assign(databaseTunnelRuntime, {
+      state: "starting",
+      source,
+      attemptCount: attempt,
+      lastError: "",
+      lastExitCode: null,
+      startedAt: databaseTunnelRuntime.startedAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    const args = [
+      "-N",
+      "-L", `127.0.0.1:${settings.localPort}:${settings.remoteHost}:${settings.remotePort}`,
+      "-o", "ExitOnForwardFailure=yes",
+      "-o", "BatchMode=yes",
+      "-o", "ConnectTimeout=8",
+      "-o", "ServerAliveInterval=30",
+      "-o", "ServerAliveCountMax=3",
+      "-o", "StrictHostKeyChecking=no",
+      "-o", "LogLevel=ERROR",
+      "-E", DATABASE_TUNNEL_LOG,
+      "-i", settings.keyPath,
+      `${settings.user}@${settings.host}`
+    ];
+    const sshBinary = process.platform === "win32" ? "ssh.exe" : "ssh";
+    const childState = { error: "", exited: false, exitCode: null };
+    let child;
+    try {
+      child = spawn(sshBinary, args, { detached: true, windowsHide: true, stdio: "ignore" });
+      databaseTunnelRuntime.startedPid = child.pid || "";
+      child.once("error", (error) => { childState.error = error.message; });
+      child.once("exit", (code) => { childState.exited = true; childState.exitCode = code; });
+      child.unref();
+    } catch (error) {
+      childState.error = error.message;
+    }
+
+    lastStatus = await waitForDatabaseTunnel(configValue, childState, Number(options.attemptTimeoutMs || 10000));
+    const logTail = databaseTunnelLogTail();
+    lastError = childState.error || logTail || (childState.exited ? `ssh exited with code ${childState.exitCode}.` : "Local database port did not open before the timeout.");
+    attempts.push({ attempt, pid: child?.pid || "", running: lastStatus.running, exited: childState.exited, exitCode: childState.exitCode, error: lastStatus.running ? "" : lastError });
+    if (lastStatus.running) {
+      Object.assign(databaseTunnelRuntime, { state: "running", startedPid: lastStatus.pid || child?.pid || "", lastError: "", lastExitCode: null, updatedAt: new Date().toISOString() });
+      appendAdminAudit("database_tunnel_start", { source, localPort: settings.localPort, remoteHost: settings.remoteHost, remotePort: settings.remotePort, sshHost: settings.host, pid: databaseTunnelRuntime.startedPid, running: true, attempt });
+      return {
+        ok: true,
+        reused: false,
+        startedPid: child?.pid || "",
+        tunnel: await databaseTunnelStatus(configValue),
+        attempts,
+        command: `${sshBinary} -N -L 127.0.0.1:${settings.localPort}:${settings.remoteHost}:${settings.remotePort} ${settings.user}@${settings.host}`,
+        message: `Database tunnel started on 127.0.0.1:${settings.localPort}.`
+      };
+    }
+    if (!childState.exited && !childState.error) break;
+  }
+
+  Object.assign(databaseTunnelRuntime, { state: "failed", lastError, lastExitCode: attempts.at(-1)?.exitCode ?? null, updatedAt: new Date().toISOString() });
+  appendAdminAudit("database_tunnel_start_failed", { source, localPort: settings.localPort, sshHost: settings.host, attempts, error: lastError, logPath: DATABASE_TUNNEL_LOG });
+  return { ok: false, tunnel: await databaseTunnelStatus(configValue), attempts, error: lastError || "Database tunnel startup failed.", message: "Database tunnel startup failed.", logPath: DATABASE_TUNNEL_LOG };
+}
+
+async function startDatabaseTunnel(options = {}) {
   const cfg = loadConfig();
   const before = await databaseTunnelStatus(cfg);
-  if (before.running) return { ok: true, alreadyRunning: true, tunnel: before, message: before.message };
-  const settings = databaseTunnelSshSettings(cfg);
-  if (!settings.host) return { ok: false, tunnel: before, error: "VM IP is not configured. Set VM IP in Settings before starting the DB tunnel." };
+  if (!before.localTunnelExpected) return { ok: true, skipped: true, directDatabase: true, tunnel: before, message: before.message };
+  if (before.running) return { ok: true, alreadyRunning: true, reused: true, tunnel: before, message: before.message };
+  if (databaseTunnelStartPromise) return await databaseTunnelStartPromise;
+  const settings = await resolveDatabaseTunnelSshSettings(cfg, { refreshDiscovery: options.source === "manual-retry" || options.source === "live-map-retry" });
+  if (!settings.host) {
+    const error = databaseTunnelRuntime.lastError || "SSH host is not configured. Set VM IP or Receiver SSH Host in Settings.";
+    Object.assign(databaseTunnelRuntime, { state: "failed", source: String(options.source || "manual"), lastError: error, updatedAt: new Date().toISOString() });
+    return { ok: false, tunnel: await databaseTunnelStatus(cfg), error };
+  }
   const key = sshKeyStatus(settings.keyPath);
-  if (!key.exists) return { ok: false, tunnel: before, sshKey: key, error: key.message };
-  const args = [
-    "-N",
-    "-L", `127.0.0.1:${settings.localPort}:${settings.remoteHost}:${settings.remotePort}`,
-    "-o", "ExitOnForwardFailure=yes",
-    "-o", "ServerAliveInterval=30",
-    "-o", "ServerAliveCountMax=3",
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "LogLevel=ERROR",
-    "-i", key.path,
-    `${settings.user}@${settings.host}`
-  ];
-  const sshBinary = process.platform === "win32" ? "ssh.exe" : "ssh";
-  const child = spawn(sshBinary, args, { detached: true, windowsHide: true, stdio: "ignore" });
-  child.unref();
-  await new Promise((resolve) => setTimeout(resolve, 1200));
-  const after = await databaseTunnelStatus(cfg);
-  appendAdminAudit("database_tunnel_start", {
-    requestedAt: new Date().toISOString(),
-    localPort: settings.localPort,
-    remoteHost: settings.remoteHost,
-    remotePort: settings.remotePort,
-    sshHost: settings.host,
-    pid: after.pid || child.pid || "",
-    running: after.running
-  });
-  return {
-    ok: after.running,
-    startedPid: child.pid || "",
-    tunnel: after,
-    command: `${sshBinary} -N -L 127.0.0.1:${settings.localPort}:${settings.remoteHost}:${settings.remotePort} ${settings.user}@${settings.host}`,
-    message: after.running ? after.message : "DB tunnel start was requested, but the local database port is still closed."
-  };
+  if (!key.exists) {
+    Object.assign(databaseTunnelRuntime, { state: "failed", source: String(options.source || "manual"), lastError: key.message, updatedAt: new Date().toISOString() });
+    return { ok: false, tunnel: await databaseTunnelStatus(cfg), sshKey: key, error: key.message };
+  }
+  const promise = runDatabaseTunnelStart(cfg, { ...settings, keyPath: key.path }, options);
+  databaseTunnelStartPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    databaseTunnelStartPromise = null;
+  }
+}
+
+function startDatabaseTunnelOnStartup() {
+  const cfg = loadConfig();
+  const host = String(cfg.databaseHost || "").trim();
+  if (host && !isLocalDbHost(host)) {
+    Object.assign(databaseTunnelRuntime, { state: "direct", source: "startup", lastError: "", updatedAt: new Date().toISOString() });
+    return;
+  }
+  startDatabaseTunnel({ source: "startup", maxAttempts: 3, retryDelayMs: 2000, attemptTimeoutMs: 10000 })
+    .then((result) => {
+      console.log(result.ok ? result.message : `Database tunnel startup failed: ${result.error || result.message}`);
+      if (!result.ok) {
+        setTimeout(() => {
+          startDatabaseTunnel({ source: "startup-retry", maxAttempts: 2, retryDelayMs: 2000, attemptTimeoutMs: 10000 })
+            .then((retry) => console.log(retry.ok ? retry.message : `Database tunnel retry failed: ${retry.error || retry.message}`))
+            .catch((error) => console.error(`Database tunnel retry failed: ${error.message}`));
+        }, 15000);
+      }
+    })
+    .catch((error) => {
+      Object.assign(databaseTunnelRuntime, { state: "failed", source: "startup", lastError: error.message, updatedAt: new Date().toISOString() });
+      console.error(`Database tunnel startup failed: ${error.message}`);
+    });
+}
+
+async function ensureDatabaseTunnelForFeature(source) {
+  const status = await databaseTunnelStatus();
+  if (!status.localTunnelExpected || status.running) return { ok: true, reused: status.running, tunnel: status, message: status.message };
+  return await startDatabaseTunnel({ source, maxAttempts: 2, retryDelayMs: 1000, attemptTimeoutMs: 10000 });
 }
 
 function generateReceiverToken() {
@@ -3661,17 +3847,20 @@ function formatBytes(value) {
 async function databaseStatus() {
   const started = Date.now();
   let target = null;
-  const tunnel = await databaseTunnelStatus().catch((error) => ({ ok: false, running: false, status: "Unknown", error: error.message, port: Number(loadConfig().databasePort || 15432), pid: "" }));
+  let tunnel = await databaseTunnelStatus().catch((error) => ({ ok: false, running: false, status: "Unknown", error: error.message, port: Number(loadConfig().databasePort || 15432), pid: "" }));
   try {
     const manual = manualDatabaseSettings(loadConfig());
     if (manual.configured && isLocalDbHost(manual.host) && !tunnel.running) {
+      const startup = await ensureDatabaseTunnelForFeature("database-status");
+      tunnel = await databaseTunnelStatus();
+      if (tunnel.running) return await databaseStatus();
       return {
         ok: false,
         status: "unavailable",
         durationMs: Date.now() - started,
         tunnel,
-        message: "Database tunnel is not running. Click Start first or start the DB tunnel.",
-        error: `Database tunnel is not running. Click Start first or start the DB tunnel. Port ${manual.port} is closed.`
+        message: "Database tunnel startup failed.",
+        error: startup.error || tunnel.lastError || `Port ${manual.port} is closed.`
       };
     }
     target = await databaseRuntimeTarget();
@@ -6727,6 +6916,9 @@ function liveMapDebugFromLayers(layers, diagnostics, db = null, errors = []) {
     tunnelExpected: Boolean(source.tunnelExpected || tunnel.localTunnelExpected),
     tunnelListening: Boolean(source.tunnelListening || tunnel.running),
     tunnelPid: source.tunnelPid || tunnel.pid || "",
+    tunnelState: source.tunnelState || tunnel.state || "idle",
+    tunnelLastError: source.tunnelLastError || tunnel.lastError || "",
+    tunnelAttemptCount: Number(source.tunnelAttemptCount || tunnel.attemptCount || 0),
     lastDbError,
     rowCounts: {
       players: layers.players.length,
@@ -6749,7 +6941,7 @@ function liveMapDebugFromLayers(layers, diagnostics, db = null, errors = []) {
     bounds: LIVE_MAP_WORLD_BOUNDS.HaggaBasin,
     maps: liveMapConfigPayload().maps,
     outsideBoundsWarning: Object.values(diagnostics).some((item) => item?.rejectedReasons?.["coordinates outside configured map bounds"]),
-    dbUnavailableMessage: lastDbError ? "Live Map database is not connected. Start the DB tunnel or configure manual DB settings." : "",
+    dbUnavailableMessage: lastDbError ? (source.tunnelLastError || tunnel.lastError || lastDbError) : "",
     errors: errors.map((error) => error.message || String(error))
   };
 }
@@ -8857,7 +9049,7 @@ function appPage() {
             <label class="live-map-layer-row"><span>Vehicles</span><input id="liveLayerVehicles" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
             <label class="live-map-layer-row"><span>Bases</span><input id="liveLayerBases" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
             <div id="liveMapBoundsWarning" class="warning mt hidden">Some markers are outside configured map bounds.</div>
-            <div id="liveEntityAvailability" class="warning mt hidden">Live Map data unavailable.</div>
+            <div id="liveEntityAvailability" class="warning mt hidden"><span id="liveEntityAvailabilityText">Live Map data unavailable.</span><button id="liveMapRetryTunnel" type="button" class="mt hidden" onclick="retryLiveMapDatabaseTunnel()">Retry DB Tunnel</button></div>
           </div>
           <div class="panel pad">
             <div class="label">Markers</div>
@@ -9354,7 +9546,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div class="detail-row"><span class="subtle">Port</span><strong id="dbTunnelPort">15432</strong></div>
           <div class="detail-row"><span class="subtle">PID</span><strong id="dbTunnelPid">--</strong></div>
         </div>
-        <div class="action-row mt"><button class="primary" onclick="startDatabaseTunnel()">Start DB Tunnel</button><button onclick="runConnectionTest('database','dbTunnelTestResult')">Test Database</button></div>
+        <div class="action-row mt"><button onclick="startDatabaseTunnel()">Retry DB Tunnel</button><button onclick="runConnectionTest('database','dbTunnelTestResult')">Test Database</button></div>
         <div id="dbTunnelTestResult" class="test-result mt">Database tunnel not tested.</div>
       </div>
       <div class="layout-3 mt">
@@ -9562,7 +9754,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div class="detail-row"><span class="subtle">Port</span><strong id="settingsDbTunnelPort">15432</strong></div>
             <div class="detail-row"><span class="subtle">PID</span><strong id="settingsDbTunnelPid">--</strong></div>
           </div>
-          <div class="action-row mt"><button type="button" class="primary" onclick="startDatabaseTunnel()">Start DB Tunnel</button><button type="button" onclick="refreshDatabaseTunnelStatus()">Refresh DB Tunnel</button></div>
+          <div class="action-row mt"><button type="button" onclick="startDatabaseTunnel()">Retry DB Tunnel</button><button type="button" onclick="refreshDatabaseTunnelStatus()">Refresh DB Tunnel</button></div>
         </div>
         <div class="panel pad">
           <div class="panel-head"><div><div class="label">Receiver Management</div><div id="receiverManagerStatus" class="micro">Checking receiver</div></div><button type="button" onclick="refreshReceiverStatus()">Refresh</button></div>
@@ -9683,6 +9875,7 @@ function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.vie
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportPending=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let liveMapTunnelPromise=null;
 function appConfirm(title,message,okText="Continue",cancelText="Cancel"){return new Promise(resolve=>{const dialog=document.getElementById("suiteConfirmDialog");const titleEl=document.getElementById("suiteConfirmTitle");const messageEl=document.getElementById("suiteConfirmMessage");const ok=document.getElementById("suiteConfirmOk");const cancel=document.getElementById("suiteConfirmCancel");if(!dialog||!ok||!cancel){resolve(false);return;}titleEl.textContent=title||"Confirm";messageEl.textContent=message||"";ok.textContent=okText;cancel.textContent=cancelText;const cleanup=result=>{dialog.classList.add("hidden");ok.onclick=null;cancel.onclick=null;document.removeEventListener("keydown",onKey,true);resolve(result);};const onKey=event=>{if(event.key==="Escape")cleanup(false);if(event.key==="Enter")cleanup(true);};ok.onclick=()=>cleanup(true);cancel.onclick=()=>cleanup(false);document.addEventListener("keydown",onKey,true);dialog.classList.remove("hidden");ok.focus();});}
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
@@ -9765,7 +9958,57 @@ function fillTeleportFromTargetPlayer(){const targetId=document.getElementById("
 async function previewTeleportToPlayer(){if(!fillTeleportFromTargetPlayer())return;await previewTeleport();}
 async function executeTeleportToPlayer(){await executeLiveTeleport();}
 function updateLiveMapDebug(latlng){if(!liveMapDebugEnabled())return;const selected=latlng?leafletToDune(latlng):liveSelectedCoordinates;const current=liveMapPosition(currentTeleportPlayer());const target={x:Number(document.getElementById("teleportX")?.value),y:Number(document.getElementById("teleportY")?.value),z:Number(document.getElementById("teleportZ")?.value)};const cfg=liveMapConfig();setText("liveDebugZoom",liveMap?String(liveMap.getZoom().toFixed(2)):"--");if(latlng)setText("liveDebugLatLng",formatLiveCoord(latlng.lat)+", "+formatLiveCoord(latlng.lng));else if(liveSelectedCoordinates)setText("liveDebugLatLng",formatLiveCoord(liveSelectedCoordinates.lat)+", "+formatLiveCoord(liveSelectedCoordinates.lng));else setText("liveDebugLatLng","--");setText("liveDebugPlayerCurrent",formatLivePosition(current));setText("liveDebugClicked",selected?("World X "+formatLiveCoord(selected.x)+" / World Y "+formatLiveCoord(selected.y)):"--");setText("liveDebugDune",Number.isFinite(target.x)&&Number.isFinite(target.y)?formatLivePosition(target):"--");setText("liveDebugElevationSource",liveTeleportElevationSource+(liveTeleportElevationConfirmed?" / confirmed":" / unsafe"));setText("liveDebugBounds",cfg.minX+".."+cfg.maxX+" / "+cfg.minY+".."+cfg.maxY+" / flipY "+Boolean(cfg.flipY));const counts=liveMapData?.debug?.rowCounts||{players:(liveMapData?.layers?.players||[]).length,vehicles:(liveMapData?.layers?.vehicles||[]).length,bases:(liveMapData?.layers?.bases||[]).length};const raw=liveMapData?.debug?.rawDbRowCounts||{};setText("liveDebugPlayers",String(counts.players||0)+" rows / raw "+(raw.players||0));setText("liveDebugVehicles",String(counts.vehicles||0)+" rows / raw "+(raw.vehicles||0));setText("liveDebugBases",String(counts.bases||0)+" rows / raw "+(raw.bases||0));setText("liveDebugMarkers",String(liveMarkerCount));const debug=liveMapData?.debug||{};setText("liveDebugPositionSource",(debug.connectionSource||"--")+" "+(debug.usedHost?debug.usedHost+":"+debug.usedPort:""));setText("liveDebugEntitySource","Tunnel "+(debug.tunnelListening?"running":"not running")+" / Get-VM "+(debug.didCallGetVM?"called":"not called"));}
-async function refreshLiveMap(){if(!liveMap)return;try{const started=performance.now();const debugMarkers=new URLSearchParams(location.search).get("debugMarkers")==="1";const data=await getJson("/api/live-map/markers"+(debugMarkers?"?debugMarkers=1":""),{timeoutMs:35000});mergeLiveMapConfig(data);setLiveMapImage();liveMapData=data;renderLiveMapLayers();const counts=data.debug?.rowCounts||{players:(data.layers?.players||[]).length,vehicles:(data.layers?.vehicles||[]).length,bases:(data.layers?.bases||[]).length};const elapsed=Math.round(performance.now()-started);const boundsWarning=document.getElementById("liveMapBoundsWarning");const unavailable=document.getElementById("liveEntityAvailability");const allRows=data.rows||[];const outside=allRows.filter(row=>!liveMapWithinBounds(row)).length;if(boundsWarning){boundsWarning.classList.toggle("hidden",outside===0&&!data.debug?.outsideBoundsWarning);boundsWarning.textContent=outside?outside+" marker(s) are outside Hagga Basin bounds. Check map/partition before trusting alignment.":"Some returned coordinates are outside configured map bounds.";}if(unavailable){const dbMissing=data.debug?.dbConnected===false&&!data.demo;const hasErrors=(data.errors||[]).length>0;unavailable.classList.toggle("hidden",!dbMissing&&!hasErrors&&!data.demo);unavailable.textContent=data.demo?"Debug marker mode: fake markers are shown for UI rendering validation only.":(dbMissing?"Live Map database is not connected. Start the DB tunnel or configure manual DB settings.":(hasErrors?(data.errors||[]).join(" / "):""));}setText("liveMapStamp",(data.demo?"Debug markers / ":"")+"Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");const log=document.getElementById("liveMapLog");if(log)log.textContent=JSON.stringify({demo:Boolean(data.demo),message:data.message||"",db:{connected:data.debug?.dbConnected,source:data.debug?.connectionSource,resolvedSource:data.debug?.resolvedSource,manualDbConfigExists:data.debug?.manualDbConfigExists,configuredHost:data.debug?.configuredDbHost,configuredPort:data.debug?.configuredDbPort,configuredName:data.debug?.configuredDbName,usedHost:data.debug?.usedHost,usedPort:data.debug?.usedPort,tunnelExpected:data.debug?.tunnelExpected,tunnelListening:data.debug?.tunnelListening,lastDbError:data.debug?.lastDbError,didCallGetVM:data.debug?.didCallGetVM},rowCounts:data.debug?.rowCounts,rawDbRowCounts:data.debug?.rawDbRowCounts,rejectedCoordinateCount:data.debug?.rejectedCoordinateCount,coordinateRange:data.debug?.coordinateRange,bounds:data.debug?.bounds,sources:data.sources||[],errors:data.errors||[],sample:{player:data.layers?.players?.[0]||null,vehicle:data.layers?.vehicles?.[0]||null,base:data.layers?.bases?.[0]||null}},null,2);updateLiveMapDebug();addActivity("maps",data.demo?"Live map debug markers rendered":"Live map refreshed",(counts.players||0)+" players / "+(counts.vehicles||0)+" vehicles / "+(counts.bases||0)+" bases / "+liveMarkerCount+" rendered");}catch(e){setText("liveMapStamp","Live map error");const log=document.getElementById("liveMapLog");if(log)log.textContent=betterError(e);const unavailable=document.getElementById("liveEntityAvailability");if(unavailable){unavailable.classList.remove("hidden");unavailable.textContent="Live Map database is not connected. Start the DB tunnel or configure manual DB settings.";}addActivity("error","Live map failed",e.message);}}
+function setLiveMapDatabaseNotice(state,message=""){const unavailable=document.getElementById("liveEntityAvailability");const text=document.getElementById("liveEntityAvailabilityText");const retry=document.getElementById("liveMapRetryTunnel");if(state==="starting")setText("liveMapStamp","Starting database tunnel...");else if(state==="connected")setText("liveMapStamp",message||"Database connected");else if(state==="failed")setText("liveMapStamp","Database tunnel failed");if(unavailable){unavailable.classList.toggle("hidden",state==="connected");unavailable.className=(state==="failed"?"warning":"empty")+" mt"+(state==="connected"?" hidden":"");}if(text)text.textContent=state==="starting"?"Starting database tunnel...":(state==="failed"?(message||"Database tunnel startup failed."):"");if(retry)retry.classList.toggle("hidden",state!=="failed");}
+async function ensureLiveMapDatabaseTunnel(source="live-map"){if(liveMapTunnelPromise)return await liveMapTunnelPromise;liveMapTunnelPromise=(async()=>{try{const status=await getJson("/api/database/tunnel/status",{timeoutMs:8000});if(status.ready||status.running||status.localTunnelExpected===false){setLiveMapDatabaseNotice("connected","Database connected");return{ok:true,tunnel:status};}setLiveMapDatabaseNotice("starting");const result=await getJson("/api/database/tunnel/start?source="+encodeURIComponent(source),{method:"POST",timeoutMs:45000});if(result.ok&&(result.tunnel?.running||result.tunnel?.ready)){setLiveMapDatabaseNotice("connected","Database connected");renderDatabaseTunnelStatus(result.tunnel);return result;}throw new Error(result.error||result.message||"Database tunnel startup failed.");}catch(error){let status=null;try{status=await getJson("/api/database/tunnel/status",{timeoutMs:8000});}catch{}const message=status?.lastError||betterError(error);setLiveMapDatabaseNotice("failed",message);if(status)renderDatabaseTunnelStatus(status);return{ok:false,tunnel:status,error:message};}finally{liveMapTunnelPromise=null;}})();return await liveMapTunnelPromise;}
+async function retryLiveMapDatabaseTunnel(){setLiveMapDatabaseNotice("starting");const result=await ensureLiveMapDatabaseTunnel("live-map-retry");if(result.ok)await refreshLiveMap();else playUiSound("warning");}
+async function refreshLiveMap(){
+  if(!liveMap)return;
+  const debugMarkers=new URLSearchParams(location.search).get("debugMarkers")==="1";
+  if(!debugMarkers){
+    const tunnel=await ensureLiveMapDatabaseTunnel("live-map-refresh");
+    if(!tunnel.ok)return;
+  }
+  try{
+    const started=performance.now();
+    const data=await getJson("/api/live-map/markers"+(debugMarkers?"?debugMarkers=1":""),{timeoutMs:35000});
+    mergeLiveMapConfig(data);
+    setLiveMapImage();
+    liveMapData=data;
+    renderLiveMapLayers();
+    const counts=data.debug?.rowCounts||{players:(data.layers?.players||[]).length,vehicles:(data.layers?.vehicles||[]).length,bases:(data.layers?.bases||[]).length};
+    const elapsed=Math.round(performance.now()-started);
+    const boundsWarning=document.getElementById("liveMapBoundsWarning");
+    const allRows=data.rows||[];
+    const outside=allRows.filter(row=>!liveMapWithinBounds(row)).length;
+    if(boundsWarning){
+      boundsWarning.classList.toggle("hidden",outside===0&&!data.debug?.outsideBoundsWarning);
+      boundsWarning.textContent=outside?outside+" marker(s) are outside Hagga Basin bounds. Check map/partition before trusting alignment.":"Some returned coordinates are outside configured map bounds.";
+    }
+    if(data.demo){
+      const unavailable=document.getElementById("liveEntityAvailability");
+      const text=document.getElementById("liveEntityAvailabilityText");
+      if(unavailable)unavailable.className="empty mt";
+      if(text)text.textContent="Debug marker mode: fake markers are shown for UI rendering validation only.";
+      document.getElementById("liveMapRetryTunnel")?.classList.add("hidden");
+      setText("liveMapStamp","Debug markers / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");
+    }else if(data.debug?.dbConnected===false||(data.errors||[]).length){
+      const message=data.debug?.tunnelLastError||data.debug?.lastDbError||(data.errors||[])[0]||"Database connection failed.";
+      setLiveMapDatabaseNotice("failed",message);
+    }else{
+      setLiveMapDatabaseNotice("connected","Database connected / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");
+    }
+    const log=document.getElementById("liveMapLog");
+    if(log)log.textContent=JSON.stringify({demo:Boolean(data.demo),message:data.message||"",db:{connected:data.debug?.dbConnected,source:data.debug?.connectionSource,resolvedSource:data.debug?.resolvedSource,manualDbConfigExists:data.debug?.manualDbConfigExists,configuredHost:data.debug?.configuredDbHost,configuredPort:data.debug?.configuredDbPort,configuredName:data.debug?.configuredDbName,usedHost:data.debug?.usedHost,usedPort:data.debug?.usedPort,tunnelExpected:data.debug?.tunnelExpected,tunnelListening:data.debug?.tunnelListening,tunnelState:data.debug?.tunnelState,tunnelAttemptCount:data.debug?.tunnelAttemptCount,tunnelLastError:data.debug?.tunnelLastError,lastDbError:data.debug?.lastDbError,didCallGetVM:data.debug?.didCallGetVM},rowCounts:data.debug?.rowCounts,rawDbRowCounts:data.debug?.rawDbRowCounts,rejectedCoordinateCount:data.debug?.rejectedCoordinateCount,coordinateRange:data.debug?.coordinateRange,bounds:data.debug?.bounds,sources:data.sources||[],errors:data.errors||[],sample:{player:data.layers?.players?.[0]||null,vehicle:data.layers?.vehicles?.[0]||null,base:data.layers?.bases?.[0]||null}},null,2);
+    updateLiveMapDebug();
+    addActivity("maps",data.demo?"Live map debug markers rendered":"Live map refreshed",(counts.players||0)+" players / "+(counts.vehicles||0)+" vehicles / "+(counts.bases||0)+" bases / "+liveMarkerCount+" rendered");
+  }catch(e){
+    const message=betterError(e);
+    setLiveMapDatabaseNotice("failed",message);
+    const log=document.getElementById("liveMapLog");
+    if(log)log.textContent=message;
+    addActivity("error","Live map failed",e.message);
+  }
+}
 function teleportPayload(){const p=selectedPlayer();const current=liveMapPosition(currentTeleportPlayer());return{playerId:document.getElementById("teleportPlayerId").value,characterName:p?.character_name||p?.name||"",x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value,partitionId:document.getElementById("teleportPartitionId")?.value||0,map:liveMapKey,elevationSource:liveTeleportElevationSource,elevationConfirmed:liveTeleportElevationConfirmed,presetName:liveTeleportPresetName,targetActorId:liveTeleportTargetActorId,debug:liveMapDebugEnabled(),playerCurrent:current,clickedMapPosition:liveSelectedCoordinates?{x:liveSelectedCoordinates.x,y:liveSelectedCoordinates.y,px:liveSelectedCoordinates.lng,py:liveSelectedCoordinates.lat}:null};}
 function renderTeleportResult(data){return (data.message||data.error||data.status||"Teleport response")+(data.warning?"\\nWarning: "+data.warning:"")+"\\nEndpoint: "+(data.endpoint||"-")+"\\nCommand: "+(data.command||"-")+"\\nPayload:\\n"+JSON.stringify(data.request||{},null,2)+(data.response?"\\n\\nReceiver response:\\n"+JSON.stringify(data.response,null,2):"")+(data.reasons?.length?"\\n\\nReadiness:\\n"+data.reasons.join("\\n"):"");}
 async function refreshAfterTeleport(payload,data){if(!data?.ok||!liveMap)return;const playerId=String(payload.playerId||data.request?.playerId||data.request?.fls_id||"").trim();const target={x:Number(data.request?.x??payload.x),y:Number(data.request?.y??payload.y),z:Number(data.request?.z??payload.z)};if(!playerId||!Number.isFinite(target.x)||!Number.isFinite(target.y))return;const oldPosition=liveMapPosition(findLiveMapPlayerByTeleportId(playerId));liveTeleportPending={playerId,target:{x:target.x,y:target.y,z:Number.isFinite(target.z)?target.z:null},oldPosition,sentAt:Date.now()};console.debug("[AlphaNine Live Map] teleport sent, refreshing player position",{playerId,oldPosition,target:liveTeleportPending.target});addActivity("maps","Teleport sent, waiting for server position update","Player "+playerId+" target "+formatLivePosition(liveTeleportPending.target));clearCachedTeleportPlayer(playerId);renderLiveMapLayers();const log=document.getElementById("teleportLog");if(log)log.textContent+=(log.textContent?"\\n\\n":"")+"Teleport sent, waiting for server position update...";await refreshLiveMap();}
@@ -9863,7 +10106,7 @@ async function restartReceiverWithCurrentConfig(){const box=document.getElementB
 async function regenerateReceiverToken(){const box=document.getElementById("envReceiverTokenWarning");try{if(!(await appConfirm("Regenerate receiver token","Regenerate the receiver token and restart the managed receiver?","Regenerate","Cancel")))return;if(box){box.classList.remove("hidden");box.textContent="Regenerating receiver token...";}const data=await getJson("/api/receiver/token/regenerate",{method:"POST"});if(box)box.textContent=data.message||"Receiver token regenerated.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
 function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=adminLiveGiveAvailable?"empty mt":"warning mt";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
 async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
-function renderDatabaseTunnelStatus(data){const tunnel=data?.tunnel||data||{};const status=tunnel.running?"Running":"Not Running";tone("dbTunnelStatus",status);setText("dbTunnelDetail","Port: "+(tunnel.port||15432)+" / PID: "+(tunnel.pid||"--"));setText("dbTunnelStatusDetail",status);setText("dbTunnelPort",tunnel.port||15432);setText("dbTunnelPid",tunnel.pid||"--");setText("settingsDbTunnelStatus",status);setText("settingsDbTunnelPort",tunnel.port||15432);setText("settingsDbTunnelPid",tunnel.pid||"--");}
+function renderDatabaseTunnelStatus(data){const tunnel=data?.tunnel||data||{};const status=tunnel.running?"Running":(tunnel.localTunnelExpected===false?"Direct DB":(tunnel.state==="starting"?"Starting":(tunnel.state==="failed"?"Failed":"Not Running")));tone("dbTunnelStatus",status);setText("dbTunnelDetail","Port: "+(tunnel.port||15432)+" / PID: "+(tunnel.pid||tunnel.startedPid||"--")+(tunnel.lastError?" / "+tunnel.lastError:""));setText("dbTunnelStatusDetail",status);setText("dbTunnelPort",tunnel.port||15432);setText("dbTunnelPid",tunnel.pid||tunnel.startedPid||"--");setText("settingsDbTunnelStatus",status);setText("settingsDbTunnelPort",tunnel.port||15432);setText("settingsDbTunnelPid",tunnel.pid||tunnel.startedPid||"--");}
 function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.message||data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");if(data?.tunnel)renderDatabaseTunnelStatus(data.tunnel);badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
 function renderDatabaseLocation(data){const folder=data?.folder||"";setText("dbBackupPath",folder||"Unknown");setText("dbBackupDefaultPath",data?.defaultFolder||"Unknown");tone("dbMgmtBackupFolderState",folder?"Configured":"Missing");}
 function backupAvailabilityLabel(row){if(row?.availabilityStatus)return row.availabilityStatus;if(row?.vmBackupPath||row?.vmPath)return"Metadata only";return"Local file";}
@@ -9871,7 +10114,7 @@ function importAvailabilityLabel(source){if(!source)return"Metadata only";if(sou
 function renderDatabaseBackups(data){const rows=document.getElementById("dbBackupRows");if(!rows)return;const backups=data?.backups||[];window.databaseBackupRows=backups;if(!backups.length){rows.innerHTML='<tr><td colspan="5">No backups found in the selected folder.</td></tr>';return;}rows.innerHTML=backups.map((row,index)=>{const target=row.vmBackupPath||row.vmPath?("VM: "+(row.vmBackupPath||row.vmPath)):row.path;const availability=backupAvailabilityLabel(row);return '<tr><td>'+esc(row.filename)+'<div class="subtle">'+esc(availability)+'</div></td><td>'+esc(new Date(row.date).toLocaleString())+'</td><td>'+esc(row.sizeLabel||row.size)+'</td><td><div class="env-path-value">'+esc(target)+'</div>'+(row.vmBackupFilename?'<div class="subtle">Import argument: '+esc(row.vmBackupFilename)+'</div>':'')+(row.vmPath?'<div class="subtle">Metadata: '+esc(row.path)+'</div>':'')+'</td><td><div class="action-row"><button onclick="copyDatabaseBackupPath('+index+')">Copy path</button><button onclick="selectDatabaseRestoreBackup('+index+')">Select for Import</button></div></td></tr>';}).join("");}
 async function refreshDatabaseStatus(){try{renderDatabaseStatus(await getJson("/api/database/status",{timeoutMs:15000}));}catch(e){renderDatabaseStatus({ok:false,status:"unavailable",error:betterError(e)});}}
 async function refreshDatabaseTunnelStatus(){try{const data=await getJson("/api/database/tunnel/status",{timeoutMs:8000});renderDatabaseTunnelStatus(data);return data;}catch(e){const fallback={running:false,status:"Not Running",port:getValue("settingsDatabasePort")||15432,pid:"",error:betterError(e)};renderDatabaseTunnelStatus(fallback);return fallback;}}
-async function startDatabaseTunnel(){const result=document.getElementById("dbTunnelTestResult")||document.getElementById("settingsDbTest");try{if(result){result.className="test-result";result.textContent="Starting DB tunnel...";}const data=await getJson("/api/database/tunnel/start",{method:"POST",timeoutMs:30000});renderDatabaseTunnelStatus(data.tunnel||data);if(result){result.className="test-result "+(data.ok?"ok":"bad");result.textContent=(data.message||data.error||"DB tunnel start requested.")+(data.tunnel?("\\nPort: "+data.tunnel.port+"\\nPID: "+(data.tunnel.pid||data.startedPid||"--")):"");}playUiSound(data.ok?"success":"warning");return data;}catch(e){if(result){result.className="test-result bad";result.textContent=betterError(e);}playUiSound("warning");return null;}}
+async function startDatabaseTunnel(){const result=document.getElementById("dbTunnelTestResult")||document.getElementById("settingsDbTest");try{if(result){result.className="test-result";result.textContent="Starting database tunnel...";}const data=await getJson("/api/database/tunnel/start?source=manual-retry",{method:"POST",timeoutMs:45000});renderDatabaseTunnelStatus(data.tunnel||data);if(result){result.className="test-result "+(data.ok?"ok":"bad");result.textContent=(data.message||data.error||"Database tunnel start requested.")+(data.tunnel?("\\nPort: "+data.tunnel.port+"\\nPID: "+(data.tunnel.pid||data.startedPid||"--")):"");}playUiSound(data.ok?"success":"warning");return data;}catch(e){const status=await refreshDatabaseTunnelStatus();if(result){result.className="test-result bad";result.textContent=status?.lastError||betterError(e);}playUiSound("warning");return null;}}
 async function refreshDatabaseLocation(){try{renderDatabaseLocation(await getJson("/api/database/backup-location"));}catch(e){renderDatabaseLocation({ok:false,folder:"",defaultFolder:"",error:betterError(e)});setText("dbLocationResult",betterError(e));}}
 async function refreshDatabaseBackups(){try{const data=await getJson("/api/database/backups");renderDatabaseBackups(data);}catch(e){const rows=document.getElementById("dbBackupRows");if(rows)rows.innerHTML='<tr><td colspan="5">'+esc(betterError(e))+'</td></tr>';}}
 async function refreshDatabaseManagement(){await Promise.all([refreshDatabaseStatus(),refreshDatabaseTunnelStatus(),refreshDatabaseLocation(),refreshDatabaseBackups()]);await refreshDatabaseImportReadiness();const activeJob=window.activeDatabaseRestoreJobId||localStorage.getItem("activeDatabaseRestoreJobId")||"";if(activeJob){const el=document.getElementById("dbRestoreResult");if(el){el.className="warning mt";el.textContent="Import job is still running. Reconnecting to import status...";}pollDatabaseRestoreStatus(activeJob).catch(e=>setText("dbRestoreResult",betterError(e)));}addActivity("database","Database management refreshed","Status, tunnel, backup location, and recent backups loaded.");}
@@ -10164,7 +10407,7 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/database/tunnel/start" && req.method === "POST") {
     try {
-      const result = await startDatabaseTunnel();
+      const result = await startDatabaseTunnel({ source: url.searchParams.get("source") || "manual", maxAttempts: 3, retryDelayMs: 1500, attemptTimeoutMs: 10000 });
       await json(res, result, result.ok ? 200 : 409);
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 500);
@@ -10594,6 +10837,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, async () => {
   console.log(`AlphaNine Dune Suite: http://${HOST}:${PORT}`);
   console.log(`Expected server install: ${DEFAULT_SERVER_ROOT}`);
+  setTimeout(startDatabaseTunnelOnStartup, 250);
   try {
     await updateRuntimeGiveTransport(null, "startup");
   } catch (error) {

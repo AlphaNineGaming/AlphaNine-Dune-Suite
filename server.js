@@ -7098,70 +7098,77 @@ async function liveGiveServerAvailability() {
 }
 
 async function adminGiveItem(payload) {
-  const command = validateGiveItemPayload(payload);
-  const mode = String(payload?.mode || "dry-run").toLowerCase();
-  const auditBase = {
-    playerId: command.playerId,
-    template: command.template,
-    qty: command.qty,
-    quality: command.quality,
-    requestId: command.requestId
-  };
-  const server = await liveGiveServerAvailability();
-  await updateRuntimeGiveTransport({ vm: server.vm, status: { summary: server.status }, raw: server.raw }, "give-item");
-  if (!server.online) {
-    const error = new Error("Server is offline. Start the server before using Give Item.");
-    appendAdminAudit("give_item_blocked", { ...auditBase, mode, reason: error.message, server });
-    throw error;
-  }
-  if (mode !== "execute") {
-    const result = {
-      ok: true,
-      dryRun: true,
-      status: "dry-run-passed",
-      command,
-      requestId: command.requestId,
-      stdout: `Dry-run passed. Command validated for ${command.template} x${command.qty} -> ${command.playerId}.`,
-      stderr: "",
-      note: "Dry-run validated the command while the server was online. No live grant was executed."
-    };
-    appendAdminAudit("give_item_dry_run", { ...auditBase, result: { ok: result.ok, status: result.status } });
-    return result;
-  }
-  if (payload?.confirmed !== true && payload?.confirmed !== "true") {
-    const error = new Error("Confirm real Live Give execution before sending the command.");
-    appendAdminAudit("give_item_live_blocked", { ...auditBase, reason: error.message });
-    throw error;
-  }
-  const transport = await checkGiveTransport();
-  if (!transport.configured || !transport.reachable) {
-    const result = { ok: false, dryRun: false, status: "live-unavailable", command, transport: transport.mode, missingEnv: transport.missingEnv || [], stdout: "", stderr: liveGiveUnavailableMessage(transport), error: liveGiveUnavailableMessage(transport) };
-    appendAdminAudit("give_item_live_unavailable", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv, error: result.error } });
-    return result;
-  }
-  appendAdminAudit("give_item_live_started", { ...auditBase, server: server.status });
+  const timer = liveGiveTimingTracker();
+  let command = null;
+  let mode = "dry-run";
+  let auditBase = {};
   try {
-    const live = await sendLiveGiveItem(command, transport);
+    command = await timer.step("validate_payload", () => validateGiveItemPayload(payload));
+    mode = String(payload?.mode || "dry-run").toLowerCase();
+    auditBase = {
+      playerId: command.playerId,
+      template: command.template,
+      qty: command.qty,
+      quality: command.quality,
+      requestId: command.requestId
+    };
+    timer.skip("server_availability", "skipped: Live Give uses receiver transport health directly");
+    timer.skip("runtime_transport_update", "skipped: no server/VM/battlegroup discovery during Give Item");
+    const transport = await timer.step("transport_health_check", () => checkGiveTransport());
+    if (!transport.configured || !transport.reachable) {
+      const result = { ok: false, dryRun: mode !== "execute", status: "live-unavailable", command, transport: transport.mode, missingEnv: transport.missingEnv || [], stdout: "", stderr: liveGiveUnavailableMessage(transport), error: liveGiveUnavailableMessage(transport) };
+      result.timings = timer.finish();
+      appendAdminAudit("give_item_live_unavailable", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv, error: result.error }, timings: result.timings });
+      return result;
+    }
+    if (mode !== "execute") {
+      const result = {
+        ok: true,
+        dryRun: true,
+        status: "dry-run-passed",
+        transport: transport.mode,
+        command,
+        requestId: command.requestId,
+        stdout: `Dry-run passed. Command validated for ${command.template} x${command.qty} -> ${command.playerId}.`,
+        stderr: "",
+        note: "Dry-run validated the command and receiver transport. No live grant was executed."
+      };
+      result.timings = timer.finish();
+      appendAdminAudit("give_item_dry_run", { ...auditBase, result: { ok: result.ok, status: result.status }, timings: result.timings });
+      return result;
+    }
+    if (payload?.confirmed !== true && payload?.confirmed !== "true") {
+      const error = new Error("Confirm real Live Give execution before sending the command.");
+      appendAdminAudit("give_item_live_blocked", { ...auditBase, reason: error.message });
+      throw error;
+    }
+    appendAdminAudit("give_item_live_started", { ...auditBase, transport: transport.mode });
+    const live = await timer.step("send_live_give_item", () => sendLiveGiveItem(command, transport));
     if (live.status === "live-unavailable") {
       const result = { ...live, ok: false, dryRun: false, stdout: "", stderr: live.error || "Live Give unavailable." };
-      appendAdminAudit("give_item_live_unavailable", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv || [], error: result.error || result.stderr } });
+      result.timings = timer.finish();
+      appendAdminAudit("give_item_live_unavailable", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv || [], error: result.error || result.stderr }, timings: result.timings });
       return result;
     }
     if (!live.ok || live.dryRun) {
       const result = { ...live, ok: false, dryRun: false, status: "live-execution-failed", stdout: "", stderr: live.error || "Live execution failed." };
-      appendAdminAudit("give_item_live_failed", { ...auditBase, result: { ok: result.ok, status: result.status, error: result.error || result.stderr } });
+      result.timings = timer.finish();
+      appendAdminAudit("give_item_live_failed", { ...auditBase, result: { ok: result.ok, status: result.status, error: result.error || result.stderr }, timings: result.timings });
       return result;
     }
     if (live.status === "live-verified") {
       const result = { ...live, dryRun: false, status: "live-verified", stderr: "" };
-      appendAdminAudit("give_item_live_verified", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null } });
+      result.timings = timer.finish();
+      appendAdminAudit("give_item_live_verified", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null }, timings: result.timings });
       return result;
     }
     const result = { ...live, dryRun: false, status: "live-published", stderr: "" };
-    appendAdminAudit("give_item_live_published", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null } });
+    result.timings = timer.finish();
+    appendAdminAudit("give_item_live_published", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null }, timings: result.timings });
     return result;
   } catch (error) {
-    appendAdminAudit("give_item_live_failed", { ...auditBase, error: error.message });
+    error.timings = timer.finish();
+    appendAdminAudit("give_item_live_failed", { ...auditBase, error: error.message, timings: error.timings });
     throw error;
   }
 }
@@ -7171,7 +7178,31 @@ function giveItemDisplayName(template) {
   return item?.name || template;
 }
 
+function liveGiveTimingTracker() {
+  const started = Date.now();
+  const timings = {};
+  return {
+    timings,
+    async step(name, fn) {
+      const stepStarted = Date.now();
+      try {
+        return await fn();
+      } finally {
+        timings[name] = Date.now() - stepStarted;
+      }
+    },
+    skip(name, reason = "skipped") {
+      timings[name] = { skipped: true, reason, ms: 0 };
+    },
+    finish() {
+      timings.total = Date.now() - started;
+      return timings;
+    }
+  };
+}
+
 async function adminGiveQueue(payload) {
+  const queueTimer = liveGiveTimingTracker();
   const playerId = String(payload?.playerId || "").trim();
   const mode = String(payload?.mode || "dry-run").toLowerCase();
   const confirmed = payload?.confirmed === true || payload?.confirmed === "true";
@@ -7194,7 +7225,7 @@ async function adminGiveQueue(payload) {
     if (Object.prototype.hasOwnProperty.call(item, "quality")) itemPayload.quality = item.quality;
     const startedAt = new Date().toISOString();
     try {
-      const result = await adminGiveItem(itemPayload);
+      const result = await queueTimer.step(`item_${index + 1}`, () => adminGiveItem(itemPayload));
       const command = result.command || itemPayload;
       const success = Boolean(result.ok || result.dryRun);
       results.push({
@@ -7221,6 +7252,7 @@ async function adminGiveQueue(payload) {
         success: false,
         status: "failed",
         error: error.message,
+        timings: error.timings || {},
         startedAt,
         completedAt: new Date().toISOString()
       });
@@ -7237,7 +7269,8 @@ async function adminGiveQueue(payload) {
     processed: results.length,
     succeeded,
     failed,
-    results
+    results,
+    timings: queueTimer.finish()
   };
   appendAdminAudit("give_item_queue_completed", {
     playerId,
@@ -9888,8 +9921,8 @@ function renderGiveQueue(){const list=document.getElementById("giveQueueList");i
 function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1]);addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
 function removeGiveQueueItem(index){giveQueue.splice(index,1);renderGiveQueue();updateGiveQueueSummary();}
 function clearGiveQueue(){giveQueue=[];lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const log=document.getElementById("giveQueueLog");if(log)log.value="Give Queue cleared.";}
-function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
-async function giveQueuedItems(itemsOverride=null){const log=document.getElementById("giveQueueLog");if(liveGiveBusy)return;const items=itemsOverride||giveQueue;if(!items.length){if(log)log.value="Give Queue is empty.";playUiSound("warning");return;}try{liveGiveBusy=true;syncGiveItemControls();updateGiveQueueSummary(0,items.length,0,0);if(log)log.value="Checking server status before Give Queue...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server))throw new Error("Server is offline. Start the server before using Give Queue.");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"&&!adminLiveGiveAvailable)throw new Error(liveGiveUnavailableMessage||"Live Give unavailable.");if(mode==="execute"&&!(await appConfirm("Confirm Live Give Queue","Send "+items.length+" queued item(s) to the selected player?","Give Queue","Cancel")))return;const playerId=document.getElementById("adminPlayer").value;if(!playerId)throw new Error("Choose a player first.");if(log)log.value="Processing Give Queue 0 / "+items.length+"...";addActivity("grant","Give Queue started",items.length+" item(s)");const data=await getJson("/api/live-give/queue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,mode,confirmed:mode==="execute",items}),timeoutMs:300000});lastGiveQueueFailedItems=(data.results||[]).filter(row=>!row.success).map(row=>({template:row.itemId,name:row.itemName,qty:row.quantity,quality:row.quality}));updateGiveQueueSummary(data.processed||0,data.total||items.length,data.succeeded||0,data.failed||0);if(log)log.value=queueResultLog(data);if(!itemsOverride&&data.failed===0)giveQueue=[];renderGiveQueue();addActivity("grant","Give Queue completed",(data.succeeded||0)+" succeeded / "+(data.failed||0)+" failed");playUiSound(data.failed?"warning":"success");}catch(e){if(log)log.value=betterError(e);addActivity("error","Give Queue failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
+function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];if(data.timings)lines.push("Queue timings: "+JSON.stringify(data.timings));(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(row.result?.timings)lines.push("  Timings: "+JSON.stringify(row.result.timings));if(row.result?.response?.timings)lines.push("  Receiver timings: "+JSON.stringify(row.result.response.timings));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
+async function giveQueuedItems(itemsOverride=null){const log=document.getElementById("giveQueueLog");if(liveGiveBusy)return;const items=itemsOverride||giveQueue;if(!items.length){if(log)log.value="Give Queue is empty.";playUiSound("warning");return;}try{liveGiveBusy=true;syncGiveItemControls();updateGiveQueueSummary(0,items.length,0,0);if(log)log.value="Checking receiver transport before Give Queue...";await refreshLiveGiveEnv();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"&&!adminLiveGiveAvailable)throw new Error(liveGiveUnavailableMessage||"Live Give unavailable.");if(mode==="execute"&&!(await appConfirm("Confirm Live Give Queue","Send "+items.length+" queued item(s) to the selected player?","Give Queue","Cancel")))return;const playerId=document.getElementById("adminPlayer").value;if(!playerId)throw new Error("Choose a player first.");if(log)log.value="Processing Give Queue 0 / "+items.length+"...";addActivity("grant","Give Queue started",items.length+" item(s)");const data=await getJson("/api/live-give/queue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,mode,confirmed:mode==="execute",items}),timeoutMs:300000});lastGiveQueueFailedItems=(data.results||[]).filter(row=>!row.success).map(row=>({template:row.itemId,name:row.itemName,qty:row.quantity,quality:row.quality}));updateGiveQueueSummary(data.processed||0,data.total||items.length,data.succeeded||0,data.failed||0);if(log)log.value=queueResultLog(data);if(!itemsOverride&&data.failed===0)giveQueue=[];renderGiveQueue();addActivity("grant","Give Queue completed",(data.succeeded||0)+" succeeded / "+(data.failed||0)+" failed");playUiSound(data.failed?"warning":"success");}catch(e){if(log)log.value=betterError(e);addActivity("error","Give Queue failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function retryFailedGiveQueueItems(){if(!lastGiveQueueFailedItems.length)return;giveQueuedItems(lastGiveQueueFailedItems.slice());}
 async function copyGiveQueueLog(){const text=document.getElementById("giveQueueLog")?.value||"";if(!text)return;try{await navigator.clipboard.writeText(text);playUiSound("success");}catch{const log=document.getElementById("giveQueueLog");if(log){log.focus();log.select();document.execCommand("copy");}}}
 function renderGiveQueuePresets(){const select=document.getElementById("giveQueuePresetSelect");if(!select)return;const current=select.value;select.innerHTML=giveQueuePresets.length?giveQueuePresets.map(p=>'<option value="'+esc(p.name)+'">'+esc(p.name+" ("+p.itemCount+")")+'</option>').join(""):'<option value="">No saved presets</option>';if(giveQueuePresets.some(p=>p.name===current))select.value=current;}
@@ -9908,11 +9941,11 @@ async function importGiveQueuePresetFile(event){const input=event.target;const l
 function isServerOnlineStatus(data){if(data?.runtimeTransport&&typeof data.runtimeTransport.serverOnline==="boolean")return data.runtimeTransport.serverOnline;return mapServerSummary(data).online;}
 function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";syncLiveGiveTransportStatus();syncGiveItemControls();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=kind==="ok"?"empty mt":"warning mt";}
-function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||!liveGiveServerOnline||(mode==="execute"&&!adminLiveGiveAvailable);if(give)give.disabled=blocked;if(add)add.disabled=liveGiveBusy||!selectedAdminItem;if(queue)queue.disabled=blocked||!giveQueue.length;if(retry)retry.disabled=blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
+function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(mode==="execute"&&!adminLiveGiveAvailable);if(give)give.disabled=blocked;if(add)add.disabled=liveGiveBusy||!selectedAdminItem;if(queue)queue.disabled=blocked||!giveQueue.length;if(retry)retry.disabled=blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const data=await getJson("/api/status");liveGiveServerOnline=isServerOnlineStatus(data);setGiveServerStatus(liveGiveServerOnline?"Server Status: Online. Give Item is available.":"Server Status: Offline. Start the server before using Give Item.",liveGiveServerOnline?"ok":"warn");await refreshLiveGiveEnv();return data;}catch(e){liveGiveServerOnline=false;setGiveServerStatus("Server Status: Offline. "+betterError(e),"warn");return null;}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
 async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncLiveGiveMode();await checkGiveItemServerStatus();syncLiveGiveTransportStatus();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
-async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking server status...";const server=await checkGiveItemServerStatus();if(!isServerOnlineStatus(server)){log.textContent="Server is offline. Start the server before using Give Item.";addActivity("grant","Give Item blocked","Server is offline.");playUiSound("warning");return;}const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify(data.command||payload,null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
+async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
 renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
@@ -10388,7 +10421,7 @@ async function route(req, res) {
       const result = await adminGiveItem(body);
       await json(res, result, result.ok || result.dryRun ? 200 : 409);
     } catch (error) {
-      await json(res, { ok: false, error: error.message }, 400);
+      await json(res, { ok: false, error: error.message, timings: error.timings || {} }, 400);
     }
     return;
   }
@@ -10398,7 +10431,7 @@ async function route(req, res) {
       const result = await adminGiveQueue(body);
       await json(res, result, result.ok ? 200 : 207);
     } catch (error) {
-      await json(res, { ok: false, error: error.message }, 400);
+      await json(res, { ok: false, error: error.message, timings: error.timings || {} }, 400);
     }
     return;
   }

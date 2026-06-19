@@ -58,7 +58,28 @@ app.listen(PORT, HOST, () => {
   console.log(`MQ pod: ${MQ_NAMESPACE && MQ_POD ? `${MQ_NAMESPACE}/${MQ_POD}` : "auto-detect"}`);
 });
 
+function receiverTimingTracker() {
+  const started = Date.now();
+  const timings = {};
+  return {
+    timings,
+    async step(name, fn) {
+      const stepStarted = Date.now();
+      try {
+        return await fn();
+      } finally {
+        timings[name] = Date.now() - stepStarted;
+      }
+    },
+    finish() {
+      timings.total = Date.now() - started;
+      return timings;
+    }
+  };
+}
+
 async function handleGiveItem(req, res) {
+  const timer = receiverTimingTracker();
   const context = {
     requestId: "",
     playerId: "",
@@ -73,8 +94,9 @@ async function handleGiveItem(req, res) {
       remoteAddress: req.socket?.remoteAddress || "",
       contentLength: req.headers["content-length"] || ""
     });
-    verifyToken(req);
-    const command = validateGiveItem(req.body || {});
+    timer.timings.request_received = 0;
+    await timer.step("verify_token", () => verifyToken(req));
+    const command = await timer.step("validate_payload", () => validateGiveItem(req.body || {}));
     context.requestId = command.requestId;
     context.playerId = command.playerId;
     logReceiver("give-item player id", {
@@ -82,27 +104,27 @@ async function handleGiveItem(req, res) {
       playerId: command.playerId
     });
     const originalPlayerId = command.playerId;
-    command.playerId = await resolveDunePlayerId(command.playerId);
+    command.playerId = await timer.step("resolve_player_id", () => resolveDunePlayerId(command.playerId));
     context.resolvedPlayerId = command.playerId;
     logReceiver("give-item resolved FLS/Funcom id", {
       requestId: command.requestId,
       originalPlayerId,
       resolvedPlayerId: command.playerId
     });
-    const target = await resolveMqTarget();
+    const target = await timer.step("resolve_mq_target", () => resolveMqTarget());
     context.target = target;
     logReceiver("give-item detected mq-game pod", {
       requestId: command.requestId,
       namespace: target.namespace,
       pod: target.pod
     });
-    context.command = buildAddItemServerCommand(command);
+    context.command = await timer.step("build_command", () => buildAddItemServerCommand(command));
     logReceiver("give-item generated AddItemToInventory command", {
       requestId: command.requestId,
       command: context.command
     });
     context.executedCommand = buildRabbitCommandLog(target);
-    const result = await publishAddItem(target, command);
+    const result = await timer.step("rabbitmq_publish", () => publishAddItem(target, command));
     logReceiver("give-item rabbitmqctl command executed", {
       requestId: command.requestId,
       command: result.executedCommand
@@ -118,13 +140,16 @@ async function handleGiveItem(req, res) {
       target,
       originalPlayerId,
       resolvedPlayerId: command.playerId,
-      command: result.command
+      command: result.command,
+      timings: timer.finish()
     });
   } catch (error) {
+    const timings = timer.finish();
     logReceiverError("give-item failed", error, context);
     res.status(error.statusCode || 500).json({
       ok: false,
-      error: error.message
+      error: error.message,
+      timings
     });
   }
 }

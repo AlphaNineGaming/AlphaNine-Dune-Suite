@@ -6528,6 +6528,13 @@ function liveMapNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+// Live Map coordinate model:
+// - Dune stores actor positions in world coordinates under dune.actors.transform.location.
+// - The map image is a 4096x4096 pixel square. Pixel X grows left-to-right; pixel Y grows top-to-bottom.
+// - Red-Blink's Hagga Basin calibration maps world X/Y linearly into that image using min/max bounds.
+// - flipY is false for this image because increasing world Y matches increasing image Y for the calibrated asset.
+// - Bounds and map images are sourced from Red-Blink's dune-awakening-selfhost-docker live map implementation.
+// Keep this generic: player, vehicle, base, and future marker types should all pass through the same x/y/z marker pipeline.
 const LIVE_MAP_WORLD_BOUNDS = {
   HaggaBasin: { key: "HaggaBasin", label: "Hagga Basin", minX: -456752.21, maxX: 354547.46, minY: -450630.14, maxY: 353821.95, flipY: false },
   DeepDesert: { key: "DeepDesert", label: "Deep Desert", minX: -1268624.82, maxX: 1163312.83, minY: -1266548.17, maxY: 1162416.13, flipY: false },
@@ -9623,6 +9630,11 @@ function telemetrySourceLabel(source){const text=String(source||"").toLowerCase(
 function renderServerResources(telemetry){const data=telemetry&&typeof telemetry==="object"?telemetry:null;const source=telemetrySourceLabel(data?.source);setText("resourceSource","Source: "+source);setResourceMetric("Cpu",data?.cpuPercent??data?.cpu);setResourceMetric("Memory",data?.memoryPercent??data?.memory);setResourceMetric("Disk",data?.diskPercent??data?.disk);setResourceMetric("Network",data?.networkPercent??data?.network);return Boolean(data&&source!=="Unknown"&&[data.cpuPercent??data.cpu,data.memoryPercent??data.memory,data.diskPercent??data.disk,data.networkPercent??data.network].some(value=>telemetryPercent(value)!==null));}
 function addActivity(type,message,detail){const item={time:new Date().toLocaleTimeString(),type,message,detail:detail||""};activity.unshift(item);activity=activity.slice(0,40);renderActivity();}
 const LIVE_MAP_IMAGE={width:4096,height:4096};
+// Frontend projection notes:
+// Leaflet CRS.Simple uses [lat, lng] as [pixelY, pixelX] for the image plane.
+// worldToLiveLatLng normalizes world X/Y within the calibrated min/max bounds, then scales to image pixels.
+// liveLatLngToWorld performs the reverse for mouse readout, coordinate search, and teleport preview.
+// Do not add per-entity coordinate hacks here; fix calibration/bounds once so every marker type stays aligned.
 const LIVE_MAP_CONFIGS={
   HaggaBasin:{key:"HaggaBasin",label:"Hagga Basin",minX:-456752.21,maxX:354547.46,minY:-450630.14,maxY:353821.95,flipY:false,image:"/assets/redblink-hagga-basin.png",fallbackImage:"/assets/world-map-overland.png",source:"Red-Blink dune-awakening-selfhost-docker console/web/public/images/maps/hagga-basin.png"},
   DeepDesert:{key:"DeepDesert",label:"Deep Desert",minX:-1268624.82,maxX:1163312.83,minY:-1266548.17,maxY:1162416.13,flipY:false,image:"/assets/redblink-deep-desert.png",fallbackImage:"/assets/world-map-overland.png"},

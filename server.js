@@ -843,6 +843,18 @@ async function testManualDatabaseConnection(settings, timeout = 8000) {
   if (!settings.port || settings.port < 1 || settings.port > 65535) {
     return { ok: false, message: "Manual database port is invalid.", diagnostics };
   }
+  if (isLocalDbHost(settings.host)) {
+    const tunnel = await databaseTunnelStatus({ databaseHost: settings.host, databasePort: settings.port });
+    diagnostics.tunnel = tunnel;
+    if (!tunnel.running) {
+      return {
+        ok: false,
+        message: "Database tunnel is not running. Click Start first or start the DB tunnel.",
+        error: `Database tunnel is not running. Click Start first or start the DB tunnel. Port ${settings.port} is closed.`,
+        diagnostics
+      };
+    }
+  }
   const params = [
     "user", settings.user,
     "database", settings.database,
@@ -901,6 +913,254 @@ async function testManualDatabaseConnection(settings, timeout = 8000) {
         message: "Manual database endpoint is reachable.",
         detail: "PostgreSQL responded to the startup request."
       });
+    });
+  });
+}
+
+function pgCString(value) {
+  return Buffer.from(String(value || "") + "\0", "utf8");
+}
+
+function pgInt32(value) {
+  const buffer = Buffer.alloc(4);
+  buffer.writeInt32BE(value, 0);
+  return buffer;
+}
+
+function pgPasswordMessage(value) {
+  const body = pgCString(value);
+  return Buffer.concat([Buffer.from("p"), pgInt32(body.length + 4), body]);
+}
+
+function pgSaslName(value) {
+  return String(value || "").replace(/=/g, "=3D").replace(/,/g, "=2C");
+}
+
+function pgXor(a, b) {
+  const out = Buffer.alloc(Math.min(a.length, b.length));
+  for (let i = 0; i < out.length; i += 1) out[i] = a[i] ^ b[i];
+  return out;
+}
+
+function pgParseSaslAttributes(value) {
+  const attrs = {};
+  for (const part of String(value || "").split(",")) attrs[part.slice(0, 1)] = part.slice(2);
+  return attrs;
+}
+
+function pgScramFinalMessage(password, clientFirstBare, serverFirst) {
+  const attrs = pgParseSaslAttributes(serverFirst);
+  const clientFinalBare = `c=biws,r=${attrs.r || ""}`;
+  const authMessage = `${clientFirstBare},${serverFirst},${clientFinalBare}`;
+  const salted = crypto.pbkdf2Sync(String(password || ""), Buffer.from(attrs.s || "", "base64"), Number(attrs.i || 4096), 32, "sha256");
+  const clientKey = crypto.createHmac("sha256", salted).update("Client Key").digest();
+  const storedKey = crypto.createHash("sha256").update(clientKey).digest();
+  const clientSignature = crypto.createHmac("sha256", storedKey).update(authMessage).digest();
+  const proof = pgXor(clientKey, clientSignature).toString("base64");
+  return `${clientFinalBare},p=${proof}`;
+}
+
+function pgSaslInitialMessage(user) {
+  const nonce = crypto.randomBytes(18).toString("base64").replace(/=+$/, "");
+  const clientFirstBare = `n=${pgSaslName(user)},r=${nonce}`;
+  const initial = Buffer.from(`n,,${clientFirstBare}`, "utf8");
+  const mechanism = pgCString("SCRAM-SHA-256");
+  return {
+    clientFirstBare,
+    packet: Buffer.concat([Buffer.from("p"), pgInt32(4 + mechanism.length + 4 + initial.length), mechanism, pgInt32(initial.length), initial])
+  };
+}
+
+function pgQueryPacket(sql) {
+  const body = pgCString(sql);
+  return Buffer.concat([Buffer.from("Q"), pgInt32(body.length + 4), body]);
+}
+
+function pgStartupPacket(settings) {
+  const parts = [];
+  for (const value of ["user", settings.user, "database", settings.database, "application_name", "AlphaNine Dune Suite Live Map", "client_encoding", "UTF8"]) {
+    parts.push(pgCString(value));
+  }
+  parts.push(Buffer.from("\0"));
+  const body = Buffer.concat(parts);
+  const packet = Buffer.alloc(8 + body.length);
+  packet.writeInt32BE(packet.length, 0);
+  packet.writeInt32BE(196608, 4);
+  body.copy(packet, 8);
+  return packet;
+}
+
+async function pgReadMessage(socket, state, timeout = 15000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    if (state.error) throw state.error;
+    if (state.buffer.length >= 5) {
+      const type = String.fromCharCode(state.buffer[0]);
+      const length = state.buffer.readInt32BE(1);
+      if (state.buffer.length >= 1 + length) {
+        const payload = state.buffer.slice(5, 1 + length);
+        state.buffer = state.buffer.slice(1 + length);
+        return { type, payload };
+      }
+    }
+    await new Promise((resolve) => {
+      const done = () => {
+        socket.off("data", done);
+        socket.off("error", done);
+        resolve();
+      };
+      socket.once("data", done);
+      socket.once("error", done);
+      setTimeout(done, 25);
+    });
+  }
+  throw new Error("PostgreSQL response timed out.");
+}
+
+function pgErrorFromPayload(payload) {
+  return postgresErrorMessage(Buffer.concat([Buffer.from("E\0\0\0\0"), payload]));
+}
+
+async function liveMapDbConfigDiagnostics(cfg = loadConfig(), manual = manualDatabaseSettings(cfg)) {
+  const tunnel = await databaseTunnelStatus(cfg).catch((error) => ({
+    ok: false,
+    running: false,
+    status: "Unknown",
+    error: error.message,
+    host: manual.host || "127.0.0.1",
+    port: manual.port || 15432,
+    pid: ""
+  }));
+  return {
+    manualDbConfigExists: Boolean(manual.configured),
+    configuredDbHost: manual.host || "",
+    configuredDbPort: manual.port || Number(cfg.databasePort || 15432),
+    configuredDbName: manual.database || String(cfg.databaseName || "dune").trim() || "dune",
+    configuredDbUser: manual.user || String(cfg.databaseUser || "postgres").trim() || "postgres",
+    resolvedSource: manual.configured ? "manual-config" : (tunnel.running ? "localhost-tunnel" : "none"),
+    tunnelExpected: Boolean(tunnel.localTunnelExpected || isLocalDbHost(manual.host || "127.0.0.1")),
+    tunnelListening: Boolean(tunnel.running),
+    tunnelPid: tunnel.pid || "",
+    tunnel,
+    didCallGetVM: false
+  };
+}
+
+async function liveMapDirectDbSettings() {
+  const cfg = loadConfig();
+  const manual = manualDatabaseSettings(cfg);
+  const diagnostics = await liveMapDbConfigDiagnostics(cfg, manual);
+  const tunnel = diagnostics.tunnel;
+  if (manual.configured) {
+    if (isLocalDbHost(manual.host) && !tunnel.running) {
+      const error = new Error(`Database tunnel is not running. Click Start first or start the DB tunnel. Port ${manual.port} is closed.`);
+      error.debug = { ...diagnostics, connectionSource: "manual-config", lastDbError: error.message };
+      throw error;
+    }
+    return { ...manual, connectionSource: "manual-config", ...diagnostics };
+  }
+  if (tunnel.running) {
+    return {
+      configured: true,
+      host: "127.0.0.1",
+      port: Number(tunnel.port || 15432),
+      database: String(cfg.databaseName || "dune").trim() || "dune",
+      user: String(cfg.databaseUser || "postgres").trim() || "postgres",
+      passwordConfigured: Boolean(cfg.databasePassword),
+      connectionSource: "localhost-tunnel",
+      ...diagnostics
+    };
+  }
+  const error = new Error("Database configuration is unavailable for Live Map. Configure manual DB settings or start the DB tunnel.");
+  error.debug = { ...diagnostics, connectionSource: "none", lastDbError: error.message };
+  throw error;
+}
+
+async function liveMapPgQuery(sql, timeout = 30000) {
+  const settings = await liveMapDirectDbSettings();
+  const password = String(loadConfig().databasePassword || "");
+  const started = Date.now();
+  const rows = [];
+  const columns = [];
+  let sasl = null;
+  return await new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: settings.host, port: settings.port });
+    const state = { buffer: Buffer.alloc(0), error: null };
+    const timer = setTimeout(() => {
+      socket.destroy();
+      const error = new Error(`Database query timed out after ${timeout} ms.`);
+      error.debug = settings;
+      reject(error);
+    }, timeout);
+    const fail = (error) => {
+      clearTimeout(timer);
+      socket.destroy();
+      if (!error.debug) error.debug = settings;
+      reject(error);
+    };
+    socket.on("data", (chunk) => { state.buffer = Buffer.concat([state.buffer, chunk]); });
+    socket.on("error", (error) => { state.error = error; });
+    socket.once("connect", async () => {
+      try {
+        socket.write(pgStartupPacket(settings));
+        let ready = false;
+        while (!ready) {
+          const message = await pgReadMessage(socket, state, timeout);
+          if (message.type === "R") {
+            const code = message.payload.readInt32BE(0);
+            if (code === 0) continue;
+            if (code === 3) socket.write(pgPasswordMessage(password));
+            else if (code === 5) {
+              const salt = message.payload.slice(4, 8);
+              const inner = crypto.createHash("md5").update(password + settings.user).digest("hex");
+              socket.write(pgPasswordMessage("md5" + crypto.createHash("md5").update(Buffer.concat([Buffer.from(inner), salt])).digest("hex")));
+            } else if (code === 10) {
+              sasl = pgSaslInitialMessage(settings.user);
+              socket.write(sasl.packet);
+            } else if (code === 11) {
+              socket.write(Buffer.concat([Buffer.from("p"), pgInt32(Buffer.byteLength(pgScramFinalMessage(password, sasl.clientFirstBare, message.payload.slice(4).toString("utf8"))) + 4), Buffer.from(pgScramFinalMessage(password, sasl.clientFirstBare, message.payload.slice(4).toString("utf8")), "utf8")]));
+            } else if (code === 12) {
+              continue;
+            } else {
+              throw new Error(`Unsupported PostgreSQL authentication method ${code}.`);
+            }
+          } else if (message.type === "E") throw new Error(pgErrorFromPayload(message.payload));
+          else if (message.type === "Z") ready = true;
+        }
+        socket.write(pgQueryPacket(sql));
+        while (true) {
+          const message = await pgReadMessage(socket, state, timeout);
+          if (message.type === "T") {
+            const count = message.payload.readInt16BE(0);
+            let offset = 2;
+            columns.length = 0;
+            for (let i = 0; i < count; i += 1) {
+              const end = message.payload.indexOf(0, offset);
+              columns.push(message.payload.slice(offset, end).toString("utf8"));
+              offset = end + 19;
+            }
+          } else if (message.type === "D") {
+            const count = message.payload.readInt16BE(0);
+            let offset = 2;
+            const row = {};
+            for (let i = 0; i < count; i += 1) {
+              const length = message.payload.readInt32BE(offset);
+              offset += 4;
+              row[columns[i] || `column_${i}`] = length < 0 ? null : message.payload.slice(offset, offset + length).toString("utf8");
+              if (length > 0) offset += length;
+            }
+            rows.push(row);
+          } else if (message.type === "E") throw new Error(pgErrorFromPayload(message.payload));
+          else if (message.type === "Z") {
+            clearTimeout(timer);
+            socket.end();
+            resolve({ rows, columns, rowCount: rows.length, durationMs: Date.now() - started, db: settings });
+            return;
+          }
+        }
+      } catch (error) {
+        fail(error);
+      }
     });
   });
 }
@@ -1019,6 +1279,85 @@ async function listeningPidOnPort(port) {
     if (match) return match[1];
   }
   return "";
+}
+
+function isLocalDbHost(host) {
+  const value = String(host || "").trim().toLowerCase();
+  return !value || value === "127.0.0.1" || value === "localhost" || value === "::1";
+}
+
+async function databaseTunnelStatus(configValue = loadConfig()) {
+  const port = Number(configValue.databasePort || 15432);
+  const host = String(configValue.databaseHost || "127.0.0.1").trim() || "127.0.0.1";
+  const pid = isLocalDbHost(host) ? await listeningPidOnPort(port) : "";
+  const listening = Boolean(pid);
+  return {
+    ok: true,
+    running: listening,
+    status: listening ? "Running" : "Not Running",
+    host,
+    port,
+    pid,
+    localTunnelExpected: isLocalDbHost(host),
+    message: listening ? `DB tunnel is running on 127.0.0.1:${port}.` : `DB tunnel is not running on 127.0.0.1:${port}.`
+  };
+}
+
+function databaseTunnelSshSettings(configValue = loadConfig()) {
+  const host = String(configValue.vmIp || VM_IP || configValue.receiverSshHost || "").trim();
+  const user = String(configValue.sshUser || configValue.receiverSshUser || SSH_USER || "dune").trim();
+  const keyPath = expandEnvPath(configValue.sshKey || configValue.receiverSshKey || SSH_KEY || defaultSshKeyPath());
+  const localPort = Number(configValue.databasePort || 15432);
+  return {
+    host,
+    user,
+    keyPath,
+    localPort,
+    remoteHost: "127.0.0.1",
+    remotePort: 15432
+  };
+}
+
+async function startDatabaseTunnel() {
+  const cfg = loadConfig();
+  const before = await databaseTunnelStatus(cfg);
+  if (before.running) return { ok: true, alreadyRunning: true, tunnel: before, message: before.message };
+  const settings = databaseTunnelSshSettings(cfg);
+  if (!settings.host) return { ok: false, tunnel: before, error: "VM IP is not configured. Set VM IP in Settings before starting the DB tunnel." };
+  const key = sshKeyStatus(settings.keyPath);
+  if (!key.exists) return { ok: false, tunnel: before, sshKey: key, error: key.message };
+  const args = [
+    "-N",
+    "-L", `127.0.0.1:${settings.localPort}:${settings.remoteHost}:${settings.remotePort}`,
+    "-o", "ExitOnForwardFailure=yes",
+    "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=3",
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "LogLevel=ERROR",
+    "-i", key.path,
+    `${settings.user}@${settings.host}`
+  ];
+  const sshBinary = process.platform === "win32" ? "ssh.exe" : "ssh";
+  const child = spawn(sshBinary, args, { detached: true, windowsHide: true, stdio: "ignore" });
+  child.unref();
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const after = await databaseTunnelStatus(cfg);
+  appendAdminAudit("database_tunnel_start", {
+    requestedAt: new Date().toISOString(),
+    localPort: settings.localPort,
+    remoteHost: settings.remoteHost,
+    remotePort: settings.remotePort,
+    sshHost: settings.host,
+    pid: after.pid || child.pid || "",
+    running: after.running
+  });
+  return {
+    ok: after.running,
+    startedPid: child.pid || "",
+    tunnel: after,
+    command: `${sshBinary} -N -L 127.0.0.1:${settings.localPort}:${settings.remoteHost}:${settings.remotePort} ${settings.user}@${settings.host}`,
+    message: after.running ? after.message : "DB tunnel start was requested, but the local database port is still closed."
+  };
 }
 
 function generateReceiverToken() {
@@ -3321,11 +3660,23 @@ function formatBytes(value) {
 async function databaseStatus() {
   const started = Date.now();
   let target = null;
+  const tunnel = await databaseTunnelStatus().catch((error) => ({ ok: false, running: false, status: "Unknown", error: error.message, port: Number(loadConfig().databasePort || 15432), pid: "" }));
   try {
+    const manual = manualDatabaseSettings(loadConfig());
+    if (manual.configured && isLocalDbHost(manual.host) && !tunnel.running) {
+      return {
+        ok: false,
+        status: "unavailable",
+        durationMs: Date.now() - started,
+        tunnel,
+        message: "Database tunnel is not running. Click Start first or start the DB tunnel.",
+        error: `Database tunnel is not running. Click Start first or start the DB tunnel. Port ${manual.port} is closed.`
+      };
+    }
     target = await databaseRuntimeTarget();
     const output = await dbQuery("select current_database(), pg_size_pretty(pg_database_size(current_database())), (select count(*) from pg_stat_activity), (select count(*) from pg_stat_activity where state = 'active'), date_trunc('second', now() - pg_postmaster_start_time())::text", 12000, target);
     const row = parseDbRows(output, ["database", "size", "connections", "activeQueries", "uptime"])[0] || {};
-    return { ok: true, status: "online", durationMs: Date.now() - started, ...row, diagnostics: target.diagnostics || null };
+    return { ok: true, status: "online", durationMs: Date.now() - started, ...row, tunnel, diagnostics: target.diagnostics || null };
   } catch (error) {
     const diagnostics = error.diagnostics || target?.diagnostics || null;
     const statusOnline = diagnostics?.statusCommandReturned === true;
@@ -3337,6 +3688,7 @@ async function databaseStatus() {
       message: statusOnline
         ? "Server is online, but database target could not be confirmed. Check selected Battlegroup."
         : "Database target could not be confirmed.",
+      tunnel,
       diagnostics
     };
   }
@@ -6164,20 +6516,6 @@ async function playersFeed() {
   };
 }
 
-function liveMapPickColumn(columns, patterns) {
-  return columns.find((column) => patterns.some((pattern) => pattern.test(column))) || "";
-}
-
-function liveMapPlayerIdentityKeys(player) {
-  return [
-    player.fls_id,
-    player.account_id,
-    player.player_controller_id,
-    player.character_id,
-    player.id
-  ].filter(Boolean).map((value) => String(value));
-}
-
 function liveMapNormalizeStatus(value) {
   const raw = String(value || "").toLowerCase();
   if (/online|connected|active|true|1/.test(raw)) return "online";
@@ -6185,346 +6523,336 @@ function liveMapNormalizeStatus(value) {
   return raw || "unknown";
 }
 
-function liveMapNumericExpr(alias, column, quoteIdent) {
-  const ref = `${alias}.${quoteIdent(column)}`;
-  return `case when ${ref} is not null and ${ref}::text ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' then ${ref}::double precision else null end`;
+function liveMapNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
-function liveMapTextExpr(alias, column, quoteIdent) {
-  return column ? `coalesce(${alias}.${quoteIdent(column)}::text, '')` : `''`;
+const LIVE_MAP_WORLD_BOUNDS = {
+  HaggaBasin: { key: "HaggaBasin", label: "Hagga Basin", minX: -456752.21, maxX: 354547.46, minY: -450630.14, maxY: 353821.95, flipY: false },
+  DeepDesert: { key: "DeepDesert", label: "Deep Desert", minX: -1268624.82, maxX: 1163312.83, minY: -1266548.17, maxY: 1162416.13, flipY: false },
+  Arrakeen: { key: "Arrakeen", label: "Arrakeen", minX: -32000, maxX: 17000, minY: -10000, maxY: 9500, flipY: true },
+  HarkoVillage: { key: "HarkoVillage", label: "Harko Village", minX: -5000, maxX: 14500, minY: -5500, maxY: 32000 }
+};
+
+function liveMapBoundsForRow(row) {
+  return LIVE_MAP_WORLD_BOUNDS[row.map] || LIVE_MAP_WORLD_BOUNDS.HaggaBasin;
 }
 
-function liveMapColumnDiscoveryRows(output) {
-  return output.split(/\r?\n/).filter(Boolean).map((line) => {
-    const [table = "", raw = ""] = line.split("\t");
-    const columns = raw.split(",").filter(Boolean);
-    return { table, columns, lower: columns.map((column) => column.toLowerCase()) };
-  });
+function liveMapCoordinateRejectReason(row) {
+  if (row.x === null && row.y === null) return "x/y are not finite numbers";
+  if (row.x === null) return "x is not a finite number";
+  if (row.y === null) return "y is not a finite number";
+  const bounds = liveMapBoundsForRow(row);
+  if (bounds && (row.x < bounds.minX || row.x > bounds.maxX || row.y < bounds.minY || row.y > bounds.maxY)) return "coordinates outside configured map bounds";
+  return "";
 }
 
-async function liveMapDiscoverPositionTables(quoteIdent) {
-  const output = await dbQuery(`
-    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
-    from information_schema.columns
-    where table_schema = 'dune'
-    group by table_name
-    having bool_or(lower(column_name) ~ '(x|y|z|pos|position|transform|location|map|world|level|pawn|entity|actor|character|player_state|controller)')
-       or lower(table_name) ~ '(player|character|pawn|entity|actor|controller|position|location|transform|vehicle|base|building)'
-    order by table_name
-    limit 260
-  `, 45000);
-  const rows = liveMapColumnDiscoveryRows(output);
-  return rows.map((row) => {
-    const xCol = liveMapPickColumn(row.lower, [/^x$/, /(^|_)pos.*x/, /position.*x/, /location.*x/, /world.*x/, /coord.*x/, /translate.*x/]);
-    const yCol = liveMapPickColumn(row.lower, [/^y$/, /(^|_)pos.*y/, /position.*y/, /location.*y/, /world.*y/, /coord.*y/, /translate.*y/]);
-    const zCol = liveMapPickColumn(row.lower, [/^z$/, /(^|_)pos.*z/, /position.*z/, /location.*z/, /world.*z/, /coord.*z/, /translate.*z/, /height/, /altitude/]);
-    const accountCol = liveMapPickColumn(row.lower, [/^account_id$/, /account.*id/]);
-    const controllerCol = liveMapPickColumn(row.lower, [/player.*controller.*id/, /^controller_id$/]);
-    const characterCol = liveMapPickColumn(row.lower, [/character.*id/, /player_state.*id/, /player.*state.*id/]);
-    const pawnCol = liveMapPickColumn(row.lower, [/pawn.*id/, /entity.*id/, /actor.*id/]);
-    const nameCol = liveMapPickColumn(row.lower, [/character.*name/, /^name$/, /display.*name/, /label/]);
-    const mapCol = liveMapPickColumn(row.lower, [/^map$/, /map.*name/, /world/, /level/, /zone/, /partition/]);
-    const onlineCol = liveMapPickColumn(row.lower, [/online/, /connected/, /status/, /presence/]);
-    const timeCol = liveMapPickColumn(row.lower, [/time/, /timestamp/, /created/, /updated/, /event.*id/, /^id$/]);
-    const hasPosition = Boolean(xCol && yCol);
-    const hasPositionBlob = row.lower.some((column) => /pos|position|transform|location/.test(column));
-    const lowerToReal = new Map(row.columns.map((column) => [column.toLowerCase(), column]));
-    return {
-      table: row.table,
-      columns: row.columns,
-      hasPosition,
-      hasPositionBlob,
-      x: xCol ? lowerToReal.get(xCol) : "",
-      y: yCol ? lowerToReal.get(yCol) : "",
-      z: zCol ? lowerToReal.get(zCol) : "",
-      account: accountCol ? lowerToReal.get(accountCol) : "",
-      controller: controllerCol ? lowerToReal.get(controllerCol) : "",
-      character: characterCol ? lowerToReal.get(characterCol) : "",
-      pawn: pawnCol ? lowerToReal.get(pawnCol) : "",
-      name: nameCol ? lowerToReal.get(nameCol) : "",
-      map: mapCol ? lowerToReal.get(mapCol) : "",
-      online: onlineCol ? lowerToReal.get(onlineCol) : "",
-      time: timeCol ? lowerToReal.get(timeCol) : "",
-      playerish: /player|character|pawn|controller|actor|entity|state/i.test(row.table)
-    };
-  });
+function liveMapCoordinateDebug(rawRows, normalizedRows) {
+  const rejected = normalizedRows
+    .map((row) => ({ row, reason: liveMapCoordinateRejectReason(row) }))
+    .filter((entry) => entry.reason);
+  const finiteRows = normalizedRows.filter((row) => row.x !== null && row.y !== null);
+  const xs = finiteRows.map((row) => row.x);
+  const ys = finiteRows.map((row) => row.y);
+  const reasonCounts = rejected.reduce((acc, entry) => {
+    acc[entry.reason] = (acc[entry.reason] || 0) + 1;
+    return acc;
+  }, {});
+  return {
+    rawRowCount: rawRows.length,
+    acceptedCoordinateCount: finiteRows.length,
+    rejectedCoordinateCount: rejected.length,
+    rejectedReasons: reasonCounts,
+    rejectedSamples: rejected.slice(0, 5).map((entry) => ({ reason: entry.reason, id: entry.row.id, name: entry.row.name, x: entry.row.x, y: entry.row.y, z: entry.row.z, map: entry.row.map })),
+    finiteCoordinates: finiteRows.length === normalizedRows.length,
+    minX: xs.length ? Math.min(...xs) : null,
+    maxX: xs.length ? Math.max(...xs) : null,
+    minY: ys.length ? Math.min(...ys) : null,
+    maxY: ys.length ? Math.max(...ys) : null,
+    sample: finiteRows[0] || normalizedRows[0] || null
+  };
 }
 
-async function liveMapPlayerPositions(players, discovery, quoteIdent) {
-  const identityByKey = new Map();
-  for (const player of players) {
-    for (const key of liveMapPlayerIdentityKeys(player)) identityByKey.set(key, player);
-  }
-  const candidates = discovery
-    .filter((row) => row.hasPosition && (row.playerish || row.account || row.controller || row.character || row.pawn || row.name))
-    .sort((a, b) => Number(b.playerish) - Number(a.playerish))
-    .slice(0, 18);
-  const rawPlayerRecords = [];
-  const positionSourceTried = [];
-  const matched = [];
-  const matchedKeys = new Set();
-  for (const candidate of candidates) {
-    const source = {
-      table: `dune.${candidate.table}`,
-      x: candidate.x,
-      y: candidate.y,
-      z: candidate.z,
-      account: candidate.account,
-      controller: candidate.controller,
-      character: candidate.character,
-      pawn: candidate.pawn,
-      map: candidate.map,
-      time: candidate.time,
-      rows: 0,
-      validRows: 0,
-      matchedRows: 0
-    };
-    positionSourceTried.push(source);
-    const select = [
-      `${liveMapTextExpr("p", candidate.account, quoteIdent)} as account_id`,
-      `${liveMapTextExpr("p", candidate.name, quoteIdent)} as character_name`,
-      `${liveMapTextExpr("p", candidate.controller, quoteIdent)} as player_controller_id`,
-      `${liveMapTextExpr("p", candidate.pawn, quoteIdent)} as pawn_entity_id`,
-      `${liveMapTextExpr("p", candidate.character, quoteIdent)} as character_id`,
-      `${liveMapNumericExpr("p", candidate.x, quoteIdent)} as x`,
-      `${liveMapNumericExpr("p", candidate.y, quoteIdent)} as y`,
-      `${candidate.z ? liveMapNumericExpr("p", candidate.z, quoteIdent) : "null"} as z`,
-      `${liveMapTextExpr("p", candidate.map, quoteIdent)} as map`,
-      `${liveMapTextExpr("p", candidate.online, quoteIdent)} as online_status`,
-      `${liveMapTextExpr("p", candidate.time, quoteIdent)} as source_time`
-    ].join(", ");
-    const orderBy = candidate.time ? `order by p.${quoteIdent(candidate.time)} desc nulls last` : "";
-    const sql = `
-      select ${select}
-      from dune.${quoteIdent(candidate.table)} p
-      where p.${quoteIdent(candidate.x)} is not null
-        and p.${quoteIdent(candidate.y)} is not null
-      ${orderBy}
-      limit 500
-    `;
-    try {
-      const output = await dbQuery(sql, 30000);
-      const rows = output.split(/\r?\n/).filter(Boolean).map((line) => {
-        const [accountId = "", characterName = "", controllerId = "", pawnEntityId = "", characterId = "", xRaw = "", yRaw = "", zRaw = "", map = "", onlineRaw = "", sourceTime = ""] = line.split("\t");
-        return {
-          account_id: accountId,
-          character_name: characterName,
-          player_controller_id: controllerId,
-          pawn_entity_id: pawnEntityId,
-          character_id: characterId,
-          x: Number(xRaw),
-          y: Number(yRaw),
-          z: zRaw === "" ? null : Number(zRaw),
-          map,
-          online_status: onlineRaw,
-          source_time: sourceTime,
-          source: source.table
-        };
-      });
-      source.rows = rows.length;
-      for (const row of rows.slice(0, 12)) rawPlayerRecords.push(row);
-      const valid = rows.filter((row) => Number.isFinite(row.x) && Number.isFinite(row.y));
-      source.validRows = valid.length;
-      for (const row of valid) {
-        const keys = [row.account_id, row.player_controller_id, row.character_id, row.pawn_entity_id].filter(Boolean).map(String);
-        const identity = keys.map((key) => identityByKey.get(key)).find(Boolean) || null;
-        if (!identity && players.length) continue;
-        const matchKey = identity?.player_controller_id || identity?.character_id || identity?.account_id || row.player_controller_id || row.character_id || row.pawn_entity_id || row.account_id;
-        if (matchKey && matchedKeys.has(String(matchKey))) continue;
-        if (matchKey) matchedKeys.add(String(matchKey));
-        matched.push({
-          id: row.player_controller_id || row.character_id || row.account_id || row.pawn_entity_id || `player-${matched.length + 1}`,
-          fls_id: identity?.fls_id || "",
-          name: row.character_name || identity?.name || identity?.character_name || row.account_id || "Player",
-          character_name: row.character_name || identity?.name || "",
-          account_id: row.account_id || identity?.account_id || "",
-          funcom_id: identity?.funcom_id || "",
-          player_controller_id: row.player_controller_id || identity?.player_controller_id || "",
-          pawn_entity_id: row.pawn_entity_id || "",
-          online: liveMapNormalizeStatus(row.online_status || identity?.status),
-          x: row.x,
-          y: row.y,
-          z: Number.isFinite(row.z) ? row.z : null,
-          map: row.map || "HaggaBasin",
-          hasPosition: true,
-          source_time: row.source_time || "",
-          source: source.table
-        });
-      }
-      source.matchedRows = matchedKeys.size;
-      if (matched.length) break;
-    } catch (error) {
-      source.error = error.message;
-    }
-  }
-  console.log("[AlphaNine Live Map] raw player position records", JSON.stringify(rawPlayerRecords.slice(0, 10)));
-  return { players: matched, rawPlayerRecords, positionSourceTried };
+function normalizeLiveMapActorRow(row, type, fallbackName) {
+  const x = liveMapNumber(row.x);
+  const y = liveMapNumber(row.y);
+  const z = liveMapNumber(row.z);
+  return {
+    id: row.id || `${type}-${row.actor_id || row.base_id || row.vehicle_id || ""}`,
+    type,
+    name: row.name || fallbackName || row.id || type,
+    x,
+    y,
+    z,
+    status: type === "player" ? liveMapNormalizeStatus(row.status || row.online_status) : (row.status || row.online_status || "active"),
+    updatedAt: row.updated_at || row.updatedAt || "",
+    actor_id: row.actor_id || row.id || "",
+    character_name: row.character_name || "",
+    account_id: row.account_id || "",
+    fls_id: row.fls_id || "",
+    funcom_id: row.funcom_id || "",
+    player_controller_id: row.player_controller_id || "",
+    pawn_entity_id: row.pawn_entity_id || row.actor_id || "",
+    online: liveMapNormalizeStatus(row.status || row.online_status),
+    online_status: row.status || row.online_status || "",
+    map: row.map || "HaggaBasin",
+    partition_id: liveMapNumber(row.partition_id),
+    hasPosition: x !== null && y !== null,
+    source: row.source || "dune.actors.transform"
+  };
 }
 
-async function liveMapEntities() {
-  const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
+async function liveMapActorsTransformPlayers() {
+  const sql = `
+    select a.id::text as id,
+           a.id::text as actor_id,
+           coalesce(ps.player_pawn_id::text, a.id::text) as pawn_entity_id,
+           coalesce(ps.account_id::text, a.owner_account_id::text, '') as account_id,
+           coalesce(ac."user", '') as fls_id,
+           coalesce(ac.funcom_id, '') as funcom_id,
+           coalesce(ps.player_controller_id::text, '') as player_controller_id,
+           coalesce(nullif(ps.character_name, ''), ac."user", a.id::text) as name,
+           coalesce(nullif(ps.character_name, ''), '') as character_name,
+           coalesce(ps.online_status::text, 'Offline') as status,
+           (((a.transform).location).x)::double precision as x,
+           (((a.transform).location).y)::double precision as y,
+           (((a.transform).location).z)::double precision as z,
+           coalesce(a.map, 'HaggaBasin') as map,
+           coalesce(a.partition_id, 0)::text as partition_id,
+           coalesce(ps.last_avatar_activity::text, '') as updated_at,
+           'dune.actors transform / player_state.player_pawn_id' as source
+    from dune.actors a
+    join dune.player_state ps on ps.player_pawn_id = a.id
+    left join dune.accounts ac on ac.id = ps.account_id
+    where a.transform is not null
+      and ((a.transform).location).x is not null
+      and ((a.transform).location).y is not null
+    order by coalesce(ps.online_status::text, '') desc, lower(coalesce(ps.character_name, '')), a.id
+    limit 500
+  `;
+  const query = await liveMapPgQuery(sql, 30000);
+  const rows = query.rows;
+  const normalized = rows.map((row) => normalizeLiveMapActorRow(row, "player", "Player"));
+  return { rows: normalized.filter((row) => row.hasPosition), debug: liveMapCoordinateDebug(rows, normalized), db: query.db, durationMs: query.durationMs };
+}
+
+async function liveMapActorsTransformVehicles() {
+  const sql = `
+    select a.id::text as id,
+           a.id::text as actor_id,
+           coalesce(nullif(a.class, ''), 'Vehicle ' || a.id::text) as name,
+           (((a.transform).location).x)::double precision as x,
+           (((a.transform).location).y)::double precision as y,
+           (((a.transform).location).z)::double precision as z,
+           coalesce(a.map, 'HaggaBasin') as map,
+           coalesce(a.partition_id, 0)::text as partition_id,
+           '' as updated_at,
+           'dune.vehicles + dune.actors.transform' as source
+    from dune.vehicles v
+    join dune.actors a on a.id = v.id
+    where a.transform is not null
+      and ((a.transform).location).x is not null
+      and ((a.transform).location).y is not null
+    order by a.map, a.partition_id, a.id
+    limit 500
+  `;
+  const query = await liveMapPgQuery(sql, 30000);
+  const rows = query.rows;
+  const normalized = rows.map((row) => normalizeLiveMapActorRow(row, "vehicle", "Vehicle"));
+  return { rows: normalized.filter((row) => row.hasPosition), debug: liveMapCoordinateDebug(rows, normalized), db: query.db, durationMs: query.durationMs };
+}
+
+async function liveMapActorsTransformBases() {
+  const sql = `
+    select b.id::text as id,
+           a.id::text as actor_id,
+           coalesce(nullif(a.class, ''), 'Base ' || b.id::text) as name,
+           (((a.transform).location).x)::double precision as x,
+           (((a.transform).location).y)::double precision as y,
+           (((a.transform).location).z)::double precision as z,
+           coalesce(a.map, 'HaggaBasin') as map,
+           coalesce(a.partition_id, 0)::text as partition_id,
+           '' as updated_at,
+           'dune.buildings + building_instances + actor_fgl_entities + actors.transform' as source
+    from dune.buildings b
+    join dune.building_instances bi on bi.building_id = b.id
+    join dune.actor_fgl_entities afe on afe.entity_id = bi.owner_entity_id
+    join dune.actors a on a.id = afe.actor_id
+    where a.transform is not null
+      and ((a.transform).location).x is not null
+      and ((a.transform).location).y is not null
+    group by b.id, a.id, a.map, a.partition_id, a.class, a.transform
+    order by a.map, a.partition_id, b.id
+    limit 500
+  `;
+  const query = await liveMapPgQuery(sql, 30000);
+  const rows = query.rows;
+  const normalized = rows.map((row) => normalizeLiveMapActorRow(row, "base", "Base"));
+  return { rows: normalized.filter((row) => row.hasPosition), debug: liveMapCoordinateDebug(rows, normalized), db: query.db, durationMs: query.durationMs };
+}
+
+function liveMapConfigPayload() {
+  return {
+    map: { ...LIVE_MAP_WORLD_BOUNDS.HaggaBasin, actorMap: "HaggaBasin", image: "/assets/redblink-hagga-basin.png", fallbackImage: "/assets/world-map-overland.png", width: 4096, height: 4096, defaultPartitionId: 1, source: "Red-Blink dune-awakening-selfhost-docker console/web/public/images/maps/hagga-basin.png" },
+    maps: {
+      HaggaBasin: { ...LIVE_MAP_WORLD_BOUNDS.HaggaBasin, actorMap: "HaggaBasin", image: "/assets/redblink-hagga-basin.png", fallbackImage: "/assets/world-map-overland.png", width: 4096, height: 4096, defaultPartitionId: 1 },
+      DeepDesert: { ...LIVE_MAP_WORLD_BOUNDS.DeepDesert, actorMap: "DeepDesert", image: "/assets/redblink-deep-desert.png", fallbackImage: "/assets/world-map-overland.png", width: 4096, height: 4096, defaultPartitionId: 8 }
+    },
+    defaultMap: "HaggaBasin"
+  };
+}
+
+function liveMapDebugFromLayers(layers, diagnostics, db = null, errors = []) {
+  const all = [...(layers.players || []), ...(layers.vehicles || []), ...(layers.bases || [])];
+  const xs = all.map((row) => row.x).filter((value) => value !== null && Number.isFinite(Number(value)));
+  const ys = all.map((row) => row.y).filter((value) => value !== null && Number.isFinite(Number(value)));
+  const rejectedCoordinateCount = Object.values(diagnostics).reduce((sum, item) => sum + Number(item?.rejectedCoordinateCount || 0), 0);
+  const errorDebug = errors.map((error) => error.debug).find(Boolean) || {};
+  const source = db || errorDebug || {};
+  const tunnel = source.tunnel || {};
+  const lastDbError = errors.map((error) => error.message || String(error)).find(Boolean) || "";
+  return {
+    ok: !errors.length,
+    dbConnected: Boolean(db && !errors.length),
+    connectionSource: source.connectionSource || source.resolvedSource || "unknown",
+    resolvedSource: source.resolvedSource || source.connectionSource || "unknown",
+    didCallGetVM: false,
+    manualDbConfigExists: Boolean(source.manualDbConfigExists || source.configured),
+    configuredDbHost: source.configuredDbHost || source.host || "",
+    configuredDbPort: source.configuredDbPort || source.port || tunnel.port || "",
+    configuredDbName: source.configuredDbName || source.database || "",
+    configuredDbUser: source.configuredDbUser || source.user || "",
+    usedHost: source.host || tunnel.host || source.configuredDbHost || "",
+    usedPort: source.port || tunnel.port || source.configuredDbPort || "",
+    tunnelExpected: Boolean(source.tunnelExpected || tunnel.localTunnelExpected),
+    tunnelListening: Boolean(source.tunnelListening || tunnel.running),
+    tunnelPid: source.tunnelPid || tunnel.pid || "",
+    lastDbError,
+    rowCounts: {
+      players: layers.players.length,
+      vehicles: layers.vehicles.length,
+      bases: layers.bases.length
+    },
+    rawDbRowCounts: {
+      players: diagnostics.players?.rawRowCount || 0,
+      vehicles: diagnostics.vehicles?.rawRowCount || 0,
+      bases: diagnostics.bases?.rawRowCount || 0
+    },
+    rejectedCoordinateCount,
+    coordinateDiagnostics: diagnostics,
+    coordinateRange: {
+      minX: xs.length ? Math.min(...xs) : null,
+      maxX: xs.length ? Math.max(...xs) : null,
+      minY: ys.length ? Math.min(...ys) : null,
+      maxY: ys.length ? Math.max(...ys) : null
+    },
+    bounds: LIVE_MAP_WORLD_BOUNDS.HaggaBasin,
+    maps: liveMapConfigPayload().maps,
+    outsideBoundsWarning: Object.values(diagnostics).some((item) => item?.rejectedReasons?.["coordinates outside configured map bounds"]),
+    dbUnavailableMessage: lastDbError ? "Live Map database is not connected. Start the DB tunnel or configure manual DB settings." : "",
+    errors: errors.map((error) => error.message || String(error))
+  };
+}
+
+function liveMapDemoMarkersPayload() {
+  const generatedAt = new Date().toISOString();
+  const layers = {
+    players: [
+      { id: "debug-player-1", type: "player", name: "Debug Player", x: -102400, y: -80600, z: 312, status: "debug", updatedAt: generatedAt, actor_id: "debug-player-1", map: "HaggaBasin", hasPosition: true, source: "debugMarkers=1" }
+    ],
+    vehicles: [
+      { id: "debug-vehicle-1", type: "vehicle", name: "Debug Vehicle", x: 54200, y: -121500, z: 304, status: "debug", updatedAt: generatedAt, actor_id: "debug-vehicle-1", map: "HaggaBasin", hasPosition: true, source: "debugMarkers=1" }
+    ],
+    bases: [
+      { id: "debug-base-1", type: "base", name: "Debug Base", x: -248000, y: 118000, z: 289, status: "debug", updatedAt: generatedAt, actor_id: "debug-base-1", map: "HaggaBasin", hasPosition: true, source: "debugMarkers=1" }
+    ]
+  };
+  const diagnostics = {
+    players: liveMapCoordinateDebug(layers.players, layers.players),
+    vehicles: liveMapCoordinateDebug(layers.vehicles, layers.vehicles),
+    bases: liveMapCoordinateDebug(layers.bases, layers.bases)
+  };
+  const rows = [...layers.players, ...layers.vehicles, ...layers.bases];
+  const debug = liveMapDebugFromLayers(layers, diagnostics, null, []);
+  return {
+    ok: true,
+    generatedAt,
+    demo: true,
+    message: "Debug marker mode is enabled by ?debugMarkers=1. These are fake markers for UI rendering validation only.",
+    layers,
+    rows,
+    bounds: { minX: Math.min(...rows.map((row) => row.x)), maxX: Math.max(...rows.map((row) => row.x)), minY: Math.min(...rows.map((row) => row.y)), maxY: Math.max(...rows.map((row) => row.y)) },
+    sources: [{ kind: "debug", table: "debugMarkers=1", status: "fake", rows: rows.length, coordinateRows: rows.length }],
+    errors: [],
+    debug: { ...debug, dbConnected: false, connectionSource: "debug-markers", resolvedSource: "debug-markers", debugMarkers: true, dbUnavailableMessage: "" },
+    ...liveMapConfigPayload()
+  };
+}
+
+async function liveMapLayer(kind) {
+  if (kind === "players") return await liveMapActorsTransformPlayers();
+  if (kind === "vehicles") return await liveMapActorsTransformVehicles();
+  if (kind === "bases") return await liveMapActorsTransformBases();
+  throw new Error("Unknown Live Map layer.");
+}
+
+async function liveMapMarkersPayload() {
   const result = {
     ok: true,
     generatedAt: new Date().toISOString(),
     layers: { players: [], vehicles: [], bases: [] },
+    rows: [],
     sources: [],
     errors: [],
     bounds: null,
-    debug: {
-      playersLoaded: 0,
-      playersWithIdentity: 0,
-      playersWithPosition: 0,
-      playersWithCoordinates: 0,
-      playerPositionUnavailable: false,
-      positionSourceTried: [],
-      positionSourceTable: "",
-      rawPlayerRecords: [],
-      positionDiscovery: [],
-      counts: { players: 0, vehicles: 0, bases: 0 },
-      entitySources: { vehicles: "unavailable", bases: "unavailable" },
-      missingReason: "",
-      markerCount: 0
-    }
+    debug: {}
   };
-  let identityPlayers = [];
+  const diagnostics = { players: null, vehicles: null, bases: null };
+  const errors = [];
+  let db = null;
   try {
-    const feed = await playersFeed();
-    identityPlayers = Array.isArray(feed.players) ? feed.players : [];
-    result.debug.playersLoaded = identityPlayers.length;
-    result.debug.playersWithIdentity = identityPlayers.length;
-    result.sources.push({ kind: "players", table: "api/players/feed", rows: result.debug.playersLoaded, coordinateRows: 0 });
-    console.log("[AlphaNine Live Map] player identities", JSON.stringify(identityPlayers.slice(0, 10).map((player) => ({
-      account_id: player.account_id,
-      character_name: player.name || player.character_name,
-      player_controller_id: player.player_controller_id,
-      character_id: player.character_id,
-      online: player.status
-    }))));
+    const players = await liveMapActorsTransformPlayers();
+    result.layers.players = players.rows;
+    diagnostics.players = players.debug;
+    db = db || players.db;
+    result.sources.push({ kind: "players", table: "dune.actors + dune.player_state", status: result.layers.players.length ? "real" : "empty", rows: result.layers.players.length, coordinateRows: result.layers.players.length, join: "ps.player_pawn_id = actors.id", coordinates: "((actors.transform).location).x/y/z" });
   } catch (error) {
-    result.errors.push(`api/players/feed: ${error.message}`);
+    errors.push(error);
+    result.errors.push(`players transform query: ${error.message}`);
+    result.sources.push({ kind: "players", table: "dune.actors + dune.player_state", status: "unavailable", rows: 0, coordinateRows: 0, join: "ps.player_pawn_id = actors.id", coordinates: "((actors.transform).location).x/y/z", error: error.message });
   }
-  let discovery = [];
   try {
-    discovery = await liveMapDiscoverPositionTables(quoteIdent);
-    result.debug.positionDiscovery = discovery.map((row) => ({
-      table: `dune.${row.table}`,
-      hasPosition: row.hasPosition,
-      hasPositionBlob: row.hasPositionBlob,
-      x: row.x,
-      y: row.y,
-      z: row.z,
-      account: row.account,
-      controller: row.controller,
-      character: row.character,
-      pawn: row.pawn,
-      map: row.map,
-      online: row.online,
-      time: row.time
-    })).slice(0, 80);
-    const positions = await liveMapPlayerPositions(identityPlayers, discovery, quoteIdent);
-    result.layers.players = positions.players;
-    result.debug.rawPlayerRecords = positions.rawPlayerRecords;
-    result.debug.positionSourceTried = positions.positionSourceTried;
-    result.debug.playersWithPosition = positions.players.length;
-    result.debug.playersWithCoordinates = positions.players.length;
-    result.debug.positionSourceTable = positions.players[0]?.source || "";
+    const vehicles = await liveMapActorsTransformVehicles();
+    result.layers.vehicles = vehicles.rows;
+    diagnostics.vehicles = vehicles.debug;
+    db = db || vehicles.db;
+    result.sources.push({ kind: "vehicles", table: "dune.vehicles + dune.actors", status: result.layers.vehicles.length ? "real" : "empty", rows: result.layers.vehicles.length, coordinateRows: result.layers.vehicles.length, join: "actors.id = vehicles.id", coordinates: "((actors.transform).location).x/y/z" });
   } catch (error) {
-    result.errors.push(`player position discovery: ${error.message}`);
+    errors.push(error);
+    result.errors.push(`vehicles transform query: ${error.message}`);
+    result.sources.push({ kind: "vehicles", table: "dune.vehicles + dune.actors", status: "unavailable", rows: 0, coordinateRows: 0, join: "actors.id = vehicles.id", coordinates: "((actors.transform).location).x/y/z", error: error.message });
   }
-  let tables = [];
   try {
-    const metaOutput = await dbQuery(`
-      select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
-      from information_schema.columns
-      where table_schema = 'dune'
-        and lower(table_name) ~ '(vehicle|sandbike|buggy|ornithopter|base|building|structure|claim|owned|garage|placeable|marker|poi)'
-      group by table_name
-      order by table_name
-      limit 140
-    `, 45000);
-    tables = metaOutput.split(/\r?\n/).filter(Boolean).map((line) => {
-      const [table = "", raw = ""] = line.split("\t");
-      const columns = raw.split(",").filter(Boolean);
-      return { table, columns, lower: columns.map((column) => column.toLowerCase()) };
-    });
+    const bases = await liveMapActorsTransformBases();
+    result.layers.bases = bases.rows;
+    diagnostics.bases = bases.debug;
+    db = db || bases.db;
+    result.sources.push({ kind: "bases", table: "dune.buildings + dune.building_instances + dune.actor_fgl_entities + dune.actors", status: result.layers.bases.length ? "real" : "empty", rows: result.layers.bases.length, coordinateRows: result.layers.bases.length, join: "building_instances.owner_entity_id = actor_fgl_entities.entity_id; actors.id = actor_fgl_entities.actor_id", coordinates: "((actors.transform).location).x/y/z" });
   } catch (error) {
-    result.errors.push(`base/vehicle table discovery: ${error.message}`);
+    errors.push(error);
+    result.errors.push(`bases transform query: ${error.message}`);
+    result.sources.push({ kind: "bases", table: "dune.buildings + dune.building_instances + dune.actor_fgl_entities + dune.actors", status: "unavailable", rows: 0, coordinateRows: 0, join: "building_instances.owner_entity_id = actor_fgl_entities.entity_id; actors.id = actor_fgl_entities.actor_id", coordinates: "((actors.transform).location).x/y/z", error: error.message });
   }
-  const kinds = [
-    { kind: "vehicles", label: "Vehicles", table: /vehicle|sandbike|buggy|ornithopter|garage/i },
-    { kind: "bases", label: "Bases", table: /base|building|structure|claim|placeable/i }
-  ];
-  const allPoints = [...result.layers.players];
-  for (const spec of kinds) {
-    const candidates = tables.filter((row) => spec.table.test(row.table));
-    if (!candidates.length) {
-      result.sources.push({ kind: spec.kind, table: "", status: "unavailable", rows: 0, coordinateRows: 0, reason: `No ${spec.label.toLowerCase()} tables discovered with candidate names.` });
-      continue;
-    }
-    for (const candidate of candidates) {
-      const lowerToReal = new Map(candidate.columns.map((column) => [column.toLowerCase(), column]));
-      const xCol = liveMapPickColumn(candidate.lower, [/^x$/, /pos.*x/, /position.*x/, /location.*x/, /world.*x/, /coord.*x/]);
-      const yCol = liveMapPickColumn(candidate.lower, [/^y$/, /pos.*y/, /position.*y/, /location.*y/, /world.*y/, /coord.*y/]);
-      if (!xCol || !yCol) {
-        result.sources.push({ kind: spec.kind, table: `dune.${candidate.table}`, status: "unavailable", rows: 0, coordinateRows: 0, x: xCol ? lowerToReal.get(xCol) : "", y: yCol ? lowerToReal.get(yCol) : "", reason: "No usable X/Y coordinate columns detected." });
-        continue;
-      }
-      const zCol = liveMapPickColumn(candidate.lower, [/^z$/, /height/, /altitude/]);
-      const idCol = liveMapPickColumn(candidate.lower, [/^id$/, /player.*id/, /vehicle.*id/, /base.*id/, /building.*id/, /account.*id/]);
-      const nameCol = liveMapPickColumn(candidate.lower, [/name/, /label/, /display/]);
-      const x = quoteIdent(lowerToReal.get(xCol));
-      const y = quoteIdent(lowerToReal.get(yCol));
-      const z = zCol ? quoteIdent(lowerToReal.get(zCol)) : "null";
-      const id = idCol ? quoteIdent(lowerToReal.get(idCol)) : "null";
-      const name = nameCol ? quoteIdent(lowerToReal.get(nameCol)) : "null";
-      const sql = `select coalesce(${id}::text, '') as id, coalesce(${name}::text, '') as name, ${x}::double precision as x, ${y}::double precision as y, ${z}::text as z from dune.${quoteIdent(candidate.table)} where ${x} is not null and ${y} is not null limit 200`;
-      const source = { kind: spec.kind, table: `dune.${candidate.table}`, status: "checking", x: lowerToReal.get(xCol), y: lowerToReal.get(yCol), z: zCol ? lowerToReal.get(zCol) : "", rows: 0, coordinateRows: 0 };
-      try {
-        const output = await dbQuery(sql, 30000);
-        const loadedRows = output.split(/\r?\n/).filter(Boolean).map((line, index) => {
-          const [id = "", name = "", xRaw = "", yRaw = "", zRaw = ""] = line.split("\t");
-          const entity = { id: id || `${spec.kind}-${index + 1}`, name: name || `${spec.label} ${index + 1}`, x: Number(xRaw), y: Number(yRaw), z: zRaw || null, source: source.table };
-          if (Number.isFinite(entity.x) && Number.isFinite(entity.y)) allPoints.push(entity);
-          return entity;
-        });
-        const rows = loadedRows.filter((row) => Number.isFinite(row.x) && Number.isFinite(row.y));
-        source.rows = loadedRows.length;
-        source.coordinateRows = rows.length;
-        source.status = rows.length ? "real" : "empty";
-        result.sources.push(source);
-        result.layers[spec.kind] = rows;
-        if (rows.length) break;
-      } catch (error) {
-        source.status = "unavailable";
-        source.error = error.message;
-        result.sources.push(source);
-        result.errors.push(`${source.table}: ${error.message}`);
-      }
-    }
-  }
+  const allPoints = [...result.layers.players, ...result.layers.vehicles, ...result.layers.bases];
   if (allPoints.length) {
     const xs = allPoints.map((row) => row.x);
     const ys = allPoints.map((row) => row.y);
     result.bounds = { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
   }
-  result.debug.counts = { players: result.layers.players.length, vehicles: result.layers.vehicles.length, bases: result.layers.bases.length };
-  for (const kind of ["vehicles", "bases"]) {
-    const source = result.sources.find((row) => row.kind === kind && row.status === "real")
-      || result.sources.find((row) => row.kind === kind && row.status === "empty")
-      || result.sources.find((row) => row.kind === kind);
-    result.debug.entitySources[kind] = source?.status || "unavailable";
-  }
-  result.debug.markerCount = result.layers.players.length + result.layers.vehicles.length + result.layers.bases.length;
-  console.log("[AlphaNine Live Map] entity counts", JSON.stringify({ players: result.layers.players.length, vehicles: result.layers.vehicles.length, bases: result.layers.bases.length, entitySources: result.debug.entitySources }));
-  result.debug.playerPositionUnavailable = result.debug.playersLoaded > 0 && result.debug.playersWithPosition === 0;
-  if (result.debug.playerPositionUnavailable) {
-    result.debug.missingReason = result.debug.positionSourceTried.length
-      ? "Player identity rows were loaded, but no discovered position table produced coordinates that could be joined to those players."
-      : "Player identity rows were loaded, but no Dune table with usable x/y position columns was discovered.";
-    result.errors.push("Player position unavailable");
-  }
-  if (!result.sources.length) result.errors.push("No player, vehicle, or base tables with coordinate-like columns were discovered.");
-  return result;
+  result.rows = allPoints;
+  result.debug = liveMapDebugFromLayers(result.layers, diagnostics, db, errors);
+  return { ...result, ...liveMapConfigPayload() };
 }
 
 async function liveMapTeleportPreview(payload) {
@@ -7973,6 +8301,15 @@ function appPage() {
     .live-map-panel { width:360px; min-width:0; display:grid; gap:12px; }
     .live-map-layer-row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(214,166,69,.1); }
     .live-map-log { max-height:180px; overflow:auto; }
+    .live-map-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .live-map-marker-table { max-height:360px; overflow:auto; }
+    .live-map-marker-table table { min-width:520px; }
+    .live-map-marker-table tr { cursor:pointer; }
+    .live-map-marker-table tr:hover { background:rgba(214,166,69,.08); }
+    .live-map-marker-label { display:block; margin-top:2px; color:var(--muted); font-size:10.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .live-map-marker.player { width:16px !important; height:16px !important; }
+    .live-map-marker.vehicle { width:16px !important; height:16px !important; }
+    .live-map-marker.base { width:17px !important; height:17px !important; }
     .live-map-coordinate-readout { position:absolute; z-index:600; right:12px; bottom:12px; border:1px solid rgba(214,166,69,.34); background:rgba(0,0,0,.62); color:var(--gold-bright); padding:7px 9px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; pointer-events:none; }
     .coordinate-card { display:grid; gap:7px; }
     .coordinate-pair { display:grid; grid-template-columns:44px minmax(0,1fr); gap:8px; align-items:center; color:var(--muted); }
@@ -8425,7 +8762,13 @@ function appPage() {
     <section id="live-map" class="view">
       <div class="live-map-layout">
         <div class="panel pad live-map-stage">
-          <div class="panel-head"><div><div class="label">Live Map</div><div id="liveMapStamp" class="micro">Leaflet tactical overlay</div></div><button type="button" onclick="refreshLiveMap()">Refresh</button></div>
+          <div class="panel-head">
+            <div><div class="label">Live Map</div><div id="liveMapStamp" class="micro">Red-Blink Hagga Basin DB overlay</div></div>
+            <div class="live-map-toolbar">
+              <label class="check-row"><input id="liveMapAutoRefresh" type="checkbox" checked>Auto-refresh</label>
+              <button type="button" onclick="refreshLiveMap()">Refresh</button>
+            </div>
+          </div>
           <div id="liveMapCanvas" class="live-map-canvas"></div>
         </div>
         <div class="live-map-panel">
@@ -8434,9 +8777,23 @@ function appPage() {
             <label class="live-map-layer-row"><span>Players</span><input id="liveLayerPlayers" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
             <label class="live-map-layer-row"><span>Vehicles</span><input id="liveLayerVehicles" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
             <label class="live-map-layer-row"><span>Bases</span><input id="liveLayerBases" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
-            <div id="livePlayerPositionWarning" class="warning mt hidden">Player position unavailable</div>
-            <div id="liveEntityAvailability" class="warning mt hidden">Bases/vehicles data not available from server yet.</div>
-            <div class="subtle mt">Resource and POI filters are reserved for the next layer pass.</div>
+            <div id="liveMapBoundsWarning" class="warning mt hidden">Some markers are outside configured map bounds.</div>
+            <div id="liveEntityAvailability" class="warning mt hidden">Live Map data unavailable.</div>
+          </div>
+          <div class="panel pad">
+            <div class="label">Markers</div>
+            <div class="detail-list mt">
+              <div class="detail-row"><span class="subtle">Players</span><strong id="liveDebugPlayers">0</strong></div>
+              <div class="detail-row"><span class="subtle">Vehicles</span><strong id="liveDebugVehicles">0</strong></div>
+              <div class="detail-row"><span class="subtle">Bases</span><strong id="liveDebugBases">0</strong></div>
+              <div class="detail-row"><span class="subtle">Rendered</span><strong id="liveDebugMarkers">0</strong></div>
+            </div>
+            <div class="table-wrap live-map-marker-table mt">
+              <table>
+                <thead><tr><th>Type</th><th>Name</th><th>X/Y</th></tr></thead>
+                <tbody id="liveMapMarkerRows"><tr><td colspan="3">No markers loaded.</td></tr></tbody>
+              </table>
+            </div>
           </div>
           <div class="panel pad">
             <div class="label">Clicked Coordinates</div>
@@ -8483,12 +8840,8 @@ function appPage() {
               <div class="detail-row"><span class="subtle">Zoom</span><strong id="liveDebugZoom">--</strong></div>
               <div class="detail-row"><span class="subtle">Leaflet</span><strong id="liveDebugLatLng">--</strong></div>
               <div class="detail-row"><span class="subtle">Dune X/Y</span><strong id="liveDebugDune">--</strong></div>
-              <div class="detail-row"><span class="subtle">Players</span><strong id="liveDebugPlayers">0</strong></div>
-              <div class="detail-row"><span class="subtle">Vehicles</span><strong id="liveDebugVehicles">0</strong></div>
-              <div class="detail-row"><span class="subtle">Bases</span><strong id="liveDebugBases">0</strong></div>
-              <div class="detail-row"><span class="subtle">Markers</span><strong id="liveDebugMarkers">0</strong></div>
-              <div class="detail-row"><span class="subtle">Position Source</span><strong id="liveDebugPositionSource">--</strong></div>
-              <div class="detail-row"><span class="subtle">Entity Source</span><strong id="liveDebugEntitySource">--</strong></div>
+              <div class="detail-row"><span class="subtle">DB Source</span><strong id="liveDebugPositionSource">--</strong></div>
+              <div class="detail-row"><span class="subtle">Tunnel</span><strong id="liveDebugEntitySource">--</strong></div>
             </div>
             <pre id="liveMapLog" class="live-map-log mt">Awaiting live map data.</pre>
           </div>
@@ -8909,7 +9262,17 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel pad metric-tile"><div class="label">Database Status</div><div id="dbMgmtStatus" class="value">Checking...</div><div id="dbMgmtStatusDetail" class="subtle">Waiting for refresh.</div></div>
         <div class="panel pad metric-tile"><div class="label">Database Size</div><div id="dbMgmtSize" class="value">--</div><div class="subtle">Reported by PostgreSQL.</div></div>
         <div class="panel pad metric-tile"><div class="label">Connections</div><div id="dbMgmtConnections" class="value">--</div><div class="subtle">Current / active queries.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Backup Folder</div><div id="dbMgmtBackupFolderState" class="value">Checking...</div><div class="subtle">Persistent AppData setting.</div></div>
+        <div class="panel pad metric-tile"><div class="label">DB Tunnel</div><div id="dbTunnelStatus" class="value">Checking...</div><div id="dbTunnelDetail" class="subtle">Port: -- / PID: --</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Database Tunnel</div><div class="subtle">Local PostgreSQL access uses the SSH tunnel on 127.0.0.1:15432.</div></div><button onclick="refreshDatabaseTunnelStatus()">Refresh Tunnel</button></div>
+        <div class="detail-list mt">
+          <div class="detail-row"><span class="subtle">DB Tunnel</span><strong id="dbTunnelStatusDetail">Checking...</strong></div>
+          <div class="detail-row"><span class="subtle">Port</span><strong id="dbTunnelPort">15432</strong></div>
+          <div class="detail-row"><span class="subtle">PID</span><strong id="dbTunnelPid">--</strong></div>
+        </div>
+        <div class="action-row mt"><button class="primary" onclick="startDatabaseTunnel()">Start DB Tunnel</button><button onclick="runConnectionTest('database','dbTunnelTestResult')">Test Database</button></div>
+        <div id="dbTunnelTestResult" class="test-result mt">Database tunnel not tested.</div>
       </div>
       <div class="layout-3 mt">
         <div class="panel pad">
@@ -9111,6 +9474,12 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <label>User<input id="settingsDatabaseUser"></label>
             <label>Password<input id="settingsDatabasePassword" type="password" placeholder="Leave blank to keep saved password"></label>
           </div>
+          <div class="detail-list mt">
+            <div class="detail-row"><span class="subtle">DB Tunnel</span><strong id="settingsDbTunnelStatus">Checking...</strong></div>
+            <div class="detail-row"><span class="subtle">Port</span><strong id="settingsDbTunnelPort">15432</strong></div>
+            <div class="detail-row"><span class="subtle">PID</span><strong id="settingsDbTunnelPid">--</strong></div>
+          </div>
+          <div class="action-row mt"><button type="button" class="primary" onclick="startDatabaseTunnel()">Start DB Tunnel</button><button type="button" onclick="refreshDatabaseTunnelStatus()">Refresh DB Tunnel</button></div>
         </div>
         <div class="panel pad">
           <div class="panel-head"><div><div class="label">Receiver Management</div><div id="receiverManagerStatus" class="micro">Checking receiver</div></div><button type="button" onclick="refreshReceiverStatus()">Refresh</button></div>
@@ -9255,24 +9624,28 @@ function renderServerResources(telemetry){const data=telemetry&&typeof telemetry
 function addActivity(type,message,detail){const item={time:new Date().toLocaleTimeString(),type,message,detail:detail||""};activity.unshift(item);activity=activity.slice(0,40);renderActivity();}
 const LIVE_MAP_IMAGE={width:4096,height:4096};
 const LIVE_MAP_CONFIGS={
-  HaggaBasin:{key:"HaggaBasin",label:"Hagga Basin",minX:-437871,maxX:350539,minY:-462011,maxY:376267,flipY:true},
-  DeepDesert:{key:"DeepDesert",label:"Deep Desert",minX:-1300000,maxX:1200000,minY:-1300000,maxY:1200000},
-  Arrakeen:{key:"Arrakeen",label:"Arrakeen",minX:-32000,maxX:17000,minY:-10000,maxY:9500,flipY:true},
-  HarkoVillage:{key:"HarkoVillage",label:"Harko Village",minX:-5000,maxX:14500,minY:-5500,maxY:32000}
+  HaggaBasin:{key:"HaggaBasin",label:"Hagga Basin",minX:-456752.21,maxX:354547.46,minY:-450630.14,maxY:353821.95,flipY:false,image:"/assets/redblink-hagga-basin.png",fallbackImage:"/assets/world-map-overland.png",source:"Red-Blink dune-awakening-selfhost-docker console/web/public/images/maps/hagga-basin.png"},
+  DeepDesert:{key:"DeepDesert",label:"Deep Desert",minX:-1268624.82,maxX:1163312.83,minY:-1266548.17,maxY:1162416.13,flipY:false,image:"/assets/redblink-deep-desert.png",fallbackImage:"/assets/world-map-overland.png"},
+  Arrakeen:{key:"Arrakeen",label:"Arrakeen",minX:-32000,maxX:17000,minY:-10000,maxY:9500,flipY:true,image:"/assets/world-map-overland.png"},
+  HarkoVillage:{key:"HarkoVillage",label:"Harko Village",minX:-5000,maxX:14500,minY:-5500,maxY:32000,image:"/assets/world-map-overland.png"}
 };
-let liveMapKey="HaggaBasin";
+let liveMapKey="HaggaBasin",liveMapImageOverlay=null,liveMapMarkerIndex={};
 function liveMapConfig(){return LIVE_MAP_CONFIGS[liveMapKey]||LIVE_MAP_CONFIGS.HaggaBasin;}
-function liveMapBounds(){return [[0,0],[LIVE_MAP_IMAGE.height,LIVE_MAP_IMAGE.width]];}
+function mergeLiveMapConfig(data){if(data?.maps){Object.entries(data.maps).forEach(([key,value])=>{LIVE_MAP_CONFIGS[key]={...(LIVE_MAP_CONFIGS[key]||{}),...value,key};});}if(data?.map){const key=data.map.key||data.map.actorMap||liveMapKey;LIVE_MAP_CONFIGS[key]={...(LIVE_MAP_CONFIGS[key]||{}),...data.map,key};liveMapKey=key;}}
+function liveMapBounds(){const cfg=liveMapConfig();const width=Number(cfg.width||LIVE_MAP_IMAGE.width),height=Number(cfg.height||LIVE_MAP_IMAGE.height);return [[0,0],[height,width]];}
+function liveMapSize(cfg=liveMapConfig()){return {width:Number(cfg.width||LIVE_MAP_IMAGE.width),height:Number(cfg.height||LIVE_MAP_IMAGE.height)};}
 function clampLiveUnit(value){if(value<0)return 0;if(value>1)return 1;return value;}
-function worldToLiveLatLng(x,y,cfg=liveMapConfig()){const nx=(Number(x)-cfg.minX)/(cfg.maxX-cfg.minX);const ny=(Number(y)-cfg.minY)/(cfg.maxY-cfg.minY);const fx=clampLiveUnit(cfg.flipX?1-nx:nx);const fy=clampLiveUnit(cfg.flipY?1-ny:ny);return [fy*LIVE_MAP_IMAGE.height,fx*LIVE_MAP_IMAGE.width];}
-function liveLatLngToWorld(latlng,cfg=liveMapConfig()){const fx=Number(latlng.lng)/LIVE_MAP_IMAGE.width;const fy=Number(latlng.lat)/LIVE_MAP_IMAGE.height;const rx=cfg.flipX?1-fx:fx;const ry=cfg.flipY?1-fy:fy;return {x:rx*(cfg.maxX-cfg.minX)+cfg.minX,y:ry*(cfg.maxY-cfg.minY)+cfg.minY};}
+function liveMapWithinBounds(row,cfg=liveMapConfig()){const x=Number(row?.x),y=Number(row?.y);return Number.isFinite(x)&&Number.isFinite(y)&&x>=cfg.minX&&x<=cfg.maxX&&y>=cfg.minY&&y<=cfg.maxY;}
+function worldToLiveLatLng(x,y,cfg=liveMapConfig(),clamp=true){const size=liveMapSize(cfg);const nx=(Number(x)-cfg.minX)/(cfg.maxX-cfg.minX);const ny=(Number(y)-cfg.minY)/(cfg.maxY-cfg.minY);let fx=cfg.flipX?1-nx:nx;let fy=cfg.flipY?1-ny:ny;if(clamp){fx=clampLiveUnit(fx);fy=clampLiveUnit(fy);}return [fy*size.height,fx*size.width];}
+function liveLatLngToWorld(latlng,cfg=liveMapConfig()){const size=liveMapSize(cfg);const fx=Number(latlng.lng)/size.width;const fy=Number(latlng.lat)/size.height;const rx=cfg.flipX?1-fx:fx;const ry=cfg.flipY?1-fy:fy;return {x:rx*(cfg.maxX-cfg.minX)+cfg.minX,y:ry*(cfg.maxY-cfg.minY)+cfg.minY};}
 function leafletToDune(latlng){return liveLatLngToWorld(latlng);}
 function duneToLeaflet(x,y){return worldToLiveLatLng(x,y);}
 function formatLiveCoord(value){const number=Number(value);return Number.isFinite(number)?number.toFixed(2):"--";}
-function initLiveMap(){if(!window.L){setText("liveMapStamp","Leaflet unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});const bounds=liveMapBounds();L.imageOverlay("/assets/world-map-overland.png",bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);liveMap.fitBounds(bounds);liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
+function setLiveMapImage(){if(!liveMap)return;const cfg=liveMapConfig(),bounds=liveMapBounds();if(liveMapImageOverlay){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=null;}liveMapImageOverlay=L.imageOverlay(cfg.image||"/assets/redblink-hagga-basin.png",bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);liveMapImageOverlay.once("error",()=>{if(cfg.fallbackImage&&liveMap){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=L.imageOverlay(cfg.fallbackImage,bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);setText("liveMapStamp","Primary map image missing; using fallback.");}});liveMap.fitBounds(bounds);}
+function initLiveMap(){if(!window.L){setText("liveMapStamp","Leaflet unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});setLiveMapImage();liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
 function liveMapChecked(id){const el=document.getElementById(id);return !el||el.checked;}
 function liveMapProject(entity){const x=Number(entity.x),y=Number(entity.y);if(!Number.isFinite(x)||!Number.isFinite(y))return null;return duneToLeaflet(x,y);}
-function liveMapIcon(kind){return L.divIcon({className:"",html:'<div class="live-map-marker '+kind+'" style="width:14px;height:14px"></div>',iconSize:[14,14],iconAnchor:[7,7]});}
+function liveMapIcon(kind){const size=kind==="base"?17:16;return L.divIcon({className:"",html:'<div class="live-map-marker '+kind+'"></div>',iconSize:[size,size],iconAnchor:[size/2,size/2]});}
 function liveTeleportPlayerId(row){return row?.fls_id||row?.funcom_id||row?.player_controller_id||"";}
 function liveMapPlayerKeys(row){return [row?.fls_id,row?.funcom_id,row?.player_controller_id,row?.id,row?.account_id,row?.name].filter(value=>value!==undefined&&value!==null&&String(value).trim()).map(value=>String(value).trim());}
 function sameLiveMapPlayer(row,playerId){const target=String(playerId||"").trim();return Boolean(target)&&liveMapPlayerKeys(row).includes(target);}
@@ -9283,8 +9656,13 @@ function formatLivePosition(pos){return pos?("X "+Math.round(Number(pos.x))+" / 
 function clearCachedTeleportPlayer(playerId){if(!liveMapData?.layers?.players)return;liveMapData.layers.players=liveMapData.layers.players.filter(row=>!sameLiveMapPlayer(row,playerId));}
 function renderPendingTeleportMarker(){if(!liveTeleportPending||!liveMapLayerGroup||!liveMapChecked("liveLayerPlayers"))return 0;const target=liveTeleportPending.target;if(!target)return 0;const point=duneToLeaflet(target.x,target.y);const marker=L.marker(point,{icon:L.divIcon({className:"",html:'<div class="live-map-marker pending" style="width:18px;height:18px"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).bindPopup('<strong>Teleport pending</strong><br>Teleport sent, waiting for server position update...<br>'+esc(formatLivePosition(target)));marker.addTo(liveMapLayerGroup);return 1;}
 function reconcileTeleportPending(){if(!liveTeleportPending)return;const player=findLiveMapPlayerByTeleportId(liveTeleportPending.playerId);const next=liveMapPosition(player);if(!next)return;const movedFromOld=!liveTeleportPending.oldPosition||liveMapDistance(next,liveTeleportPending.oldPosition)>2;const nearTarget=liveMapDistance(next,liveTeleportPending.target)<50;if(movedFromOld||nearTarget){const detail="Player "+liveTeleportPending.playerId+" old "+formatLivePosition(liveTeleportPending.oldPosition)+" -> new "+formatLivePosition(next);console.debug("[AlphaNine Live Map] teleport position refresh",{playerId:liveTeleportPending.playerId,oldPosition:liveTeleportPending.oldPosition,newPosition:next,target:liveTeleportPending.target});addActivity("maps","Teleport position confirmed",detail);const log=document.getElementById("teleportLog");if(log&&!/Server position confirmed/.test(log.textContent||""))log.textContent+=(log.textContent?"\n\n":"")+"Server position confirmed.\n"+detail;liveTeleportPending=null;}}
-function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point)return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(kind.slice(0,-1)||kind),draggable:kind==="players"}).bindPopup('<strong>'+esc(row.name||row.id||kind)+'</strong><br>'+esc(row.source||"DB")+'<br>X '+esc(formatLiveCoord(row.x))+' / Y '+esc(formatLiveCoord(row.y))+(row.z!=null?' / Z '+esc(row.z):'')+(kind==="players"?'<br>Drag marker to preview teleport.':''));marker.on("click",()=>{if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});});if(kind==="players")marker.on("dragend",event=>{const dragged=event.target;const next=dragged.getLatLng();dragged.setLatLng(point);const coords=leafletToDune(next);const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");if(input&&playerId)input.value=playerId;const tx=document.getElementById("teleportX");const ty=document.getElementById("teleportY");const tz=document.getElementById("teleportZ");if(tx)tx.value=String(Math.round(coords.x));if(ty)ty.value=String(Math.round(coords.y));selectLiveCoordinates(next,{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Drag teleport preview armed. Marker snapped back until Preview Teleport is sent.\\nPlayer: "+(playerId||"FLS ID unavailable")+"\\nX "+Math.round(coords.x)+" / Y "+Math.round(coords.y)+"\\nEnter a verified Z/elevation before live teleport.";playUiSound("click");});marker.addTo(liveMapLayerGroup);});return count;}
-function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;reconcileTeleportPending();liveMapLayerGroup.clearLayers();liveMarkerCount=0;const playerRows=liveTeleportPending?(liveMapData.layers?.players||[]).filter(row=>!sameLiveMapPlayer(row,liveTeleportPending.playerId)):liveMapData.layers?.players;liveMarkerCount+=addLiveMapMarkers("players",playerRows);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapData.layers?.vehicles);liveMarkerCount+=addLiveMapMarkers("bases",liveMapData.layers?.bases);liveMarkerCount+=renderPendingTeleportMarker();updateLiveMapDebug();}
+function liveMapMarkerKey(row){return String(row?.type||"marker")+":"+String(row?.id||row?.actor_id||row?.name||"");}
+function liveMapMarkerPopup(row){return '<strong>'+esc(row.name||row.id||row.type||"Marker")+'</strong><br>'+esc(row.type||"marker")+' / '+esc(row.status||"unknown")+'<br>X '+esc(formatLiveCoord(row.x))+' / Y '+esc(formatLiveCoord(row.y))+(row.z!=null?' / Z '+esc(formatLiveCoord(row.z)):'')+(row.updatedAt?'<br>Updated '+esc(row.updatedAt):'')+(row.actor_id?'<br>Actor '+esc(row.actor_id):'')+(row.type==="player"?'<br>Drag marker to preview teleport.':'');}
+function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(row.type||kind.slice(0,-1)||kind),draggable:kind==="players"}).bindPopup(liveMapMarkerPopup(row));liveMapMarkerIndex[liveMapMarkerKey(row)]=marker;marker.on("click",()=>{if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});});if(kind==="players")marker.on("dragend",event=>{const dragged=event.target;const next=dragged.getLatLng();dragged.setLatLng(point);const coords=leafletToDune(next);const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");if(input&&playerId)input.value=playerId;const tx=document.getElementById("teleportX");const ty=document.getElementById("teleportY");if(tx)tx.value=String(Math.round(coords.x));if(ty)ty.value=String(Math.round(coords.y));selectLiveCoordinates(next,{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Drag teleport preview armed. Marker snapped back until Preview Teleport is sent.\\nPlayer: "+(playerId||"FLS ID unavailable")+"\\nX "+Math.round(coords.x)+" / Y "+Math.round(coords.y)+"\\nEnter a verified Z/elevation before live teleport.";playUiSound("click");});marker.addTo(liveMapLayerGroup);});return count;}
+function liveMapVisibleRows(){const layers=liveMapData?.layers||{};const rows=[];if(liveMapChecked("liveLayerPlayers"))rows.push(...(layers.players||[]));if(liveMapChecked("liveLayerVehicles"))rows.push(...(layers.vehicles||[]));if(liveMapChecked("liveLayerBases"))rows.push(...(layers.bases||[]));return rows;}
+function renderLiveMapMarkerTable(){const body=document.getElementById("liveMapMarkerRows");if(!body)return;const rows=liveMapVisibleRows();if(!rows.length){body.innerHTML='<tr><td colspan="3">No markers loaded.</td></tr>';return;}body.innerHTML=rows.slice(0,300).map(row=>'<tr onclick="centerLiveMapMarker(\\''+esc(liveMapMarkerKey(row))+'\\')"><td>'+esc(row.type||"marker")+'</td><td>'+esc(row.name||row.id||"Marker")+'<span class="live-map-marker-label">'+esc(row.status||"unknown")+(row.updatedAt?" / "+row.updatedAt:"")+'</span></td><td>'+esc(formatLiveCoord(row.x))+'<br>'+esc(formatLiveCoord(row.y))+'</td></tr>').join("");}
+function centerLiveMapMarker(key){const rows=liveMapVisibleRows();const row=rows.find(item=>liveMapMarkerKey(item)===key);const marker=liveMapMarkerIndex[key];if(!row)return;const point=liveMapProject(row);if(point&&liveMap){liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});if(marker)marker.openPopup();playUiSound("click");}}
+function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;reconcileTeleportPending();liveMapLayerGroup.clearLayers();liveMapMarkerIndex={};liveMarkerCount=0;const playerRows=liveTeleportPending?(liveMapData.layers?.players||[]).filter(row=>!sameLiveMapPlayer(row,liveTeleportPending.playerId)):liveMapData.layers?.players;liveMarkerCount+=addLiveMapMarkers("players",playerRows);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapData.layers?.vehicles);liveMarkerCount+=addLiveMapMarkers("bases",liveMapData.layers?.bases);liveMarkerCount+=renderPendingTeleportMarker();renderLiveMapMarkerTable();updateLiveMapDebug();}
 function updateLiveMouseCoordinates(latlng){const coords=leafletToDune(latlng);const readout=document.getElementById("liveMouseReadout");if(readout)readout.textContent="X "+formatLiveCoord(coords.x)+" / Y "+formatLiveCoord(coords.y);}
 function selectLiveCoordinates(latlng,options={}){const coords=leafletToDune(latlng);liveSelectedCoordinates={...coords,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(coords.x));setText("liveClickedY",formatLiveCoord(coords.y));const searchX=document.getElementById("liveSearchX");const searchY=document.getElementById("liveSearchY");if(searchX)searchX.value=formatLiveCoord(coords.x);if(searchY)searchY.value=formatLiveCoord(coords.y);if(options.fillTeleport){const teleportX=document.getElementById("teleportX");const teleportY=document.getElementById("teleportY");if(teleportX)teleportX.value=String(Math.round(coords.x));if(teleportY)teleportY.value=String(Math.round(coords.y));}updateLiveMapDebug(latlng);}
 async function copyLiveCoordinates(){if(!liveSelectedCoordinates){playUiSound("warning");return;}const text="X "+formatLiveCoord(liveSelectedCoordinates.x)+", Y "+formatLiveCoord(liveSelectedCoordinates.y);try{await navigator.clipboard.writeText(text);playUiSound("success");addActivity("maps","Coordinates copied",text);}catch{playUiSound("warning");}}
@@ -9295,8 +9673,8 @@ function findLiveMapPlayerByAnyId(playerId){return findLiveMapPlayerByTeleportId
 function fillTeleportFromTargetPlayer(){const targetId=document.getElementById("teleportTargetPlayerId")?.value||"";const target=findLiveMapPlayerByAnyId(targetId);const pos=liveMapPosition(target);if(!target||!pos){const message="Target player position unavailable. Refresh Live Map and choose a player with known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}if(!Number.isFinite(Number(pos.z))||Number(pos.z)===0){const message="Target player has no valid Z/elevation. Teleport to Player requires known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}setValue("teleportX",pos.x);setValue("teleportY",pos.y);setValue("teleportZ",pos.z);setValue("teleportPartitionId",target.partition_id||target.partitionId||0);const point=duneToLeaflet(pos.x,pos.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});document.getElementById("teleportLog").textContent="Loaded target player position for "+(target.name||target.character_name||targetId)+"\\n"+formatLivePosition(pos);playUiSound("click");return target;}
 async function previewTeleportToPlayer(){if(!fillTeleportFromTargetPlayer())return;await previewTeleport();}
 async function executeTeleportToPlayer(){if(!fillTeleportFromTargetPlayer())return;await executeLiveTeleport();}
-function updateLiveMapDebug(latlng){const selected=latlng?leafletToDune(latlng):liveSelectedCoordinates;setText("liveDebugZoom",liveMap?String(liveMap.getZoom().toFixed(2)):"--");if(latlng)setText("liveDebugLatLng",formatLiveCoord(latlng.lat)+", "+formatLiveCoord(latlng.lng));else if(liveSelectedCoordinates)setText("liveDebugLatLng",formatLiveCoord(liveSelectedCoordinates.lat)+", "+formatLiveCoord(liveSelectedCoordinates.lng));else setText("liveDebugLatLng","--");setText("liveDebugDune",selected?("X "+formatLiveCoord(selected.x)+" / Y "+formatLiveCoord(selected.y)):"--");const debug=liveMapData?.debug||{};const loaded=Number(debug.playersLoaded??(liveMapData?.layers?.players||[]).length)||0;const positioned=Number(debug.playersWithPosition??debug.playersWithCoordinates??0)||0;const counts=debug.counts||{players:(liveMapData?.layers?.players||[]).length,vehicles:(liveMapData?.layers?.vehicles||[]).length,bases:(liveMapData?.layers?.bases||[]).length};setText("liveDebugPlayers","Loaded "+loaded+", positioned "+positioned);setText("liveDebugVehicles",String(counts.vehicles||0)+" / "+(debug.entitySources?.vehicles||"unknown"));setText("liveDebugBases",String(counts.bases||0)+" / "+(debug.entitySources?.bases||"unknown"));setText("liveDebugMarkers",String(liveMarkerCount));setText("liveDebugPositionSource",debug.positionSourceTable||"--");setText("liveDebugEntitySource","Vehicles "+(debug.entitySources?.vehicles||"--")+" / Bases "+(debug.entitySources?.bases||"--"));}
-async function refreshLiveMap(){if(!liveMap)return;try{const data=await getJson("/api/live-map/entities");liveMapData=data;renderLiveMapLayers();const counts={players:(data.layers?.players||[]).length,vehicles:(data.layers?.vehicles||[]).length,bases:(data.layers?.bases||[]).length};const debug=data.debug||{};const loaded=Number(debug.playersLoaded??counts.players)||0;const valid=Number(debug.playersWithPosition??debug.playersWithCoordinates??counts.players)||0;const warning=document.getElementById("livePlayerPositionWarning");const entityWarning=document.getElementById("liveEntityAvailability");const playerWord=loaded===1?"player":"players";if(warning){warning.classList.toggle("hidden",!(loaded>0&&valid===0));warning.textContent="Loaded "+loaded+" "+playerWord+", "+valid+" with coordinates";}const vehicleSource=debug.entitySources?.vehicles||"unavailable";const baseSource=debug.entitySources?.bases||"unavailable";const entityUnavailable=counts.vehicles===0&&counts.bases===0&&vehicleSource!=="real"&&baseSource!=="real";if(entityWarning){entityWarning.classList.toggle("hidden",!entityUnavailable);entityWarning.textContent=entityUnavailable?"Bases/vehicles data not available from server yet.":"";}console.debug("[AlphaNine Live Map] entity counts",{players:counts.players,vehicles:counts.vehicles,bases:counts.bases,playersLoaded:loaded,playersWithCoordinates:valid,entitySources:debug.entitySources||{}});setText("liveMapStamp","Loaded "+loaded+" "+playerWord+", "+valid+" with coordinates / Vehicles "+counts.vehicles+" / Bases "+counts.bases);document.getElementById("liveMapLog").textContent=JSON.stringify({counts,entitySources:debug.entitySources||{},debug,sources:data.sources||[],errors:data.errors||[],raw:data},null,2);updateLiveMapDebug();addActivity("maps","Live map refreshed",loaded+" players / "+valid+" positioned / "+counts.vehicles+" vehicles / "+counts.bases+" bases / "+liveMarkerCount+" markers");}catch(e){setText("liveMapStamp","Live map error");document.getElementById("liveMapLog").textContent=betterError(e);addActivity("error","Live map failed",e.message);}}
+function updateLiveMapDebug(latlng){const selected=latlng?leafletToDune(latlng):liveSelectedCoordinates;setText("liveDebugZoom",liveMap?String(liveMap.getZoom().toFixed(2)):"--");if(latlng)setText("liveDebugLatLng",formatLiveCoord(latlng.lat)+", "+formatLiveCoord(latlng.lng));else if(liveSelectedCoordinates)setText("liveDebugLatLng",formatLiveCoord(liveSelectedCoordinates.lat)+", "+formatLiveCoord(liveSelectedCoordinates.lng));else setText("liveDebugLatLng","--");setText("liveDebugDune",selected?("X "+formatLiveCoord(selected.x)+" / Y "+formatLiveCoord(selected.y)):"--");const counts=liveMapData?.debug?.rowCounts||{players:(liveMapData?.layers?.players||[]).length,vehicles:(liveMapData?.layers?.vehicles||[]).length,bases:(liveMapData?.layers?.bases||[]).length};const raw=liveMapData?.debug?.rawDbRowCounts||{};setText("liveDebugPlayers",String(counts.players||0)+" rows / raw "+(raw.players||0));setText("liveDebugVehicles",String(counts.vehicles||0)+" rows / raw "+(raw.vehicles||0));setText("liveDebugBases",String(counts.bases||0)+" rows / raw "+(raw.bases||0));setText("liveDebugMarkers",String(liveMarkerCount));const debug=liveMapData?.debug||{};setText("liveDebugPositionSource",(debug.connectionSource||"--")+" "+(debug.usedHost?debug.usedHost+":"+debug.usedPort:""));setText("liveDebugEntitySource","Tunnel "+(debug.tunnelListening?"running":"not running")+" / Get-VM "+(debug.didCallGetVM?"called":"not called"));}
+async function refreshLiveMap(){if(!liveMap)return;try{const started=performance.now();const debugMarkers=new URLSearchParams(location.search).get("debugMarkers")==="1";const data=await getJson("/api/live-map/markers"+(debugMarkers?"?debugMarkers=1":""),{timeoutMs:35000});mergeLiveMapConfig(data);setLiveMapImage();liveMapData=data;renderLiveMapLayers();const counts=data.debug?.rowCounts||{players:(data.layers?.players||[]).length,vehicles:(data.layers?.vehicles||[]).length,bases:(data.layers?.bases||[]).length};const elapsed=Math.round(performance.now()-started);const boundsWarning=document.getElementById("liveMapBoundsWarning");const unavailable=document.getElementById("liveEntityAvailability");const allRows=data.rows||[];const outside=allRows.filter(row=>!liveMapWithinBounds(row)).length;if(boundsWarning){boundsWarning.classList.toggle("hidden",outside===0&&!data.debug?.outsideBoundsWarning);boundsWarning.textContent=outside?outside+" marker(s) are outside Hagga Basin bounds. Check map/partition before trusting alignment.":"Some returned coordinates are outside configured map bounds.";}if(unavailable){const dbMissing=data.debug?.dbConnected===false&&!data.demo;const hasErrors=(data.errors||[]).length>0;unavailable.classList.toggle("hidden",!dbMissing&&!hasErrors&&!data.demo);unavailable.textContent=data.demo?"Debug marker mode: fake markers are shown for UI rendering validation only.":(dbMissing?"Live Map database is not connected. Start the DB tunnel or configure manual DB settings.":(hasErrors?(data.errors||[]).join(" / "):""));}setText("liveMapStamp",(data.demo?"Debug markers / ":"")+"Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");const log=document.getElementById("liveMapLog");if(log)log.textContent=JSON.stringify({demo:Boolean(data.demo),message:data.message||"",db:{connected:data.debug?.dbConnected,source:data.debug?.connectionSource,resolvedSource:data.debug?.resolvedSource,manualDbConfigExists:data.debug?.manualDbConfigExists,configuredHost:data.debug?.configuredDbHost,configuredPort:data.debug?.configuredDbPort,configuredName:data.debug?.configuredDbName,usedHost:data.debug?.usedHost,usedPort:data.debug?.usedPort,tunnelExpected:data.debug?.tunnelExpected,tunnelListening:data.debug?.tunnelListening,lastDbError:data.debug?.lastDbError,didCallGetVM:data.debug?.didCallGetVM},rowCounts:data.debug?.rowCounts,rawDbRowCounts:data.debug?.rawDbRowCounts,rejectedCoordinateCount:data.debug?.rejectedCoordinateCount,coordinateRange:data.debug?.coordinateRange,bounds:data.debug?.bounds,sources:data.sources||[],errors:data.errors||[],sample:{player:data.layers?.players?.[0]||null,vehicle:data.layers?.vehicles?.[0]||null,base:data.layers?.bases?.[0]||null}},null,2);updateLiveMapDebug();addActivity("maps",data.demo?"Live map debug markers rendered":"Live map refreshed",(counts.players||0)+" players / "+(counts.vehicles||0)+" vehicles / "+(counts.bases||0)+" bases / "+liveMarkerCount+" rendered");}catch(e){setText("liveMapStamp","Live map error");const log=document.getElementById("liveMapLog");if(log)log.textContent=betterError(e);const unavailable=document.getElementById("liveEntityAvailability");if(unavailable){unavailable.classList.remove("hidden");unavailable.textContent="Live Map database is not connected. Start the DB tunnel or configure manual DB settings.";}addActivity("error","Live map failed",e.message);}}
 function teleportPayload(){const p=selectedPlayer();return{playerId:document.getElementById("teleportPlayerId").value,characterName:p?.character_name||p?.name||"",x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value,partitionId:document.getElementById("teleportPartitionId")?.value||0,map:"HaggaBasin"};}
 function renderTeleportResult(data){return (data.message||data.error||data.status||"Teleport response")+(data.warning?"\\nWarning: "+data.warning:"")+"\\nEndpoint: "+(data.endpoint||"-")+"\\nCommand: "+(data.command||"-")+"\\nPayload:\\n"+JSON.stringify(data.request||{},null,2)+(data.response?"\\n\\nReceiver response:\\n"+JSON.stringify(data.response,null,2):"")+(data.reasons?.length?"\\n\\nReadiness:\\n"+data.reasons.join("\\n"):"");}
 async function refreshAfterTeleport(payload,data){if(!data?.ok||!liveMap)return;const playerId=String(payload.playerId||data.request?.playerId||data.request?.fls_id||"").trim();const target={x:Number(data.request?.x??payload.x),y:Number(data.request?.y??payload.y),z:Number(data.request?.z??payload.z)};if(!playerId||!Number.isFinite(target.x)||!Number.isFinite(target.y))return;const oldPosition=liveMapPosition(findLiveMapPlayerByTeleportId(playerId));liveTeleportPending={playerId,target:{x:target.x,y:target.y,z:Number.isFinite(target.z)?target.z:null},oldPosition,sentAt:Date.now()};console.debug("[AlphaNine Live Map] teleport sent, refreshing player position",{playerId,oldPosition,target:liveTeleportPending.target});addActivity("maps","Teleport sent, waiting for server position update","Player "+playerId+" target "+formatLivePosition(liveTeleportPending.target));clearCachedTeleportPlayer(playerId);renderLiveMapLayers();const log=document.getElementById("teleportLog");if(log)log.textContent+=(log.textContent?"\\n\\n":"")+"Teleport sent, waiting for server position update...";await refreshLiveMap();}
@@ -9309,7 +9687,7 @@ async function getJson(url, options={}){const controller=new AbortController();c
 function setValue(id,value){const el=document.getElementById(id);if(el)el.value=value==null?"":String(value);}
 function getValue(id){return document.getElementById(id)?.value||"";}
 function setChecked(id,value){const el=document.getElementById(id);if(el)el.checked=Boolean(value);}
-function resultBox(id,data){const el=document.getElementById(id);if(!el)return;el.className="test-result "+(data.ok?"ok":"bad");el.textContent=(data.message||data.status||data.error||"Done")+(data.error?"\\n"+data.error:"");}
+function resultBox(id,data){const el=document.getElementById(id);if(!el)return;el.className="test-result "+(data.ok?"ok":"bad");el.textContent=(data.message||data.status||data.error||"Done")+(data.error&&data.error!==data.message?"\\n"+data.error:"");}
 function configPayload(prefix){const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),serverInstallPath:getValue(prefix+"ServerInstallPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey")};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");if(dbPass&&dbPass!=="********")payload.databasePassword=dbPass;if(token&&token!=="********")payload.receiverToken=token;return payload;}
 function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);setValue("setupReceiverSshHost",config.receiverSshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");setServerInstallPathWarning("setupServerInstallPathWarning",config.serverInstallPathStatus);}
 function setSshKeyWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.exists);el.className=ok?"empty mt":"warning mt";el.textContent=status?.message||"SSH key file not found.";if(status?.path)el.textContent+=" "+status.path;}
@@ -9339,7 +9717,7 @@ async function initSetup(){try{const data=await getJson("/api/setup/status");con
 async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.installPath){setValue("setupServerInstallPath",data.server.installPath);await refreshServerInstallPathWarning("setupServerInstallPath","setupServerInstallPathWarning");}if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}
 async function finishSetup(){try{const payload={...configPayload("setup"),setupComplete:true};const pathCheck=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload.serverInstallPath||""));setServerInstallPathWarning("setupServerInstallPathWarning",pathCheck.serverInstallPath);if(!pathCheck.serverInstallPath?.valid)throw new Error("Selected folder does not appear to be a valid Dune Awakening server installation.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified)throw new Error("Setup config save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);fillSettings(data.config||payload);closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
-async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);refreshReceiverStatus();refreshBattlegroups();}catch(e){setText("settingsSaveStatus",betterError(e));}}
+async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);refreshReceiverStatus();refreshBattlegroups();refreshDatabaseTunnelStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
 async function saveSettings(){try{const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...appConfig,...collectSettings()})});fillSettings(data.config||{});setText("settingsSaveStatus","Settings saved. Restart the suite for receiver startup environment changes.");playUiSound("success");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
 async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");const label=data.ok?"Receiver Online":"Receiver Offline";setText("receiverManagerStatus",label+" / "+data.healthUrl);setText("settingsReceiver",label);tone("receiverState",label);if(!data.ok)tone("rabbitState","Dry Run Active");return data;}catch(e){setText("receiverManagerStatus",betterError(e));tone("receiverState","Receiver Offline");tone("rabbitState","Dry Run Active");}}
 async function receiverAction(action){try{if(action==="start")await saveSettings();const data=await getJson("/api/receiver/"+action,{method:"POST"});setText("receiverManagerStatus",data.message||data.status||"Receiver action complete");await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){setText("receiverManagerStatus",betterError(e));playUiSound("warning");}}
@@ -9378,7 +9756,7 @@ function betterError(e){return e&&e.message?e.message:"Command failed. Check tha
 async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status");renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
 async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!(await appConfirm("Confirm VM action","Are you sure you want to "+action+" the VM?","Run "+action,"Cancel")))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
-async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const data=await getJson("/api/action/"+action,{method:"POST"});document.getElementById("serverLog").textContent=data.stdout||data.stderr||data.error||"Done.";syncLogs();addActivity("action",action+" completed",(data.error||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(refresh,1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
+async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const data=await getJson("/api/action/"+action,{method:"POST"});let output=data.stdout||data.stderr||data.error||"Done.";if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
 async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>'<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td></tr>').join(""):'<tr><td colspan="5">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
 function setText(id,value){const el=document.getElementById(id);if(el)el.textContent=String(value);}
@@ -9394,15 +9772,18 @@ async function restartReceiverWithCurrentConfig(){const box=document.getElementB
 async function regenerateReceiverToken(){const box=document.getElementById("envReceiverTokenWarning");try{if(!(await appConfirm("Regenerate receiver token","Regenerate the receiver token and restart the managed receiver?","Regenerate","Cancel")))return;if(box){box.classList.remove("hidden");box.textContent="Regenerating receiver token...";}const data=await getJson("/api/receiver/token/regenerate",{method:"POST"});if(box)box.textContent=data.message||"Receiver token regenerated.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
 function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=adminLiveGiveAvailable?"empty mt":"warning mt";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
 async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
-function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.message||data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
+function renderDatabaseTunnelStatus(data){const tunnel=data?.tunnel||data||{};const status=tunnel.running?"Running":"Not Running";tone("dbTunnelStatus",status);setText("dbTunnelDetail","Port: "+(tunnel.port||15432)+" / PID: "+(tunnel.pid||"--"));setText("dbTunnelStatusDetail",status);setText("dbTunnelPort",tunnel.port||15432);setText("dbTunnelPid",tunnel.pid||"--");setText("settingsDbTunnelStatus",status);setText("settingsDbTunnelPort",tunnel.port||15432);setText("settingsDbTunnelPid",tunnel.pid||"--");}
+function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.message||data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");if(data?.tunnel)renderDatabaseTunnelStatus(data.tunnel);badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
 function renderDatabaseLocation(data){const folder=data?.folder||"";setText("dbBackupPath",folder||"Unknown");setText("dbBackupDefaultPath",data?.defaultFolder||"Unknown");tone("dbMgmtBackupFolderState",folder?"Configured":"Missing");}
 function backupAvailabilityLabel(row){if(row?.availabilityStatus)return row.availabilityStatus;if(row?.vmBackupPath||row?.vmPath)return"Metadata only";return"Local file";}
 function importAvailabilityLabel(source){if(!source)return"Metadata only";if(source.sourceType==="local")return"Local file";if(source.availability?.available)return"Available on VM";if(source.availability?.known)return"Missing on VM";return"Metadata only";}
 function renderDatabaseBackups(data){const rows=document.getElementById("dbBackupRows");if(!rows)return;const backups=data?.backups||[];window.databaseBackupRows=backups;if(!backups.length){rows.innerHTML='<tr><td colspan="5">No backups found in the selected folder.</td></tr>';return;}rows.innerHTML=backups.map((row,index)=>{const target=row.vmBackupPath||row.vmPath?("VM: "+(row.vmBackupPath||row.vmPath)):row.path;const availability=backupAvailabilityLabel(row);return '<tr><td>'+esc(row.filename)+'<div class="subtle">'+esc(availability)+'</div></td><td>'+esc(new Date(row.date).toLocaleString())+'</td><td>'+esc(row.sizeLabel||row.size)+'</td><td><div class="env-path-value">'+esc(target)+'</div>'+(row.vmBackupFilename?'<div class="subtle">Import argument: '+esc(row.vmBackupFilename)+'</div>':'')+(row.vmPath?'<div class="subtle">Metadata: '+esc(row.path)+'</div>':'')+'</td><td><div class="action-row"><button onclick="copyDatabaseBackupPath('+index+')">Copy path</button><button onclick="selectDatabaseRestoreBackup('+index+')">Select for Import</button></div></td></tr>';}).join("");}
 async function refreshDatabaseStatus(){try{renderDatabaseStatus(await getJson("/api/database/status",{timeoutMs:15000}));}catch(e){renderDatabaseStatus({ok:false,status:"unavailable",error:betterError(e)});}}
+async function refreshDatabaseTunnelStatus(){try{const data=await getJson("/api/database/tunnel/status",{timeoutMs:8000});renderDatabaseTunnelStatus(data);return data;}catch(e){const fallback={running:false,status:"Not Running",port:getValue("settingsDatabasePort")||15432,pid:"",error:betterError(e)};renderDatabaseTunnelStatus(fallback);return fallback;}}
+async function startDatabaseTunnel(){const result=document.getElementById("dbTunnelTestResult")||document.getElementById("settingsDbTest");try{if(result){result.className="test-result";result.textContent="Starting DB tunnel...";}const data=await getJson("/api/database/tunnel/start",{method:"POST",timeoutMs:30000});renderDatabaseTunnelStatus(data.tunnel||data);if(result){result.className="test-result "+(data.ok?"ok":"bad");result.textContent=(data.message||data.error||"DB tunnel start requested.")+(data.tunnel?("\\nPort: "+data.tunnel.port+"\\nPID: "+(data.tunnel.pid||data.startedPid||"--")):"");}playUiSound(data.ok?"success":"warning");return data;}catch(e){if(result){result.className="test-result bad";result.textContent=betterError(e);}playUiSound("warning");return null;}}
 async function refreshDatabaseLocation(){try{renderDatabaseLocation(await getJson("/api/database/backup-location"));}catch(e){renderDatabaseLocation({ok:false,folder:"",defaultFolder:"",error:betterError(e)});setText("dbLocationResult",betterError(e));}}
 async function refreshDatabaseBackups(){try{const data=await getJson("/api/database/backups");renderDatabaseBackups(data);}catch(e){const rows=document.getElementById("dbBackupRows");if(rows)rows.innerHTML='<tr><td colspan="5">'+esc(betterError(e))+'</td></tr>';}}
-async function refreshDatabaseManagement(){await Promise.all([refreshDatabaseStatus(),refreshDatabaseLocation(),refreshDatabaseBackups()]);await refreshDatabaseImportReadiness();const activeJob=window.activeDatabaseRestoreJobId||localStorage.getItem("activeDatabaseRestoreJobId")||"";if(activeJob){const el=document.getElementById("dbRestoreResult");if(el){el.className="warning mt";el.textContent="Import job is still running. Reconnecting to import status...";}pollDatabaseRestoreStatus(activeJob).catch(e=>setText("dbRestoreResult",betterError(e)));}addActivity("database","Database management refreshed","Status, backup location, and recent backups loaded.");}
+async function refreshDatabaseManagement(){await Promise.all([refreshDatabaseStatus(),refreshDatabaseTunnelStatus(),refreshDatabaseLocation(),refreshDatabaseBackups()]);await refreshDatabaseImportReadiness();const activeJob=window.activeDatabaseRestoreJobId||localStorage.getItem("activeDatabaseRestoreJobId")||"";if(activeJob){const el=document.getElementById("dbRestoreResult");if(el){el.className="warning mt";el.textContent="Import job is still running. Reconnecting to import status...";}pollDatabaseRestoreStatus(activeJob).catch(e=>setText("dbRestoreResult",betterError(e)));}addActivity("database","Database management refreshed","Status, tunnel, backup location, and recent backups loaded.");}
 async function chooseDatabaseBackupFolder(){try{let folder="";if(window.alphaNineSuite?.chooseDatabaseBackupFolder){const result=await window.alphaNineSuite.chooseDatabaseBackupFolder();if(result?.canceled)return;folder=result.folderPath||"";}else{throw new Error("Folder picker is not available in this desktop build.");}if(!folder)return;const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({folder})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder saved: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
 async function openDatabaseBackupFolder(){try{const folder=document.getElementById("dbBackupPath")?.textContent||"";if(window.alphaNineSuite?.openPath)await window.alphaNineSuite.openPath(folder);else window.open("file:///"+folder.replace(/\\\\/g,"/"),"_blank");}catch(e){setText("dbLocationResult",betterError(e));}}
 async function resetDatabaseBackupFolder(){try{const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reset:true})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder reset: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
@@ -9525,7 +9906,7 @@ function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setVie
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
 renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
-setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){refreshLiveMap();refreshTeleportReadiness();}},12000);
+setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>
 </body>
 </html>`;
@@ -9686,6 +10067,19 @@ async function route(req, res) {
     await json(res, await databaseStatus());
     return;
   }
+  if (url.pathname === "/api/database/tunnel/status" && req.method === "GET") {
+    await json(res, await databaseTunnelStatus());
+    return;
+  }
+  if (url.pathname === "/api/database/tunnel/start" && req.method === "POST") {
+    try {
+      const result = await startDatabaseTunnel();
+      await json(res, result, result.ok ? 200 : 409);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 500);
+    }
+    return;
+  }
   if (url.pathname === "/api/database/backup-location" && req.method === "GET") {
     try {
       const folder = ensureDatabaseBackupDir();
@@ -9784,9 +10178,37 @@ async function route(req, res) {
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }
-  if (url.pathname === "/api/live-map/entities" && req.method === "GET") {
-    try { await json(res, await liveMapEntities()); }
-    catch (error) { await json(res, { ok: false, layers: { players: [], vehicles: [], bases: [] }, errors: [error.message], error: error.message }, 500); }
+  if ((url.pathname === "/api/live-map/markers" || url.pathname === "/api/live-map/entities") && req.method === "GET") {
+    if (url.searchParams.get("debugMarkers") === "1") {
+      await json(res, liveMapDemoMarkersPayload());
+      return;
+    }
+    try { await json(res, await liveMapMarkersPayload()); }
+    catch (error) { await json(res, { ok: false, rows: [], layers: { players: [], vehicles: [], bases: [] }, debug: liveMapDebugFromLayers({ players: [], vehicles: [], bases: [] }, { players: null, vehicles: null, bases: null }, null, [error]), errors: [error.message], error: error.message, ...liveMapConfigPayload() }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/live-map/debug" && req.method === "GET") {
+    try {
+      const payload = url.searchParams.get("debugMarkers") === "1" ? liveMapDemoMarkersPayload() : await liveMapMarkersPayload();
+      await json(res, { ok: payload.ok, generatedAt: payload.generatedAt, debug: payload.debug, sources: payload.sources, errors: payload.errors, map: payload.map, maps: payload.maps });
+    } catch (error) {
+      await json(res, { ok: false, debug: liveMapDebugFromLayers({ players: [], vehicles: [], bases: [] }, { players: null, vehicles: null, bases: null }, null, [error]), errors: [error.message], error: error.message, ...liveMapConfigPayload() }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/live-map/players" && req.method === "GET") {
+    try { const layer = await liveMapLayer("players"); await json(res, { ok: true, rows: layer.rows, debug: liveMapDebugFromLayers({ players: layer.rows, vehicles: [], bases: [] }, { players: layer.debug, vehicles: null, bases: null }, layer.db, []), ...liveMapConfigPayload() }); }
+    catch (error) { await json(res, { ok: false, rows: [], debug: liveMapDebugFromLayers({ players: [], vehicles: [], bases: [] }, { players: null, vehicles: null, bases: null }, null, [error]), errors: [error.message], error: error.message, ...liveMapConfigPayload() }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/live-map/vehicles" && req.method === "GET") {
+    try { const layer = await liveMapLayer("vehicles"); await json(res, { ok: true, rows: layer.rows, debug: liveMapDebugFromLayers({ players: [], vehicles: layer.rows, bases: [] }, { players: null, vehicles: layer.debug, bases: null }, layer.db, []), ...liveMapConfigPayload() }); }
+    catch (error) { await json(res, { ok: false, rows: [], debug: liveMapDebugFromLayers({ players: [], vehicles: [], bases: [] }, { players: null, vehicles: null, bases: null }, null, [error]), errors: [error.message], error: error.message, ...liveMapConfigPayload() }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/live-map/bases" && req.method === "GET") {
+    try { const layer = await liveMapLayer("bases"); await json(res, { ok: true, rows: layer.rows, debug: liveMapDebugFromLayers({ players: [], vehicles: [], bases: layer.rows }, { players: null, vehicles: null, bases: layer.debug }, layer.db, []), ...liveMapConfigPayload() }); }
+    catch (error) { await json(res, { ok: false, rows: [], debug: liveMapDebugFromLayers({ players: [], vehicles: [], bases: [] }, { players: null, vehicles: null, bases: null }, null, [error]), errors: [error.message], error: error.message, ...liveMapConfigPayload() }, 500); }
     return;
   }
   if (url.pathname === "/api/live-map/teleport" && req.method === "POST") {
@@ -10010,6 +10432,9 @@ async function route(req, res) {
   if (url.pathname.startsWith("/api/action/") && req.method === "POST") {
     const action = decodeURIComponent(url.pathname.split("/").pop());
     const result = await battlegroup(action);
+    if (action === "start") {
+      result.dbTunnel = await startDatabaseTunnel().catch((error) => ({ ok: false, error: error.message }));
+    }
     await json(res, result, result.ok ? 200 : 500);
     return;
   }

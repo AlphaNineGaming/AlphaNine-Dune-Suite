@@ -23,6 +23,12 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - Settings export and import
 - GitHub update check
 
+## Release Notes
+
+### 0.3.3-beta
+
+Live Map has been rebuilt using Red-Blink-style map calibration and marker APIs, but real DB marker validation is still pending. Debug/demo marker mode exists only for UI testing.
+
 ## Requirements
 
 - Windows 10 or Windows 11

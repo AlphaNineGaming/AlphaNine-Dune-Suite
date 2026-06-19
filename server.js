@@ -6536,7 +6536,7 @@ function liveMapNumber(value) {
 // - Bounds and map images are sourced from Red-Blink's dune-awakening-selfhost-docker live map implementation.
 // Keep this generic: player, vehicle, base, and future marker types should all pass through the same x/y/z marker pipeline.
 const LIVE_MAP_WORLD_BOUNDS = {
-  HaggaBasin: { key: "HaggaBasin", label: "Hagga Basin", minX: -456752.21, maxX: 354547.46, minY: -450630.14, maxY: 353821.95, flipY: false },
+  HaggaBasin: { key: "HaggaBasin", label: "Hagga Basin", minX: -456752.21, maxX: 354547.46, minY: -450630.14, maxY: 353821.95, flipY: true },
   DeepDesert: { key: "DeepDesert", label: "Deep Desert", minX: -1268624.82, maxX: 1163312.83, minY: -1266548.17, maxY: 1162416.13, flipY: false },
   Arrakeen: { key: "Arrakeen", label: "Arrakeen", minX: -32000, maxX: 17000, minY: -10000, maxY: 9500, flipY: true },
   HarkoVillage: { key: "HarkoVillage", label: "Harko Village", minX: -5000, maxX: 14500, minY: -5500, maxY: 32000 }
@@ -9635,7 +9635,7 @@ const LIVE_MAP_IMAGE={width:4096,height:4096};
 // liveLatLngToWorld performs the reverse for mouse readout, coordinate search, and teleport preview.
 // Do not add per-entity coordinate hacks here; fix calibration/bounds once so every marker type stays aligned.
 const LIVE_MAP_CONFIGS={
-  HaggaBasin:{key:"HaggaBasin",label:"Hagga Basin",minX:-456752.21,maxX:354547.46,minY:-450630.14,maxY:353821.95,flipY:false,image:"/assets/redblink-hagga-basin.png",fallbackImage:"/assets/world-map-overland.png",source:"Red-Blink dune-awakening-selfhost-docker console/web/public/images/maps/hagga-basin.png"},
+  HaggaBasin:{key:"HaggaBasin",label:"Hagga Basin",minX:-456752.21,maxX:354547.46,minY:-450630.14,maxY:353821.95,flipY:true,image:"/assets/redblink-hagga-basin.png",fallbackImage:"/assets/world-map-overland.png",source:"Red-Blink dune-awakening-selfhost-docker console/web/public/images/maps/hagga-basin.png"},
   DeepDesert:{key:"DeepDesert",label:"Deep Desert",minX:-1268624.82,maxX:1163312.83,minY:-1266548.17,maxY:1162416.13,flipY:false,image:"/assets/redblink-deep-desert.png",fallbackImage:"/assets/world-map-overland.png"},
   Arrakeen:{key:"Arrakeen",label:"Arrakeen",minX:-32000,maxX:17000,minY:-10000,maxY:9500,flipY:true,image:"/assets/world-map-overland.png"},
   HarkoVillage:{key:"HarkoVillage",label:"Harko Village",minX:-5000,maxX:14500,minY:-5500,maxY:32000,image:"/assets/world-map-overland.png"}

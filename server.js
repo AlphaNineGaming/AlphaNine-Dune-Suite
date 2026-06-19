@@ -13,7 +13,10 @@ const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
 const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || path.join(__dirname, "config.json");
-const TELEPORT_PRESETS_PATH = process.env.ALPHANINE_TELEPORT_PRESETS_PATH || path.join(__dirname, "assets", "teleport-location-presets.json");
+const BUNDLED_TELEPORT_PRESETS_PATH = path.join(__dirname, "assets", "teleport-location-presets.json");
+const TELEPORT_PRESETS_PATH = process.env.ALPHANINE_TELEPORT_PRESETS_PATH || (process.env.APPDATA
+  ? path.join(process.env.APPDATA, "AlphaNine Dune Suite", "teleport-location-presets.json")
+  : path.join(__dirname, "data", "teleport-location-presets.json"));
 const TELEPORT_PLACEHOLDER_COMMAND = "teleport {playerId} {x} {y} {z}";
 const ADMIN_AUDIT_LOG = process.env.APPDATA
   ? path.join(process.env.APPDATA, "AlphaNine Dune Suite", "admin-audit.log")
@@ -7101,27 +7104,95 @@ function renderTeleportTemplate(template, values) {
   ));
 }
 
+function readTeleportPresetRows(filePath) {
+  if (!fs.existsSync(filePath)) return [];
+  const raw = JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+  return Array.isArray(raw) ? raw : Array.isArray(raw.presets) ? raw.presets : [];
+}
+
+function normalizeTeleportPreset(row, origin) {
+  if (!row || row.enabled === false || row.verified !== true) return null;
+  const x = Number(row.x), y = Number(row.y), z = Number(row.z);
+  const partitionId = Number(row.partition_id ?? row.partitionId ?? 0);
+  const preset = {
+    name: String(row.name || "").trim(),
+    map: String(row.map || "HaggaBasin").trim(),
+    x,
+    y,
+    z,
+    partition_id: Number.isFinite(partitionId) ? Math.trunc(partitionId) : 0,
+    verified: true,
+    source: String(row.source || "verified-location").trim(),
+    source_actor_id: String(row.source_actor_id || "").trim(),
+    source_player_name: String(row.source_player_name || "").trim(),
+    created_at: String(row.created_at || "").trim(),
+    origin
+  };
+  if (!preset.name || ![preset.x, preset.y, preset.z].every(Number.isFinite) || preset.z === 0) return null;
+  if (!Coordinates.withinBounds(preset, preset.map)) return null;
+  return preset;
+}
+
 function loadTeleportLocationPresets() {
   try {
-    if (!fs.existsSync(TELEPORT_PRESETS_PATH)) return { ok: true, presets: [], path: TELEPORT_PRESETS_PATH };
-    const raw = JSON.parse(fs.readFileSync(TELEPORT_PRESETS_PATH, "utf8").replace(/^\uFEFF/, ""));
-    const rows = Array.isArray(raw) ? raw : Array.isArray(raw.presets) ? raw.presets : [];
-    const presets = rows.filter((row) => row && row.enabled !== false).map((row) => {
-      const x = Number(row.x), y = Number(row.y), z = Number(row.z);
-      const partitionId = Number(row.partition_id ?? row.partitionId ?? 0);
-      return {
-        name: String(row.name || "Unnamed location").trim(),
-        map: String(row.map || "HaggaBasin").trim(),
-        x,
-        y,
-        z,
-        partition_id: Number.isFinite(partitionId) ? Math.trunc(partitionId) : 0
-      };
-    }).filter((row) => row.name && [row.x, row.y, row.z].every(Number.isFinite) && row.z !== 0);
-    return { ok: true, presets, path: TELEPORT_PRESETS_PATH };
+    const bundled = readTeleportPresetRows(BUNDLED_TELEPORT_PRESETS_PATH).map((row) => normalizeTeleportPreset(row, "bundled")).filter(Boolean);
+    const saved = readTeleportPresetRows(TELEPORT_PRESETS_PATH).map((row) => normalizeTeleportPreset(row, "saved")).filter(Boolean);
+    const byName = new Map();
+    for (const preset of [...bundled, ...saved]) byName.set(preset.name.toLowerCase(), preset);
+    return { ok: true, presets: [...byName.values()], path: TELEPORT_PRESETS_PATH, bundledPath: BUNDLED_TELEPORT_PRESETS_PATH };
   } catch (error) {
-    return { ok: false, presets: [], path: TELEPORT_PRESETS_PATH, error: error.message };
+    return { ok: false, presets: [], path: TELEPORT_PRESETS_PATH, bundledPath: BUNDLED_TELEPORT_PRESETS_PATH, error: error.message };
   }
+}
+
+function teleportPlayerRowMatches(row, value) {
+  const expected = String(value || "").trim();
+  if (!expected) return false;
+  return [row.id, row.actor_id, row.pawn_entity_id, row.fls_id, row.funcom_id, row.player_controller_id, row.account_id]
+    .some((candidate) => String(candidate || "").trim() === expected);
+}
+
+async function saveCurrentPlayerTeleportPreset(payload) {
+  if (payload.confirmed !== true) throw new Error("Confirm that the player is standing at a safe location before saving the preset.");
+  const name = String(payload.name || "").trim();
+  if (!name || name.length > 80 || /[\u0000-\u001f]/.test(name)) throw new Error("Preset name must be between 1 and 80 printable characters.");
+  const actorId = String(payload.actorId || "").trim();
+  const playerId = String(payload.playerId || "").trim();
+  const layer = await liveMapActorsTransformPlayers();
+  const player = layer.rows.find((row) => (actorId && String(row.actor_id || row.id) === actorId) || teleportPlayerRowMatches(row, playerId));
+  if (!player) throw new Error("Current player position could not be verified. Refresh Live Map and select the player again.");
+  if (liveMapNormalizeStatus(player.status || player.online_status) !== "online") throw new Error("Only a currently online player position can be saved as a safe preset.");
+  if (![player.x, player.y, player.z].every((value) => Number.isFinite(Number(value))) || Number(player.z) === 0) {
+    throw new Error("Current player position does not include a safe X/Y/Z transform.");
+  }
+  const preset = {
+    enabled: true,
+    verified: true,
+    name,
+    map: String(player.map || "HaggaBasin"),
+    x: Number(player.x),
+    y: Number(player.y),
+    z: Number(player.z),
+    partition_id: Math.trunc(Number(player.partition_id || 0)),
+    source: "online-player-position",
+    source_actor_id: String(player.actor_id || player.id || ""),
+    source_player_name: String(player.character_name || player.name || ""),
+    created_at: new Date().toISOString()
+  };
+  if (!Coordinates.withinBounds(preset, preset.map)) throw new Error("Current player position is outside the configured map bounds.");
+  const rows = readTeleportPresetRows(TELEPORT_PRESETS_PATH);
+  const existingIndex = rows.findIndex((row) => String(row?.name || "").trim().toLowerCase() === name.toLowerCase());
+  if (existingIndex >= 0 && payload.overwrite !== true) {
+    const error = new Error(`A verified preset named ${name} already exists.`);
+    error.statusCode = 409;
+    throw error;
+  }
+  if (existingIndex >= 0) rows[existingIndex] = preset;
+  else rows.push(preset);
+  fs.mkdirSync(path.dirname(TELEPORT_PRESETS_PATH), { recursive: true });
+  fs.writeFileSync(TELEPORT_PRESETS_PATH, JSON.stringify({ version: 1, presets: rows }, null, 2), "utf8");
+  appendAdminAudit("teleport_preset_saved", { name, map: preset.map, x: preset.x, y: preset.y, z: preset.z, partitionId: preset.partition_id, source: preset.source, actorId: preset.source_actor_id });
+  return { ok: true, message: `Verified teleport preset saved: ${name}`, preset: normalizeTeleportPreset(preset, "saved"), ...loadTeleportLocationPresets() };
 }
 
 function matchingTeleportPreset(payload) {
@@ -7130,38 +7201,59 @@ function matchingTeleportPreset(payload) {
   const name = String(payload.presetName || "").trim();
   const x = Number(payload.x);
   const y = Number(payload.y);
+  const map = String(payload.map || "HaggaBasin");
+  const partitionId = Math.trunc(Number(payload.partition_id ?? payload.partitionId ?? 0));
   return result.presets.find((preset) => (
-    (name && preset.name === name)
-    || (preset.map === String(payload.map || "HaggaBasin") && Math.hypot(preset.x - x, preset.y - y) <= 1)
+    (!name || preset.name === name)
+    && preset.map === map
+    && preset.partition_id === partitionId
+    && Math.hypot(preset.x - x, preset.y - y) <= 1
   )) || null;
 }
 
+async function verifiedTeleportActor(payload, source) {
+  const actorId = String(payload.targetActorId || "").trim();
+  if (!actorId) throw new Error("Exact actor teleport requires a target actor id. Refresh Live Map and select the actor again.");
+  const requestedType = String(payload.targetActorType || "").trim().toLowerCase();
+  const loaders = source === "player-position" || requestedType === "player"
+    ? [liveMapActorsTransformPlayers]
+    : requestedType === "vehicle"
+      ? [liveMapActorsTransformVehicles]
+      : requestedType === "base"
+        ? [liveMapActorsTransformBases]
+        : [liveMapActorsTransformPlayers, liveMapActorsTransformVehicles, liveMapActorsTransformBases];
+  for (const load of loaders) {
+    const layer = await load();
+    const actor = layer.rows.find((row) => String(row.actor_id || row.id) === actorId);
+    if (actor) return actor;
+  }
+  throw new Error(`Exact actor position could not be verified for actor ${actorId}.`);
+}
+
 async function resolveTeleportZ(payload) {
-  const preset = matchingTeleportPreset(payload);
-  const raw = String(payload.z ?? "").trim();
-  const source = preset ? "location-preset" : String(payload.elevationSource || (raw ? "manual-input" : "unknown"));
-  let sourceZ = preset ? preset.z : payload.z;
-  if (source === "live-map-drag") {
+  const requestedSource = String(payload.elevationSource || "unknown");
+  if (requestedSource === "live-map-drag") {
     throw new Error("Teleport blocked: safe ground elevation could not be calculated for this location.");
   }
+  const preset = requestedSource === "location-preset" ? matchingTeleportPreset(payload) : null;
+  const source = preset ? "location-preset" : requestedSource;
+  let sourceZ = preset ? preset.z : payload.z;
+  if (requestedSource === "location-preset" && !preset) {
+    throw new Error("Verified preset coordinates no longer match. Reload the preset before teleporting.");
+  }
   if (source === "player-position" || source === "actor-transform") {
-    const actorId = String(payload.targetActorId || "").trim();
-    if (!actorId) throw new Error("Live player elevation requires a target actor id. Refresh Live Map and select the target player again.");
-    const layer = await liveMapActorsTransformPlayers();
-    const actor = layer.rows.find((row) => String(row.actor_id || row.id) === actorId);
-    if (!actor) throw new Error(`Live player elevation could not be verified for actor ${actorId}.`);
+    const actor = await verifiedTeleportActor(payload, source);
     if (Math.hypot(Number(actor.x) - Number(payload.x), Number(actor.y) - Number(payload.y)) > 5) {
-      throw new Error("The target player moved after selection. Refresh Live Map and preview the current position again.");
+      throw new Error("The selected actor moved after selection. Refresh Live Map and load the exact actor position again.");
     }
     sourceZ = actor.z;
   }
   const resolved = Coordinates.resolveElevation({
     z: sourceZ,
-    source,
-    confirmed: source !== "manual-input" || payload.elevationConfirmed === true
+    source
   });
   if (!resolved.safe) {
-    throw new Error(`${resolved.reason} Enter and confirm a verified Z, choose a saved preset, or use a live player position.`);
+    throw new Error(`${resolved.reason} Choose a verified preset, another player, or an exact actor position.`);
   }
   return { z: resolved.z, source: resolved.source, warning: "", presetName: preset?.name || "" };
 }
@@ -9106,18 +9198,21 @@ function appPage() {
             </div>
           </div>
           <div class="panel pad">
-            <div class="label">Teleport To Coordinate</div>
+            <div class="label">Safe Teleport</div>
             <div class="field-grid mt">
               <label>Player / Controller ID<input id="teleportPlayerId" placeholder="player_controller_id or account id"></label>
-              <label>Known Location Preset<select id="teleportPreset" onchange="applyTeleportPreset()"><option value="">Manual coordinates</option></select></label>
+              <label>Verified Location Preset<select id="teleportPreset" onchange="applyTeleportPreset()"><option value="">Choose a verified preset</option></select></label>
+              <label>New Preset Name<input id="teleportPresetName" maxlength="80" placeholder="Safe location name"></label>
+              <button type="button" onclick="saveCurrentPlayerTeleportPreset()">Save Current Player Position</button>
               <label>X<input id="teleportX" type="number" step="0.01"></label>
               <label>Y<input id="teleportY" type="number" step="0.01"></label>
-              <label>Verified Z / Elevation<input id="teleportZ" type="number" step="0.01" placeholder="Required unless using a preset/player target"></label>
+              <label>Verified Z / Elevation<input id="teleportZ" type="number" step="0.01" readonly placeholder="Loaded from a verified source"></label>
               <label>Partition ID<input id="teleportPartitionId" type="number" step="1" min="0" placeholder="0"></label>
+              <button type="button" onclick="fillTeleportFromSelectedActor()">Use Selected Actor Position</button>
               <button type="button" class="primary" onclick="previewTeleport()">Preview Teleport</button>
               <button type="button" id="liveTeleportButton" onclick="executeLiveTeleport()" disabled>Live Teleport</button>
             </div>
-            <div class="warning mt">Map clicks provide X/Y only and clear any previous elevation. Enter a verified Z, choose a saved preset, or use Teleport to Player before previewing.</div>
+            <div class="warning mt">Map drag teleport requires safe ground elevation and is disabled for now.</div>
             <div class="label mt">Teleport To Player</div>
             <div class="field-grid mt">
               <label>Target Player With Known Position<input id="teleportTargetPlayerId" placeholder="target FLS/controller/account id"></label>
@@ -9902,7 +9997,7 @@ let managerFrameCheckTimer=null;
 function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let liveMapTunnelPromise=null;
 function appConfirm(title,message,okText="Continue",cancelText="Cancel"){return new Promise(resolve=>{const dialog=document.getElementById("suiteConfirmDialog");const titleEl=document.getElementById("suiteConfirmTitle");const messageEl=document.getElementById("suiteConfirmMessage");const ok=document.getElementById("suiteConfirmOk");const cancel=document.getElementById("suiteConfirmCancel");if(!dialog||!ok||!cancel){resolve(false);return;}titleEl.textContent=title||"Confirm";messageEl.textContent=message||"";ok.textContent=okText;cancel.textContent=cancelText;const cleanup=result=>{dialog.classList.add("hidden");ok.onclick=null;cancel.onclick=null;document.removeEventListener("keydown",onKey,true);resolve(result);};const onKey=event=>{if(event.key==="Escape")cleanup(false);if(event.key==="Enter")cleanup(true);};ok.onclick=()=>cleanup(true);cancel.onclick=()=>cleanup(false);document.addEventListener("keydown",onKey,true);dialog.classList.remove("hidden");ok.focus();});}
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
@@ -9949,12 +10044,12 @@ function duneToLeaflet(x,y){return worldToLiveLatLng(x,y);}
 function formatLiveCoord(value){const number=Number(value);return Number.isFinite(number)?number.toFixed(2):"--";}
 function liveMapDebugEnabled(){const params=new URLSearchParams(location.search);return params.get("debug")==="1"||params.get("debugMarkers")==="1";}
 function setTeleportElevationSource(source,confirmed=false){liveTeleportElevationSource=source||"unknown";liveTeleportElevationConfirmed=confirmed===true;invalidateTeleportPreview();updateLiveMapDebug();}
-function teleportPayloadSignature(payload){return JSON.stringify([payload.playerId,payload.x,payload.y,payload.z,payload.partitionId,payload.map,payload.elevationSource,payload.elevationConfirmed,payload.presetName,payload.targetActorId]);}
+function teleportPayloadSignature(payload){return JSON.stringify([payload.playerId,payload.x,payload.y,payload.z,payload.partitionId,payload.map,payload.elevationSource,payload.elevationConfirmed,payload.presetName,payload.targetActorId,payload.targetActorType]);}
 function invalidateTeleportPreview(){liveTeleportPreviewSignature="";syncTeleportButtons();}
 function syncTeleportButtons(){const canExecute=liveTeleportReady&&Boolean(liveTeleportPreviewSignature);const button=document.getElementById("liveTeleportButton");const playerButton=document.getElementById("liveTeleportToPlayerButton");if(button)button.disabled=!canExecute;if(playerButton)playerButton.disabled=!canExecute;}
 function currentTeleportPlayer(){return findLiveMapPlayerByTeleportId(document.getElementById("teleportPlayerId")?.value||"");}
 function setLiveMapImage(){if(!liveMap)return;const cfg=liveMapConfig(),bounds=liveMapBounds();if(liveMapImageOverlay){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=null;}liveMapImageOverlay=L.imageOverlay(cfg.image||"/assets/hagga-basin-map.png",bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);liveMapImageOverlay.once("error",()=>{if(cfg.fallbackImage&&liveMap){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=L.imageOverlay(cfg.fallbackImage,bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);setText("liveMapStamp","Primary map image missing; using fallback.");}});liveMap.fitBounds(bounds);}
-function initLiveMap(){if(!window.L||!LIVE_COORDINATES){setText("liveMapStamp","Map coordinate runtime unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;document.getElementById("liveMapDiagnosticsPanel")?.classList.toggle("hidden",!liveMapDebugEnabled());if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});setLiveMapImage();liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());["teleportPlayerId","teleportX","teleportY","teleportPartitionId"].forEach(id=>document.getElementById(id)?.addEventListener("input",invalidateTeleportPreview));document.getElementById("teleportZ")?.addEventListener("input",()=>{liveTeleportPresetName="";liveTeleportTargetActorId="";setTeleportElevationSource("manual-input",true);});}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
+function initLiveMap(){if(!window.L||!LIVE_COORDINATES){setText("liveMapStamp","Map coordinate runtime unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;document.getElementById("liveMapDiagnosticsPanel")?.classList.toggle("hidden",!liveMapDebugEnabled());if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});setLiveMapImage();liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());document.getElementById("teleportPlayerId")?.addEventListener("input",invalidateTeleportPreview);["teleportX","teleportY","teleportPartitionId"].forEach(id=>document.getElementById(id)?.addEventListener("input",()=>{invalidateTeleportPreview();liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("unknown",false);}));}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
 function liveMapChecked(id){const el=document.getElementById(id);return !el||el.checked;}
 function liveMapProject(entity){const x=Number(entity.x),y=Number(entity.y);if(!Number.isFinite(x)||!Number.isFinite(y))return null;return duneToLeaflet(x,y);}
 function liveMapIcon(kind){const size=kind==="base"?17:16;return L.divIcon({className:"",html:'<div class="live-map-marker '+kind+'"></div>',iconSize:[size,size],iconAnchor:[size/2,size/2]});}
@@ -9974,21 +10069,23 @@ function liveMapPlayerDisplayName(row){return String(row?.character_name||row?.n
 function liveMapBlockedTeleportMessage(){return "Teleport blocked: safe ground elevation could not be calculated for this location.";}
 function liveMapSafeDragPreset(coords){return (liveTeleportPresets||[]).find(preset=>preset&&preset.map===liveMapKey&&Number.isFinite(Number(preset.z))&&Number(preset.z)!==0&&Math.hypot(Number(preset.x)-Number(coords.x),Number(preset.y)-Number(coords.y))<=1)||null;}
 function liveMapDragTeleportPayload(row,latlng){const coords=leafletToDune(latlng);const preset=liveMapSafeDragPreset(coords);if(!preset)throw new Error(liveMapBlockedTeleportMessage());const elevation=LIVE_COORDINATES.resolveElevation({z:preset.z,source:"location-preset"});if(!elevation.safe)throw new Error(liveMapBlockedTeleportMessage());const playerId=liveTeleportPlayerId(row);if(!playerId)throw new Error("Player marker has no FLS/controller id for teleport.");const partitionId=Number(preset.partition_id??preset.partitionId??row?.partition_id??row?.partitionId??liveMapConfig().defaultPartitionId??0);return{playerId,characterName:liveMapPlayerDisplayName(row),x:Math.round(Number(preset.x)),y:Math.round(Number(preset.y)),z:elevation.z,partitionId:Number.isFinite(partitionId)?Math.trunc(partitionId):0,map:liveMapKey,elevationSource:"location-preset",elevationConfirmed:true,presetName:preset.name||"",targetActorId:"",debug:true,playerCurrent:liveMapPosition(row),clickedMapPosition:{x:coords.x,y:coords.y,px:Number(latlng.lng),py:Number(latlng.lat)},safetyOffset:0};}
-function applyDragTeleportPayloadToForm(payload,latlng){setValue("teleportPlayerId",payload.playerId);setValue("teleportX",payload.x);setValue("teleportY",payload.y);setValue("teleportZ",payload.z);setValue("teleportPartitionId",payload.partitionId);liveTeleportPresetName=payload.presetName||"";liveTeleportTargetActorId=payload.targetActorId||"";liveSelectedCoordinates={...payload.clickedMapPosition,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(payload.clickedMapPosition.x));setText("liveClickedY",formatLiveCoord(payload.clickedMapPosition.y));setTeleportElevationSource(payload.elevationSource,true);updateLiveMapDebug(latlng);}
+function applyDragTeleportPayloadToForm(payload,latlng){setValue("teleportPlayerId",payload.playerId);setValue("teleportX",payload.x);setValue("teleportY",payload.y);setValue("teleportZ",payload.z);setValue("teleportPartitionId",payload.partitionId);liveTeleportPresetName=payload.presetName||"";liveTeleportTargetActorId=payload.targetActorId||"";liveTeleportTargetActorType=payload.targetActorType||"";liveSelectedCoordinates={...payload.clickedMapPosition,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(payload.clickedMapPosition.x));setText("liveClickedY",formatLiveCoord(payload.clickedMapPosition.y));setTeleportElevationSource(payload.elevationSource,true);updateLiveMapDebug(latlng);}
 async function handleLiveMapPlayerDrag(row,marker,originalPoint,event){const next=event.target.getLatLng();const originalLatLng=L.latLng(originalPoint[0],originalPoint[1]);const log=document.getElementById("teleportLog");try{const payload=liveMapDragTeleportPayload(row,next);applyDragTeleportPayloadToForm(payload,next);const confirmed=await appConfirm("Confirm Teleport","Teleport "+payload.characterName+" to "+Math.round(payload.x)+", "+Math.round(payload.y)+", "+Math.round(payload.z)+"?","Confirm Teleport","Cancel");if(!confirmed){marker.setLatLng(originalLatLng);if(log)log.textContent="Teleport cancelled. Marker returned to "+formatLivePosition(liveMapPosition(row))+".";playUiSound("click");return;}if(log)log.textContent="Sending live map drag teleport for "+payload.characterName+"...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");if(log)log.textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying server position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(error){marker.setLatLng(originalLatLng);if(log)log.textContent=betterError(error);addActivity("error","Live map drag teleport failed",error.message);playUiSound("warning");}finally{refreshTeleportReadiness();}}
-function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(row.type||kind.slice(0,-1)||kind),draggable:kind==="players"}).bindPopup(liveMapMarkerPopup(row));liveMapMarkerIndex[liveMapMarkerKey(row)]=marker;marker.on("click",()=>{liveMapSelectedEntity=row;if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});updateLiveMapDebug();});if(kind==="players")marker.on("dragend",event=>handleLiveMapPlayerDrag(row,marker,point,event));marker.addTo(liveMapLayerGroup);});return count;}
+function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(row.type||kind.slice(0,-1)||kind),draggable:false}).bindPopup(liveMapMarkerPopup(row));liveMapMarkerIndex[liveMapMarkerKey(row)]=marker;marker.on("click",()=>{liveMapSelectedEntity=row;if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});updateLiveMapDebug();});marker.addTo(liveMapLayerGroup);});return count;}
 function liveMapVisibleRows(){const layers=liveMapData?.layers||{};const rows=[];if(liveMapChecked("liveLayerPlayers"))rows.push(...(layers.players||[]));if(liveMapChecked("liveLayerVehicles"))rows.push(...(layers.vehicles||[]));if(liveMapChecked("liveLayerBases"))rows.push(...(layers.bases||[]));return rows;}
 function renderLiveMapMarkerTable(){const body=document.getElementById("liveMapMarkerRows");if(!body)return;const rows=liveMapVisibleRows();if(!rows.length){body.innerHTML='<tr><td colspan="3">No markers loaded.</td></tr>';return;}body.innerHTML=rows.slice(0,300).map(row=>'<tr data-live-marker-key="'+esc(liveMapMarkerKey(row))+'"><td>'+esc(row.type||"marker")+'</td><td>'+esc(row.name||row.id||"Marker")+'<span class="live-map-marker-label">'+esc(row.status||"unknown")+(row.updatedAt?" / "+row.updatedAt:"")+'</span></td><td>'+esc(formatLiveCoord(row.x))+'<br>'+esc(formatLiveCoord(row.y))+'</td></tr>').join("");body.querySelectorAll("[data-live-marker-key]").forEach(row=>row.addEventListener("click",()=>centerLiveMapMarker(row.dataset.liveMarkerKey)));}
-function centerLiveMapMarker(key){const rows=liveMapVisibleRows();const row=rows.find(item=>liveMapMarkerKey(item)===key);const marker=liveMapMarkerIndex[key];if(!row)return;const point=liveMapProject(row);if(point&&liveMap){liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});if(marker)marker.openPopup();playUiSound("click");}}
+function centerLiveMapMarker(key){const rows=liveMapVisibleRows();const row=rows.find(item=>liveMapMarkerKey(item)===key);const marker=liveMapMarkerIndex[key];if(!row)return;liveMapSelectedEntity=row;const point=liveMapProject(row);if(point&&liveMap){liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});if(marker)marker.openPopup();playUiSound("click");}}
 function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;reconcileTeleportPending();liveMapLayerGroup.clearLayers();liveMapMarkerIndex={};liveMarkerCount=0;const playerRows=liveTeleportPending?(liveMapData.layers?.players||[]).filter(row=>!sameLiveMapPlayer(row,liveTeleportPending.playerId)):liveMapData.layers?.players;liveMarkerCount+=addLiveMapMarkers("players",playerRows);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapData.layers?.vehicles);liveMarkerCount+=addLiveMapMarkers("bases",liveMapData.layers?.bases);liveMarkerCount+=renderPendingTeleportMarker();renderLiveMapMarkerTable();updateLiveMapDebug();}
 function updateLiveMouseCoordinates(latlng){const coords=leafletToDune(latlng);const readout=document.getElementById("liveMouseReadout");if(readout)readout.textContent="World X "+formatLiveCoord(coords.x)+" / World Y "+formatLiveCoord(coords.y);}
-function selectLiveCoordinates(latlng,options={}){const coords=leafletToDune(latlng);liveSelectedCoordinates={...coords,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(coords.x));setText("liveClickedY",formatLiveCoord(coords.y));const searchX=document.getElementById("liveSearchX");const searchY=document.getElementById("liveSearchY");if(searchX)searchX.value=formatLiveCoord(coords.x);if(searchY)searchY.value=formatLiveCoord(coords.y);if(options.fillTeleport){setValue("teleportX",Math.round(coords.x));setValue("teleportY",Math.round(coords.y));setValue("teleportZ","");liveTeleportPresetName="";liveTeleportTargetActorId="";setTeleportElevationSource("unknown",false);}updateLiveMapDebug(latlng);}
+function selectLiveCoordinates(latlng,options={}){const coords=leafletToDune(latlng);liveSelectedCoordinates={...coords,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(coords.x));setText("liveClickedY",formatLiveCoord(coords.y));const searchX=document.getElementById("liveSearchX");const searchY=document.getElementById("liveSearchY");if(searchX)searchX.value=formatLiveCoord(coords.x);if(searchY)searchY.value=formatLiveCoord(coords.y);if(options.fillTeleport){setValue("teleportX",Math.round(coords.x));setValue("teleportY",Math.round(coords.y));setValue("teleportZ","");liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("unknown",false);}updateLiveMapDebug(latlng);}
 async function copyLiveCoordinates(){if(!liveSelectedCoordinates){playUiSound("warning");return;}const text="X "+formatLiveCoord(liveSelectedCoordinates.x)+", Y "+formatLiveCoord(liveSelectedCoordinates.y);try{await navigator.clipboard.writeText(text);playUiSound("success");addActivity("maps","Coordinates copied",text);}catch{playUiSound("warning");}}
 function goToLiveCoordinates(){if(!liveMap)return;const x=Number(document.getElementById("liveSearchX")?.value);const y=Number(document.getElementById("liveSearchY")?.value);if(!Number.isFinite(x)||!Number.isFinite(y)){playUiSound("warning");return;}const point=duneToLeaflet(x,y);liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:true});playUiSound("click");}
-async function loadTeleportPresets(){try{const data=await getJson("/api/live-map/teleport/presets");liveTeleportPresets=data.presets||[];const select=document.getElementById("teleportPreset");if(!select)return;select.innerHTML='<option value="">Manual coordinates</option>'+liveTeleportPresets.map((preset,index)=>'<option value="'+index+'">'+esc(preset.name)+' / '+esc(preset.map)+' / Z '+esc(preset.z)+'</option>').join("");if(!liveTeleportPresets.length)select.innerHTML+='<option value="" disabled>No enabled presets found</option>';}catch(e){const log=document.getElementById("teleportLog");if(log)log.textContent="Location presets unavailable. "+betterError(e);}}
-function applyTeleportPreset(){const select=document.getElementById("teleportPreset");const preset=liveTeleportPresets[Number(select?.value)];if(!preset)return;setValue("teleportX",preset.x);setValue("teleportY",preset.y);setValue("teleportZ",preset.z);setValue("teleportPartitionId",preset.partition_id||0);liveTeleportPresetName=preset.name;liveTeleportTargetActorId="";setTeleportElevationSource("location-preset",true);const point=duneToLeaflet(preset.x,preset.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Loaded verified location preset: "+preset.name+"\\n"+formatLivePosition(preset);playUiSound("click");}
+async function loadTeleportPresets(){try{const data=await getJson("/api/live-map/teleport/presets");liveTeleportPresets=data.presets||[];const select=document.getElementById("teleportPreset");if(!select)return;select.innerHTML='<option value="">Choose a verified preset</option>'+liveTeleportPresets.map((preset,index)=>'<option value="'+index+'">'+esc(preset.name)+' / '+esc(preset.map)+' / Z '+esc(preset.z)+'</option>').join("");if(!liveTeleportPresets.length)select.innerHTML+='<option value="" disabled>No verified presets saved</option>';}catch(e){const log=document.getElementById("teleportLog");if(log)log.textContent="Location presets unavailable. "+betterError(e);}}
+function applyTeleportPreset(){const select=document.getElementById("teleportPreset");if(!select||select.value==="")return;const preset=liveTeleportPresets[Number(select.value)];if(!preset)return;setValue("teleportX",preset.x);setValue("teleportY",preset.y);setValue("teleportZ",preset.z);setValue("teleportPartitionId",preset.partition_id||0);liveTeleportPresetName=preset.name;liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("location-preset",true);const point=duneToLeaflet(preset.x,preset.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Loaded verified location preset: "+preset.name+"\\n"+formatLivePosition(preset);playUiSound("click");}
+async function saveCurrentPlayerTeleportPreset(){const player=currentTeleportPlayer();const position=liveMapPosition(player);const name=document.getElementById("teleportPresetName")?.value.trim()||"";const log=document.getElementById("teleportLog");try{if(!name)throw new Error("Enter a preset name first.");if(!player||!position||!Number.isFinite(position.z)||position.z===0)throw new Error("Select an online player with a current X/Y/Z position first.");if(String(player.status||player.online_status||"").toLowerCase()!=="online")throw new Error("Only a currently online player position can be saved as a safe preset.");const existing=liveTeleportPresets.find(preset=>String(preset.name||"").toLowerCase()===name.toLowerCase());const confirmed=await appConfirm("Save Safe Teleport Preset","Confirm that "+(player.character_name||player.name||"this player")+" is standing at a safe location. Save "+name+" at "+formatLivePosition(position)+"?",existing?"Overwrite Preset":"Save Preset","Cancel");if(!confirmed)return;const data=await getJson("/api/live-map/teleport/presets",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,playerId:liveTeleportPlayerId(player),actorId:String(player.actor_id||player.id||""),confirmed:true,overwrite:Boolean(existing)})});await loadTeleportPresets();const select=document.getElementById("teleportPreset");const index=liveTeleportPresets.findIndex(preset=>preset.name===data.preset?.name);if(select&&index>=0){select.value=String(index);applyTeleportPreset();}if(log)log.textContent=data.message+"\\n"+formatLivePosition(data.preset);addActivity("maps","Safe teleport preset saved",data.preset?.name||name);playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
+function fillTeleportFromSelectedActor(){const actor=liveMapSelectedEntity;const position=liveMapPosition(actor);const log=document.getElementById("teleportLog");if(!actor||!position||!Number.isFinite(position.z)||position.z===0){if(log)log.textContent="Select a player, vehicle, or base marker with an exact X/Y/Z transform first.";playUiSound("warning");return null;}setValue("teleportX",position.x);setValue("teleportY",position.y);setValue("teleportZ",position.z);setValue("teleportPartitionId",actor.partition_id||actor.partitionId||0);liveTeleportPresetName="";liveTeleportTargetActorId=String(actor.actor_id||actor.id||"");liveTeleportTargetActorType=String(actor.type||"");setTeleportElevationSource("actor-transform",true);const point=duneToLeaflet(position.x,position.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});if(log)log.textContent="Loaded exact "+(actor.type||"actor")+" position for "+(actor.name||actor.id)+"\\n"+formatLivePosition(position);playUiSound("click");return actor;}
 function findLiveMapPlayerByAnyId(playerId){return findLiveMapPlayerByTeleportId(playerId);}
-function fillTeleportFromTargetPlayer(){const targetId=document.getElementById("teleportTargetPlayerId")?.value||"";const target=findLiveMapPlayerByAnyId(targetId);const pos=liveMapPosition(target);if(!target||!pos){const message="Target player position unavailable. Refresh Live Map and choose a player with known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}if(!Number.isFinite(Number(pos.z))||Number(pos.z)===0){const message="Target player has no valid Z/elevation. Teleport to Player requires known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}setValue("teleportX",pos.x);setValue("teleportY",pos.y);setValue("teleportZ",pos.z);setValue("teleportPartitionId",target.partition_id||target.partitionId||0);liveTeleportPresetName="";liveTeleportTargetActorId=String(target.actor_id||target.id||"");setTeleportElevationSource("player-position",true);const point=duneToLeaflet(pos.x,pos.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});document.getElementById("teleportLog").textContent="Loaded target player position for "+(target.name||target.character_name||targetId)+"\\n"+formatLivePosition(pos);playUiSound("click");return target;}
+function fillTeleportFromTargetPlayer(){const targetId=document.getElementById("teleportTargetPlayerId")?.value||"";const target=findLiveMapPlayerByAnyId(targetId);const pos=liveMapPosition(target);if(!target||!pos){const message="Target player position unavailable. Refresh Live Map and choose a player with known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}if(!Number.isFinite(Number(pos.z))||Number(pos.z)===0){const message="Target player has no valid Z/elevation. Teleport to Player requires known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}setValue("teleportX",pos.x);setValue("teleportY",pos.y);setValue("teleportZ",pos.z);setValue("teleportPartitionId",target.partition_id||target.partitionId||0);liveTeleportPresetName="";liveTeleportTargetActorId=String(target.actor_id||target.id||"");liveTeleportTargetActorType="player";setTeleportElevationSource("player-position",true);const point=duneToLeaflet(pos.x,pos.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});document.getElementById("teleportLog").textContent="Loaded target player position for "+(target.name||target.character_name||targetId)+"\\n"+formatLivePosition(pos);playUiSound("click");return target;}
 async function previewTeleportToPlayer(){if(!fillTeleportFromTargetPlayer())return;await previewTeleport();}
 async function executeTeleportToPlayer(){await executeLiveTeleport();}
 function updateLiveMapDebug(latlng){
@@ -10068,7 +10165,7 @@ async function refreshLiveMap(){
     addActivity("error","Live map failed",e.message);
   }
 }
-function teleportPayload(){const p=selectedPlayer();const current=liveMapPosition(currentTeleportPlayer());return{playerId:document.getElementById("teleportPlayerId").value,characterName:p?.character_name||p?.name||"",x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value,partitionId:document.getElementById("teleportPartitionId")?.value||0,map:liveMapKey,elevationSource:liveTeleportElevationSource,elevationConfirmed:liveTeleportElevationConfirmed,presetName:liveTeleportPresetName,targetActorId:liveTeleportTargetActorId,debug:liveMapDebugEnabled(),playerCurrent:current,clickedMapPosition:liveSelectedCoordinates?{x:liveSelectedCoordinates.x,y:liveSelectedCoordinates.y,px:liveSelectedCoordinates.lng,py:liveSelectedCoordinates.lat}:null};}
+function teleportPayload(){const p=selectedPlayer();const current=liveMapPosition(currentTeleportPlayer());return{playerId:document.getElementById("teleportPlayerId").value,characterName:p?.character_name||p?.name||"",x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value,partitionId:document.getElementById("teleportPartitionId")?.value||0,map:liveMapKey,elevationSource:liveTeleportElevationSource,elevationConfirmed:liveTeleportElevationConfirmed,presetName:liveTeleportPresetName,targetActorId:liveTeleportTargetActorId,targetActorType:liveTeleportTargetActorType,debug:liveMapDebugEnabled(),playerCurrent:current,clickedMapPosition:liveSelectedCoordinates?{x:liveSelectedCoordinates.x,y:liveSelectedCoordinates.y,px:liveSelectedCoordinates.lng,py:liveSelectedCoordinates.lat}:null};}
 function renderTeleportResult(data){return (data.message||data.error||data.status||"Teleport response")+(data.warning?"\\nWarning: "+data.warning:"")+"\\nEndpoint: "+(data.endpoint||"-")+"\\nCommand: "+(data.command||"-")+"\\nPayload:\\n"+JSON.stringify(data.request||{},null,2)+(data.response?"\\n\\nReceiver response:\\n"+JSON.stringify(data.response,null,2):"")+(data.reasons?.length?"\\n\\nReadiness:\\n"+data.reasons.join("\\n"):"");}
 async function refreshAfterTeleport(payload,data){
   if(!data?.ok||!liveMap)return false;
@@ -10650,6 +10747,15 @@ async function route(req, res) {
   if (url.pathname === "/api/live-map/teleport/presets" && req.method === "GET") {
     const result = loadTeleportLocationPresets();
     await json(res, result, result.ok ? 200 : 500);
+    return;
+  }
+  if (url.pathname === "/api/live-map/teleport/presets" && req.method === "POST") {
+    try {
+      const result = await saveCurrentPlayerTeleportPreset(JSON.parse(await readBody(req) || "{}"));
+      await json(res, result);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, Number(error.statusCode || 400));
+    }
     return;
   }
   if (url.pathname === "/api/live-map/teleport/status" && req.method === "GET") {

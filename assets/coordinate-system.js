@@ -12,7 +12,7 @@
     Arrakeen: Object.freeze({ key: "Arrakeen", label: "Arrakeen", minX: -32000, maxX: 17000, minY: -10000, maxY: 9500, flipX: false, flipY: true, width: 4096, height: 4096, defaultPartitionId: 0 }),
     HarkoVillage: Object.freeze({ key: "HarkoVillage", label: "Harko Village", minX: -5000, maxX: 14500, minY: -5500, maxY: 32000, flipX: false, flipY: false, width: 4096, height: 4096, defaultPartitionId: 0 })
   });
-  const SAFE_ELEVATION_SOURCES = Object.freeze(["manual-input", "location-preset", "player-position", "actor-transform"]);
+  const SAFE_ELEVATION_SOURCES = Object.freeze(["location-preset", "player-position", "actor-transform"]);
 
   function finiteNumber(value) {
     const number = Number(value);
@@ -93,7 +93,6 @@
     const z = finiteNumber(candidate && candidate.z);
     if (z === null || z === 0) return { safe: false, z: null, source, reason: "Z/elevation is unknown." };
     if (!SAFE_ELEVATION_SOURCES.includes(source)) return { safe: false, z, source, reason: "Z/elevation source is not trusted." };
-    if (source === "manual-input" && candidate.confirmed !== true) return { safe: false, z, source, reason: "Manual Z/elevation has not been confirmed." };
     return { safe: true, z, source, reason: "" };
   }
 

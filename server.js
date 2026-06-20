@@ -8,7 +8,7 @@ const path = require("path");
 const crypto = require("crypto");
 const Coordinates = require("./assets/coordinate-system");
 
-const APP_VERSION = "0.3.7-beta";
+const APP_VERSION = "0.3.8-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;

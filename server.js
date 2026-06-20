@@ -8949,7 +8949,7 @@ function appPage() {
     .inline-validation { min-height:18px; color:var(--warn); font-size:12px; line-height:1.35; }
     .preset-actions { display:grid; gap:10px; margin-top:12px; }
     .preset-name-row { display:grid; grid-template-columns:minmax(180px,1fr) auto; gap:10px; align-items:end; }
-    .give-layout { display:grid; grid-template-columns:minmax(0,1fr) 380px; grid-template-areas:"form presets" "catalog presets"; gap:var(--panel-gap); align-items:start; }
+    .give-layout { display:grid; grid-template-columns:minmax(250px,25fr) minmax(400px,45fr) minmax(300px,30fr); grid-template-areas:"form catalog presets"; gap:var(--panel-gap); align-items:start; }
     .give-form { grid-area:form; }
     .give-catalog { grid-area:catalog; }
     .give-sidebar { grid-area:presets; position:sticky; top:92px; max-height:calc(100vh - 112px); overflow:auto; display:flex; flex-direction:column; }
@@ -9109,7 +9109,8 @@ function appPage() {
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
-    @media (max-width:1180px) { .give-layout{grid-template-columns:1fr;grid-template-areas:"form" "presets" "catalog"}.give-sidebar{position:static;max-height:none}.give-primary-actions{grid-template-columns:1fr} }
+    @media (max-width:1350px) { .give-layout{grid-template-columns:minmax(260px,35fr) minmax(0,65fr);grid-template-areas:"form catalog" "presets presets"}.give-sidebar{position:static;max-height:none} }
+    @media (max-width:800px) { .give-layout{grid-template-columns:1fr;grid-template-areas:"form" "catalog" "presets"}.give-primary-actions{grid-template-columns:1fr} }
     @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.topbar-actions{justify-content:flex-start}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
     @media (max-width:720px) { .env-var-row{grid-template-columns:1fr;gap:5px}.env-var-value{font-size:12px}.env-help{font-size:11.5px} }
   </style>
@@ -9546,11 +9547,6 @@ function appPage() {
           <div class="field-grid mt">
             <label>Player Search<input id="givePlayerSearch" placeholder="Search player or account" oninput="renderPlayerSelect()"></label>
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
-            <label>Item Template Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
-            <label>Item Filter<select id="adminItemCategory" onchange="renderAdminItems()"><option value="">All discovered items</option></select></label>
-            <label>Grade<select id="adminItemGrade" onchange="renderAdminItems()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
-            <label>Tier<select id="adminItemTier" onchange="renderAdminItems()"><option value="all">All tiers</option></select></label>
-            <div id="selectedGiveItem" class="empty">Select an item from the catalog below.</div>
             <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
             <label id="adminQualityWrap" class="unsupported-control">Durability<input id="adminQuality" type="number" min="0" max="100" value="0" disabled oninput="syncQualityWarning()"></label>
             <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute">Live Give</option></select></label>
@@ -9574,6 +9570,13 @@ function appPage() {
         </div>
         <div class="panel pad give-catalog">
           <div class="panel-head"><div><div class="label">Item Catalog</div><div class="subtle">Select one item for Give Item or add several to the queue.</div></div></div>
+          <div class="field-grid mt">
+            <label>Item Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
+            <label>Item Filter<select id="adminItemCategory" onchange="renderAdminItems()"><option value="">All discovered items</option></select></label>
+            <label>Grade<select id="adminItemGrade" onchange="renderAdminItems()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
+            <label>Tier<select id="adminItemTier" onchange="renderAdminItems()"><option value="all">All tiers</option></select></label>
+          </div>
+          <div id="selectedGiveItem" class="empty mt">Select an item from the catalogue below.</div>
           <details class="advanced-only give-diagnostics">
             <summary>Catalog Diagnostics</summary>
             <div id="gearDiscoveryStatus" class="empty mt">Item cache status unknown.</div>

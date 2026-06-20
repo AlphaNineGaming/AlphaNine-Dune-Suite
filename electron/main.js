@@ -129,9 +129,14 @@ function receiverUrlsFromConfig(cfg) {
 
 function managedEnvValues(cfg) {
   const receiver = receiverUrlsFromConfig(cfg);
-  const sshHost = String(cfg.receiverSshHost || cfg.sshHost || cfg.vmIp || "").trim();
-  const sshUser = String(cfg.receiverSshUser || cfg.sshUser || "dune").trim();
-  const sshKey = expandEnvPath(cfg.receiverSshKey || cfg.sshKey || "");
+  const dedicatedReceiverSshHost = String(cfg.receiverSshHost || "").trim();
+  const sshHost = String(dedicatedReceiverSshHost || cfg.sshHost || cfg.vmIp || "").trim();
+  const sshUser = String(dedicatedReceiverSshHost
+    ? (cfg.receiverSshUser || cfg.sshUser || "dune")
+    : (cfg.sshUser || cfg.receiverSshUser || "dune")).trim();
+  const sshKey = expandEnvPath(dedicatedReceiverSshHost
+    ? (cfg.receiverSshKey || cfg.sshKey || "")
+    : (cfg.sshKey || cfg.receiverSshKey || ""));
   const receiverToken = String(cfg.receiverToken || "").trim();
   const adminToken = String(cfg.adminGiveItemToken || receiverToken || "").trim();
   const selected = normalizeSelectedBattlegroup(cfg.selectedBattlegroup);
@@ -292,6 +297,8 @@ function loadEnvironment() {
   readEnvFile(userPath(".env.local"), true);
   const cfg = ensureReceiverTokenConfig();
   const managedEnvPath = writeManagedEnvFile(cfg);
+  process.env.ALPHANINE_MANAGED_ENV_PATH = managedEnvPath;
+  process.env.ALPHANINE_RECEIVER_ENV_SOURCE = "managed .env/config/runtime";
   applyConfigRuntimeEnv(cfg);
   appendLog("desktop", `Managed runtime environment regenerated at ${managedEnvPath}.`);
   if (!process.env.DUNE_RECEIVER_TOKEN || !process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN) {

@@ -183,9 +183,14 @@ function writeManagedEnvFile(configValue = loadConfig()) {
 function managedEnvValues(configValue = loadConfig()) {
   const receiverHost = String(configValue.receiverHost || "127.0.0.1").trim();
   const receiverPort = String(configValue.receiverPort || 5055).trim();
-  const sshHost = String(configValue.receiverSshHost || configValue.sshHost || configValue.vmIp || "").trim();
-  const sshUser = String(configValue.receiverSshUser || configValue.sshUser || "dune").trim();
-  const sshKey = expandEnvPath(configValue.receiverSshKey || configValue.sshKey || "");
+  const dedicatedReceiverSshHost = String(configValue.receiverSshHost || "").trim();
+  const sshHost = String(dedicatedReceiverSshHost || configValue.sshHost || configValue.vmIp || "").trim();
+  const sshUser = String(dedicatedReceiverSshHost
+    ? (configValue.receiverSshUser || configValue.sshUser || "dune")
+    : (configValue.sshUser || configValue.receiverSshUser || "dune")).trim();
+  const sshKey = expandEnvPath(dedicatedReceiverSshHost
+    ? (configValue.receiverSshKey || configValue.sshKey || "")
+    : (configValue.sshKey || configValue.receiverSshKey || ""));
   const receiverToken = String(configValue.receiverToken || "").trim();
   const adminToken = String(configValue.adminGiveItemToken || receiverToken || "").trim();
   const databaseHost = String(configValue.databaseHost || "").trim();
@@ -514,6 +519,8 @@ function loadRuntimeEnvFilesIntoProcess() {
 
 loadRuntimeEnvFilesIntoProcess();
 const config = loadConfig();
+const startupManagedEnv = writeManagedEnvFile(config);
+process.env.ALPHANINE_MANAGED_ENV_PATH = startupManagedEnv.path;
 applyConfigRuntimeEnv(config);
 const VM_NAME = config.vmName;
 const VM_IP = String(config.vmIp || "").trim();
@@ -901,6 +908,14 @@ async function startManagedReceiver() {
   const urls = receiverUrls(cfg);
   const receiverToken = String(cfg.receiverToken || process.env.DUNE_RECEIVER_TOKEN || "").trim();
   const suiteToken = String(cfg.adminGiveItemToken || process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || receiverToken || "").trim();
+  const dedicatedReceiverSshHost = String(cfg.receiverSshHost || "").trim();
+  const receiverSshHost = String(dedicatedReceiverSshHost || cfg.sshHost || cfg.vmIp || process.env.DUNE_RECEIVER_SSH_HOST || "").trim();
+  const receiverSshUser = String(dedicatedReceiverSshHost
+    ? (cfg.receiverSshUser || cfg.sshUser || process.env.DUNE_RECEIVER_SSH_USER || "dune")
+    : (cfg.sshUser || cfg.receiverSshUser || process.env.DUNE_RECEIVER_SSH_USER || "dune")).trim();
+  const receiverSshKey = expandEnvPath(dedicatedReceiverSshHost
+    ? (cfg.receiverSshKey || cfg.sshKey || process.env.DUNE_RECEIVER_SSH_KEY || "")
+    : (cfg.sshKey || cfg.receiverSshKey || process.env.DUNE_RECEIVER_SSH_KEY || ""));
   if (!receiverToken || !suiteToken) throw new Error("Receiver token configuration is incomplete.");
   process.env.DUNE_RECEIVER_TOKEN = receiverToken;
   process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = suiteToken;
@@ -909,9 +924,11 @@ async function startManagedReceiver() {
     DUNE_RECEIVER_HOST: urls.host,
     DUNE_RECEIVER_PORT: String(urls.port),
     DUNE_RECEIVER_TOKEN: receiverToken,
-    DUNE_RECEIVER_SSH_HOST: cfg.receiverSshHost || cfg.vmIp || process.env.DUNE_RECEIVER_SSH_HOST || "",
-    DUNE_RECEIVER_SSH_USER: cfg.receiverSshUser || cfg.sshUser || process.env.DUNE_RECEIVER_SSH_USER || "",
-    DUNE_RECEIVER_SSH_KEY: expandEnvPath(cfg.receiverSshKey || cfg.sshKey || process.env.DUNE_RECEIVER_SSH_KEY || ""),
+    DUNE_RECEIVER_SSH_HOST: receiverSshHost,
+    DUNE_RECEIVER_SSH_USER: receiverSshUser,
+    DUNE_RECEIVER_SSH_KEY: receiverSshKey,
+    ALPHANINE_MANAGED_ENV_PATH: MANAGED_ENV_PATH,
+    ALPHANINE_RECEIVER_ENV_SOURCE: "managed .env/config/runtime",
     DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: cfg.liveTeleportEnabled ? "true" : "false",
     ALPHANINE_RECEIVER_STARTED_BY_SUITE: "true",
     ELECTRON_RUN_AS_NODE: "1",

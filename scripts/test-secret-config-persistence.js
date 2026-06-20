@@ -99,6 +99,26 @@ async function waitForReceiver(baseUrl) {
   throw new Error(`Receiver did not become healthy: ${JSON.stringify(latest)}`);
 }
 
+async function assertReceiverRuntime(receiverPort, token) {
+  const health = await getJson(`http://127.0.0.1:${receiverPort}/health`);
+  assert.equal(health.response.ok, true, JSON.stringify(health.payload));
+  assert.equal(health.payload.sshHostConfigured, true);
+  assert.equal(health.payload.sshUserConfigured, true);
+  assert.equal(health.payload.sshKeyConfigured, true);
+  assert.equal(health.payload.tokenConfigured, true);
+  assert.match(String(health.payload.envSource || ""), /managed \.env|config|runtime/);
+
+  const give = await fetch(`http://127.0.0.1:${receiverPort}/api/give-item`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ playerId: "test-player", template: "test-template", qty: 1 })
+  });
+  const payload = await give.json();
+  assert.notEqual(give.status, 401, JSON.stringify(payload));
+  assert.equal(String(payload.error || "").includes("DUNE_RECEIVER_SSH_HOST is required"), false, JSON.stringify(payload));
+  return { health: health.payload, give: payload };
+}
+
 async function postConfig(baseUrl, body) {
   const response = await fetch(`${baseUrl}/api/config`, {
     method: "POST",
@@ -125,6 +145,7 @@ function assertNoPlaceholders(filePath) {
   const configPath = path.join(testRoot, "config.json");
   const serverInstallPath = path.join(testRoot, "DuneServer");
   const sshKeyPath = path.join(testRoot, "test-ssh-key");
+  const configOnlySshKeyPath = path.join(testRoot, "config-only-ssh-key");
   fs.mkdirSync(appData, { recursive: true });
   fs.mkdirSync(serverInstallPath, { recursive: true });
   fs.writeFileSync(sshKeyPath, "release-test-key");
@@ -135,6 +156,9 @@ function assertNoPlaceholders(filePath) {
     serverInstallPath,
     receiverHost: "127.0.0.1",
     receiverPort,
+    sshHost: "config-only-host",
+    sshUser: "config-user",
+    sshKey: configOnlySshKeyPath,
     databasePassword: "db-original-real",
     receiverToken: "receiver-original-real",
     adminGiveItemToken: "admin-original-real"
@@ -142,10 +166,24 @@ function assertNoPlaceholders(filePath) {
 
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
+  const envPath = path.join(appData, "AlphaNine Dune Suite", ".env");
   let child;
   try {
+    assert.equal(fs.existsSync(envPath), false);
     child = await startServer({ port, configPath, appData });
     await waitForReceiver(baseUrl);
+    assert.equal(fs.existsSync(envPath), true, "Suite startup did not regenerate the managed .env file.");
+    const startupEnv = fs.readFileSync(envPath, "utf8");
+    assert.match(startupEnv, /DUNE_RECEIVER_SSH_HOST="config-only-host"/);
+    assert.match(startupEnv, /DUNE_RECEIVER_SSH_USER="config-user"/);
+    assert.match(startupEnv, /DUNE_RECEIVER_SSH_KEY=".*config-only-ssh-key"/);
+    await assertReceiverRuntime(receiverPort, "receiver-original-real");
+
+    await stopSuite(child, baseUrl);
+    child = await startServer({ port, configPath, appData });
+    await waitForReceiver(baseUrl);
+    await assertReceiverRuntime(receiverPort, "receiver-original-real");
+    fs.writeFileSync(configOnlySshKeyPath, "config-only-release-test-key");
 
     await postConfig(baseUrl, {
       uiMode: "advanced",
@@ -171,6 +209,7 @@ function assertNoPlaceholders(filePath) {
     assert.equal(saved.databasePassword, "db-new-real");
     assert.equal(saved.receiverToken, "receiver-new-real");
     assert.equal(saved.adminGiveItemToken, "receiver-new-real");
+    fs.rmSync(configOnlySshKeyPath, { force: true });
 
     const restartResult = await getJson(`${baseUrl}/api/receiver/restart`, { method: "POST" });
     assert.equal(restartResult.response.ok, true, JSON.stringify(restartResult.payload));
@@ -198,7 +237,6 @@ function assertNoPlaceholders(filePath) {
     assert.equal(liveGiveDryRun.response.ok, true, JSON.stringify(liveGiveDryRun.payload));
     assert.equal(liveGiveDryRun.payload.status, "dry-run-passed", JSON.stringify(liveGiveDryRun.payload));
     assert.equal(liveGiveDryRun.payload.transport, "http-json");
-
     const setupSaveTest = await getJson(`${baseUrl}/api/setup/save-test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -230,7 +268,6 @@ function assertNoPlaceholders(filePath) {
     saved = readJson(configPath);
     assert.equal(saved.databasePassword, "");
     assertNoPlaceholders(configPath);
-    const envPath = path.join(appData, "AlphaNine Dune Suite", ".env");
     assert.equal(path.resolve(setupSaveTest.payload.managedEnvPath), path.resolve(envPath));
     const managedEnvFiles = fs.readdirSync(testRoot, { recursive: true, withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name === ".env");
@@ -292,7 +329,7 @@ function assertNoPlaceholders(filePath) {
     assert.equal(isMasked(generated.adminGiveItemToken), false);
     assertNoPlaceholders(configPath);
 
-    console.log("Release persistence test passed: masked values blocked, unchanged/new/blank secrets verified, receiver token sync and authentication verified, Live Give dry-run passed after restart, Setup Save & Test passed, one managed .env verified, legacy repair passed, and unrecoverable tokens regenerated in sync.");
+    console.log("Release persistence test passed: config-only SSH settings regenerated the managed .env and reached /health and /give-item across restart; masked values were blocked; token sync, Live Give dry-run, Setup Save & Test, legacy repair, and fresh-token generation also passed.");
   } finally {
     await stopSuite(child, baseUrl);
     fs.rmSync(testRoot, { recursive: true, force: true });

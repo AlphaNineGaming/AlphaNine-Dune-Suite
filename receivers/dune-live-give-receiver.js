@@ -4,8 +4,11 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-loadDotEnv(path.join(__dirname, "..", ".env"));
+const MANAGED_ENV_PATH = String(process.env.ALPHANINE_MANAGED_ENV_PATH || "").trim();
+const MANAGED_ENV_LOADED = loadDotEnv(MANAGED_ENV_PATH);
+const APP_ENV_LOADED = loadDotEnv(path.join(__dirname, "..", ".env"));
 loadDotEnv(path.join(__dirname, "..", ".env.local"));
+const ENV_SOURCE = String(process.env.ALPHANINE_RECEIVER_ENV_SOURCE || (MANAGED_ENV_LOADED ? "managed .env" : (APP_ENV_LOADED ? "app .env" : "runtime"))).trim();
 
 const HOST = process.env.DUNE_RECEIVER_HOST || "127.0.0.1";
 const PORT = Number(process.env.DUNE_RECEIVER_PORT || 5055);
@@ -27,8 +30,8 @@ const SERVER_COMMAND_AUTH_TOKEN = "Nu6VmPWUMvdPMeB7qErr";
 const app = express();
 app.use(express.json({ limit: "64kb" }));
 
-app.get("/health", async (_req, res) => {
-  const diagnostics = await probeReceiver();
+app.get("/health", (_req, res) => {
+  const diagnostics = receiverHealthDiagnostics();
   res.status(diagnostics.ok ? 200 : 503).json(diagnostics);
 });
 
@@ -735,6 +738,10 @@ async function probeReceiver() {
       ok: Boolean(TOKEN),
       receiverOnline: true,
       tokenConfigured: Boolean(TOKEN),
+      sshHostConfigured: config.sshHostConfigured,
+      sshUserConfigured: config.sshUserConfigured,
+      sshKeyConfigured: config.sshKeyConfigured,
+      envSource: config.envSource,
       sshConfigured: config.sshConfigured,
       sshKeyExists: config.sshKeyExists,
       selectedBattlegroup: config.selectedBattlegroup,
@@ -754,6 +761,10 @@ async function probeReceiver() {
       ok: Boolean(TOKEN),
       receiverOnline: true,
       tokenConfigured: Boolean(TOKEN),
+      sshHostConfigured: config.sshHostConfigured,
+      sshUserConfigured: config.sshUserConfigured,
+      sshKeyConfigured: config.sshKeyConfigured,
+      envSource: config.envSource,
       sshConfigured: config.sshConfigured,
       sshKeyExists: config.sshKeyExists,
       selectedBattlegroup: config.selectedBattlegroup,
@@ -770,6 +781,27 @@ async function probeReceiver() {
   }
 }
 
+function receiverHealthDiagnostics() {
+  const config = receiverConfigDiagnostics();
+  return {
+    ok: Boolean(TOKEN),
+    receiverOnline: true,
+    tokenConfigured: config.tokenConfigured,
+    sshHostConfigured: config.sshHostConfigured,
+    sshUserConfigured: config.sshUserConfigured,
+    sshKeyConfigured: config.sshKeyConfigured,
+    sshConfigured: config.sshConfigured,
+    sshKeyExists: config.sshKeyExists,
+    envSource: config.envSource,
+    config,
+    warning: !config.sshHostConfigured
+      ? "SSH host is not configured."
+      : (!config.sshKeyConfigured
+        ? "SSH key is not configured."
+        : (!config.sshKeyExists ? "SSH key file does not exist." : ""))
+  };
+}
+
 function receiverConfigDiagnostics() {
   const sshConfigured = Boolean(SSH_HOST && SSH_USER && SSH_KEY);
   const sshKeyExists = Boolean(SSH_KEY && fs.existsSync(SSH_KEY));
@@ -779,11 +811,14 @@ function receiverConfigDiagnostics() {
     port: PORT,
     sshHost: SSH_HOST || "",
     sshUser: SSH_USER || "",
+    sshHostConfigured: Boolean(SSH_HOST),
+    sshUserConfigured: Boolean(SSH_USER),
     sshConfigured,
     sshKeyConfigured: Boolean(SSH_KEY),
     sshKeyExists,
     sshKeyPath: SSH_KEY ? "<set>" : "",
     tokenConfigured: Boolean(TOKEN),
+    envSource: ENV_SOURCE,
     startedBySuite: /^(true|1|yes)$/i.test(String(process.env.ALPHANINE_RECEIVER_STARTED_BY_SUITE || "")),
     mqNamespace: MQ_NAMESPACE || "",
     mqPod: MQ_POD || "",
@@ -1038,7 +1073,7 @@ function sanitizeForLog(value) {
 }
 
 function loadDotEnv(filePath) {
-  if (!fs.existsSync(filePath)) return;
+  if (!filePath || !fs.existsSync(filePath)) return false;
   const text = fs.readFileSync(filePath, "utf8");
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -1049,6 +1084,7 @@ function loadDotEnv(filePath) {
     if (Object.prototype.hasOwnProperty.call(process.env, key)) continue;
     process.env[key] = unquoteEnvValue(match[2]);
   }
+  return true;
 }
 
 function unquoteEnvValue(value) {

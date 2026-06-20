@@ -9243,7 +9243,7 @@ function appPage() {
       <button class="tab" data-view="admin">Admin Tools</button>
       <button class="tab" data-view="progression">Progression Inspector</button>
       <button class="tab" data-view="database">Database</button>
-      <button class="tab" data-view="server">Server Status</button>
+      <button class="tab" data-view="server">Server Control</button>
       <button class="tab" data-view="live-map">Live Map</button>
       <button class="tab" data-view="management">Server Management</button>
       <button class="tab" data-view="item-database">Item Database</button>
@@ -9367,7 +9367,7 @@ function appPage() {
         <div class="panel pad advanced-only">
           <div class="panel-head"><div class="label">System Alerts</div><div class="micro">Operations</div></div>
           <div class="ops-list">
-            <div class="ops-row"><div class="ops-icon">!</div><div><strong>Permission and elevation checks</strong><div class="subtle">Server Status reports admin and VM diagnostics when required.</div></div><span class="micro">Active</span></div>
+            <div class="ops-row"><div class="ops-icon">!</div><div><strong>Permission and elevation checks</strong><div class="subtle">Server Control reports admin and VM diagnostics when required.</div></div><span class="micro">Active</span></div>
             <div class="ops-row"><div class="ops-icon">Q</div><div><strong>Live Give queue wording</strong><div class="subtle">Live execution reports published/queued until inventory verification exists.</div></div><span class="micro">Guarded</span></div>
             <div class="ops-row"><div class="ops-icon">D</div><div><strong>Dry-Run default</strong><div class="subtle">Give Item opens in Dry-Run mode and requires manual Live Give selection.</div></div><span class="micro">Safe</span></div>
           </div>
@@ -9377,7 +9377,7 @@ function appPage() {
           <div class="action-row mt">
             <button class="primary" data-open="give">Give Item</button>
             <button data-open="players">Players</button>
-            <button data-open="server">Server Status</button>
+            <button data-open="server">Server Control</button>
             <button onclick="refreshAll()">Refresh All</button>
           </div>
           <div class="sound-widget advanced-only" aria-label="UI sound controls">
@@ -9728,7 +9728,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel pad"><div class="label">Schema</div><div id="progressionSchema" class="value">Unknown</div><div class="subtle">Detected Dune schema signature.</div></div>
         <div class="panel pad"><div class="label">Duration</div><div id="progressionDuration" class="value">--</div><div class="subtle">Metadata query time.</div></div>
       </div>
-      <div class="panel pad mt">
+      <div class="panel pad mt advanced-only">
         <div class="panel-head">
           <div><div class="label">Progression / XP Reputation Inspector</div><div class="subtle">Read-only database metadata discovery. No SQL input and no write actions.</div></div>
           <button type="button" onclick="refreshProgressionInspector()">Refresh Inspector</button>
@@ -10237,7 +10237,7 @@ const viewCopy={
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
   database:["Database","Battlegroup backup, import, and backup location management."],
-  server:["Server Status","Battlegroup controls, maps, and live server telemetry."],
+  server:["Server Control","Battlegroup controls, maps, and live server telemetry."],
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
   codex:["Gear Codex","Item template reference and operations catalog."],

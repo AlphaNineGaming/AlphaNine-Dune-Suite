@@ -7463,12 +7463,100 @@ async function liveMapMarkersPayload() {
   return { ...result, ...liveMapConfigPayload() };
 }
 
+function normalizeTeleportPlayerState(row) {
+  if (!row) return null;
+  const dbNumber = (value) => value === null || value === undefined || String(value).trim() === "" ? null : Number(value);
+  const partitionId = Number(row.partition_id);
+  const state = {
+    playerId: String(row.player_id || row.fls_id || row.player_controller_id || row.account_id || "").trim(),
+    playerName: String(row.character_name || row.fls_id || row.account_id || "").trim(),
+    actorId: String(row.actor_id || "").trim(),
+    accountId: String(row.account_id || "").trim(),
+    flsId: String(row.fls_id || "").trim(),
+    playerControllerId: String(row.player_controller_id || "").trim(),
+    map: String(row.map || "").trim(),
+    partitionId: Number.isInteger(partitionId) ? partitionId : null,
+    partitionActive: String(row.partition_active || "").toLowerCase() === "true",
+    x: dbNumber(row.x),
+    y: dbNumber(row.y),
+    z: dbNumber(row.z),
+    onlineStatus: String(row.online_status || "").trim(),
+    source: "dune.player_state + dune.actors + dune.world_partition"
+  };
+  state.positionValid = [state.x, state.y, state.z].every(Number.isFinite);
+  state.partitionValid = Number.isInteger(state.partitionId) && state.partitionId > 0 && state.partitionActive;
+  return state;
+}
+
+async function resolveTeleportPlayerState(identity, role = "source") {
+  const value = String(identity || "").trim();
+  if (!value) throw new Error(`Teleport ${role} player is not selected.`);
+  const exact = sqlString(value);
+  const sql = `
+    select
+      coalesce(nullif(ac."user", ''), ps.player_controller_id::text, ps.account_id::text, '') as player_id,
+      coalesce(nullif(ps.character_name, ''), nullif(ac."user", ''), ps.account_id::text, '') as character_name,
+      coalesce(ps.player_pawn_id::text, '') as actor_id,
+      coalesce(ps.account_id::text, '') as account_id,
+      coalesce(ac."user", '') as fls_id,
+      coalesce(ps.player_controller_id::text, '') as player_controller_id,
+      coalesce(a.map, '') as map,
+      a.partition_id::text as partition_id,
+      case when wp.partition_id is not null and nullif(wp.server_id, '') is not null then 'true' else 'false' end as partition_active,
+      (((a.transform).location).x)::double precision as x,
+      (((a.transform).location).y)::double precision as y,
+      (((a.transform).location).z)::double precision as z,
+      coalesce(ps.online_status::text, '') as online_status
+    from dune.player_state ps
+    join dune.actors a on a.id = ps.player_pawn_id
+    left join dune.accounts ac on ac.id = ps.account_id
+    left join dune.world_partition wp on wp.partition_id = a.partition_id
+    where ps.player_pawn_id::text = ${exact}
+       or ps.player_controller_id::text = ${exact}
+       or ps.player_state_id::text = ${exact}
+       or ps.account_id::text = ${exact}
+       or lower(coalesce(ps.character_name, '')) = lower(${exact})
+       or lower(coalesce(ac."user", '')) = lower(${exact})
+       or coalesce(ac.funcom_id, '') = ${exact}
+    order by
+      case when ps.player_pawn_id::text = ${exact} then 0
+           when ps.player_controller_id::text = ${exact} then 1
+           when lower(coalesce(ac."user", '')) = lower(${exact}) then 2
+           else 3 end,
+      ps.last_avatar_activity desc nulls last
+    limit 1
+  `;
+  const query = await liveMapPgQuery(sql, 15000);
+  const state = normalizeTeleportPlayerState(query.rows?.[0]);
+  if (!state?.actorId) throw new Error(`Teleport ${role} player could not be resolved to a current pawn actor from the database.`);
+  return state;
+}
+
+function teleportStateSummary(state) {
+  if (!state) return null;
+  return {
+    playerId: state.playerId,
+    playerName: state.playerName,
+    actorId: state.actorId,
+    map: state.map,
+    partitionId: state.partitionId,
+    partitionActive: state.partitionActive,
+    x: state.x,
+    y: state.y,
+    z: state.z,
+    onlineStatus: state.onlineStatus,
+    source: state.source
+  };
+}
+
 async function liveMapTeleportPreview(payload) {
-  const preview = await liveMapTeleportRequest(payload, { dryRun: true, test: true });
+  const preview = await liveMapTeleportRequest(payload, { dryRun: true, test: true, execution: false });
   return {
     ok: true,
     status: "preview",
-    message: "Teleport preview only. No live teleport command was sent.",
+    message: preview.canExecute
+      ? "Teleport preview resolved from current database state. No live teleport command was sent."
+      : "Teleport preview created, but execution is blocked until partition and safe Z are resolved.",
     ...preview
   };
 }
@@ -7602,11 +7690,9 @@ function matchingTeleportPreset(payload) {
   const x = Number(payload.x);
   const y = Number(payload.y);
   const map = String(payload.map || "HaggaBasin");
-  const partitionId = Math.trunc(Number(payload.partition_id ?? payload.partitionId ?? 0));
   return result.presets.find((preset) => (
     (!name || preset.name === name)
     && preset.map === map
-    && preset.partition_id === partitionId
     && Math.hypot(preset.x - x, preset.y - y) <= 1
   )) || null;
 }
@@ -7630,50 +7716,125 @@ async function verifiedTeleportActor(payload, source) {
   throw new Error(`Exact actor position could not be verified for actor ${actorId}.`);
 }
 
-async function resolveTeleportZ(payload) {
-  const requestedSource = String(payload.elevationSource || "unknown");
-  if (requestedSource === "live-map-drag") {
-    throw new Error("Teleport blocked: safe ground elevation could not be calculated for this location.");
+async function resolveLiveMapTeleportPlan(payload) {
+  const submittedPlayerId = String(payload.playerId || "").trim();
+  if (!submittedPlayerId) throw new Error("Choose or enter a source player/controller id first.");
+  if (submittedPlayerId.length > 128 || !/^[A-Za-z0-9_:.+\-# @]+$/.test(submittedPlayerId)) throw new Error("Source player/controller id contains unsupported characters.");
+  const source = await resolveTeleportPlayerState(submittedPlayerId, "source");
+  const targetType = String(payload.targetActorType || "").trim().toLowerCase();
+  const targetPlayerIdentity = targetType === "player" ? String(payload.targetPlayerId || payload.targetActorId || "").trim() : "";
+  const requestedMap = String(payload.map || source.map || "HaggaBasin").trim();
+  const preset = String(payload.elevationSource || "") === "location-preset" ? matchingTeleportPreset(payload) : null;
+  let target = null;
+  let targetKind = "map-click";
+  let x = Number(payload.x);
+  let y = Number(payload.y);
+  let z = null;
+  let map = source.map || requestedMap;
+  let partitionId = source.partitionId;
+  let partitionReason = "source player's current pawn partition_id from SQL";
+  let safeZReason = "No database-backed or verified safe Z is available for this map-click target.";
+  const blockers = [];
+
+  if (targetPlayerIdentity) {
+    targetKind = "player";
+    target = await resolveTeleportPlayerState(targetPlayerIdentity, "target");
+    x = target.x;
+    y = target.y;
+    z = target.z;
+    map = target.map || map;
+    partitionId = target.partitionId;
+    partitionReason = "target player's current pawn partition_id from SQL";
+    safeZReason = "target player's current pawn Z from SQL";
+    if (!target.positionValid) blockers.push("Target player does not have a complete current X/Y/Z transform in the database.");
+    if (!target.partitionValid) blockers.push("Target player's current database partition_id is missing or inactive.");
+  } else if (preset) {
+    targetKind = "verified-preset";
+    x = preset.x;
+    y = preset.y;
+    z = preset.z;
+    map = preset.map || map;
+    safeZReason = `verified location preset ${preset.name}`;
+    if (source.map && map !== source.map) blockers.push(`Verified preset is on ${map}, but the source player's current world is ${source.map}.`);
+  } else if (payload.targetActorId && targetType && targetType !== "player") {
+    targetKind = "actor";
+    const actor = await verifiedTeleportActor(payload, "actor-transform");
+    x = Number(actor.x);
+    y = Number(actor.y);
+    z = Number(actor.z);
+    map = String(actor.map || map);
+    safeZReason = "target actor's current transform Z from SQL";
+    target = {
+      actorId: String(actor.actor_id || actor.id || ""),
+      playerName: String(actor.name || ""),
+      map,
+      partitionId: Number(actor.partition_id),
+      x,
+      y,
+      z,
+      positionValid: [x, y, z].every(Number.isFinite)
+    };
+    if (!target.positionValid) blockers.push("Target actor does not have a complete current X/Y/Z transform in the database.");
+  } else {
+    if (requestedMap && source.map && requestedMap !== source.map) blockers.push(`Map-click target is on ${requestedMap}, but the source player's current world is ${source.map}.`);
+    blockers.push("Map-click execution requires a safe target Z resolved by the server; preview is still available.");
   }
-  const preset = requestedSource === "location-preset" ? matchingTeleportPreset(payload) : null;
-  const source = preset ? "location-preset" : requestedSource;
-  let sourceZ = preset ? preset.z : payload.z;
-  if (requestedSource === "location-preset" && !preset) {
-    throw new Error("Verified preset coordinates no longer match. Reload the preset before teleporting.");
-  }
-  if (source === "player-position" || source === "actor-transform") {
-    const actor = await verifiedTeleportActor(payload, source);
-    if (Math.hypot(Number(actor.x) - Number(payload.x), Number(actor.y) - Number(payload.y)) > 5) {
-      throw new Error("The selected actor moved after selection. Refresh Live Map and load the exact actor position again.");
-    }
-    sourceZ = actor.z;
-  }
-  const resolved = Coordinates.resolveElevation({
-    z: sourceZ,
-    source
-  });
-  if (!resolved.safe) {
-    throw new Error(`${resolved.reason} Choose a verified preset, another player, or an exact actor position.`);
-  }
-  return { z: resolved.z, source: resolved.source, warning: "", presetName: preset?.name || "" };
+
+  if (!source.positionValid) blockers.push("Source player does not have a complete current X/Y/Z transform in the database.");
+  if (targetKind !== "player" && !source.partitionValid) blockers.push("Source player's current database partition_id is missing or inactive.");
+  if (!Number.isInteger(partitionId) || partitionId <= 0) blockers.push("A valid database-resolved partition_id is required.");
+  if (![x, y].every(Number.isFinite)) blockers.push("Teleport target X/Y must be numeric.");
+  if (!Number.isFinite(z) || z === 0) blockers.push("A safe target Z could not be resolved.");
+  const mapConfig = Coordinates.mapConfig(map);
+  if ([x, y].every(Number.isFinite) && !Coordinates.withinBounds({ x, y }, mapConfig)) blockers.push(`Teleport target is outside ${mapConfig.label} bounds.`);
+  return {
+    source,
+    target,
+    targetKind,
+    playerId: source.playerId || submittedPlayerId,
+    characterName: source.playerName,
+    x,
+    y,
+    z,
+    map,
+    partitionId,
+    partitionReason,
+    safeZReason,
+    blockers: [...new Set(blockers)],
+    canExecute: blockers.length === 0
+  };
 }
 
 async function liveMapTeleportRequest(payload, options = {}) {
   const cfg = loadConfig();
-  const playerId = String(payload.playerId || "").trim();
-  const characterName = String(payload.characterName || payload.name || "").trim();
-  const x = Number(payload.x);
-  const y = Number(payload.y);
-  const zInfo = await resolveTeleportZ(payload);
-  const z = zInfo.z;
-  const partitionId = Number(payload.partition_id ?? payload.partitionId ?? 0);
-  const map = String(payload.map || "HaggaBasin").trim();
+  const plan = await resolveLiveMapTeleportPlan(payload);
+  const { playerId, characterName, x, y, z, map, partitionId } = plan;
   const mapConfig = Coordinates.mapConfig(map);
-  if (!playerId) throw new Error("Choose or enter a player/controller id first.");
-  if (playerId.length > 128 || !/^[A-Za-z0-9_:.+\-# @]+$/.test(playerId)) throw new Error("Player/controller id contains unsupported characters.");
-  if (![x, y, z].every(Number.isFinite)) throw new Error("Teleport coordinates must be numeric.");
-  if (!Coordinates.withinBounds({ x, y }, mapConfig)) throw new Error(`Teleport target is outside ${mapConfig.label} bounds.`);
-  if (!Number.isFinite(partitionId) || partitionId < 0) throw new Error("Partition ID must be a non-negative number when provided.");
+  const diagnostics = {
+    selectedSourcePlayer: { id: plan.source.playerId, name: plan.source.playerName },
+    sourceActorId: plan.source.actorId,
+    targetActorId: plan.targetKind === "player" ? plan.target?.actorId || "" : "",
+    sourceState: teleportStateSummary(plan.source),
+    targetState: plan.targetKind === "player" ? teleportStateSummary(plan.target) : null,
+    targetKind: plan.targetKind,
+    selectedPartitionId: partitionId,
+    partitionReason: plan.partitionReason,
+    safeZReason: plan.safeZReason,
+    sent: { x, y, z },
+    blockers: plan.blockers
+  };
+  if (options.execution === true && !plan.canExecute) throw new Error(`Teleport execution blocked: ${plan.blockers.join(" ")}`);
+  if (!plan.canExecute) {
+    return {
+      endpoint: teleportReceiverUrl(cfg),
+      command: "",
+      request: { playerId, characterName, x, y, z, partition_id: partitionId, map, dryRun: true, test: true },
+      warning: plan.blockers.join(" "),
+      elevationSource: plan.safeZReason,
+      canExecute: false,
+      resolution: { diagnostics }
+    };
+  }
   const commandTemplate = effectiveTeleportCommandTemplate(cfg.teleportCommandTemplate);
   const command = commandTemplate ? renderTeleportTemplate(commandTemplate, {
     playerId,
@@ -7704,16 +7865,18 @@ async function liveMapTeleportRequest(payload, options = {}) {
     endpoint: teleportReceiverUrl(cfg),
     command,
     request: requestPayload,
-    warning: zInfo.warning,
-    elevationSource: zInfo.source
+    warning: "",
+    elevationSource: plan.safeZReason,
+    canExecute: true,
+    resolution: { diagnostics }
   };
   if (payload.debug === true) {
     result.coordinateDebug = {
       playerCurrent: payload.playerCurrent || null,
       clickedMapPosition: payload.clickedMapPosition || null,
       convertedTarget: Coordinates.diagnostics({ x, y, z }, mapConfig),
-      elevationSource: zInfo.source,
-      presetName: zInfo.presetName,
+      elevationSource: plan.safeZReason,
+      targetKind: plan.targetKind,
       mapBoundsUsed: Coordinates.diagnostics({ x, y, z }, mapConfig).bounds
     };
   }
@@ -7751,7 +7914,7 @@ async function liveMapTeleportStatus() {
 
 async function liveMapTeleportExecute(payload) {
   const status = await liveMapTeleportStatus();
-  const preview = await liveMapTeleportRequest(payload, { dryRun: false, test: false });
+  const preview = await liveMapTeleportRequest(payload, { dryRun: false, test: false, execution: true });
   if (!status.serverHealthy) return { ok: false, status: "blocked", error: "Server is not online.", ...preview, readiness: status };
   if (!status.receiverReachable) return { ok: false, status: "blocked", error: "Receiver offline.", ...preview, readiness: status };
   if (!status.liveTeleportEnabled) return { ok: false, status: "blocked", error: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.", ...preview, readiness: status };
@@ -7768,6 +7931,7 @@ async function liveMapTeleportExecute(payload) {
     elevationSource: preview.elevationSource,
     safetyOffset: 0,
     finalPayload: preview.request,
+    resolution: preview.resolution?.diagnostics || null,
     playerId: preview.request.playerId,
     characterName: preview.request.characterName,
     x: preview.request.x,
@@ -7797,6 +7961,44 @@ async function liveMapTeleportExecute(payload) {
     appendAdminAudit("teleport_failed", { endpoint: preview.endpoint, error: error.message });
     return { ok: false, status: "failed", error: error.message, ...preview, readiness: status };
   }
+}
+
+async function verifyLiveMapTeleport(payload) {
+  const playerId = String(payload.playerId || "").trim();
+  const expected = {
+    x: Number(payload.expected?.x ?? payload.x),
+    y: Number(payload.expected?.y ?? payload.y),
+    z: Number(payload.expected?.z ?? payload.z),
+    partitionId: Number(payload.expected?.partitionId ?? payload.partitionId)
+  };
+  if (!playerId) throw new Error("Teleport verification requires the source player id.");
+  if (![expected.x, expected.y, expected.z].every(Number.isFinite)) throw new Error("Teleport verification requires the exact X/Y/Z that was sent.");
+  const state = await resolveTeleportPlayerState(playerId, "verification source");
+  const xyDistance = Math.hypot(state.x - expected.x, state.y - expected.y);
+  const zDistance = Math.abs(state.z - expected.z);
+  const partitionMatches = Number.isInteger(expected.partitionId) && state.partitionId === expected.partitionId;
+  const verified = xyDistance < 50 && zDistance < 100 && partitionMatches;
+  let reason = "Database position has not reached the sent teleport target yet.";
+  if (!partitionMatches) reason = `Post-teleport partition_id ${state.partitionId ?? "missing"} does not match sent partition_id ${expected.partitionId}.`;
+  else if (xyDistance >= 50) reason = `Post-teleport X/Y is ${Math.round(xyDistance)} units from the sent target.`;
+  else if (zDistance >= 100) reason = `Post-teleport Z is ${Math.round(zDistance)} units from the sent target.`;
+  else if (verified) reason = "Post-teleport database X/Y/Z and partition_id match the sent target.";
+  if (verified) appendAdminAudit("teleport_database_verified", { playerId, sourceActorId: state.actorId, expected, postTeleport: { x: state.x, y: state.y, z: state.z, map: state.map, partitionId: state.partitionId }, reason });
+  return {
+    ok: true,
+    status: verified ? "verified" : "pending",
+    verified,
+    playerId,
+    selectedSourcePlayer: { id: state.playerId, name: state.playerName },
+    sourceActorId: state.actorId,
+    expected,
+    postTeleport: { x: state.x, y: state.y, z: state.z, map: state.map, partitionId: state.partitionId },
+    xyDistance,
+    zDistance,
+    partitionMatches,
+    reason,
+    checkedAt: new Date().toISOString()
+  };
 }
 
 function playerDiagnosticLines(diagnostics) {
@@ -9668,13 +9870,12 @@ function appPage() {
               <button type="button" onclick="saveCurrentPlayerTeleportPreset()">Save Current Player Position</button>
               <label>X<input id="teleportX" type="number" step="0.01"></label>
               <label>Y<input id="teleportY" type="number" step="0.01"></label>
-              <label>Verified Z / Elevation<input id="teleportZ" type="number" step="0.01" readonly placeholder="Loaded from a verified source"></label>
-              <label>Partition ID<input id="teleportPartitionId" type="number" step="1" min="0" placeholder="0"></label>
+              <label>Resolved Z / Elevation<input id="teleportZ" type="number" step="0.01" readonly placeholder="Resolved by preview"></label>
               <button type="button" onclick="fillTeleportFromSelectedActor()">Use Selected Actor Position</button>
               <button type="button" class="primary" onclick="previewTeleport()">Preview Teleport</button>
               <button type="button" id="liveTeleportButton" onclick="executeLiveTeleport()" disabled>Live Teleport</button>
             </div>
-            <div class="warning mt">Map drag teleport requires safe ground elevation and is disabled for now.</div>
+            <div class="warning mt">Partition and safe Z are resolved by the server. Map-click preview is allowed; execution remains blocked when safe Z is unavailable.</div>
             <div class="label mt">Teleport To Player</div>
             <div class="field-grid mt">
               <label>Target Player With Known Position<input id="teleportTargetPlayerId" placeholder="target FLS/controller/account id"></label>
@@ -9698,6 +9899,12 @@ function appPage() {
               <div class="detail-row"><span class="subtle">Selected map position</span><strong id="liveDebugMapPosition">--</strong></div>
               <div class="detail-row"><span class="subtle">Coordinate fields</span><strong id="liveDebugCoordinateFields">--</strong></div>
               <div class="detail-row"><span class="subtle">Final teleport payload</span><strong id="liveDebugFinalPayload">--</strong></div>
+              <div class="detail-row"><span class="subtle">Selected source player</span><strong id="liveDebugTeleportSource">--</strong></div>
+              <div class="detail-row"><span class="subtle">Source / target actor</span><strong id="liveDebugTeleportActors">--</strong></div>
+              <div class="detail-row"><span class="subtle">Resolved partition</span><strong id="liveDebugTeleportPartition">--</strong></div>
+              <div class="detail-row"><span class="subtle">X/Y/Z sent</span><strong id="liveDebugTeleportSent">--</strong></div>
+              <div class="detail-row"><span class="subtle">Post-teleport X/Y/Z</span><strong id="liveDebugTeleportPost">--</strong></div>
+              <div class="detail-row"><span class="subtle">Teleport result reason</span><strong id="liveDebugTeleportReason">--</strong></div>
               <div class="detail-row"><span class="subtle">Post-teleport verification</span><strong id="liveDebugVerification">--</strong></div>
               <div class="detail-row"><span class="subtle">Map bounds</span><strong id="liveDebugBounds">--</strong></div>
               <div class="detail-row"><span class="subtle">DB Source</span><strong id="liveDebugPositionSource">--</strong></div>
@@ -10487,7 +10694,7 @@ let managerFrameCheckTimer=null;
 function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let liveMapTunnelPromise=null;
 function appConfirm(title,message,okText="Continue",cancelText="Cancel"){return new Promise(resolve=>{const dialog=document.getElementById("suiteConfirmDialog");const titleEl=document.getElementById("suiteConfirmTitle");const messageEl=document.getElementById("suiteConfirmMessage");const ok=document.getElementById("suiteConfirmOk");const cancel=document.getElementById("suiteConfirmCancel");if(!dialog||!ok||!cancel){resolve(false);return;}titleEl.textContent=title||"Confirm";messageEl.textContent=message||"";ok.textContent=okText;cancel.textContent=cancelText;const cleanup=result=>{dialog.classList.add("hidden");ok.onclick=null;cancel.onclick=null;document.removeEventListener("keydown",onKey,true);resolve(result);};const onKey=event=>{if(event.key==="Escape")cleanup(false);if(event.key==="Enter")cleanup(true);};ok.onclick=()=>cleanup(true);cancel.onclick=()=>cleanup(false);document.addEventListener("keydown",onKey,true);dialog.classList.remove("hidden");ok.focus();});}
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
@@ -10538,12 +10745,12 @@ function duneToLeaflet(x,y){return worldToLiveLatLng(x,y);}
 function formatLiveCoord(value){const number=Number(value);return Number.isFinite(number)?number.toFixed(2):"--";}
 function liveMapDebugEnabled(){const params=new URLSearchParams(location.search);return params.get("debug")==="1"||params.get("debugMarkers")==="1";}
 function setTeleportElevationSource(source,confirmed=false){liveTeleportElevationSource=source||"unknown";liveTeleportElevationConfirmed=confirmed===true;invalidateTeleportPreview();updateLiveMapDebug();}
-function teleportPayloadSignature(payload){return JSON.stringify([payload.playerId,payload.x,payload.y,payload.z,payload.partitionId,payload.map,payload.elevationSource,payload.elevationConfirmed,payload.presetName,payload.targetActorId,payload.targetActorType]);}
-function invalidateTeleportPreview(){liveTeleportPreviewSignature="";syncTeleportButtons();}
-function syncTeleportButtons(){const canExecute=liveTeleportReady&&Boolean(liveTeleportPreviewSignature);const button=document.getElementById("liveTeleportButton");const playerButton=document.getElementById("liveTeleportToPlayerButton");if(button)button.disabled=!canExecute;if(playerButton)playerButton.disabled=!canExecute;}
+function teleportPayloadSignature(payload){return JSON.stringify([payload.playerId,payload.x,payload.y,payload.map,payload.elevationSource,payload.presetName,payload.targetPlayerId,payload.targetActorId,payload.targetActorType]);}
+function invalidateTeleportPreview(){liveTeleportPreviewSignature="";liveTeleportPreviewExecutable=false;syncTeleportButtons();}
+function syncTeleportButtons(){const canExecute=liveTeleportReady&&liveTeleportPreviewExecutable&&Boolean(liveTeleportPreviewSignature);const button=document.getElementById("liveTeleportButton");const playerButton=document.getElementById("liveTeleportToPlayerButton");if(button)button.disabled=!canExecute;if(playerButton)playerButton.disabled=!canExecute;}
 function currentTeleportPlayer(){return findLiveMapPlayerByTeleportId(document.getElementById("teleportPlayerId")?.value||"");}
 function setLiveMapImage(){if(!liveMap)return;const cfg=liveMapConfig(),bounds=liveMapBounds();if(liveMapImageOverlay){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=null;}liveMapImageOverlay=L.imageOverlay(cfg.image||"/assets/hagga-basin-map.png",bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);liveMapImageOverlay.once("error",()=>{if(cfg.fallbackImage&&liveMap){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=L.imageOverlay(cfg.fallbackImage,bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);setText("liveMapStamp","Primary map image missing; using fallback.");}});liveMap.fitBounds(bounds);}
-function initLiveMap(){if(!window.L||!LIVE_COORDINATES){setText("liveMapStamp","Map coordinate runtime unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;document.getElementById("liveMapDiagnosticsPanel")?.classList.toggle("hidden",!liveMapDebugEnabled());if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});setLiveMapImage();liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());document.getElementById("teleportPlayerId")?.addEventListener("input",invalidateTeleportPreview);["teleportX","teleportY","teleportPartitionId"].forEach(id=>document.getElementById(id)?.addEventListener("input",()=>{invalidateTeleportPreview();liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("unknown",false);}));}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
+function initLiveMap(){if(!window.L||!LIVE_COORDINATES){setText("liveMapStamp","Map coordinate runtime unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;document.getElementById("liveMapDiagnosticsPanel")?.classList.toggle("hidden",!liveMapDebugEnabled());if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});setLiveMapImage();liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());document.getElementById("teleportPlayerId")?.addEventListener("input",invalidateTeleportPreview);["teleportX","teleportY"].forEach(id=>document.getElementById(id)?.addEventListener("input",()=>{invalidateTeleportPreview();liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("unknown",false);}));document.getElementById("teleportTargetPlayerId")?.addEventListener("input",invalidateTeleportPreview);}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
 function liveMapChecked(id){const el=document.getElementById(id);return !el||el.checked;}
 function liveMapProject(entity){const x=Number(entity.x),y=Number(entity.y);if(!Number.isFinite(x)||!Number.isFinite(y))return null;return duneToLeaflet(x,y);}
 function liveMapIcon(kind){const size=kind==="base"?17:16;return L.divIcon({className:"",html:'<div class="live-map-marker '+kind+'"></div>',iconSize:[size,size],iconAnchor:[size/2,size/2]});}
@@ -10562,8 +10769,8 @@ function liveMapMarkerPopup(row){return '<strong>'+esc(row.name||row.id||row.typ
 function liveMapPlayerDisplayName(row){return String(row?.character_name||row?.name||row?.player_name||row?.id||"Player").trim()||"Player";}
 function liveMapBlockedTeleportMessage(){return "Teleport blocked: safe ground elevation could not be calculated for this location.";}
 function liveMapSafeDragPreset(coords){return (liveTeleportPresets||[]).find(preset=>preset&&preset.map===liveMapKey&&Number.isFinite(Number(preset.z))&&Number(preset.z)!==0&&Math.hypot(Number(preset.x)-Number(coords.x),Number(preset.y)-Number(coords.y))<=1)||null;}
-function liveMapDragTeleportPayload(row,latlng){const coords=leafletToDune(latlng);const preset=liveMapSafeDragPreset(coords);if(!preset)throw new Error(liveMapBlockedTeleportMessage());const elevation=LIVE_COORDINATES.resolveElevation({z:preset.z,source:"location-preset"});if(!elevation.safe)throw new Error(liveMapBlockedTeleportMessage());const playerId=liveTeleportPlayerId(row);if(!playerId)throw new Error("Player marker has no FLS/controller id for teleport.");const partitionId=Number(preset.partition_id??preset.partitionId??row?.partition_id??row?.partitionId??liveMapConfig().defaultPartitionId??0);return{playerId,characterName:liveMapPlayerDisplayName(row),x:Math.round(Number(preset.x)),y:Math.round(Number(preset.y)),z:elevation.z,partitionId:Number.isFinite(partitionId)?Math.trunc(partitionId):0,map:liveMapKey,elevationSource:"location-preset",elevationConfirmed:true,presetName:preset.name||"",targetActorId:"",debug:true,playerCurrent:liveMapPosition(row),clickedMapPosition:{x:coords.x,y:coords.y,px:Number(latlng.lng),py:Number(latlng.lat)},safetyOffset:0};}
-function applyDragTeleportPayloadToForm(payload,latlng){setValue("teleportPlayerId",payload.playerId);setValue("teleportX",payload.x);setValue("teleportY",payload.y);setValue("teleportZ",payload.z);setValue("teleportPartitionId",payload.partitionId);liveTeleportPresetName=payload.presetName||"";liveTeleportTargetActorId=payload.targetActorId||"";liveTeleportTargetActorType=payload.targetActorType||"";liveSelectedCoordinates={...payload.clickedMapPosition,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(payload.clickedMapPosition.x));setText("liveClickedY",formatLiveCoord(payload.clickedMapPosition.y));setTeleportElevationSource(payload.elevationSource,true);updateLiveMapDebug(latlng);}
+function liveMapDragTeleportPayload(row,latlng){const coords=leafletToDune(latlng);const preset=liveMapSafeDragPreset(coords);if(!preset)throw new Error(liveMapBlockedTeleportMessage());const elevation=LIVE_COORDINATES.resolveElevation({z:preset.z,source:"location-preset"});if(!elevation.safe)throw new Error(liveMapBlockedTeleportMessage());const playerId=liveTeleportPlayerId(row);if(!playerId)throw new Error("Player marker has no FLS/controller id for teleport.");return{playerId,characterName:liveMapPlayerDisplayName(row),x:Math.round(Number(preset.x)),y:Math.round(Number(preset.y)),z:elevation.z,map:liveMapKey,elevationSource:"location-preset",elevationConfirmed:true,presetName:preset.name||"",targetActorId:"",debug:true,playerCurrent:liveMapPosition(row),clickedMapPosition:{x:coords.x,y:coords.y,px:Number(latlng.lng),py:Number(latlng.lat)},safetyOffset:0};}
+function applyDragTeleportPayloadToForm(payload,latlng){setValue("teleportPlayerId",payload.playerId);setValue("teleportX",payload.x);setValue("teleportY",payload.y);setValue("teleportZ",payload.z);liveTeleportPresetName=payload.presetName||"";liveTeleportTargetActorId=payload.targetActorId||"";liveTeleportTargetActorType=payload.targetActorType||"";liveSelectedCoordinates={...payload.clickedMapPosition,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(payload.clickedMapPosition.x));setText("liveClickedY",formatLiveCoord(payload.clickedMapPosition.y));setTeleportElevationSource(payload.elevationSource,true);updateLiveMapDebug(latlng);}
 async function handleLiveMapPlayerDrag(row,marker,originalPoint,event){const next=event.target.getLatLng();const originalLatLng=L.latLng(originalPoint[0],originalPoint[1]);const log=document.getElementById("teleportLog");try{const payload=liveMapDragTeleportPayload(row,next);applyDragTeleportPayloadToForm(payload,next);const confirmed=await appConfirm("Confirm Teleport","Teleport "+payload.characterName+" to "+Math.round(payload.x)+", "+Math.round(payload.y)+", "+Math.round(payload.z)+"?","Confirm Teleport","Cancel");if(!confirmed){marker.setLatLng(originalLatLng);if(log)log.textContent="Teleport cancelled. Marker returned to "+formatLivePosition(liveMapPosition(row))+".";playUiSound("click");return;}if(log)log.textContent="Sending live map drag teleport for "+payload.characterName+"...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");if(log)log.textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying server position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(error){marker.setLatLng(originalLatLng);if(log)log.textContent=betterError(error);addActivity("error","Live map drag teleport failed",error.message);playUiSound("warning");}finally{refreshTeleportReadiness();}}
 function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(row.type||kind.slice(0,-1)||kind),draggable:false}).bindPopup(liveMapMarkerPopup(row));liveMapMarkerIndex[liveMapMarkerKey(row)]=marker;marker.on("click",()=>{liveMapSelectedEntity=row;if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});updateLiveMapDebug();});marker.addTo(liveMapLayerGroup);});return count;}
 function liveMapVisibleRows(){const layers=liveMapData?.layers||{};const rows=[];if(liveMapChecked("liveLayerPlayers"))rows.push(...(layers.players||[]));if(liveMapChecked("liveLayerVehicles"))rows.push(...(layers.vehicles||[]));if(liveMapChecked("liveLayerBases"))rows.push(...(layers.bases||[]));return rows;}
@@ -10575,12 +10782,12 @@ function selectLiveCoordinates(latlng,options={}){const coords=leafletToDune(lat
 async function copyLiveCoordinates(){if(!liveSelectedCoordinates){playUiSound("warning");return;}const text="X "+formatLiveCoord(liveSelectedCoordinates.x)+", Y "+formatLiveCoord(liveSelectedCoordinates.y);try{await navigator.clipboard.writeText(text);playUiSound("success");addActivity("maps","Coordinates copied",text);}catch{playUiSound("warning");}}
 function goToLiveCoordinates(){if(!liveMap)return;const x=Number(document.getElementById("liveSearchX")?.value);const y=Number(document.getElementById("liveSearchY")?.value);if(!Number.isFinite(x)||!Number.isFinite(y)){playUiSound("warning");return;}const point=duneToLeaflet(x,y);liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:true});playUiSound("click");}
 async function loadTeleportPresets(){try{const data=await getJson("/api/live-map/teleport/presets");liveTeleportPresets=data.presets||[];const select=document.getElementById("teleportPreset");if(!select)return;select.innerHTML='<option value="">Choose a verified preset</option>'+liveTeleportPresets.map((preset,index)=>'<option value="'+index+'">'+esc(preset.name)+' / '+esc(preset.map)+' / Z '+esc(preset.z)+'</option>').join("");if(!liveTeleportPresets.length)select.innerHTML+='<option value="" disabled>No verified presets saved</option>';}catch(e){const log=document.getElementById("teleportLog");if(log)log.textContent="Location presets unavailable. "+betterError(e);}}
-function applyTeleportPreset(){const select=document.getElementById("teleportPreset");if(!select||select.value==="")return;const preset=liveTeleportPresets[Number(select.value)];if(!preset)return;setValue("teleportX",preset.x);setValue("teleportY",preset.y);setValue("teleportZ",preset.z);setValue("teleportPartitionId",preset.partition_id||0);liveTeleportPresetName=preset.name;liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("location-preset",true);const point=duneToLeaflet(preset.x,preset.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Loaded verified location preset: "+preset.name+"\\n"+formatLivePosition(preset);playUiSound("click");}
+function applyTeleportPreset(){const select=document.getElementById("teleportPreset");if(!select||select.value==="")return;const preset=liveTeleportPresets[Number(select.value)];if(!preset)return;setValue("teleportX",preset.x);setValue("teleportY",preset.y);setValue("teleportZ",preset.z);liveTeleportPresetName=preset.name;liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("location-preset",true);const point=duneToLeaflet(preset.x,preset.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});const log=document.getElementById("teleportLog");if(log)log.textContent="Loaded verified location preset: "+preset.name+"\\n"+formatLivePosition(preset);playUiSound("click");}
 async function saveCurrentPlayerTeleportPreset(){const player=currentTeleportPlayer();const position=liveMapPosition(player);const name=document.getElementById("teleportPresetName")?.value.trim()||"";const log=document.getElementById("teleportLog");try{if(!name)throw new Error("Enter a preset name first.");if(!player||!position||!Number.isFinite(position.z)||position.z===0)throw new Error("Select an online player with a current X/Y/Z position first.");if(String(player.status||player.online_status||"").toLowerCase()!=="online")throw new Error("Only a currently online player position can be saved as a safe preset.");const existing=liveTeleportPresets.find(preset=>String(preset.name||"").toLowerCase()===name.toLowerCase());const confirmed=await appConfirm("Save Safe Teleport Preset","Confirm that "+(player.character_name||player.name||"this player")+" is standing at a safe location. Save "+name+" at "+formatLivePosition(position)+"?",existing?"Overwrite Preset":"Save Preset","Cancel");if(!confirmed)return;const data=await getJson("/api/live-map/teleport/presets",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,playerId:liveTeleportPlayerId(player),actorId:String(player.actor_id||player.id||""),confirmed:true,overwrite:Boolean(existing)})});await loadTeleportPresets();const select=document.getElementById("teleportPreset");const index=liveTeleportPresets.findIndex(preset=>preset.name===data.preset?.name);if(select&&index>=0){select.value=String(index);applyTeleportPreset();}if(log)log.textContent=data.message+"\\n"+formatLivePosition(data.preset);addActivity("maps","Safe teleport preset saved",data.preset?.name||name);playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
-function fillTeleportFromSelectedActor(){const actor=liveMapSelectedEntity;const position=liveMapPosition(actor);const log=document.getElementById("teleportLog");if(!actor||!position||!Number.isFinite(position.z)||position.z===0){if(log)log.textContent="Select a player, vehicle, or base marker with an exact X/Y/Z transform first.";playUiSound("warning");return null;}setValue("teleportX",position.x);setValue("teleportY",position.y);setValue("teleportZ",position.z);setValue("teleportPartitionId",actor.partition_id||actor.partitionId||0);liveTeleportPresetName="";liveTeleportTargetActorId=String(actor.actor_id||actor.id||"");liveTeleportTargetActorType=String(actor.type||"");setTeleportElevationSource("actor-transform",true);const point=duneToLeaflet(position.x,position.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});if(log)log.textContent="Loaded exact "+(actor.type||"actor")+" position for "+(actor.name||actor.id)+"\\n"+formatLivePosition(position);playUiSound("click");return actor;}
+function fillTeleportFromSelectedActor(){const actor=liveMapSelectedEntity;const position=liveMapPosition(actor);const log=document.getElementById("teleportLog");if(!actor||!position||!Number.isFinite(position.z)||position.z===0){if(log)log.textContent="Select a player, vehicle, or base marker with an exact X/Y/Z transform first.";playUiSound("warning");return null;}setValue("teleportX",position.x);setValue("teleportY",position.y);setValue("teleportZ",position.z);liveTeleportPresetName="";liveTeleportTargetActorId=String(actor.actor_id||actor.id||"");liveTeleportTargetActorType=String(actor.type||"");setTeleportElevationSource("actor-transform",true);const point=duneToLeaflet(position.x,position.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});if(log)log.textContent="Loaded exact "+(actor.type||"actor")+" position for "+(actor.name||actor.id)+"\\n"+formatLivePosition(position);playUiSound("click");return actor;}
 function findLiveMapPlayerByAnyId(playerId){return findLiveMapPlayerByTeleportId(playerId);}
-function fillTeleportFromTargetPlayer(){const targetId=document.getElementById("teleportTargetPlayerId")?.value||"";const target=findLiveMapPlayerByAnyId(targetId);const pos=liveMapPosition(target);if(!target||!pos){const message="Target player position unavailable. Refresh Live Map and choose a player with known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}if(!Number.isFinite(Number(pos.z))||Number(pos.z)===0){const message="Target player has no valid Z/elevation. Teleport to Player requires known X/Y/Z.";document.getElementById("teleportLog").textContent=message;playUiSound("warning");return null;}setValue("teleportX",pos.x);setValue("teleportY",pos.y);setValue("teleportZ",pos.z);setValue("teleportPartitionId",target.partition_id||target.partitionId||0);liveTeleportPresetName="";liveTeleportTargetActorId=String(target.actor_id||target.id||"");liveTeleportTargetActorType="player";setTeleportElevationSource("player-position",true);const point=duneToLeaflet(pos.x,pos.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});document.getElementById("teleportLog").textContent="Loaded target player position for "+(target.name||target.character_name||targetId)+"\\n"+formatLivePosition(pos);playUiSound("click");return target;}
-async function previewTeleportToPlayer(){if(!fillTeleportFromTargetPlayer())return;await previewTeleport();}
+function fillTeleportFromTargetPlayer(){const targetId=document.getElementById("teleportTargetPlayerId")?.value||"";const target=findLiveMapPlayerByAnyId(targetId);const pos=liveMapPosition(target);liveTeleportPresetName="";liveTeleportTargetActorId=String(target?.actor_id||target?.id||"");liveTeleportTargetActorType="player";setTeleportElevationSource("player-position",true);if(target&&pos){setValue("teleportX",pos.x);setValue("teleportY",pos.y);setValue("teleportZ",pos.z);const point=duneToLeaflet(pos.x,pos.y);if(liveMap)liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});}document.getElementById("teleportLog").textContent="Target selected. Preview will resolve the player's current X/Y/Z and partition from the database.";playUiSound("click");return targetId?target||{id:targetId}:null;}
+async function previewTeleportToPlayer(){liveTeleportTargetActorType="player";await previewTeleport();}
 async function executeTeleportToPlayer(){await executeLiveTeleport();}
 function updateLiveMapDebug(latlng){
   if(!liveMapDebugEnabled())return;
@@ -10599,6 +10806,14 @@ function updateLiveMapDebug(latlng){
   setText("liveDebugMapPosition",entityDebug?.transformedMapPosition?("PX "+formatLiveCoord(entityDebug.transformedMapPosition.px)+" / PY "+formatLiveCoord(entityDebug.transformedMapPosition.py)):"--");
   setText("liveDebugCoordinateFields",entityDebug?.sourceCoordinateFields||"--");
   setText("liveDebugFinalPayload",liveTeleportFinalPayload?JSON.stringify(liveTeleportFinalPayload):"--");
+  const teleportDiag=liveTeleportResolutionDiagnostics||{};
+  const verification=liveTeleportVerificationResult||{};
+  setText("liveDebugTeleportSource",teleportDiag.selectedSourcePlayer?(teleportDiag.selectedSourcePlayer.name+" / "+teleportDiag.selectedSourcePlayer.id):"--");
+  setText("liveDebugTeleportActors",teleportDiag.sourceActorId?teleportDiag.sourceActorId+(teleportDiag.targetActorId?" -> "+teleportDiag.targetActorId:""):"--");
+  setText("liveDebugTeleportPartition",teleportDiag.selectedPartitionId!=null?String(teleportDiag.selectedPartitionId)+" / "+String(teleportDiag.partitionReason||""):"--");
+  setText("liveDebugTeleportSent",teleportDiag.sent?formatLivePosition(teleportDiag.sent):"--");
+  setText("liveDebugTeleportPost",verification.postTeleport?formatLivePosition(verification.postTeleport):"--");
+  setText("liveDebugTeleportReason",verification.reason||(teleportDiag.blockers||[]).join(" ")||"--");
   setText("liveDebugVerification",liveTeleportVerificationResult?JSON.stringify(liveTeleportVerificationResult):"--");
   setText("liveDebugBounds",cfg.minX+".."+cfg.maxX+" / "+cfg.minY+".."+cfg.maxY+" / flipY "+Boolean(cfg.flipY));
   const counts=liveMapData?.debug?.rowCounts||{players:(liveMapData?.layers?.players||[]).length,vehicles:(liveMapData?.layers?.vehicles||[]).length,bases:(liveMapData?.layers?.bases||[]).length};
@@ -10659,50 +10874,46 @@ async function refreshLiveMap(){
     addActivity("error","Live map failed",e.message);
   }
 }
-function teleportPayload(){const p=selectedPlayer();const current=liveMapPosition(currentTeleportPlayer());return{playerId:document.getElementById("teleportPlayerId").value,characterName:p?.character_name||p?.name||"",x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value,partitionId:document.getElementById("teleportPartitionId")?.value||0,map:liveMapKey,elevationSource:liveTeleportElevationSource,elevationConfirmed:liveTeleportElevationConfirmed,presetName:liveTeleportPresetName,targetActorId:liveTeleportTargetActorId,targetActorType:liveTeleportTargetActorType,debug:liveMapDebugEnabled(),playerCurrent:current,clickedMapPosition:liveSelectedCoordinates?{x:liveSelectedCoordinates.x,y:liveSelectedCoordinates.y,px:liveSelectedCoordinates.lng,py:liveSelectedCoordinates.lat}:null};}
-function renderTeleportResult(data){return (data.message||data.error||data.status||"Teleport response")+(data.warning?"\\nWarning: "+data.warning:"")+"\\nEndpoint: "+(data.endpoint||"-")+"\\nCommand: "+(data.command||"-")+"\\nPayload:\\n"+JSON.stringify(data.request||{},null,2)+(data.response?"\\n\\nReceiver response:\\n"+JSON.stringify(data.response,null,2):"")+(data.reasons?.length?"\\n\\nReadiness:\\n"+data.reasons.join("\\n"):"");}
+function teleportPayload(){const p=selectedPlayer();const current=liveMapPosition(currentTeleportPlayer());return{playerId:document.getElementById("teleportPlayerId").value,characterName:p?.character_name||p?.name||"",targetPlayerId:document.getElementById("teleportTargetPlayerId")?.value||"",x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value,map:liveMapKey,elevationSource:liveTeleportElevationSource,elevationConfirmed:liveTeleportElevationConfirmed,presetName:liveTeleportPresetName,targetActorId:liveTeleportTargetActorId,targetActorType:liveTeleportTargetActorType,debug:liveMapDebugEnabled(),playerCurrent:current,clickedMapPosition:liveSelectedCoordinates?{x:liveSelectedCoordinates.x,y:liveSelectedCoordinates.y,px:liveSelectedCoordinates.lng,py:liveSelectedCoordinates.lat}:null};}
+function renderTeleportResult(data){return (data.message||data.error||data.status||"Teleport response")+(data.warning?"\\nWarning: "+data.warning:"")+"\\nEndpoint: "+(data.endpoint||"-")+"\\nCommand: "+(data.command||"-")+"\\nPayload:\\n"+JSON.stringify(data.request||{},null,2)+(data.resolution?.diagnostics?"\\n\\nSQL resolution:\\n"+JSON.stringify(data.resolution.diagnostics,null,2):"")+(data.response?"\\n\\nReceiver response:\\n"+JSON.stringify(data.response,null,2):"")+(data.reasons?.length?"\\n\\nReadiness:\\n"+data.reasons.join("\\n"):"");}
 async function refreshAfterTeleport(payload,data){
-  if(!data?.ok||!liveMap)return false;
-  const playerId=String(payload.playerId||data.request?.playerId||data.request?.fls_id||"").trim();
+  if(!data?.ok)return false;
+  const resolution=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics||{};
+  const playerId=String(resolution.selectedSourcePlayer?.id||payload.playerId||data.request?.playerId||data.request?.fls_id||"").trim();
   const target={x:Number(data.request?.x??payload.x),y:Number(data.request?.y??payload.y),z:Number(data.request?.z??payload.z)};
   if(!playerId||!Number.isFinite(target.x)||!Number.isFinite(target.y))return false;
-  const oldPosition=liveMapPosition(findLiveMapPlayerByTeleportId(playerId));
+  const oldPosition=resolution.sourceState?{x:Number(resolution.sourceState.x),y:Number(resolution.sourceState.y),z:Number(resolution.sourceState.z)}:liveMapPosition(findLiveMapPlayerByTeleportId(playerId));
   liveTeleportFinalPayload=data.request||null;
-  liveTeleportVerificationResult={status:"pending",playerId,oldPosition,target,afterPosition:null,distance:null};
+  liveTeleportResolutionDiagnostics=resolution;
+  liveTeleportVerificationResult={status:"pending",playerId,oldPosition,target,postTeleport:null,reason:"Waiting for post-teleport database state."};
   liveTeleportPending={playerId,target:{x:target.x,y:target.y,z:Number.isFinite(target.z)?target.z:null},oldPosition,sentAt:Date.now()};
   updateLiveMapDebug();
-  console.debug("[AlphaNine Live Map] teleport sent, refreshing player position",{playerId,oldPosition,target:liveTeleportPending.target,elevationSource:data.elevationSource,safetyOffset:payload.safetyOffset??0,finalPayload:data.request});
-  addActivity("maps","Teleport sent, waiting for server position update","Player "+playerId+" target "+formatLivePosition(liveTeleportPending.target));
-  clearCachedTeleportPlayer(playerId);renderLiveMapLayers();
+  addActivity("maps","Teleport sent, waiting for database position update","Player "+playerId+" target "+formatLivePosition(liveTeleportPending.target));
+  clearCachedTeleportPlayer(playerId);if(liveMap)renderLiveMapLayers();
   const log=document.getElementById("teleportLog");
-  if(log)log.textContent+=(log.textContent?"\n\n":"")+"Teleport sent, waiting for server position update...";
+  if(log)log.textContent+=(log.textContent?"\n\n":"")+"Teleport sent, waiting for database position update...";
   for(let attempt=0;attempt<12;attempt++){
-    await refreshLiveMap();
-    const player=findLiveMapPlayerByTeleportId(playerId);
-    const next=liveMapPosition(player);
-    const distance=liveMapDistance(next,target);
-    liveTeleportVerificationResult={status:"pending",attempt:attempt+1,playerId,oldPosition,target,afterPosition:next,distance};
+    let verification;
+    try{verification=await getJson("/api/live-map/teleport/verify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,expected:{x:target.x,y:target.y,z:target.z,partitionId:Number(data.request?.partition_id??resolution.selectedPartitionId)}}),timeoutMs:20000});}
+    catch(error){verification={ok:false,status:"pending",verified:false,playerId,postTeleport:null,reason:betterError(error)};}
+    liveTeleportVerificationResult={...verification,attempt:attempt+1,oldPosition,target};
     updateLiveMapDebug();
-    console.debug("[AlphaNine Live Map] teleport verification",liveTeleportVerificationResult);
-    if(next&&distance<50){
-      const detail="Player "+playerId+" old "+formatLivePosition(oldPosition)+" -> new "+formatLivePosition(next);
-      liveTeleportVerificationResult={status:"verified",attempt:attempt+1,playerId,oldPosition,target,afterPosition:next,distance};
+    if(verification.verified){
+      const next=verification.postTeleport;
+      const detail="Player "+playerId+" old "+formatLivePosition(oldPosition)+" -> DB "+formatLivePosition(next);
       updateLiveMapDebug();
-      if(log&&!/Server position confirmed/.test(log.textContent||""))log.textContent+=(log.textContent?"\n\n":"")+"Server position confirmed.\n"+detail;
-      addActivity("maps","Teleport position confirmed",detail);liveTeleportPending=null;return true;
+      if(log&&!/Database position confirmed/.test(log.textContent||""))log.textContent+=(log.textContent?"\n\n":"")+"Database position confirmed.\n"+detail+"\n"+verification.reason;
+      addActivity("maps","Teleport database position confirmed",detail);liveTeleportPending=null;if(liveMap)await refreshLiveMap();return true;
     }
     await new Promise(resolve=>setTimeout(resolve,5000));
   }
-  const after=liveMapPosition(findLiveMapPlayerByTeleportId(playerId));
-  const distance=liveMapDistance(after,target);
-  const detail="Target "+formatLivePosition(target)+" / after "+formatLivePosition(after);
-  liveTeleportVerificationResult={status:"failed",playerId,oldPosition,target,afterPosition:after,distance,reason:"Player position did not update near target."};
-  liveTeleportPending=null;renderLiveMapLayers();updateLiveMapDebug();
-  throw new Error("Teleport verification failed: player position did not update near target. "+detail);
+  liveTeleportVerificationResult={...liveTeleportVerificationResult,status:"failed",verified:false,reason:liveTeleportVerificationResult?.reason||"Database position did not update to the sent target."};
+  liveTeleportPending=null;if(liveMap)renderLiveMapLayers();updateLiveMapDebug();
+  throw new Error("Teleport verification failed: "+liveTeleportVerificationResult.reason);
 }
-async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){status.className=(liveTeleportReady?"empty mt":"warning mt")+" advanced-status";status.textContent=liveTeleportReady?(liveTeleportPreviewSignature?"Teleport preview confirmed. Live Teleport is armed.":"Live Teleport ready. Preview a safe X/Y/Z target before confirming."):(data.reasons||["Live Teleport unavailable."]).join(" ");}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt advanced-status";status.textContent=betterError(e);}return null;}}
-async function previewTeleport(){const payload=teleportPayload();invalidateTeleportPreview();try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});liveTeleportPreviewSignature=teleportPayloadSignature(payload);document.getElementById("teleportLog").textContent=renderTeleportResult(data);await refreshTeleportReadiness();playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
-async function executeLiveTeleport(){const payload=teleportPayload();try{if(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload))throw new Error("Teleport target changed or has not been previewed. Preview the current X/Y/Z target before live teleport.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying server position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}finally{refreshTeleportReadiness();}}
+async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){const executable=liveTeleportReady&&liveTeleportPreviewExecutable&&Boolean(liveTeleportPreviewSignature);status.className=(executable?"empty mt":"warning mt")+" advanced-status";status.textContent=!liveTeleportReady?(data.reasons||["Live Teleport unavailable."]).join(" "):executable?"SQL-resolved preview confirmed. Live Teleport is armed.":liveTeleportPreviewSignature?"Preview available, but Execute is blocked until partition and safe Z resolve.":"Live Teleport ready. Preview a target to resolve current database state.";}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt advanced-status";status.textContent=betterError(e);}return null;}}
+async function previewTeleport(){const payload=teleportPayload();invalidateTeleportPreview();try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||null;const sent=liveTeleportResolutionDiagnostics?.sent;if(sent){setValue("teleportX",sent.x);setValue("teleportY",sent.y);setValue("teleportZ",sent.z!==null&&sent.z!==""&&Number.isFinite(Number(sent.z))?sent.z:"");}liveTeleportPreviewExecutable=data.canExecute===true;liveTeleportPreviewSignature=teleportPayloadSignature(teleportPayload());document.getElementById("teleportLog").textContent=renderTeleportResult(data);updateLiveMapDebug();await refreshTeleportReadiness();playUiSound(data.canExecute?"success":"warning");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
+async function executeLiveTeleport(){const payload=teleportPayload();try{if(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload))throw new Error("Teleport target changed or has not been previewed. Preview the current target before live teleport.");if(!liveTeleportPreviewExecutable)throw new Error("Execute is blocked because preview did not resolve a valid partition and safe Z.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}finally{refreshTeleportReadiness();}}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
@@ -11303,6 +11514,11 @@ async function route(req, res) {
   if (url.pathname === "/api/live-map/teleport/status" && req.method === "GET") {
     try { await json(res, await liveMapTeleportStatus()); }
     catch (error) { await json(res, { ok: false, canTeleport: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/live-map/teleport/verify" && req.method === "POST") {
+    try { await json(res, await verifyLiveMapTeleport(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) { await json(res, { ok: false, status: "failed", verified: false, reason: error.message, error: error.message }, 400); }
     return;
   }
   if (url.pathname === "/api/live-map/teleport/execute" && req.method === "POST") {

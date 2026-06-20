@@ -34,6 +34,7 @@
   "teleportPayloadTemplate": "{\n  \"fls_id\": \"{playerId}\",\n  \"x\": {x},\n  \"y\": {y},\n  \"z\": {z},\n  \"partition_id\": {partitionId},\n  \"dryRun\": {dryRun},\n  \"test\": {test}\n}",
   "progressionEditingEnabled": false,
   "databaseBackupLocation": "",
+  "uiMode": "simple",
   "uiSoundsEnabled": true,
   "uiSoundVolume": 100
 }

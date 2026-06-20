@@ -113,6 +113,7 @@ const defaultConfig = {
   teleportPayloadTemplate: "{\n  \"fls_id\": \"{playerId}\",\n  \"x\": {x},\n  \"y\": {y},\n  \"z\": {z},\n  \"partition_id\": {partitionId},\n  \"dryRun\": {dryRun},\n  \"test\": {test}\n}",
   progressionEditingEnabled: false,
   databaseBackupLocation: DEFAULT_DATABASE_BACKUP_DIR,
+  uiMode: "simple",
   uiSoundsEnabled: true,
   uiSoundVolume: 100
 };
@@ -233,7 +234,7 @@ function normalizeSelectedBattlegroup(value) {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
   const clean = {};
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(nextConfig, key)) clean[key] = nextConfig[key];
@@ -275,6 +276,7 @@ function saveConfig(nextConfig) {
   clean.teleportPayloadTemplate = String(clean.teleportPayloadTemplate || defaultConfig.teleportPayloadTemplate).trim();
   clean.progressionEditingEnabled = clean.progressionEditingEnabled === true || clean.progressionEditingEnabled === "true";
   clean.databaseBackupLocation = expandEnvPath(String(clean.databaseBackupLocation || DEFAULT_DATABASE_BACKUP_DIR).trim());
+  clean.uiMode = String(clean.uiMode || "simple").trim().toLowerCase() === "advanced" ? "advanced" : "simple";
   clean.uiSoundsEnabled = clean.uiSoundsEnabled === true || clean.uiSoundsEnabled === "true";
   clean.uiSoundVolume = Math.max(0, Math.min(100, Number(clean.uiSoundVolume) || 0));
   clean.selectedBattlegroup = normalizeSelectedBattlegroup(clean.selectedBattlegroup);
@@ -8787,6 +8789,12 @@ function appPage() {
     .legal-notice { margin-top:12px; padding-top:10px; border-top:1px solid rgba(214,166,69,.16); color:rgba(214,196,151,.68); font-size:10px; line-height:1.35; }
     .content { min-width:0; padding:18px 24px 30px; overflow-x:hidden; }
     .topbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(260px,1fr) auto; gap:16px; align-items:center; margin:-18px -24px 18px; padding:16px 24px; backdrop-filter:blur(18px); background:linear-gradient(90deg, rgba(7,8,4,.94), rgba(23,19,10,.88)); border-bottom:1px solid var(--line); box-shadow:0 14px 42px rgba(0,0,0,.36); }
+    .topbar-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:12px; }
+    .ui-mode-control { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.09em; white-space:nowrap; }
+    .ui-mode-control select { width:auto; min-width:112px; min-height:34px; padding:0 28px 0 10px; font-size:11px; }
+    body.simple-mode .advanced-only { display:none !important; }
+    body.simple-mode .advanced-status.empty { display:none !important; }
+    body.simple-mode .metric-tile .subtle { display:none; }
     .title h2 { margin:0; font-size:24px; letter-spacing:.12em; text-transform:uppercase; color:var(--gold-bright); }
     .title p { margin:5px 0 0; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-size:12px; }
     .status-strip { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
@@ -9080,11 +9088,11 @@ function appPage() {
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
-    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.topbar-actions{justify-content:flex-start}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
     @media (max-width:720px) { .env-var-row{grid-template-columns:1fr;gap:5px}.env-var-value{font-size:12px}.env-help{font-size:11.5px} }
   </style>
 </head>
-<body>
+<body class="simple-mode">
 <div id="aboutDialog" class="about-overlay hidden" role="dialog" aria-modal="true" aria-label="About AlphaNine Dune Suite">
   <div class="about-card">
     <div class="panel-head">
@@ -9240,8 +9248,8 @@ function appPage() {
       <button class="tab" data-view="management">Server Management</button>
       <button class="tab" data-view="item-database">Item Database</button>
       <button class="tab" data-view="env">Env Setup</button>
-      <button class="tab" data-view="logs">Logs</button>
-      <button class="tab" data-view="diagnostics">Diagnostics</button>
+      <button class="tab advanced-only" data-view="logs">Logs</button>
+      <button class="tab advanced-only" data-view="diagnostics">Diagnostics</button>
       <button class="tab" data-view="settings">Settings</button>
     </nav>
     <div class="sidebar-foot">
@@ -9255,12 +9263,17 @@ function appPage() {
         <h2 id="viewTitle">Dashboard</h2>
         <p id="viewSubtitle">Dune Awakening Server Operations Center.</p>
       </div>
-      <div class="status-strip">
-        <span id="topServer" class="badge warn">Server checking</span>
-        <span id="topDb" class="badge warn">DB checking</span>
-        <span id="topLive" class="badge warn">Live give checking</span>
-        <span id="topPlayers" class="badge warn">Players 0</span>
-        <span id="topSsh" class="badge warn">SSH unknown</span>
+      <div class="topbar-actions">
+        <label class="ui-mode-control">UI Mode
+          <select id="headerUiMode" onchange="changeUiMode(this.value)"><option value="simple">Simple</option><option value="advanced">Advanced</option></select>
+        </label>
+        <div class="status-strip">
+          <span id="topServer" class="badge warn">Server checking</span>
+          <span id="topDb" class="badge warn">DB checking</span>
+          <span id="topLive" class="badge warn advanced-only">Live give checking</span>
+          <span id="topPlayers" class="badge warn">Players 0</span>
+          <span id="topSsh" class="badge warn advanced-only">SSH unknown</span>
+        </div>
       </div>
     </div>
 
@@ -9283,12 +9296,12 @@ function appPage() {
         <div class="panel pad metric-tile"><div class="label">VM Status</div><div id="dashboardVmStatus" class="value">Checking...</div><div class="subtle">Hyper-V VM state.</div></div>
         <div class="panel pad metric-tile"><div class="label">Server Population</div><div id="players" class="value">Checking...</div><div class="subtle">Current known player state.</div></div>
         <div class="panel pad metric-tile"><div class="label">Database Link</div><div id="adminDb" class="value">Checking...</div><div class="subtle">Postgres/admin probe.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Give Transport</div><div id="adminLive" class="value">Checking...</div><div class="subtle">Runtime grant route.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Receiver Bridge</div><div id="receiverState" class="value">Checking...</div><div class="subtle">HTTP JSON receiver health.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Queue Bridge</div><div id="rabbitState" class="value">Checking...</div><div class="subtle">RabbitMQ command target.</div></div>
+        <div class="panel pad metric-tile advanced-only"><div class="label">Give Transport</div><div id="adminLive" class="value">Checking...</div><div class="subtle">Runtime grant route.</div></div>
+        <div class="panel pad metric-tile advanced-only"><div class="label">Receiver Bridge</div><div id="receiverState" class="value">Checking...</div><div class="subtle">HTTP JSON receiver health.</div></div>
+        <div class="panel pad metric-tile advanced-only"><div class="label">Queue Bridge</div><div id="rabbitState" class="value">Checking...</div><div class="subtle">RabbitMQ command target.</div></div>
       </div>
       <div class="dashboard-grid">
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="panel-head"><div class="label">Server Resources</div><div id="resourceSource" class="micro">Source: Unknown</div></div>
           <div class="resource-bars">
             <div class="resource-row"><span>CPU</span><div class="bar"><span id="resourceCpuBar" style="width:0%"></span></div><strong id="resourceCpu">Unknown</strong></div>
@@ -9301,11 +9314,11 @@ function appPage() {
           <div class="panel-head"><div class="label">Player Feed</div><div id="playerFeedStamp" class="micro">Loading</div></div>
           <div id="playerFeed" class="player-feed"><div class="empty">Loading players...</div></div>
         </div>
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="panel-head"><div class="label">Activity Feed</div><div class="micro">All events</div></div>
           <div id="activityFeed" class="activity"><div class="empty">Activity will appear after probes, refreshes, grants, and errors.</div></div>
         </div>
-        <div class="panel pad vm-monitor">
+        <div class="panel pad vm-monitor advanced-only">
           <div class="vm-monitor-head">
             <div>
               <div class="label">VM Connection Monitor</div>
@@ -9351,7 +9364,7 @@ function appPage() {
         </div>
       </div>
       <div class="layout-3 mt">
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="panel-head"><div class="label">System Alerts</div><div class="micro">Operations</div></div>
           <div class="ops-list">
             <div class="ops-row"><div class="ops-icon">!</div><div><strong>Permission and elevation checks</strong><div class="subtle">Server Status reports admin and VM diagnostics when required.</div></div><span class="micro">Active</span></div>
@@ -9367,14 +9380,14 @@ function appPage() {
             <button data-open="server">Server Status</button>
             <button onclick="refreshAll()">Refresh All</button>
           </div>
-          <div class="sound-widget" aria-label="UI sound controls">
+          <div class="sound-widget advanced-only" aria-label="UI sound controls">
             <div class="sound-widget-head">
               <div class="label">Interface Audio</div>
               <button id="dashboardSoundToggle" class="sound-toggle" type="button">🔊 Sounds ON</button>
             </div>
             <label class="sound-slider">Volume <input id="dashboardSoundVolume" type="range" min="0" max="100" value="100"><span id="dashboardSoundVolumeLabel" class="sound-volume-readout">100%</span></label>
           </div>
-          <pre id="dashboardLog" class="mt">Awaiting telemetry.</pre>
+          <pre id="dashboardLog" class="mt advanced-only">Awaiting telemetry.</pre>
           <div class="dashboard-footer">
             <span>Need help? Join our Discord: <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">https://discord.gg/tuUv3hYTv</a></span>
           </div>
@@ -9405,7 +9418,7 @@ function appPage() {
           </div>
           <div class="panel pad">
             <div class="label">Markers</div>
-            <div class="detail-list mt">
+            <div class="detail-list mt advanced-only">
               <div class="detail-row"><span class="subtle">Players</span><strong id="liveDebugPlayers">0</strong></div>
               <div class="detail-row"><span class="subtle">Vehicles</span><strong id="liveDebugVehicles">0</strong></div>
               <div class="detail-row"><span class="subtle">Bases</span><strong id="liveDebugBases">0</strong></div>
@@ -9457,8 +9470,8 @@ function appPage() {
               <button type="button" class="primary" onclick="previewTeleportToPlayer()">Preview To Player</button>
               <button type="button" id="liveTeleportToPlayerButton" onclick="executeTeleportToPlayer()" disabled>Live Teleport To Player</button>
             </div>
-            <div id="teleportReadiness" class="warning mt">Live Teleport requires server health, receiver reachability, Settings enablement, and a configured hook.</div>
-            <pre id="teleportLog" class="mt">Teleport mode is safe-preview only until a server-specific command hook is configured.</pre>
+            <div id="teleportReadiness" class="warning mt advanced-status">Live Teleport requires server health, receiver reachability, Settings enablement, and a configured hook.</div>
+            <pre id="teleportLog" class="mt advanced-only">Teleport mode is safe-preview only until a server-specific command hook is configured.</pre>
           </div>
           <div id="liveMapDiagnosticsPanel" class="panel pad hidden">
             <div class="label">Live Map Diagnostics</div>
@@ -9515,15 +9528,15 @@ function appPage() {
             <label>Grade<select id="adminItemGrade" onchange="renderAdminItems()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
             <label>Tier<select id="adminItemTier" onchange="renderAdminItems()"><option value="all">All tiers</option></select></label>
             <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
-            <label id="adminQualityWrap">Quality<input id="adminQuality" type="number" min="0" max="100" value="0" disabled oninput="syncQualityWarning()"></label>
-            <div id="qualityWarning" class="warning">Quality giving is not supported by the current receiver method.</div>
+              <label id="adminQualityWrap" class="advanced-only">Quality<input id="adminQuality" type="number" min="0" max="100" value="0" disabled oninput="syncQualityWarning()"></label>
+              <div id="qualityWarning" class="warning advanced-only">Quality giving is not supported by the current receiver method.</div>
             <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute">Live Give</option></select></label>
-            <div id="liveGiveServerStatus" class="warning">Server Status: Checking</div>
-            <div id="liveGiveTransportStatus" class="warning">Live Give transport: Checking</div>
+              <div id="liveGiveServerStatus" class="warning advanced-status">Server Status: Checking</div>
+              <div id="liveGiveTransportStatus" class="warning advanced-status">Live Give transport: Checking</div>
             <button id="liveGiveStartServerButton" onclick="startServerForGiveItem()">Start Server</button>
             <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
             <button id="addGiveQueueButton" onclick="addSelectedItemToGiveQueue()">Add to Queue</button>
-            <button onclick="refreshAdmin()">Refresh Admin Data</button>
+              <button class="advanced-only" onclick="refreshAdmin()">Refresh Admin Data</button>
           </div>
           <div class="divider"></div>
           <div class="label">Give Queue</div>
@@ -9558,8 +9571,8 @@ function appPage() {
         </div>
         <div class="panel pad">
           <div class="label">Item Templates</div>
-          <div id="gearDiscoveryStatus" class="empty mt">Item cache status unknown.</div>
-          <div class="action-row mt">
+          <div id="gearDiscoveryStatus" class="empty mt advanced-only">Item cache status unknown.</div>
+          <div class="action-row mt advanced-only">
             <button onclick="discoverGearItems()">Import Gear Items</button>
             <button onclick="refreshAdmin()">Reload Cache</button>
           </div>
@@ -9578,31 +9591,31 @@ function appPage() {
         </div>
         <div class="panel pad">
           <div class="label">Receiver Token</div>
-          <div id="envReceiverTokenStatus" class="detail-list mt"></div>
+          <div id="envReceiverTokenStatus" class="detail-list mt advanced-only"></div>
           <div id="envReceiverTokenWarning" class="warning mt hidden"></div>
           <div class="action-row mt">
             <button onclick="restartReceiverWithCurrentConfig()">Restart Receiver with Current Configuration</button>
             <button onclick="regenerateReceiverToken()">Regenerate Receiver Token</button>
           </div>
         </div>
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="label mt">Active Runtime Configuration</div>
           <div id="envRuntimeOverview" class="env-grid mt"></div>
         </div>
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="label mt">Loaded Environment Variables</div>
           <div class="env-section-note">Final merged values visible to the packaged backend/runtime. Each row shows current value and source. Secrets are redacted but still show whether they are set.</div>
           <div id="envRuntimeValues" class="env-var-list mt"></div>
         </div>
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="label">Config Paths</div>
           <div id="envRuntimePaths" class="detail-list mt"></div>
         </div>
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="label">Source Priority</div>
           <div id="envSourcePriority" class="detail-list mt"></div>
         </div>
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="label">Required Variables Help</div>
           <pre id="envLiveGuide" class="env-help">Reference only. These examples are not the active runtime configuration.
 
@@ -9764,8 +9777,8 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div id="progressionPlayerWarnings" class="detail-list mt"><div class="empty">No warnings.</div></div>
           </div>
         </div>
-        <div class="label mt">Character XP Detection Debug</div>
-        <div id="progressionCharacterDebug" class="detail-list mt"><div class="empty">Run a player lookup to inspect actor/entity component paths.</div></div>
+        <div class="label mt advanced-only">Character XP Detection Debug</div>
+        <div id="progressionCharacterDebug" class="detail-list mt advanced-only"><div class="empty">Run a player lookup to inspect actor/entity component paths.</div></div>
       </div>
       <div class="panel pad mt">
         <div class="label">Character EXP / Skill Point Editing</div>
@@ -9777,14 +9790,14 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <label class="progression-edit-field progression-character">Total Skill Points<input id="progressionTotalSkillPoints" type="number" min="0" max="999" step="1" value="0"></label>
           <label class="progression-edit-field progression-character">Unspent Skill Points<input id="progressionUnspentSkillPoints" type="number" min="0" max="999" step="1" value="0"></label>
           <label class="progression-edit-field progression-character">Tech Knowledge Points<input id="progressionTechKnowledgePoints" type="number" min="0" step="1" value="0"></label>
-          <label class="check-row progression-edit-field progression-character"><input id="progressionAdvancedOverride" type="checkbox"> Advanced override: allow UnspentSkillPoints above TotalSkillPoints</label>
+          <label class="check-row progression-edit-field progression-character advanced-only"><input id="progressionAdvancedOverride" type="checkbox"> Advanced override: allow UnspentSkillPoints above TotalSkillPoints</label>
           <button type="button" onclick="previewProgressionApply()">Generate Preview + Backup</button>
           <label>Type APPLY PROGRESSION<input id="progressionConfirmText" placeholder="APPLY PROGRESSION"></label>
           <button type="button" class="danger" onclick="applyProgressionLive()">Apply Live Change</button>
         </div>
         <pre id="progressionPreviewLog" class="mt">No live progression preview generated.</pre>
       </div>
-      <div class="layout-2 mt">
+      <div class="layout-2 mt advanced-only">
         <div class="panel pad">
           <div class="label">Detected Progression Tables</div>
           <table class="mt">
@@ -9800,7 +9813,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           </table>
         </div>
       </div>
-      <div class="panel pad mt">
+      <div class="panel pad mt advanced-only">
         <div class="label">XP / Reputation Related Columns</div>
         <table class="mt">
           <thead><tr><th>Table</th><th>Column</th><th>Type</th><th>Status</th></tr></thead>
@@ -9849,8 +9862,8 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <button class="danger" onclick="runVmAction('stop')">Stop VM</button>
           <button onclick="runVmAction('restart')">Restart VM</button>
         </div>
-        <div class="subtle mt"><a href="https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/manage/manage-hyper-v-hosts" target="_blank" rel="noopener">How to fix Hyper-V permissions</a></div>
-        <pre id="vmControlLog" class="mt">Ready.</pre>
+        <div class="subtle mt advanced-only"><a href="https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/manage/manage-hyper-v-hosts" target="_blank" rel="noopener">How to fix Hyper-V permissions</a></div>
+        <pre id="vmControlLog" class="mt advanced-only">Ready.</pre>
       </div>
       <div class="panel pad mt">
         <div class="label">Battlegroup Actions</div>
@@ -9865,7 +9878,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <button onclick="act('logs-export')">Export Logs</button>
           <button onclick="act('operator-logs-export')">Export Operator Logs</button>
         </div>
-        <pre id="serverLog" class="mt">Ready.</pre>
+        <pre id="serverLog" class="mt advanced-only">Ready.</pre>
       </div>
       <div class="panel pad mt">
         <div class="label">Map Deployment</div>
@@ -9875,7 +9888,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <label>Replicas<input id="mapReplicas" type="number" min="0" max="3" value="1"></label>
             <div class="action-row"><button class="primary" onclick="deployMap()">Set Map</button><button onclick="stopSelectedMap()">Stop Map</button></div>
           </div>
-          <div>
+          <div class="advanced-only">
             <div class="grid four">
               <div class="panel pad"><div class="label">Map Group</div><div id="mapBattlegroup" class="value">Checking...</div></div>
               <div class="panel pad"><div class="label">Active</div><div id="activeMaps" class="value">Checking...</div></div>
@@ -9884,19 +9897,19 @@ DUNE_RECEIVER_SSH_KEY</pre>
             </div>
           </div>
         </div>
-        <table class="mt">
+        <table class="mt advanced-only">
           <thead><tr><th>Map</th><th>Type</th><th>Wanted</th><th>Running</th><th>Memory</th></tr></thead>
           <tbody id="mapRows"><tr><td colspan="5">Loading maps...</td></tr></tbody>
         </table>
-        <pre id="mapLog" class="mt">Ready.</pre>
+        <pre id="mapLog" class="mt advanced-only">Ready.</pre>
       </div>
     </section>
 
     <section id="database" class="view">
       <div class="grid four">
         <div class="panel pad metric-tile"><div class="label">Database Status</div><div id="dbMgmtStatus" class="value">Checking...</div><div id="dbMgmtStatusDetail" class="subtle">Waiting for refresh.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Database Size</div><div id="dbMgmtSize" class="value">--</div><div class="subtle">Reported by PostgreSQL.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Connections</div><div id="dbMgmtConnections" class="value">--</div><div class="subtle">Current / active queries.</div></div>
+        <div class="panel pad metric-tile advanced-only"><div class="label">Database Size</div><div id="dbMgmtSize" class="value">--</div><div class="subtle">Reported by PostgreSQL.</div></div>
+        <div class="panel pad metric-tile advanced-only"><div class="label">Connections</div><div id="dbMgmtConnections" class="value">--</div><div class="subtle">Current / active queries.</div></div>
         <div class="panel pad metric-tile"><div class="label">DB Tunnel</div><div id="dbTunnelStatus" class="value">Checking...</div><div id="dbTunnelDetail" class="subtle">Port: -- / PID: --</div></div>
       </div>
       <div class="panel pad mt">
@@ -9904,7 +9917,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="detail-list mt">
           <div class="detail-row"><span class="subtle">DB Tunnel</span><strong id="dbTunnelStatusDetail">Checking...</strong></div>
           <div class="detail-row"><span class="subtle">Port</span><strong id="dbTunnelPort">15432</strong></div>
-          <div class="detail-row"><span class="subtle">PID</span><strong id="dbTunnelPid">--</strong></div>
+          <div class="detail-row advanced-only"><span class="subtle">PID</span><strong id="dbTunnelPid">--</strong></div>
         </div>
         <div class="action-row mt"><button onclick="startDatabaseTunnel()">Retry DB Tunnel</button><button onclick="runConnectionTest('database','dbTunnelTestResult')">Test Database</button></div>
         <div id="dbTunnelTestResult" class="test-result mt">Database tunnel not tested.</div>
@@ -10112,7 +10125,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div class="detail-list mt">
             <div class="detail-row"><span class="subtle">DB Tunnel</span><strong id="settingsDbTunnelStatus">Checking...</strong></div>
             <div class="detail-row"><span class="subtle">Port</span><strong id="settingsDbTunnelPort">15432</strong></div>
-            <div class="detail-row"><span class="subtle">PID</span><strong id="settingsDbTunnelPid">--</strong></div>
+            <div class="detail-row advanced-only"><span class="subtle">PID</span><strong id="settingsDbTunnelPid">--</strong></div>
           </div>
           <div class="action-row mt"><button type="button" onclick="startDatabaseTunnel()">Retry DB Tunnel</button><button type="button" onclick="refreshDatabaseTunnelStatus()">Refresh DB Tunnel</button></div>
         </div>
@@ -10123,11 +10136,11 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <label>Port<input id="settingsReceiverPort" type="number"></label>
             <label>Token<input id="settingsReceiverToken" type="password" placeholder="Leave blank to keep saved token"></label>
             <label>Admin Give Item Token<input id="settingsAdminGiveItemToken" type="password" placeholder="Leave blank to keep saved token"></label>
-            <label>SSH Host<input id="settingsReceiverSshHost"></label>
-            <label>SSH User<input id="settingsReceiverSshUser"></label>
-            <label>SSH Key<input id="settingsReceiverSshKey"></label>
-            <div class="action-row"><button type="button" onclick="browseSshKey('settingsReceiverSshKey','settingsReceiverSshKeyWarning')">Browse SSH Key</button></div>
-            <div id="settingsReceiverSshKeyWarning" class="warning">SSH key file not checked.</div>
+            <label class="advanced-only">SSH Host<input id="settingsReceiverSshHost"></label>
+            <label class="advanced-only">SSH User<input id="settingsReceiverSshUser"></label>
+            <label class="advanced-only">SSH Key<input id="settingsReceiverSshKey"></label>
+            <div class="action-row advanced-only"><button type="button" onclick="browseSshKey('settingsReceiverSshKey','settingsReceiverSshKeyWarning')">Browse SSH Key</button></div>
+            <div id="settingsReceiverSshKeyWarning" class="warning advanced-only">SSH key file not checked.</div>
           </div>
           <div class="action-row mt">
             <button type="button" onclick="receiverAction('start')">Start</button>
@@ -10157,8 +10170,8 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div class="label">Map & Logging</div>
           <div class="field-grid mt">
             <label>Default Map<select id="settingsMapDefault"><option value="HaggaBasin">Hagga Basin</option><option value="DeepDesert">Deep Desert</option><option value="Arrakeen">Arrakeen</option><option value="HarkoVillage">Harko Village</option></select></label>
-            <label>Log Level<select id="settingsLogLevel"><option value="info">Info</option><option value="debug">Debug</option><option value="warn">Warnings</option></select></label>
-            <label>GitHub Update Repo<input id="settingsUpdateRepo" placeholder="owner/repo"></label>
+            <label class="advanced-only">Log Level<select id="settingsLogLevel"><option value="info">Info</option><option value="debug">Debug</option><option value="warn">Warnings</option></select></label>
+            <label class="advanced-only">GitHub Update Repo<input id="settingsUpdateRepo" placeholder="owner/repo"></label>
           </div>
           <div class="action-row mt">
             <button type="button" onclick="checkUpdates()">Check Updates</button>
@@ -10166,7 +10179,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           </div>
           <div id="settingsSaveStatus" class="empty mt">Settings load automatically.</div>
         </div>
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="label">Live Map Teleport</div>
           <div class="field-grid mt">
             <label class="check-row"><input id="settingsLiveTeleportEnabled" type="checkbox">Enable Receiver Live Teleport</label>
@@ -10196,12 +10209,13 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel pad">
           <div class="label">App Preferences</div>
           <div class="field-grid mt">
+            <label>UI Mode<select id="settingsUiMode" onchange="changeUiMode(this.value)"><option value="simple">Simple</option><option value="advanced">Advanced</option></select></label>
             <label class="check-row"><input id="uiSoundsEnabled" type="checkbox">Enable UI Sounds</label>
             <label>UI Sound Volume <span id="uiSoundVolumeLabel" class="micro">100%</span><input id="uiSoundVolume" type="range" min="0" max="100" value="100"></label>
             <div id="uiSoundStatus" class="empty">Sounds ON. Volume 100%.</div>
           </div>
         </div>
-        <div class="panel pad">
+        <div class="panel pad advanced-only">
           <div class="label">Runtime</div>
           <div class="detail-list">
             <div class="detail-row"><span class="subtle">Suite URL</span><strong>http://127.0.0.1:8810</strong></div>
@@ -10237,10 +10251,14 @@ let managerFrameCheckTimer=null;
 function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,appConfig=null,diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,appConfig=null,uiMode="simple",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let liveMapTunnelPromise=null;
 function appConfirm(title,message,okText="Continue",cancelText="Cancel"){return new Promise(resolve=>{const dialog=document.getElementById("suiteConfirmDialog");const titleEl=document.getElementById("suiteConfirmTitle");const messageEl=document.getElementById("suiteConfirmMessage");const ok=document.getElementById("suiteConfirmOk");const cancel=document.getElementById("suiteConfirmCancel");if(!dialog||!ok||!cancel){resolve(false);return;}titleEl.textContent=title||"Confirm";messageEl.textContent=message||"";ok.textContent=okText;cancel.textContent=cancelText;const cleanup=result=>{dialog.classList.add("hidden");ok.onclick=null;cancel.onclick=null;document.removeEventListener("keydown",onKey,true);resolve(result);};const onKey=event=>{if(event.key==="Escape")cleanup(false);if(event.key==="Enter")cleanup(true);};ok.onclick=()=>cleanup(true);cancel.onclick=()=>cleanup(false);document.addEventListener("keydown",onKey,true);dialog.classList.remove("hidden");ok.focus();});}
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
+function normalizeUiMode(value){return String(value||"").toLowerCase()==="advanced"?"advanced":"simple";}
+function applyUiMode(value){uiMode=normalizeUiMode(value);document.body.classList.toggle("simple-mode",uiMode==="simple");document.body.classList.toggle("advanced-mode",uiMode==="advanced");setValue("headerUiMode",uiMode);setValue("settingsUiMode",uiMode);if(appConfig)appConfig.uiMode=uiMode;if(uiMode==="simple"&&(document.getElementById("logs")?.classList.contains("active")||document.getElementById("diagnostics")?.classList.contains("active")))setView("dashboard");}
+async function changeUiMode(value){const previous=uiMode;applyUiMode(value);try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,uiMode})});appConfig=data.config||{...current,uiMode};applyUiMode(appConfig.uiMode);setText("settingsSaveStatus","UI mode saved.");playUiSound("click");}catch(error){applyUiMode(previous);setText("settingsSaveStatus","Could not save UI mode: "+betterError(error));playUiSound("warning");}}
+async function loadUiMode(){try{const config=await getJson("/api/config");appConfig=config;applyUiMode(config.uiMode);}catch{applyUiMode("simple");}}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
 function managerFrameHasContent(){const frame=document.getElementById("managerFrame");try{return Boolean(frame&&frame.contentDocument&&frame.contentDocument.body&&frame.contentDocument.body.innerText.trim());}catch{return false;}}
@@ -10254,7 +10272,7 @@ function mapServerStatusValue(value){const raw=String(value||"").trim();const ke
 function mapServerSummary(data){const s=data?.status?.summary||data?.summary||data?.status||{};const phase=mapServerStatusValue(s.phase||s.status);const checks=[s.servergroup,s.gateway,s.director].filter(value=>String(value||"").trim()).map(mapServerStatusValue);if(phase.kind==="bad"||checks.some(check=>check.kind==="bad"))return{label:"Offline",kind:"bad",online:false,phase,checks};if(phase.online&&checks.every(check=>check.kind!=="bad"))return{label:"Online",kind:"ok",online:true,phase,checks};return{label:"Warning",kind:"warn",online:false,phase,checks};}
 function statusClass(value){const text=String(value||"");if(/offline|failed|error|missing|not|false|unavailable|unsupported|stopped|unreachable/i.test(text))return"bad";if(/healthy|ready|running|reconciling|updating|starting|progressing|online|enabled|reachable|available|true|detected|connected/i.test(text))return"ok";return"warn";}
 function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");}
-function badge(id,value){const el=document.getElementById(id);if(!el)return;el.className="badge "+statusClass(value);el.textContent=String(value||"Unknown");}
+function badge(id,value){const el=document.getElementById(id);if(!el)return;const advancedOnly=el.classList.contains("advanced-only");el.className="badge "+statusClass(value)+(advancedOnly?" advanced-only":"");el.textContent=String(value||"Unknown");}
 function telemetryPercent(value){const number=Number(value);return Number.isFinite(number)&&number>=0&&number<=100?number:null;}
 function setResourceMetric(key,value){const percent=telemetryPercent(value);const label=document.getElementById("resource"+key);const bar=document.getElementById("resource"+key+"Bar");if(label)label.textContent=percent===null?"Unknown":Math.round(percent)+"%";if(bar)bar.style.width=percent===null?"0%":Math.max(0,Math.min(100,percent))+"%";}
 function telemetrySourceLabel(source){const text=String(source||"").toLowerCase();if(text==="local"||text==="local pc")return"Local PC";if(text==="remote"||text==="vm"||text==="remote vm")return"Remote VM";if(text==="receiver")return"Receiver";return"Unknown";}
@@ -10446,7 +10464,7 @@ async function refreshAfterTeleport(payload,data){
   liveTeleportPending=null;renderLiveMapLayers();updateLiveMapDebug();
   throw new Error("Teleport verification failed: player position did not update near target. "+detail);
 }
-async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){status.className=liveTeleportReady?"empty mt":"warning mt";status.textContent=liveTeleportReady?(liveTeleportPreviewSignature?"Teleport preview confirmed. Live Teleport is armed.":"Live Teleport ready. Preview a safe X/Y/Z target before confirming."):(data.reasons||["Live Teleport unavailable."]).join(" ");}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt";status.textContent=betterError(e);}return null;}}
+async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){status.className=(liveTeleportReady?"empty mt":"warning mt")+" advanced-status";status.textContent=liveTeleportReady?(liveTeleportPreviewSignature?"Teleport preview confirmed. Live Teleport is armed.":"Live Teleport ready. Preview a safe X/Y/Z target before confirming."):(data.reasons||["Live Teleport unavailable."]).join(" ");}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt advanced-status";status.textContent=betterError(e);}return null;}}
 async function previewTeleport(){const payload=teleportPayload();invalidateTeleportPreview();try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});liveTeleportPreviewSignature=teleportPayloadSignature(payload);document.getElementById("teleportLog").textContent=renderTeleportResult(data);await refreshTeleportReadiness();playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
 async function executeLiveTeleport(){const payload=teleportPayload();try{if(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload))throw new Error("Teleport target changed or has not been previewed. Preview the current X/Y/Z target before live teleport.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying server position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}finally{refreshTeleportReadiness();}}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
@@ -10487,7 +10505,7 @@ async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,me
 async function finishSetup(){try{const payload={...configPayload("setup"),setupComplete:true};const pathCheck=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload.serverInstallPath||""));setServerInstallPathWarning("setupServerInstallPathWarning",pathCheck.serverInstallPath);if(!pathCheck.serverInstallPath?.valid)throw new Error("Selected folder does not appear to be a valid Dune Awakening server installation.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified)throw new Error("Setup config save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);fillSettings(data.config||payload);closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
 function setupTestLine(label,result){return label+": "+(result?.ok?"PASS":"CHECK")+" - "+(result?.message||result?.error||"No result")+(result?.error?" / "+result.error:"");}
 async function saveAndTestSetup(){const box=document.getElementById("setupFinishResult");try{const payload={...configPayload("setup"),setupComplete:true};if(box)box.textContent="Saving configuration, regenerating managed .env, and testing connections...";const data=await getJson("/api/setup/save-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:60000});fillSetup(data.config||payload);fillSettings(data.config||payload);if(box){box.textContent=[data.message||"Save & Test complete.","Config: "+(data.configPath||"App data"),"Managed .env: "+(data.managedEnvPath||"App data .env"),setupTestLine("SSH",data.tests?.ssh),setupTestLine("Database",data.tests?.database),setupTestLine("Receiver",data.tests?.receiver)].join("\n");}await refreshLiveGiveEnv();await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){if(box)box.textContent=betterError(e);playUiSound("warning");}}
-async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);refreshReceiverStatus();refreshBattlegroups();refreshDatabaseTunnelStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
+async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);applyUiMode(cfg.uiMode);refreshReceiverStatus();refreshBattlegroups();refreshDatabaseTunnelStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
 async function saveSettings(){try{const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...appConfig,...collectSettings()})});fillSettings(data.config||{});setText("settingsSaveStatus","Settings saved. Restart the suite for receiver startup environment changes.");playUiSound("success");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
 async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");const label=data.ok?"Receiver Online":"Receiver Offline";setText("receiverManagerStatus",label+" / "+data.healthUrl);setText("settingsReceiver",label);tone("receiverState",label);if(!data.ok)tone("rabbitState","Dry Run Active");return data;}catch(e){setText("receiverManagerStatus",betterError(e));tone("receiverState","Receiver Offline");tone("rabbitState","Dry Run Active");}}
 async function receiverAction(action){try{if(action==="start")await saveSettings();const data=await getJson("/api/receiver/"+action,{method:"POST"});setText("receiverManagerStatus",data.message||data.status||"Receiver action complete");await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){setText("receiverManagerStatus",betterError(e));playUiSound("warning");}}
@@ -10540,7 +10558,7 @@ function renderReceiverTokenStatus(data=null){const token=data?.receiverToken||l
 function renderEnvSetup(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagnostics=data;const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong class="env-path-value">'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}renderReceiverTokenStatus(data);const runtime=(data?.activeRuntimeConfig||liveGiveEnvDiagnostics?.activeRuntimeConfig||{});const help=(data?.requiredModesHelp||liveGiveEnvDiagnostics?.requiredModesHelp||null);const overview=document.getElementById("envRuntimeOverview");const paths=document.getElementById("envRuntimePaths");const values=document.getElementById("envRuntimeValues");const priority=document.getElementById("envSourcePriority");const guide=document.getElementById("envLiveGuide");if(overview){overview.innerHTML=['<div class="env-card"><span>Active config</span><strong>'+esc(runtime.activeConfigPath||"Unknown")+'</strong></div>','<div class="env-card"><span>App data</span><strong>'+esc(runtime.appDataDir||"Unknown")+'</strong></div>','<div class="env-card"><span>Manager data</span><strong>'+esc(runtime.managerDataDir||"Unknown")+'</strong></div>'].join("");}if(paths){const envFiles=(runtime.envFiles||[]).map(file=>'<div class="detail-row"><span class="subtle">'+esc(file.label)+(file.override?" override":"")+'</span><strong class="env-path-value">'+esc((file.exists?"Found: ":"Missing: ")+(file.path||""))+'</strong></div>').join("");paths.innerHTML='<div class="detail-row"><span class="subtle">Backend config</span><strong class="env-path-value">'+esc(runtime.backendConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Manager config</span><strong class="env-path-value">'+esc(runtime.managerConfigPath||"Unknown")+'</strong></div>'+envFiles;}if(values){const envValues=runtime.loadedEnvironmentVariables||runtime.values||[];values.innerHTML=envValues.length?envValues.map(envValueRow).join(""):'<div class="empty">No runtime environment details returned.</div>';}if(priority){priority.innerHTML=(runtime.sourcePriority||[]).map((item,index)=>'<div class="detail-row"><span class="subtle">'+(index+1)+'</span><strong class="env-path-value">'+esc(item)+'</strong></div>').join("")||'<div class="empty">No source priority returned.</div>';}if(guide&&help){guide.textContent=[help.note||"",...(help.lines||[])].filter(Boolean).join("\\n\\n");}}
 async function restartReceiverWithCurrentConfig(){const box=document.getElementById("envReceiverTokenWarning");try{if(box){box.classList.remove("hidden");box.textContent="Restarting receiver with current configuration...";}const data=await getJson("/api/receiver/restart",{method:"POST"});if(box)box.textContent=data.message||"Receiver restart requested.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
 async function regenerateReceiverToken(){const box=document.getElementById("envReceiverTokenWarning");try{if(!(await appConfirm("Regenerate receiver token","Regenerate the receiver token and restart the managed receiver?","Regenerate","Cancel")))return;if(box){box.classList.remove("hidden");box.textContent="Regenerating receiver token...";}const data=await getJson("/api/receiver/token/regenerate",{method:"POST"});if(box)box.textContent=data.message||"Receiver token regenerated.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
-function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=adminLiveGiveAvailable?"empty mt":"warning mt";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
+function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=(adminLiveGiveAvailable?"empty mt":"warning mt")+" advanced-status";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
 async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
 function renderDatabaseTunnelStatus(data){const tunnel=data?.tunnel||data||{};const status=tunnel.running?"Running":(tunnel.localTunnelExpected===false?"Direct DB":(tunnel.state==="starting"?"Starting":(tunnel.state==="failed"?"Failed":"Not Running")));tone("dbTunnelStatus",status);setText("dbTunnelDetail","Port: "+(tunnel.port||15432)+" / PID: "+(tunnel.pid||tunnel.startedPid||"--")+(tunnel.lastError?" / "+tunnel.lastError:""));setText("dbTunnelStatusDetail",status);setText("dbTunnelPort",tunnel.port||15432);setText("dbTunnelPid",tunnel.pid||tunnel.startedPid||"--");setText("settingsDbTunnelStatus",status);setText("settingsDbTunnelPort",tunnel.port||15432);setText("settingsDbTunnelPid",tunnel.pid||tunnel.startedPid||"--");}
 function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.message||data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");if(data?.tunnel)renderDatabaseTunnelStatus(data.tunnel);badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
@@ -10666,7 +10684,7 @@ async function exportGiveQueuePreset(){const log=document.getElementById("giveQu
 async function importGiveQueuePresetFile(event){const input=event.target;const log=document.getElementById("giveQueueLog");try{setGiveQueuePresetValidation("");const file=input.files&&input.files[0];if(!file)return;const text=await file.text();const preset=JSON.parse(text);preset.items=normalizeClientPresetItems(preset.items);preset.name=String(preset.name||giveQueuePresetInputName()||file.name.replace(/\\.json$/i,"")).trim();if(!preset.name){setGiveQueuePresetValidation("Enter a preset name before importing this file.");document.getElementById("giveQueuePresetName")?.focus();playUiSound("warning");return;}if(giveQueuePresetExists(preset.name)&&!(await appConfirm("Overwrite preset","A preset named '"+preset.name+"' already exists. Overwrite it?","Overwrite","Cancel")))return;const data=await getJson("/api/live-give/queue-presets/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({preset})});if(log)log.value="Imported preset: "+data.preset.name+"\\nItems: "+data.preset.items.length;await refreshGiveQueuePresets();const select=document.getElementById("giveQueuePresetSelect");if(select)select.value=data.preset.name;setGiveQueuePresetName(data.preset.name);playUiSound("success");}catch(e){if(log)log.value="Import failed: "+betterError(e);playUiSound("warning");}finally{if(input)input.value="";}}
 function isServerOnlineStatus(data){if(data?.runtimeTransport&&typeof data.runtimeTransport.serverOnline==="boolean")return data.runtimeTransport.serverOnline;return mapServerSummary(data).online;}
 function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";syncLiveGiveTransportStatus();syncGiveItemControls();}
-function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=kind==="ok"?"empty mt":"warning mt";}
+function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
 function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(mode==="execute"&&!adminLiveGiveAvailable);if(give)give.disabled=blocked;if(add)add.disabled=liveGiveBusy||!selectedAdminItem;if(queue)queue.disabled=blocked||!giveQueue.length;if(retry)retry.disabled=blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const data=await getJson("/api/status");liveGiveServerOnline=isServerOnlineStatus(data);setGiveServerStatus(liveGiveServerOnline?"Server Status: Online. Give Item is available.":"Server Status: Offline. Start the server before using Give Item.",liveGiveServerOnline?"ok":"warn");await refreshLiveGiveEnv();return data;}catch(e){liveGiveServerOnline=false;setGiveServerStatus("Server Status: Offline. "+betterError(e),"warn");return null;}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
 async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncLiveGiveMode();await checkGiveItemServerStatus();syncLiveGiveTransportStatus();}
@@ -10674,7 +10692,7 @@ async function startServerForGiveItem(){const log=document.getElementById("admin
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();window.uiSoundReady=true;wireUiSounds();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();window.uiSoundReady=true;wireUiSounds();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>

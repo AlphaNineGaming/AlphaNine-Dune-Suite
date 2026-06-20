@@ -154,6 +154,7 @@ function assertNoPlaceholders(filePath) {
     setupComplete: true,
     serverType: "remote",
     serverInstallPath,
+    awakeningServerPath: serverInstallPath,
     receiverHost: "127.0.0.1",
     receiverPort,
     sshHost: "config-only-host",
@@ -243,6 +244,7 @@ function assertNoPlaceholders(filePath) {
       body: JSON.stringify({
         serverType: "remote",
         serverInstallPath,
+        awakeningServerPath: serverInstallPath,
         sshHost: "127.0.0.1",
         sshUser: "test",
         sshKey: sshKeyPath,

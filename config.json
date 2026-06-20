@@ -10,5 +10,6 @@
   "teleportPayloadTemplate": "{\n  \"fls_id\": \"{playerId}\",\n  \"x\": {x},\n  \"y\": {y},\n  \"z\": {z},\n  \"partition_id\": {partitionId},\n  \"dryRun\": {dryRun},\n  \"test\": {test}\n}",
   "panelTitle": "AlphaNine Dune Suite",
   "panelSubtitle": "Unified local tools for your self-hosted server",
-  "serverInstallPath": "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server"
+  "serverInstallPath": "",
+  "awakeningServerPath": ""
 }

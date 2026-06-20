@@ -8,7 +8,7 @@ const path = require("path");
 const crypto = require("crypto");
 const Coordinates = require("./assets/coordinate-system");
 
-const APP_VERSION = "0.3.8-beta";
+const APP_VERSION = "0.3.9-beta";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -105,7 +105,8 @@ const defaultConfig = {
   updateRepo: "AlphaNineGaming/alphanine-dune-suite",
   panelTitle: "AlphaNine Dune Suite",
   panelSubtitle: "Unified local tools for your self-hosted server",
-  serverInstallPath: "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server",
+  serverInstallPath: "",
+  awakeningServerPath: "",
   liveTeleportEnabled: true,
   teleportSafeZOffset: 1000,
   teleportEndpointPath: "/api/v1/players/teleport-coords",
@@ -120,6 +121,7 @@ const defaultConfig = {
 
 const MANAGED_ENV_PATH = APPDATA_DIR ? path.join(APPDATA_DIR, ".env") : path.join(__dirname, ".env");
 const MASKED_SECRET_VALUES = new Set(["********", "<set>"]);
+const INVALID_PATH_PLACEHOLDERS = new Set(["<set>", "set", "***", "********"]);
 const SECRET_CONFIG_ENV = {
   databasePassword: "DUNE_DATABASE_PASSWORD",
   receiverToken: "DUNE_RECEIVER_TOKEN",
@@ -219,8 +221,8 @@ function managedEnvValues(configValue = loadConfig()) {
     DUNE_ADMIN_GIVE_ITEM_HEALTH_URL: `http://${receiverHost}:${receiverPort}/health`,
     DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: configValue.liveTeleportEnabled ? "true" : "false",
     DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET: String(configValue.teleportSafeZOffset || 1000),
-    DUNE_SERVER_INSTALL_PATH: expandEnvPath(configValue.serverInstallPath || ""),
-    DUNE_AWAKENING_SERVER_PATH: expandEnvPath(configValue.serverInstallPath || "")
+    DUNE_SERVER_INSTALL_PATH: serverInstallPathStatus(configValue.serverInstallPath).valid ? expandEnvPath(configValue.serverInstallPath) : "",
+    DUNE_AWAKENING_SERVER_PATH: serverInstallPathStatus(configValue.awakeningServerPath).valid ? expandEnvPath(configValue.awakeningServerPath) : ""
   };
   if (selected) {
     values.DUNE_RECEIVER_BG_NAMESPACE = selected.namespace;
@@ -247,10 +249,17 @@ function loadConfig() {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(generated, null, 2));
     return generated;
   }
-  const loaded = { ...defaultConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")) };
+  const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, ""));
+  const loaded = { ...defaultConfig, ...raw };
   const repaired = repairMaskedSecrets(loaded);
   const configValue = repaired.config;
   let changed = repaired.changed;
+  // Releases before 0.3.9 used serverInstallPath for both environment variables.
+  // Seed the new field once for upgrades, then preserve the two values independently.
+  if (!Object.prototype.hasOwnProperty.call(raw, "awakeningServerPath") && String(raw.serverInstallPath || "").trim()) {
+    configValue.awakeningServerPath = String(raw.serverInstallPath).trim();
+    changed = true;
+  }
   if (!String(configValue.receiverToken || "").trim()) {
     configValue.receiverToken = generateReceiverToken();
     configValue.receiverTokenSource = "generated";
@@ -290,7 +299,7 @@ function normalizeSelectedBattlegroup(value) {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "liveTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
   const current = loadConfig();
   const clean = {};
   for (const key of allowed) {
@@ -337,6 +346,7 @@ function saveConfig(nextConfig) {
   clean.panelTitle = String(clean.panelTitle || "AlphaNine Dune Suite").trim();
   clean.panelSubtitle = String(clean.panelSubtitle || "Unified local tools for your self-hosted server").trim();
   clean.serverInstallPath = String(clean.serverInstallPath || "").trim();
+  clean.awakeningServerPath = String(clean.awakeningServerPath || "").trim();
   clean.liveTeleportEnabled = clean.liveTeleportEnabled === true || clean.liveTeleportEnabled === "true";
   clean.teleportSafeZOffset = Number(clean.teleportSafeZOffset) || 1000;
   clean.teleportEndpointPath = String(clean.teleportEndpointPath || "/api/v1/players/teleport-coords").trim();
@@ -404,6 +414,10 @@ function serverInstallPathStatus(value) {
     message: "Server install path is not configured."
   };
   if (!resolved) return result;
+  if (INVALID_PATH_PLACEHOLDERS.has(configured.toLowerCase())) {
+    result.message = "A placeholder is not a valid path. Browse to the folder on this machine.";
+    return result;
+  }
   result.exists = fs.existsSync(resolved);
   if (!result.exists) {
     result.message = "Selected folder does not exist.";
@@ -457,6 +471,7 @@ function publicConfig(configValue = loadConfig()) {
   copy.sshKeyStatus = sshKeyStatus(copy.sshKey || defaultSshKeyPath());
   copy.receiverSshKeyStatus = sshKeyStatus(copy.receiverSshKey || copy.sshKey || defaultSshKeyPath());
   copy.serverInstallPathStatus = serverInstallPathStatus(copy.serverInstallPath);
+  copy.awakeningServerPathStatus = serverInstallPathStatus(copy.awakeningServerPath);
   copy.databasePassword = copy.databasePassword ? "********" : "";
   copy.receiverToken = copy.receiverToken ? "********" : "";
   copy.adminGiveItemToken = copy.adminGiveItemToken ? "********" : "";
@@ -469,7 +484,8 @@ function configWithSshDiagnostics(configValue = loadConfig()) {
     configPath: CONFIG_PATH,
     sshKeyStatus: sshKeyStatus(configValue.sshKey || defaultSshKeyPath()),
     receiverSshKeyStatus: sshKeyStatus(configValue.receiverSshKey || configValue.sshKey || defaultSshKeyPath()),
-    serverInstallPathStatus: serverInstallPathStatus(configValue.serverInstallPath)
+    serverInstallPathStatus: serverInstallPathStatus(configValue.serverInstallPath),
+    awakeningServerPathStatus: serverInstallPathStatus(configValue.awakeningServerPath)
   };
 }
 
@@ -506,6 +522,30 @@ function sshKeyStatus(value) {
     exists,
     message: exists ? "SSH key file found." : "SSH key file not found."
   };
+}
+
+function readManagedEnvValue(name) {
+  if (!fs.existsSync(MANAGED_ENV_PATH)) return undefined;
+  const line = fs.readFileSync(MANAGED_ENV_PATH, "utf8")
+    .split(/\r?\n/)
+    .find((entry) => entry.startsWith(`${name}=`));
+  if (!line) return undefined;
+  const raw = line.slice(name.length + 1).trim();
+  if (raw.startsWith('"') && raw.endsWith('"')) {
+    try { return JSON.parse(raw); } catch { return raw.slice(1, -1); }
+  }
+  return raw;
+}
+
+function verifyServerPathsPersisted(configValue) {
+  const expected = {
+    DUNE_SERVER_INSTALL_PATH: expandEnvPath(configValue.serverInstallPath || ""),
+    DUNE_AWAKENING_SERVER_PATH: expandEnvPath(configValue.awakeningServerPath || "")
+  };
+  const mismatches = Object.entries(expected)
+    .filter(([name, value]) => readManagedEnvValue(name) !== value)
+    .map(([name, value]) => ({ field: name, expected: value, actual: readManagedEnvValue(name) }));
+  return { ok: mismatches.length === 0, path: MANAGED_ENV_PATH, mismatches };
 }
 
 function loadRuntimeEnvFilesIntoProcess() {
@@ -612,7 +652,7 @@ function configSourceForEnv(name, configValue = loadConfig()) {
     DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: { key: "liveTeleportEnabled", value: () => configValue.liveTeleportEnabled ? "true" : "false" },
     DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET: { key: "teleportSafeZOffset", value: () => String(configValue.teleportSafeZOffset || "") },
     DUNE_SERVER_INSTALL_PATH: { key: "serverInstallPath", value: () => expandEnvPath(configValue.serverInstallPath || "") },
-    DUNE_AWAKENING_SERVER_PATH: { key: "serverInstallPath", value: () => expandEnvPath(configValue.serverInstallPath || "") }
+    DUNE_AWAKENING_SERVER_PATH: { key: "awakeningServerPath", value: () => expandEnvPath(configValue.awakeningServerPath || "") }
   };
   const mapping = mappings[name];
   if (!mapping) return null;
@@ -1070,6 +1110,7 @@ function validateSetupConfigPayload(body) {
     if (!value(key)) errors.push(`${label} is required.`);
   };
   requireField("serverInstallPath", "Server install path");
+  requireField("awakeningServerPath", "Dune Awakening server path");
   requireField("databaseName", "Database name");
   requireField("databaseUser", "Database user");
   requireField("receiverHost", "Receiver host");
@@ -1083,8 +1124,10 @@ function validateSetupConfigPayload(body) {
   for (const [key, label] of [["databaseHost", "Database host"], ["receiverHost", "Receiver host"], ["receiverSshHost", "SSH host"]]) {
     if (value(key) && /\s/.test(value(key))) errors.push(`${label} cannot contain spaces.`);
   }
-  const serverPath = expandEnvPath(value("serverInstallPath"));
-  if (serverPath && !fs.existsSync(serverPath)) errors.push(`Server install path does not exist: ${serverPath}`);
+  for (const [key, label] of [["serverInstallPath", "Server install path"], ["awakeningServerPath", "Dune Awakening server path"]]) {
+    const status = serverInstallPathStatus(value(key));
+    if (!status.valid) errors.push(`${label}: ${status.message}${status.path ? ` (${status.path})` : ""}`);
+  }
   const sshKey = expandEnvPath(value("receiverSshKey") || value("sshKey"));
   if (sshKey && !fs.existsSync(sshKey)) errors.push(`SSH key does not exist: ${sshKey}`);
   return { ok: errors.length === 0, errors };
@@ -1097,8 +1140,9 @@ async function saveSetupAndTest(body) {
   }
   const saved = saveConfig({ ...loadConfig(), ...body, setupComplete: true });
   const verification = verifyConfigSaved(saved);
-  if (!verification.ok) {
-    return { ok: false, saved: false, message: "Setup config save verification failed.", configPath: verification.configPath, mismatches: verification.mismatches, tests: {} };
+  const envVerification = verifyServerPathsPersisted(saved);
+  if (!verification.ok || !envVerification.ok) {
+    return { ok: false, saved: false, message: "Setup config/.env save verification failed.", configPath: verification.configPath, managedEnvPath: envVerification.path, mismatches: [...verification.mismatches, ...envVerification.mismatches], tests: {} };
   }
   const managedEnv = writeManagedEnvFile(saved);
   applyConfigRuntimeEnv(saved);
@@ -1112,6 +1156,7 @@ async function saveSetupAndTest(body) {
     ok: allPassed,
     saved: true,
     verified: true,
+    pathsVerified: true,
     message: allPassed ? "Configuration saved and all tests passed." : "Configuration saved. One or more tests need attention.",
     configPath: verification.configPath,
     managedEnvPath: managedEnv.path,
@@ -1410,9 +1455,9 @@ async function liveMapDirectDbSettings() {
   throw error;
 }
 
-async function liveMapPgQuery(sql, timeout = 30000) {
-  const settings = await liveMapDirectDbSettings();
-  const password = String(loadConfig().databasePassword || "");
+async function liveMapPgQuery(sql, timeout = 30000, connectionOverride = null) {
+  const settings = connectionOverride?.settings || await liveMapDirectDbSettings();
+  const password = connectionOverride ? String(connectionOverride.password ?? "") : String(loadConfig().databasePassword || "");
   const started = Date.now();
   const rows = [];
   const columns = [];
@@ -1872,6 +1917,48 @@ function ensureReceiverTokenSaved(source = "generated") {
   process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = next.adminGiveItemToken || next.receiverToken;
   appendAdminAudit("receiver_token_generated", { source, configPath: CONFIG_PATH });
   return { config: next, generated: true };
+}
+
+function redactSensitiveText(value, secrets = []) {
+  let text = String(value || "");
+  for (const secret of secrets) {
+    const candidate = String(secret || "");
+    if (candidate) text = text.split(candidate).join("[REDACTED]");
+  }
+  return text;
+}
+
+async function testSetupDatabaseConnection(body) {
+  const host = String(body?.databaseHost ?? "").trim();
+  const portText = String(body?.databasePort ?? "").trim();
+  const database = String(body?.databaseName ?? "").trim();
+  const user = String(body?.databaseUser ?? "").trim();
+  const password = String(body?.databasePassword ?? "");
+  const diagnostics = { source: "setup-form", host, port: Number(portText), database, user, passwordConfigured: Boolean(password) };
+  const missing = [];
+  if (!host) missing.push("Database host");
+  if (!portText) missing.push("Database port");
+  if (!database) missing.push("Database name");
+  if (!user) missing.push("Database user");
+  if (!password || isMaskedSecretValue(password) || password === "***") missing.push("Database password");
+  if (missing.length) {
+    return { ok: false, target: "database", message: "Database authentication test failed.", error: `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} required.`, diagnostics };
+  }
+  const port = Number(portText);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { ok: false, target: "database", message: "Database authentication test failed.", error: "Database port must be a number between 1 and 65535.", diagnostics };
+  }
+  try {
+    const result = await liveMapPgQuery("SELECT 1;", 8000, {
+      settings: { host, port, database, user, connectionSource: "setup-form" },
+      password
+    });
+    const value = result.rows?.[0] ? Object.values(result.rows[0])[0] : undefined;
+    if (String(value) !== "1") throw new Error("PostgreSQL did not return the expected SELECT 1 result.");
+    return { ok: true, target: "database", message: "Database authentication passed.", detail: "Authenticated PostgreSQL query SELECT 1 completed.", diagnostics, durationMs: result.durationMs };
+  } catch (error) {
+    return { ok: false, target: "database", message: "Database authentication failed.", error: redactSensitiveText(error.message, [password]), diagnostics };
+  }
 }
 
 function regenerateReceiverToken() {
@@ -9265,10 +9352,15 @@ function appPage() {
       <div class="field-grid">
         <label>Server Type<select id="setupServerType"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
         <div class="path-picker-row">
-          <label>Dune Server Install Path<input id="setupServerInstallPath" placeholder="D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server" onchange="refreshServerInstallPathWarning('setupServerInstallPath','setupServerInstallPathWarning')"></label>
+          <label>DUNE_SERVER_INSTALL_PATH<input id="setupServerInstallPath" placeholder="Browse to the server install folder" onchange="refreshServerInstallPathWarning('setupServerInstallPath','setupServerInstallPathWarning')"></label>
           <button type="button" onclick="browseServerInstallPath('setupServerInstallPath','setupServerInstallPathWarning')">Browse...</button>
         </div>
         <div id="setupServerInstallPathWarning" class="warning">Server install path not checked.</div>
+        <div class="path-picker-row">
+          <label>DUNE_AWAKENING_SERVER_PATH<input id="setupAwakeningServerPath" placeholder="Browse to the Dune Awakening server folder" onchange="refreshServerInstallPathWarning('setupAwakeningServerPath','setupAwakeningServerPathWarning')"></label>
+          <button type="button" onclick="browseServerInstallPath('setupAwakeningServerPath','setupAwakeningServerPathWarning')">Browse...</button>
+        </div>
+        <div id="setupAwakeningServerPathWarning" class="warning">Dune Awakening server path not checked.</div>
         <label>VM Name<input id="setupVmName" placeholder="dune-awakening"></label>
         <label>VM / Server IP<input id="setupVmIp" placeholder="192.168.1.50"></label>
         <label>SSH Host<input id="setupSshHost" placeholder="192.168.1.50"></label>
@@ -9284,12 +9376,12 @@ function appPage() {
     </div>
     <div id="setupPage2" class="setup-page">
       <div class="field-grid">
-        <label>Database Host<input id="setupDatabaseHost" placeholder="Auto via Dune VM or host/IP"></label>
-        <label>Database Port<input id="setupDatabasePort" type="number" value="15432"></label>
-        <label>Database Name<input id="setupDatabaseName" value="dune"></label>
-        <label>Database User<input id="setupDatabaseUser" value="postgres"></label>
-        <label>Database Password<input id="setupDatabasePassword" type="password" placeholder="Optional when using VM auto-detect"></label>
-        <button type="button" onclick="runConnectionTest('database','setupDatabaseResult')">Test Database</button>
+        <label>Database Host<input id="setupDatabaseHost" placeholder="Database host or IP" oninput="invalidateSetupDatabaseTest()"></label>
+        <label>Database Port<input id="setupDatabasePort" type="number" value="15432" oninput="invalidateSetupDatabaseTest()"></label>
+        <label>Database Name<input id="setupDatabaseName" value="dune" oninput="invalidateSetupDatabaseTest()"></label>
+        <label>Database User<input id="setupDatabaseUser" value="postgres" oninput="invalidateSetupDatabaseTest()"></label>
+        <label>Database Password<input id="setupDatabasePassword" type="password" placeholder="Required" oninput="invalidateSetupDatabaseTest()"></label>
+        <button type="button" onclick="testSetupDatabase('setupDatabaseResult')">Test Database</button>
       </div>
       <div id="setupDatabaseResult" class="test-result mt">Not tested.</div>
     </div>
@@ -9316,7 +9408,7 @@ function appPage() {
     <div id="setupPage4" class="setup-page">
       <div class="test-grid">
         <button type="button" onclick="runConnectionTest('ssh','finishSshResult')">Test SSH</button>
-        <button type="button" onclick="runConnectionTest('database','finishDbResult')">Test Database</button>
+        <button type="button" onclick="testSetupDatabase('finishDbResult')">Test Database</button>
         <button type="button" onclick="runConnectionTest('receiver','finishReceiverResult')">Test Receiver</button>
         <button type="button" onclick="runConnectionTest('server','finishServerResult')">Test Server</button>
       </div>
@@ -9335,8 +9427,8 @@ function appPage() {
         <label><input id="setupProgressionEditingEnabled" type="checkbox"> Progression editing enabled</label>
       </div>
       <div class="action-row mt">
-        <button type="button" class="primary" onclick="finishSetup()">Save Configuration</button>
-        <button type="button" class="primary" onclick="saveAndTestSetup()">Save & Test</button>
+        <button id="setupFinishButton" type="button" class="primary" onclick="finishSetup()" disabled>Save Configuration</button>
+        <button id="setupSaveTestButton" type="button" class="primary" onclick="saveAndTestSetup()" disabled>Save & Test</button>
       </div>
       <div id="setupFinishResult" class="empty mt">Ready to save.</div>
     </div>
@@ -10299,10 +10391,15 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div class="action-row"><button type="button" onclick="browseSshKey('settingsSshKey','settingsSshKeyWarning')">Browse SSH Key</button></div>
             <div id="settingsSshKeyWarning" class="warning">SSH key file not checked.</div>
             <div class="path-picker-row">
-              <label>Dune Server Path<input id="settingsServerInstallPath" onchange="refreshServerInstallPathWarning('settingsServerInstallPath','settingsServerInstallPathWarning')"></label>
+              <label>DUNE_SERVER_INSTALL_PATH<input id="settingsServerInstallPath" onchange="refreshServerInstallPathWarning('settingsServerInstallPath','settingsServerInstallPathWarning')"></label>
               <button type="button" onclick="browseServerInstallPath('settingsServerInstallPath','settingsServerInstallPathWarning')">Browse...</button>
             </div>
             <div id="settingsServerInstallPathWarning" class="warning">Server install path not checked.</div>
+            <div class="path-picker-row">
+              <label>DUNE_AWAKENING_SERVER_PATH<input id="settingsAwakeningServerPath" onchange="refreshServerInstallPathWarning('settingsAwakeningServerPath','settingsAwakeningServerPathWarning')"></label>
+              <button type="button" onclick="browseServerInstallPath('settingsAwakeningServerPath','settingsAwakeningServerPathWarning')">Browse...</button>
+            </div>
+            <div id="settingsAwakeningServerPathWarning" class="warning">Dune Awakening server path not checked.</div>
           </div>
         </div>
         <div class="panel pad">
@@ -10390,7 +10487,7 @@ let managerFrameCheckTimer=null;
 function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,appConfig=null,uiMode="simple",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let liveMapTunnelPromise=null;
 function appConfirm(title,message,okText="Continue",cancelText="Cancel"){return new Promise(resolve=>{const dialog=document.getElementById("suiteConfirmDialog");const titleEl=document.getElementById("suiteConfirmTitle");const messageEl=document.getElementById("suiteConfirmMessage");const ok=document.getElementById("suiteConfirmOk");const cancel=document.getElementById("suiteConfirmCancel");if(!dialog||!ok||!cancel){resolve(false);return;}titleEl.textContent=title||"Confirm";messageEl.textContent=message||"";ok.textContent=okText;cancel.textContent=cancelText;const cleanup=result=>{dialog.classList.add("hidden");ok.onclick=null;cancel.onclick=null;document.removeEventListener("keydown",onKey,true);resolve(result);};const onKey=event=>{if(event.key==="Escape")cleanup(false);if(event.key==="Enter")cleanup(true);};ok.onclick=()=>cleanup(true);cancel.onclick=()=>cleanup(false);document.addEventListener("keydown",onKey,true);dialog.classList.remove("hidden");ok.focus();});}
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
@@ -10614,16 +10711,21 @@ function getValue(id){return document.getElementById(id)?.value||"";}
 function setChecked(id,value){const el=document.getElementById(id);if(el)el.checked=Boolean(value);}
 function resultBox(id,data){const el=document.getElementById(id);if(!el)return;el.className="test-result "+(data.ok?"ok":"bad");el.textContent=(data.message||data.status||data.error||"Done")+(data.error&&data.error!==data.message?"\\n"+data.error:"");}
 function isMaskedSecretPlaceholder(value){const normalized=String(value??"").trim().toLowerCase();return normalized==="********"||normalized==="<set>";}
-function configPayload(prefix){const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),sshHost:getValue(prefix+"SshHost"),sshUser:getValue(prefix+"SshUser"),sshKey:getValue(prefix+"SshKey"),serverInstallPath:getValue(prefix+"ServerInstallPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey"),mapDefault:getValue(prefix+"MapDefault"),logLevel:getValue(prefix+"LogLevel"),updateRepo:getValue(prefix+"UpdateRepo"),teleportEndpointPath:getValue(prefix+"TeleportEndpointPath"),teleportSafeZOffset:getValue(prefix+"TeleportSafeZOffset"),progressionEditingEnabled:document.getElementById(prefix+"ProgressionEditingEnabled")?.checked===true};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");const adminToken=getValue(prefix+"AdminGiveItemToken");if(dbPass&&!isMaskedSecretPlaceholder(dbPass))payload.databasePassword=dbPass;if(token&&!isMaskedSecretPlaceholder(token))payload.receiverToken=token;if(adminToken&&!isMaskedSecretPlaceholder(adminToken))payload.adminGiveItemToken=adminToken;return payload;}
+function setupDatabaseFormPayload(){return{databaseHost:getValue("setupDatabaseHost"),databasePort:getValue("setupDatabasePort"),databaseName:getValue("setupDatabaseName"),databaseUser:getValue("setupDatabaseUser"),databasePassword:getValue("setupDatabasePassword")};}
+function currentSetupDatabaseSignature(){const value=setupDatabaseFormPayload();return JSON.stringify([value.databaseHost.trim(),value.databasePort.trim(),value.databaseName.trim(),value.databaseUser.trim(),value.databasePassword]);}
+function syncSetupFinishButtons(){const enabled=Boolean(setupDatabaseTestSignature&&setupDatabaseTestSignature===currentSetupDatabaseSignature());for(const id of ["setupFinishButton","setupSaveTestButton"]){const button=document.getElementById(id);if(button)button.disabled=!enabled;}}
+function invalidateSetupDatabaseTest(){setupDatabaseTestSignature="";syncSetupFinishButtons();for(const id of ["setupDatabaseResult","finishDbResult"]){const box=document.getElementById(id);if(box){box.className="test-result mt";box.textContent="Database values changed. Test again before finishing.";}}}
+async function testSetupDatabase(resultId){const payload=setupDatabaseFormPayload();setupDatabaseTestSignature="";syncSetupFinishButtons();resultBox(resultId,{ok:true,message:"Running authenticated SELECT 1..."});try{const data=await getJson("/api/setup/test-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:12000});if(data.ok)setupDatabaseTestSignature=currentSetupDatabaseSignature();resultBox(resultId,data);syncSetupFinishButtons();playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:"Database authentication failed.",error:betterError(e)};resultBox(resultId,data);syncSetupFinishButtons();playUiSound("warning");return data;}}
+function configPayload(prefix){const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),sshHost:getValue(prefix+"SshHost"),sshUser:getValue(prefix+"SshUser"),sshKey:getValue(prefix+"SshKey"),serverInstallPath:getValue(prefix+"ServerInstallPath"),awakeningServerPath:getValue(prefix+"AwakeningServerPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey"),mapDefault:getValue(prefix+"MapDefault"),logLevel:getValue(prefix+"LogLevel"),updateRepo:getValue(prefix+"UpdateRepo"),teleportEndpointPath:getValue(prefix+"TeleportEndpointPath"),teleportSafeZOffset:getValue(prefix+"TeleportSafeZOffset"),progressionEditingEnabled:document.getElementById(prefix+"ProgressionEditingEnabled")?.checked===true};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");const adminToken=getValue(prefix+"AdminGiveItemToken");if(dbPass&&!isMaskedSecretPlaceholder(dbPass))payload.databasePassword=dbPass;if(token&&!isMaskedSecretPlaceholder(token))payload.receiverToken=token;if(adminToken&&!isMaskedSecretPlaceholder(adminToken))payload.adminGiveItemToken=adminToken;return payload;}
 function fillSecretInput(id,isSet){const input=document.getElementById(id);if(!input)return;if(!input.dataset.emptyPlaceholder)input.dataset.emptyPlaceholder=input.placeholder||"";input.value="";input.placeholder=isSet?"********":input.dataset.emptyPlaceholder;}
-function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("setupSshUser",config.sshUser||"dune");setValue("setupSshKey",config.sshKey||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");fillSecretInput("setupDatabasePassword",config.databasePasswordSet);setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);fillSecretInput("setupReceiverToken",config.receiverTokenSet);fillSecretInput("setupAdminGiveItemToken",config.adminGiveItemTokenSet);setValue("setupReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("setupMapDefault",config.mapDefault||"HaggaBasin");setValue("setupLogLevel",config.logLevel||"info");setValue("setupUpdateRepo",config.updateRepo||"AlphaNineGaming/alphanine-dune-suite");setValue("setupTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("setupTeleportSafeZOffset",config.teleportSafeZOffset||1000);setChecked("setupProgressionEditingEnabled",config.progressionEditingEnabled===true);setSshKeyWarning("setupSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("setupReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("setupServerInstallPathWarning",config.serverInstallPathStatus);}
+function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupAwakeningServerPath",config.awakeningServerPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("setupSshUser",config.sshUser||"dune");setValue("setupSshKey",config.sshKey||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");fillSecretInput("setupDatabasePassword",config.databasePasswordSet);setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);fillSecretInput("setupReceiverToken",config.receiverTokenSet);fillSecretInput("setupAdminGiveItemToken",config.adminGiveItemTokenSet);setValue("setupReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("setupMapDefault",config.mapDefault||"HaggaBasin");setValue("setupLogLevel",config.logLevel||"info");setValue("setupUpdateRepo",config.updateRepo||"AlphaNineGaming/alphanine-dune-suite");setValue("setupTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("setupTeleportSafeZOffset",config.teleportSafeZOffset||1000);setChecked("setupProgressionEditingEnabled",config.progressionEditingEnabled===true);setSshKeyWarning("setupSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("setupReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("setupServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("setupAwakeningServerPathWarning",config.awakeningServerPathStatus);invalidateSetupDatabaseTest();}
 function setSshKeyWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.exists);el.className=ok?"empty mt":"warning mt";el.textContent=status?.message||"SSH key file not found.";if(status?.path)el.textContent+=" "+status.path;}
 async function refreshSshKeyWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/ssh-key/status?path="+encodeURIComponent(path));setSshKeyWarning(warningId,data.sshKey);}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
 async function browseSshKey(inputId,warningId){try{if(!window.alphaNineSuite?.chooseSshKey)throw new Error("File picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseSshKey();if(result?.filePath){setValue(inputId,result.filePath);await refreshSshKeyWarning(inputId,warningId);}}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
 function setServerInstallPathWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.valid);el.className=ok?"empty mt":"warning mt";let text=status?.message||"Selected folder does not appear to be a valid Dune Awakening server installation.";if(status?.path)text+=" "+status.path;const checks=(status?.checks||[]).filter(item=>item.ok).map(item=>item.name);if(checks.length)text+="\nDetected: "+checks.join(", ");el.textContent=text;}
 async function refreshServerInstallPathWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/server-install-path/status?path="+encodeURIComponent(path));setServerInstallPathWarning(warningId,data.serverInstallPath);}catch(e){setServerInstallPathWarning(warningId,{valid:false,message:betterError(e)});}}
 async function browseServerInstallPath(inputId,warningId){try{if(!window.alphaNineSuite?.chooseServerInstallFolder)throw new Error("Folder picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseServerInstallFolder();if(result?.folderPath){setValue(inputId,result.folderPath);await refreshServerInstallPathWarning(inputId,warningId);}}catch(e){setServerInstallPathWarning(warningId,{valid:false,message:betterError(e)});}}
-function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");fillSecretInput("settingsDatabasePassword",config.databasePasswordSet||Boolean(config.databasePassword));setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);fillSecretInput("settingsReceiverToken",config.receiverTokenSet||Boolean(config.receiverToken));fillSecretInput("settingsAdminGiveItemToken",config.adminGiveItemTokenSet||Boolean(config.adminGiveItemToken));setValue("settingsReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("settingsReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportSafeZOffset",config.teleportSafeZOffset||1000);setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setChecked("settingsProgressionEditingEnabled",config.progressionEditingEnabled===true);setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("settingsServerInstallPathWarning",config.serverInstallPathStatus);}
+function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsAwakeningServerPath",config.awakeningServerPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");fillSecretInput("settingsDatabasePassword",config.databasePasswordSet||Boolean(config.databasePassword));setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);fillSecretInput("settingsReceiverToken",config.receiverTokenSet||Boolean(config.receiverToken));fillSecretInput("settingsAdminGiveItemToken",config.adminGiveItemTokenSet||Boolean(config.adminGiveItemToken));setValue("settingsReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("settingsReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportSafeZOffset",config.teleportSafeZOffset||1000);setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setChecked("settingsProgressionEditingEnabled",config.progressionEditingEnabled===true);setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("settingsServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("settingsAwakeningServerPathWarning",config.awakeningServerPathStatus);}
 function collectSettings(){const payload=configPayload("settings");payload.sshHost=getValue("settingsSshHost");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.liveTeleportEnabled=document.getElementById("settingsLiveTeleportEnabled")?.checked===true;payload.teleportEndpointPath=getValue("settingsTeleportEndpointPath");payload.teleportSafeZOffset=getValue("settingsTeleportSafeZOffset");payload.teleportCommandTemplate=getValue("settingsTeleportCommandTemplate");payload.teleportPayloadTemplate=getValue("settingsTeleportPayloadTemplate");payload.progressionEditingEnabled=document.getElementById("settingsProgressionEditingEnabled")?.checked===true;payload.setupComplete=true;return payload;}
 function battlegroupKey(row){return row?String(row.namespace||"")+"/"+String(row.name||""):"";}
 function selectedBattlegroupFromUi(){const key=getValue("settingsBattlegroupSelect");return (battlegroupData.battlegroups||[]).find(row=>battlegroupKey(row)===key)||null;}
@@ -10641,11 +10743,11 @@ function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.ad
 function openSupportDiscord(){window.open("https://discord.gg/tuUv3hYTv","_blank","noopener");playUiSound("click");}
 function openSupportKofi(){window.open("https://ko-fi.com/E1W220NMPA","_blank","noopener");playUiSound("click");}
 async function initSetup(){try{const data=await getJson("/api/setup/status");const config=data.config||{};fillSetup(config);await loadSettings();if(!data.setupComplete)openSetupWizard();if(data.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(data.discovery,null,2);refreshReceiverStatus();}catch(e){addActivity("error","Setup status failed",e.message);}}
-async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.vmIp){setValue("setupVmIp",data.server.vmIp);setValue("setupSshHost",data.server.vmIp);setValue("setupReceiverSshHost",data.server.vmIp);}if(data.server?.installPath){setValue("setupServerInstallPath",data.server.installPath);await refreshServerInstallPathWarning("setupServerInstallPath","setupServerInstallPathWarning");}if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
+async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.vmIp){setValue("setupVmIp",data.server.vmIp);setValue("setupSshHost",data.server.vmIp);setValue("setupReceiverSshHost",data.server.vmIp);}if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}
-async function finishSetup(){try{const payload={...configPayload("setup"),setupComplete:true};const pathCheck=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload.serverInstallPath||""));setServerInstallPathWarning("setupServerInstallPathWarning",pathCheck.serverInstallPath);if(!pathCheck.serverInstallPath?.valid)throw new Error("Selected folder does not appear to be a valid Dune Awakening server installation.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified)throw new Error("Setup config save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);await loadSettings();closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
+async function finishSetup(){try{if(!setupDatabaseTestSignature||setupDatabaseTestSignature!==currentSetupDatabaseSignature())throw new Error("Test the current database settings successfully before finishing setup.");const payload={...configPayload("setup"),setupComplete:true};const checks=await Promise.all([["serverInstallPath","setupServerInstallPathWarning"],["awakeningServerPath","setupAwakeningServerPathWarning"]].map(async([key,warningId])=>{const data=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload[key]||""));setServerInstallPathWarning(warningId,data.serverInstallPath);return data.serverInstallPath;}));if(checks.some(status=>!status?.valid))throw new Error("Both server paths must be valid folders on this machine. Use Browse to select each folder.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified||!data.pathsVerified)throw new Error("Setup path save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified in config.json and managed .env. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);await loadSettings();closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
 function setupTestLine(label,result){return label+": "+(result?.ok?"PASS":"CHECK")+" - "+(result?.message||result?.error||"No result")+(result?.error?" / "+result.error:"");}
-async function saveAndTestSetup(){const box=document.getElementById("setupFinishResult");try{const payload={...configPayload("setup"),setupComplete:true};if(box)box.textContent="Saving configuration, regenerating managed .env, and testing connections...";const data=await getJson("/api/setup/save-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:60000});fillSetup(data.config||payload);await loadSettings();if(box){box.textContent=[data.message||"Save & Test complete.","Config: "+(data.configPath||"App data"),"Managed .env: "+(data.managedEnvPath||"App data .env"),setupTestLine("SSH",data.tests?.ssh),setupTestLine("Database",data.tests?.database),setupTestLine("Receiver",data.tests?.receiver)].join("\n");}await refreshLiveGiveEnv();await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){if(box)box.textContent=betterError(e);playUiSound("warning");}}
+async function saveAndTestSetup(){const box=document.getElementById("setupFinishResult");try{if(!setupDatabaseTestSignature||setupDatabaseTestSignature!==currentSetupDatabaseSignature())throw new Error("Test the current database settings successfully before saving setup.");const payload={...configPayload("setup"),setupComplete:true};if(box)box.textContent="Saving configuration, regenerating managed .env, and testing connections...";const data=await getJson("/api/setup/save-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:60000});fillSetup(data.config||payload);await loadSettings();if(box){box.textContent=[data.message||"Save & Test complete.","Config: "+(data.configPath||"App data"),"Managed .env: "+(data.managedEnvPath||"App data .env"),setupTestLine("SSH",data.tests?.ssh),setupTestLine("Database",data.tests?.database),setupTestLine("Receiver",data.tests?.receiver)].join("\n");}await refreshLiveGiveEnv();await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){if(box)box.textContent=betterError(e);playUiSound("warning");}}
 async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);applyUiMode(cfg.uiMode);refreshReceiverStatus();refreshBattlegroups();refreshDatabaseTunnelStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
 async function saveSettings(){try{const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...appConfig,...collectSettings()})});fillSettings(data.config||{});setText("settingsSaveStatus","Settings saved. Restart the suite for receiver startup environment changes.");playUiSound("success");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
 async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");const label=data.ok?"Receiver Online":"Receiver Offline";setText("receiverManagerStatus",label+" / "+data.healthUrl);setText("settingsReceiver",label);tone("receiverState",label);if(!data.ok)tone("rabbitState","Dry Run Active");return data;}catch(e){setText("receiverManagerStatus",betterError(e));tone("receiverState","Receiver Offline");tone("rabbitState","Dry Run Active");}}
@@ -10886,7 +10988,16 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/config" && req.method === "POST") {
     try {
-      const saved = saveConfig(JSON.parse(await readBody(req) || "{}"));
+      const body = JSON.parse(await readBody(req) || "{}");
+      for (const [key, label] of [["serverInstallPath", "Server install path"], ["awakeningServerPath", "Dune Awakening server path"]]) {
+        if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
+        const status = serverInstallPathStatus(body[key]);
+        if (!status.valid) {
+          await json(res, { ok: false, error: `${label}: ${status.message}`, field: key, pathStatus: status }, 400);
+          return;
+        }
+      }
+      const saved = saveConfig(body);
       const verification = verifyConfigSaved(saved);
       if (!verification.ok) {
         await json(res, { ok: false, error: "Config save verification failed.", configPath: verification.configPath, mismatches: verification.mismatches }, 500);
@@ -10902,28 +11013,37 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/server-install-path/status" && req.method === "GET") {
-    await json(res, { ok: true, serverInstallPath: serverInstallPathStatus(url.searchParams.get("path") || loadConfig().serverInstallPath || "") });
+    const candidate = url.searchParams.has("path") ? url.searchParams.get("path") : loadConfig().serverInstallPath;
+    await json(res, { ok: true, serverInstallPath: serverInstallPathStatus(candidate) });
     return;
   }
   if (url.pathname === "/api/setup/status" && req.method === "GET") {
-    await json(res, { ok: true, config: publicConfig(), setupComplete: Boolean(loadConfig().setupComplete), discovery: await autoDiscovery() });
+    const current = loadConfig();
+    const pathsValid = serverInstallPathStatus(current.serverInstallPath).valid
+      && serverInstallPathStatus(current.awakeningServerPath).valid;
+    await json(res, { ok: true, config: publicConfig(current), setupComplete: Boolean(current.setupComplete && pathsValid), discovery: await autoDiscovery() });
     return;
   }
   if (url.pathname === "/api/setup/save" && req.method === "POST") {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
-      const pathStatus = serverInstallPathStatus(body.serverInstallPath);
-      if (!pathStatus.valid) {
-        await json(res, { ok: false, error: "Selected folder does not appear to be a valid Dune Awakening server installation.", serverInstallPath: pathStatus }, 400);
+      const pathValidation = [
+        ["serverInstallPath", "Server install path"],
+        ["awakeningServerPath", "Dune Awakening server path"]
+      ].map(([key, label]) => ({ key, label, status: serverInstallPathStatus(body[key]) }));
+      const invalidPaths = pathValidation.filter((entry) => !entry.status.valid);
+      if (invalidPaths.length) {
+        await json(res, { ok: false, error: invalidPaths.map((entry) => `${entry.label}: ${entry.status.message}`).join(" "), paths: pathValidation }, 400);
         return;
       }
       const saved = saveConfig({ ...loadConfig(), ...body, setupComplete: true });
       const verification = verifyConfigSaved(saved);
-      if (!verification.ok) {
-        await json(res, { ok: false, error: "Setup config save verification failed.", configPath: verification.configPath, mismatches: verification.mismatches }, 500);
+      const envVerification = verifyServerPathsPersisted(saved);
+      if (!verification.ok || !envVerification.ok) {
+        await json(res, { ok: false, error: "Setup config/.env save verification failed.", configPath: verification.configPath, managedEnvPath: envVerification.path, mismatches: [...verification.mismatches, ...envVerification.mismatches] }, 500);
         return;
       }
-      await json(res, { ok: true, verified: true, configPath: verification.configPath, config: publicConfig(verification.config), restartRequired: true });
+      await json(res, { ok: true, verified: true, pathsVerified: true, configPath: verification.configPath, managedEnvPath: envVerification.path, config: publicConfig(verification.config), restartRequired: true });
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 400);
     }
@@ -10941,6 +11061,15 @@ async function route(req, res) {
   if (url.pathname === "/api/discovery" && req.method === "GET") {
     try { await json(res, await autoDiscovery()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/setup/test-database" && req.method === "POST") {
+    try {
+      const result = await testSetupDatabaseConnection(JSON.parse(await readBody(req) || "{}"));
+      await json(res, result);
+    } catch (error) {
+      await json(res, { ok: false, target: "database", message: "Database authentication test failed.", error: redactSensitiveText(error.message) }, 400);
+    }
     return;
   }
   if (url.pathname.startsWith("/api/test/") && req.method === "POST") {

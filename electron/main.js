@@ -88,6 +88,17 @@ function expandEnvPath(value) {
   return String(value || "").replace(/%([^%]+)%/g, (_whole, key) => process.env[key] || _whole);
 }
 
+function usableServerPath(value) {
+  const configured = String(value || "").trim();
+  if (!configured || new Set(["<set>", "set", "***", "********"]).has(configured.toLowerCase())) return "";
+  const resolved = expandEnvPath(configured);
+  try {
+    return fs.statSync(resolved).isDirectory() ? resolved : "";
+  } catch {
+    return "";
+  }
+}
+
 function quoteEnvValue(value) {
   const text = String(value ?? "");
   return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n")}"`;
@@ -160,8 +171,8 @@ function managedEnvValues(cfg) {
     DUNE_ADMIN_GIVE_ITEM_HEALTH_URL: receiver.healthUrl,
     DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: cfg.liveTeleportEnabled ? "true" : "false",
     DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET: String(cfg.teleportSafeZOffset || 1000),
-    DUNE_SERVER_INSTALL_PATH: expandEnvPath(cfg.serverInstallPath || ""),
-    DUNE_AWAKENING_SERVER_PATH: expandEnvPath(cfg.serverInstallPath || "")
+    DUNE_SERVER_INSTALL_PATH: usableServerPath(cfg.serverInstallPath),
+    DUNE_AWAKENING_SERVER_PATH: usableServerPath(cfg.awakeningServerPath)
   };
   if (selected) {
     values.DUNE_RECEIVER_BG_NAMESPACE = selected.namespace;
@@ -240,7 +251,8 @@ function createFirstRunFiles() {
         updateRepo: "AlphaNineGaming/alphanine-dune-suite",
         panelTitle: "AlphaNine Dune Suite",
         panelSubtitle: "Unified local tools for your self-hosted server",
-        serverInstallPath: "D:\\SteamLibrary\\steamapps\\common\\Dune Awakening Self-Hosted Server",
+        serverInstallPath: "",
+        awakeningServerPath: "",
         liveTeleportEnabled: true,
         teleportEndpointPath: "/api/v1/players/teleport-coords",
         teleportCommandTemplate: "",

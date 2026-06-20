@@ -93,6 +93,21 @@ function quoteEnvValue(value) {
   return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n")}"`;
 }
 
+const MASKED_SECRET_VALUES = new Set(["********", "<set>"]);
+
+function isMaskedSecretValue(value) {
+  return MASKED_SECRET_VALUES.has(String(value ?? "").trim().toLowerCase());
+}
+
+function usableSecretValue(value) {
+  return isMaskedSecretValue(value) ? "" : String(value ?? "");
+}
+
+function assertNoMaskedSecrets(cfg, destination) {
+  const masked = Object.entries(cfg || {}).filter(([key, value]) => /password|token|secret/i.test(key) && isMaskedSecretValue(value));
+  if (masked.length) throw new Error(`Refusing to write masked secret placeholder${masked.length === 1 ? "" : "s"} to ${destination}: ${masked.map(([key]) => key).join(", ")}`);
+}
+
 function normalizeSelectedBattlegroup(value) {
   if (!value || typeof value !== "object") return null;
   const namespace = String(value.namespace || "").trim();
@@ -153,6 +168,7 @@ function managedEnvValues(cfg) {
 }
 
 function writeManagedEnvFile(cfg) {
+  assertNoMaskedSecrets(cfg, ".env");
   const envPath = userPath(".env");
   const values = managedEnvValues(cfg);
   const lines = [
@@ -245,14 +261,27 @@ function generateReceiverToken() {
 function ensureReceiverTokenConfig() {
   const configPath = userPath("config.json");
   const cfg = readAppConfig();
-  if (String(cfg.receiverToken || "").trim()) return cfg;
+  const receiverToken = usableSecretValue(cfg.receiverToken)
+    || usableSecretValue(process.env.DUNE_RECEIVER_TOKEN)
+    || usableSecretValue(cfg.adminGiveItemToken)
+    || usableSecretValue(process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN)
+    || generateReceiverToken();
+  const adminGiveItemToken = receiverToken;
+  const databasePassword = isMaskedSecretValue(cfg.databasePassword)
+    ? usableSecretValue(process.env.DUNE_DATABASE_PASSWORD)
+    : String(cfg.databasePassword ?? "");
   const next = {
     ...cfg,
-    receiverToken: generateReceiverToken(),
-    receiverTokenSource: "generated"
+    databasePassword,
+    receiverToken,
+    adminGiveItemToken,
+    receiverTokenSource: usableSecretValue(cfg.receiverToken) ? (cfg.receiverTokenSource || "config.json") : "generated"
   };
+  assertNoMaskedSecrets(next, "config.json");
+  const changed = databasePassword !== cfg.databasePassword || receiverToken !== cfg.receiverToken || adminGiveItemToken !== cfg.adminGiveItemToken || next.receiverTokenSource !== cfg.receiverTokenSource;
+  if (!changed) return cfg;
   fs.writeFileSync(configPath, JSON.stringify(next, null, 2), "utf8");
-  appendLog("desktop", "Generated receiver authentication token and saved it to config.json.");
+  appendLog("desktop", "Repaired or generated secret configuration and saved it to config.json.");
   return next;
 }
 

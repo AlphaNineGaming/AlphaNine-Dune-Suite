@@ -6,6 +6,7 @@
   "main": "electron/main.js",
   "scripts": {
     "build:item-catalog": "node scripts/build-item-catalog.js",
+    "test:secret-persistence": "node scripts/test-secret-config-persistence.js",
     "build:win": "electron-builder --win nsis --x64 --publish never --config.win.signAndEditExecutable=false && node scripts/ensure-admin-manifest.js"
   },
   "dependencies": {

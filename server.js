@@ -8949,6 +8949,27 @@ function appPage() {
     .inline-validation { min-height:18px; color:var(--warn); font-size:12px; line-height:1.35; }
     .preset-actions { display:grid; gap:10px; margin-top:12px; }
     .preset-name-row { display:grid; grid-template-columns:minmax(180px,1fr) auto; gap:10px; align-items:end; }
+    .give-layout { display:grid; grid-template-columns:minmax(0,1fr) 380px; grid-template-areas:"form presets" "catalog presets"; gap:var(--panel-gap); align-items:start; }
+    .give-form { grid-area:form; }
+    .give-catalog { grid-area:catalog; }
+    .give-sidebar { grid-area:presets; position:sticky; top:92px; max-height:calc(100vh - 112px); overflow:auto; display:flex; flex-direction:column; }
+    .give-primary-actions { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:stretch; }
+    .give-result { min-height:46px; display:flex; align-items:center; overflow-wrap:anywhere; }
+    .give-diagnostics { margin-top:12px; border-top:1px solid rgba(214,166,69,.16); padding-top:10px; }
+    .give-diagnostics summary { cursor:pointer; color:var(--sand); text-transform:uppercase; letter-spacing:.08em; font-size:11px; font-weight:900; }
+    .give-sidebar .preset-name-row { grid-template-columns:minmax(0,1fr) auto; }
+    .give-sidebar textarea { min-height:120px; }
+    .give-preset-save { order:1; }
+    .give-preset-fields { order:2; }
+    .give-preset-actions { order:3; }
+    .give-queue-divider { order:4; }
+    .give-queue-title { order:5; }
+    .give-queue-copy { order:6; }
+    .give-queue-list { order:7; }
+    .give-queue-actions { order:8; }
+    #giveQueueSummary { order:9; }
+    #giveQueueLog { order:10; }
+    body.simple-mode .unsupported-control { display:none !important; }
     .support-links { display:grid; gap:8px; margin-top:12px; color:var(--muted); font-size:13px; }
     .field-grid { display:grid; gap:10px; }
     label { display:grid; gap:6px; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
@@ -9088,6 +9109,7 @@ function appPage() {
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
+    @media (max-width:1180px) { .give-layout{grid-template-columns:1fr;grid-template-areas:"form" "presets" "catalog"}.give-sidebar{position:static;max-height:none}.give-primary-actions{grid-template-columns:1fr} }
     @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.topbar-actions{justify-content:flex-start}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
     @media (max-width:720px) { .env-var-row{grid-template-columns:1fr;gap:5px}.env-var-value{font-size:12px}.env-help{font-size:11.5px} }
   </style>
@@ -9518,48 +9540,74 @@ function appPage() {
     </section>
 
     <section id="give" class="view">
-      <div class="layout-2">
-        <div class="panel pad">
+      <div class="give-layout">
+        <div class="panel pad give-form">
           <div class="label">Give Item</div>
           <div class="field-grid mt">
+            <label>Player Search<input id="givePlayerSearch" placeholder="Search player or account" oninput="renderPlayerSelect()"></label>
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
             <label>Item Template Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
             <label>Item Filter<select id="adminItemCategory" onchange="renderAdminItems()"><option value="">All discovered items</option></select></label>
             <label>Grade<select id="adminItemGrade" onchange="renderAdminItems()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
             <label>Tier<select id="adminItemTier" onchange="renderAdminItems()"><option value="all">All tiers</option></select></label>
+            <div id="selectedGiveItem" class="empty">Select an item from the catalog below.</div>
             <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
-              <label id="adminQualityWrap" class="advanced-only">Quality<input id="adminQuality" type="number" min="0" max="100" value="0" disabled oninput="syncQualityWarning()"></label>
-              <div id="qualityWarning" class="warning advanced-only">Quality giving is not supported by the current receiver method.</div>
+            <label id="adminQualityWrap" class="unsupported-control">Durability<input id="adminQuality" type="number" min="0" max="100" value="0" disabled oninput="syncQualityWarning()"></label>
             <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute">Live Give</option></select></label>
-              <div id="liveGiveServerStatus" class="warning advanced-status">Server Status: Checking</div>
-              <div id="liveGiveTransportStatus" class="warning advanced-status">Live Give transport: Checking</div>
-            <button id="liveGiveStartServerButton" onclick="startServerForGiveItem()">Start Server</button>
-            <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
-            <button id="addGiveQueueButton" onclick="addSelectedItemToGiveQueue()">Add to Queue</button>
-              <button class="advanced-only" onclick="refreshAdmin()">Refresh Admin Data</button>
+            <div class="give-primary-actions">
+              <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
+              <button id="addGiveQueueButton" onclick="addSelectedItemToGiveQueue()">Add to Queue</button>
+            </div>
+            <div id="giveItemResult" class="empty give-result">Ready to give an item.</div>
           </div>
-          <div class="divider"></div>
-          <div class="label">Give Queue</div>
-          <div class="subtle mt">Queue multiple item grants for the selected player. Items are sent sequentially.</div>
-          <div id="giveQueueList" class="detail-list mt"><div class="empty">Queue is empty.</div></div>
-          <div class="preset-actions">
+          <details class="advanced-only give-diagnostics">
+            <summary>Troubleshooting and Status</summary>
+            <div id="liveGiveServerStatus" class="warning mt">Server Status: Checking</div>
+            <div id="liveGiveTransportStatus" class="warning mt">Live Give transport: Checking</div>
+            <div id="qualityWarning" class="warning mt">Durability is not supported by the current receiver method.</div>
+            <div class="action-row mt">
+              <button id="liveGiveStartServerButton" onclick="startServerForGiveItem()">Start Server</button>
+              <button onclick="refreshAdmin()">Refresh Admin Data</button>
+            </div>
+            <pre id="giveItemResultDetail" class="mt">No Give Item request has run.</pre>
+          </details>
+        </div>
+        <div class="panel pad give-catalog">
+          <div class="panel-head"><div><div class="label">Item Catalog</div><div class="subtle">Select one item for Give Item or add several to the queue.</div></div></div>
+          <details class="advanced-only give-diagnostics">
+            <summary>Catalog Diagnostics</summary>
+            <div id="gearDiscoveryStatus" class="empty mt">Item cache status unknown.</div>
+            <div class="action-row mt">
+              <button onclick="discoverGearItems()">Import Gear Items</button>
+              <button onclick="refreshAdmin()">Reload Cache</button>
+            </div>
+          </details>
+          <div id="adminItems" class="admin-items mt"><div class="empty">Loading item templates...</div></div>
+        </div>
+        <aside class="panel pad give-sidebar">
+          <div class="label">Presets</div>
+          <div class="divider give-queue-divider"></div>
+          <div class="label give-queue-title">Give Queue</div>
+          <div class="subtle mt give-queue-copy">Items are sent sequentially to the selected player.</div>
+          <div id="giveQueueList" class="detail-list mt give-queue-list"><div class="empty">Queue is empty.</div></div>
+          <div class="preset-actions give-preset-save">
             <div class="preset-name-row">
               <label>Preset Name<input id="giveQueuePresetName" placeholder="Builder Kit" oninput="setGiveQueuePresetValidation('')"></label>
               <button onclick="saveGiveQueuePreset()">Save</button>
             </div>
             <div id="giveQueuePresetValidation" class="inline-validation"></div>
           </div>
-          <div class="field-grid mt">
+          <div class="field-grid mt give-preset-fields">
             <label>Preset<select id="giveQueuePresetSelect"></select></label>
             <label>Load Mode<select id="giveQueuePresetLoadMode"><option value="replace">Replace Queue</option><option value="append">Append to Queue</option></select></label>
           </div>
-          <div class="action-row mt">
+          <div class="action-row mt give-queue-actions">
             <button id="giveQueueButton" class="primary" onclick="giveQueuedItems()">Give Queue</button>
             <button onclick="clearGiveQueue()">Clear Queue</button>
             <button id="retryGiveQueueButton" onclick="retryFailedGiveQueueItems()" disabled>Retry Failed Items</button>
             <button onclick="copyGiveQueueLog()">Copy Result Log</button>
           </div>
-          <div class="action-row mt">
+          <div class="action-row mt give-preset-actions">
             <button onclick="loadGiveQueuePreset()">Load</button>
             <button onclick="deleteGiveQueuePreset()">Delete</button>
             <button onclick="exportGiveQueuePreset()">Export</button>
@@ -9568,16 +9616,7 @@ function appPage() {
           </div>
           <div id="giveQueueSummary" class="empty mt">Progress: 0 / 0 · Succeeded: 0 · Failed: 0</div>
           <textarea id="giveQueueLog" class="mt" rows="10" readonly placeholder="Queue results will appear here."></textarea>
-        </div>
-        <div class="panel pad">
-          <div class="label">Item Templates</div>
-          <div id="gearDiscoveryStatus" class="empty mt advanced-only">Item cache status unknown.</div>
-          <div class="action-row mt advanced-only">
-            <button onclick="discoverGearItems()">Import Gear Items</button>
-            <button onclick="refreshAdmin()">Reload Cache</button>
-          </div>
-          <div id="adminItems" class="admin-items mt"><div class="empty">Loading item templates...</div></div>
-        </div>
+        </aside>
       </div>
     </section>
 
@@ -10600,7 +10639,7 @@ function wireDatabaseImportControls(){const file=document.getElementById("dbRest
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
-function renderPlayerSelect(){const select=document.getElementById("adminPlayer");select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;}
+function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
 function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
@@ -10656,8 +10695,9 @@ function filteredItemDatabaseItems(){const q=(document.getElementById("itemDbSea
 function renderItemDatabaseDetails(item){const detail=document.getElementById("itemDbDetails");if(!detail)return;if(!item){detail.className="empty mt";detail.textContent="Select an item to inspect spawn data, grade, category, and stats.";return;}const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const rows={"Name":item.name||item.id,"Spawn Code":item.spawnCode||item.itemCode||item.id,"Category":item.category||"Unknown","Subcategory":item.subtype||item.type||"--","Grade":itemGrade,"Tier":item.tier||"--","Max Stack":item.maxStack||"--","Spawnable":item.spawnable===false?"No":"Yes"};const stats=item.stats&&typeof item.stats==="object"?Object.entries(item.stats).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join(""):"";detail.className="mt";detail.innerHTML='<div class="detail-list">'+Object.entries(rows).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join("")+'</div>'+(item.description?'<div class="empty mt">'+esc(item.description)+'</div>':'')+(stats?'<div class="label mt">Stats</div><div class="detail-list">'+stats+'</div>':'');}
 function renderItemDatabase(){const rows=filteredItemDatabaseItems();const list=document.getElementById("itemDbList");const count=document.getElementById("itemDbCount");if(count)count.textContent=rows.length+" shown / "+itemDatabaseItems.length+" loaded";if(!selectedItemDatabaseId&&rows[0])selectedItemDatabaseId=rows[0].id;if(list){list.innerHTML=rows.slice(0,250).map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);return '<button type="button" class="item-db-card '+(selectedItemDatabaseId===item.id?'active':'')+'" data-item-db-id="'+esc(item.id)+'">'+itemDbIcon(item)+'<span><strong>'+esc(item.name||item.id)+'</strong><span class="item-db-meta"><span class="item-grade-badge">'+esc(itemGrade)+'</span><span>'+esc(item.category||"Unknown")+'</span><span>'+esc(item.subtype||item.type||"")+'</span><span>'+esc(item.tier||"")+'</span></span><span class="subtle env-path-value">'+esc(item.id||"")+'</span></span></button>';}).join("")||'<div class="empty">No items match the current filters.</div>';list.querySelectorAll("[data-item-db-id]").forEach(el=>el.addEventListener("click",()=>{selectedItemDatabaseId=el.dataset.itemDbId;renderItemDatabase();}));}renderItemDatabaseDetails(itemDatabaseItems.find(item=>item.id===selectedItemDatabaseId)||rows[0]);}
 async function refreshItemDatabase(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Loading bundled item database...";}const data=await getJson("/api/item-database/items?grade=all");itemDatabaseItems=data.items||[];if(!selectedItemDatabaseId&&itemDatabaseItems[0])selectedItemDatabaseId=itemDatabaseItems[0].id;fillItemDbFilters();renderItemDatabase();if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML='<strong>'+esc(itemDatabaseItems.length)+' items loaded.</strong><div class="subtle">Source: shared bundled/user item catalog. No server scan required.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
-function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();syncGiveItemControls();}
-function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(input){input.disabled=!supported;if(!supported)input.value=0;}if(!warning)return;warning.classList.toggle("hidden",supported);warning.textContent=supported?"":"Quality giving is not supported by the current receiver method.";}
+function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select an item from the catalog below.";return;}selected.className="detail-row";selected.innerHTML='<span class="subtle">Selected Item</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>';}
+function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();renderSelectedGiveItem();syncGiveItemControls();}
+function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;if(!supported)input.value=0;}if(!warning)return;warning.classList.toggle("hidden",supported);warning.textContent=supported?"":"Durability is not supported by the current receiver method.";}
 function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1)};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
 function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / quality "+row.quality:"");}
 function updateGiveQueueSummary(processed=0,total=giveQueue.length,succeeded=0,failed=0){const el=document.getElementById("giveQueueSummary");if(el)el.textContent="Progress: "+processed+" / "+total+" · Succeeded: "+succeeded+" · Failed: "+failed;const retry=document.getElementById("retryGiveQueueButton");if(retry)retry.disabled=!lastGiveQueueFailedItems.length||liveGiveBusy;syncGiveItemControls();}
@@ -10684,6 +10724,8 @@ async function exportGiveQueuePreset(){const log=document.getElementById("giveQu
 async function importGiveQueuePresetFile(event){const input=event.target;const log=document.getElementById("giveQueueLog");try{setGiveQueuePresetValidation("");const file=input.files&&input.files[0];if(!file)return;const text=await file.text();const preset=JSON.parse(text);preset.items=normalizeClientPresetItems(preset.items);preset.name=String(preset.name||giveQueuePresetInputName()||file.name.replace(/\\.json$/i,"")).trim();if(!preset.name){setGiveQueuePresetValidation("Enter a preset name before importing this file.");document.getElementById("giveQueuePresetName")?.focus();playUiSound("warning");return;}if(giveQueuePresetExists(preset.name)&&!(await appConfirm("Overwrite preset","A preset named '"+preset.name+"' already exists. Overwrite it?","Overwrite","Cancel")))return;const data=await getJson("/api/live-give/queue-presets/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({preset})});if(log)log.value="Imported preset: "+data.preset.name+"\\nItems: "+data.preset.items.length;await refreshGiveQueuePresets();const select=document.getElementById("giveQueuePresetSelect");if(select)select.value=data.preset.name;setGiveQueuePresetName(data.preset.name);playUiSound("success");}catch(e){if(log)log.value="Import failed: "+betterError(e);playUiSound("warning");}finally{if(input)input.value="";}}
 function isServerOnlineStatus(data){if(data?.runtimeTransport&&typeof data.runtimeTransport.serverOnline==="boolean")return data.runtimeTransport.serverOnline;return mapServerSummary(data).online;}
 function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";syncLiveGiveTransportStatus();syncGiveItemControls();}
+function syncGiveItemResultFromLog(){if(!document.getElementById("give")?.classList.contains("active"))return;const source=document.getElementById("adminLog");const result=document.getElementById("giveItemResult");const detail=document.getElementById("giveItemResultDetail");const message=String(source?.textContent||"").trim();if(detail)detail.textContent=message||"No Give Item request has run.";if(result){const summary=message.split(/\r?\n/).find(Boolean)||"Ready to give an item.";result.className=(/failed|error|unavailable|offline|blocked/i.test(summary)?"warning":"empty")+" give-result";result.textContent=summary;}}
+function wireGiveItemResult(){const source=document.getElementById("adminLog");if(!source||source.dataset.giveResultWired)return;source.dataset.giveResultWired="true";new MutationObserver(syncGiveItemResultFromLog).observe(source,{childList:true,characterData:true,subtree:true});syncGiveItemResultFromLog();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
 function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(mode==="execute"&&!adminLiveGiveAvailable);if(give)give.disabled=blocked;if(add)add.disabled=liveGiveBusy||!selectedAdminItem;if(queue)queue.disabled=blocked||!giveQueue.length;if(retry)retry.disabled=blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const data=await getJson("/api/status");liveGiveServerOnline=isServerOnlineStatus(data);setGiveServerStatus(liveGiveServerOnline?"Server Status: Online. Give Item is available.":"Server Status: Offline. Start the server before using Give Item.",liveGiveServerOnline?"ok":"warn");await refreshLiveGiveEnv();return data;}catch(e){liveGiveServerOnline=false;setGiveServerStatus("Server Status: Offline. "+betterError(e),"warn");return null;}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
@@ -10692,7 +10734,7 @@ async function startServerForGiveItem(){const log=document.getElementById("admin
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();window.uiSoundReady=true;wireUiSounds();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();window.uiSoundReady=true;wireUiSounds();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>

@@ -254,6 +254,7 @@ function createFirstRunFiles() {
         serverInstallPath: "",
         awakeningServerPath: "",
         liveTeleportEnabled: true,
+        dragTeleportEnabled: true,
         teleportEndpointPath: "/api/v1/players/teleport-coords",
         teleportCommandTemplate: "",
         teleportSafeZOffset: 1000

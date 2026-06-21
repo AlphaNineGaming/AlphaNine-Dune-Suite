@@ -29,6 +29,7 @@
   "serverInstallPath": "",
   "awakeningServerPath": "",
   "liveTeleportEnabled": true,
+  "dragTeleportEnabled": true,
   "teleportSafeZOffset": 1000,
   "teleportEndpointPath": "/api/v1/players/teleport-coords",
   "teleportCommandTemplate": "",

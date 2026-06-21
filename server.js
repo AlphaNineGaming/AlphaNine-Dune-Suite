@@ -9,7 +9,7 @@ const crypto = require("crypto");
 const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 
-const APP_VERSION = "0.3.9-beta";
+const APP_VERSION = "0.4.0";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -109,6 +109,7 @@ const defaultConfig = {
   serverInstallPath: "",
   awakeningServerPath: "",
   liveTeleportEnabled: true,
+  dragTeleportEnabled: true,
   teleportSafeZOffset: 1000,
   teleportEndpointPath: "/api/v1/players/teleport-coords",
   teleportCommandTemplate: "",
@@ -300,7 +301,7 @@ function normalizeSelectedBattlegroup(value) {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "dragTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
   const current = loadConfig();
   const clean = {};
   for (const key of allowed) {
@@ -349,6 +350,7 @@ function saveConfig(nextConfig) {
   clean.serverInstallPath = String(clean.serverInstallPath || "").trim();
   clean.awakeningServerPath = String(clean.awakeningServerPath || "").trim();
   clean.liveTeleportEnabled = clean.liveTeleportEnabled === true || clean.liveTeleportEnabled === "true";
+  clean.dragTeleportEnabled = clean.dragTeleportEnabled !== false && clean.dragTeleportEnabled !== "false";
   clean.teleportSafeZOffset = Number(clean.teleportSafeZOffset) || 1000;
   clean.teleportEndpointPath = String(clean.teleportEndpointPath || "/api/v1/players/teleport-coords").trim();
   if (!clean.teleportEndpointPath.startsWith("/")) clean.teleportEndpointPath = `/${clean.teleportEndpointPath}`;
@@ -7684,6 +7686,18 @@ async function saveCurrentPlayerTeleportPreset(payload) {
   return { ok: true, message: `Verified teleport preset saved: ${name}`, preset: normalizeTeleportPreset(preset, "saved"), ...loadTeleportLocationPresets() };
 }
 
+function deleteTeleportLocationPreset(nameValue) {
+  const name = String(nameValue || "").trim();
+  if (!name) throw new Error("Choose a saved location first.");
+  const rows = readTeleportPresetRows(TELEPORT_PRESETS_PATH);
+  const next = rows.filter((row) => String(row?.name || "").trim().toLowerCase() !== name.toLowerCase());
+  if (next.length === rows.length) throw new Error(`Saved location not found: ${name}`);
+  fs.mkdirSync(path.dirname(TELEPORT_PRESETS_PATH), { recursive: true });
+  fs.writeFileSync(TELEPORT_PRESETS_PATH, JSON.stringify({ version: 1, presets: next }, null, 2), "utf8");
+  appendAdminAudit("teleport_preset_deleted", { name });
+  return { ok: true, message: `Deleted saved location: ${name}`, ...loadTeleportLocationPresets() };
+}
+
 function matchingTeleportPreset(payload) {
   const result = loadTeleportLocationPresets();
   if (!result.ok) return null;
@@ -9357,6 +9371,10 @@ function appPage() {
     .suite-modal-card { width:min(520px,100%); border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.96)); box-shadow:var(--shadow); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
     .suite-modal-card h3 { margin:0; font-size:18px; color:var(--gold-bright); letter-spacing:0; }
     .suite-modal-card p { margin:10px 0 0; color:var(--muted); line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .suite-toast { position:fixed; right:20px; bottom:20px; z-index:7000; max-width:360px; padding:11px 14px; border:1px solid var(--line); background:rgba(8,10,7,.96); color:var(--text); box-shadow:var(--shadow); transition:opacity .18s ease, transform .18s ease; }
+    .suite-toast.hidden { display:block!important; opacity:0; transform:translateY(12px); pointer-events:none; }
+    .suite-toast.success { border-color:rgba(102,209,122,.7); color:var(--good); }
+    .suite-toast.error { border-color:rgba(255,98,98,.7); color:var(--bad); }
     .inline-validation { min-height:18px; color:var(--warn); font-size:12px; line-height:1.35; }
     .preset-actions { display:grid; gap:10px; margin-top:12px; }
     .preset-name-row { display:grid; grid-template-columns:minmax(180px,1fr) auto; gap:10px; align-items:end; }
@@ -9555,6 +9573,7 @@ function appPage() {
     </div>
   </div>
 </div>
+<div id="suiteToast" class="suite-toast hidden" role="status" aria-live="polite"></div>
 <div id="setupWizard" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-label="AlphaNine Dune Suite setup wizard">
   <div class="setup-card">
     <div class="panel-head">
@@ -9870,7 +9889,7 @@ function appPage() {
               </table>
             </div>
           </div>
-          <div class="panel pad">
+          <div class="panel pad advanced-only">
             <div class="label">Clicked World Coordinates</div>
             <div class="coordinate-card mt">
               <div class="coordinate-pair"><span>X</span><strong id="liveClickedX">--</strong></div>
@@ -9878,7 +9897,7 @@ function appPage() {
               <button type="button" onclick="copyLiveCoordinates()">Copy Coordinates</button>
             </div>
           </div>
-          <div class="panel pad">
+          <div class="panel pad advanced-only">
             <div class="label">Coordinate Search</div>
             <div class="field-grid mt">
               <label>X<input id="liveSearchX" type="number" step="0.01"></label>
@@ -9887,16 +9906,12 @@ function appPage() {
             </div>
           </div>
           <div class="panel pad">
-            <div class="label">Safe Teleport</div>
+            <div class="label">Live Teleport</div>
             <div class="field-grid mt">
               <label>Player / Controller ID<input id="teleportPlayerId" placeholder="player_controller_id or account id"></label>
-              <label>Verified Location Preset<select id="teleportPreset" onchange="applyTeleportPreset()"><option value="">Choose a verified preset</option></select></label>
-              <label>New Preset Name<input id="teleportPresetName" maxlength="80" placeholder="Safe location name"></label>
-              <button type="button" onclick="saveCurrentPlayerTeleportPreset()">Save Current Player Position</button>
-              <label>X<input id="teleportX" type="number" step="0.01"></label>
-              <label>Y<input id="teleportY" type="number" step="0.01"></label>
-              <label>Z / Dispatch Altitude<input id="teleportZ" type="number" step="0.01" readonly value="5000"></label>
-              <button type="button" onclick="fillTeleportFromSelectedActor()">Use Selected Actor Position</button>
+              <label class="advanced-only">X<input id="teleportX" type="number" step="0.01"></label>
+              <label class="advanced-only">Y<input id="teleportY" type="number" step="0.01"></label>
+              <label class="advanced-only">Z / Dispatch Altitude<input id="teleportZ" type="number" step="0.01" readonly value="5000"></label>
               <button type="button" class="primary" id="liveTeleportButton" onclick="executeLiveTeleport()" disabled>Teleport</button>
             </div>
             <div class="subtle mt">Map-click and dragged-marker destinations send immediately with safe-ground mode and dispatch altitude Z 5000.</div>
@@ -9909,6 +9924,18 @@ function appPage() {
             </div>
             <div id="teleportReadiness" class="warning mt advanced-status">Live Teleport requires server health, receiver reachability, Settings enablement, and a configured hook.</div>
             <pre id="teleportLog" class="mt advanced-only">Click the map or drag a player marker, then press Teleport.</pre>
+          </div>
+          <div class="panel pad">
+            <div class="label">Player Saved Locations</div>
+            <div class="field-grid mt">
+              <label>Saved Location<select id="teleportPreset"><option value="">Choose a saved location</option></select></label>
+              <label>Location Name<input id="teleportPresetName" maxlength="80" placeholder="Location name"></label>
+              <button type="button" onclick="saveCurrentPlayerTeleportPreset()">Save Current Location</button>
+              <button type="button" onclick="applyTeleportPreset()">Load Saved Location</button>
+              <button type="button" onclick="deleteTeleportPreset()">Delete Saved Location</button>
+              <button type="button" class="primary" onclick="teleportToSavedLocation()">Teleport to Saved Location</button>
+            </div>
+            <div id="savedLocationStatus" class="empty mt">Saved locations use their verified exact Z.</div>
           </div>
           <div id="liveMapDiagnosticsPanel" class="panel pad hidden">
             <div class="label">Live Map Diagnostics</div>
@@ -10650,6 +10677,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div class="label">Live Map Teleport</div>
           <div class="field-grid mt">
             <label class="check-row"><input id="settingsLiveTeleportEnabled" type="checkbox">Enable Receiver Live Teleport</label>
+            <label class="check-row"><input id="settingsDragTeleportEnabled" type="checkbox" checked onchange="toggleDragTeleport(this.checked)">Enable drag-to-teleport</label>
             <label>Teleport Endpoint Path<input id="settingsTeleportEndpointPath" placeholder="/api/v1/players/teleport-coords"></label>
             <label>Teleport Safe Z Offset<input id="settingsTeleportSafeZOffset" type="number" value="1000"></label>
             <label>Preview Command Template<input id="settingsTeleportCommandTemplate" placeholder="TeleportToExact {playerId} {x} {y} {z}"></label>
@@ -10720,7 +10748,11 @@ tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let liveMapTunnelPromise=null;
+async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setText("settingsSaveStatus",betterError(error));}}
+async function deleteTeleportPreset(){const select=document.getElementById("teleportPreset");const preset=select&&select.value!==""?liveTeleportPresets[Number(select.value)]:null;try{if(!preset)throw new Error("Choose a saved location first.");if(!(await appConfirm("Delete saved location","Delete '"+preset.name+"'?","Delete","Cancel")))return;const data=await getJson("/api/live-map/teleport/presets?name="+encodeURIComponent(preset.name),{method:"DELETE"});await loadTeleportPresets();setText("savedLocationStatus",data.message||"Saved location deleted.");showToast(data.message||"Saved location deleted.","success");playUiSound("success");}catch(error){setText("savedLocationStatus",betterError(error));showToast(betterError(error),"error");playUiSound("warning");}}
+async function teleportToSavedLocation(){const select=document.getElementById("teleportPreset");try{if(!select||select.value==="")throw new Error("Choose a saved location first.");applyTeleportPreset();await executeLiveTeleport(false);}catch(error){setText("savedLocationStatus",betterError(error));showToast(betterError(error),"error");}}
 function appConfirm(title,message,okText="Continue",cancelText="Cancel"){return new Promise(resolve=>{const dialog=document.getElementById("suiteConfirmDialog");const titleEl=document.getElementById("suiteConfirmTitle");const messageEl=document.getElementById("suiteConfirmMessage");const ok=document.getElementById("suiteConfirmOk");const cancel=document.getElementById("suiteConfirmCancel");if(!dialog||!ok||!cancel){resolve(false);return;}titleEl.textContent=title||"Confirm";messageEl.textContent=message||"";ok.textContent=okText;cancel.textContent=cancelText;const cleanup=result=>{dialog.classList.add("hidden");ok.onclick=null;cancel.onclick=null;document.removeEventListener("keydown",onKey,true);resolve(result);};const onKey=event=>{if(event.key==="Escape")cleanup(false);if(event.key==="Enter")cleanup(true);};ok.onclick=()=>cleanup(true);cancel.onclick=()=>cleanup(false);document.addEventListener("keydown",onKey,true);dialog.classList.remove("hidden");ok.focus();});}
+let suiteToastTimer=null;function showToast(message,kind="success"){const toast=document.getElementById("suiteToast");if(!toast)return;window.clearTimeout(suiteToastTimer);toast.textContent=String(message||"");toast.className="suite-toast "+(kind==="error"?"error":"success");suiteToastTimer=window.setTimeout(()=>toast.classList.add("hidden"),3200);}
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function normalizeUiMode(value){return String(value||"").toLowerCase()==="advanced"?"advanced":"simple";}
 function applyUiMode(value){uiMode=normalizeUiMode(value);document.body.classList.toggle("simple-mode",uiMode==="simple");document.body.classList.toggle("advanced-mode",uiMode==="advanced");setValue("headerUiMode",uiMode);setValue("settingsUiMode",uiMode);if(appConfig)appConfig.uiMode=uiMode;if(uiMode==="simple"&&(document.getElementById("logs")?.classList.contains("active")||document.getElementById("diagnostics")?.classList.contains("active")))setView("dashboard");}
@@ -10791,10 +10823,11 @@ function reconcileTeleportPending(){if(!liveTeleportPending)return;const player=
 function liveMapMarkerKey(row){return String(row?.type||"marker")+":"+String(row?.id||row?.actor_id||row?.name||"");}
 function liveMapMarkerPopup(row){return '<strong>'+esc(row.name||row.id||row.type||"Marker")+'</strong><br>'+esc(row.type||"marker")+' / '+esc(row.status||"unknown")+'<br>World X '+esc(formatLiveCoord(row.x))+' / World Y '+esc(formatLiveCoord(row.y))+(row.z!=null?' / World Z '+esc(formatLiveCoord(row.z)):'')+(row.updatedAt?'<br>Updated '+esc(row.updatedAt):'')+(row.actor_id?'<br>Actor '+esc(row.actor_id):'')+(row.type==="player"?'<br>Drag marker to select a teleport destination.':'');}
 function liveMapPlayerDisplayName(row){return String(row?.character_name||row?.name||row?.player_name||row?.id||"Player").trim()||"Player";}
-function liveMapDragTeleportPayload(row,latlng){const coords=leafletToDune(latlng);const playerId=liveTeleportPlayerId(row);if(!playerId)throw new Error("Player marker has no FLS/controller id for teleport.");return{playerId,characterName:liveMapPlayerDisplayName(row),x:Math.round(Number(coords.x)),y:Math.round(Number(coords.y)),z:5000,map:liveMapKey,elevationSource:"safe-ground",elevationConfirmed:true,presetName:"",targetActorId:"",targetActorType:"",commandMode:"safe-ground",requestMode:"execute",debug:true,playerCurrent:liveMapPosition(row),clickedMapPosition:{x:coords.x,y:coords.y,px:Number(latlng.lng),py:Number(latlng.lat)},safetyOffset:0};}
+function dragTeleportEnabled(){return appConfig?.dragTeleportEnabled!==false;}
+function liveMapDragTeleportPayload(row,latlng){const coords=leafletToDune(latlng);const playerId=liveTeleportPlayerId(row);if(!playerId)throw new Error("Player marker has no FLS/controller id for teleport.");return{playerId,characterName:liveMapPlayerDisplayName(row),x:Math.round(Number(coords.x)),y:Math.round(Number(coords.y)),z:5000,map:liveMapKey,elevationSource:"safe-ground",elevationConfirmed:true,presetName:"",targetActorId:"",targetActorType:"",commandMode:"safe-ground",requestMode:"execute",dryRun:false,test:false,debug:true,playerCurrent:liveMapPosition(row),clickedMapPosition:{x:coords.x,y:coords.y,px:Number(latlng.lng),py:Number(latlng.lat)},safetyOffset:0};}
 function applyDragTeleportPayloadToForm(payload,latlng){setValue("teleportPlayerId",payload.playerId);setValue("teleportX",payload.x);setValue("teleportY",payload.y);setValue("teleportZ",payload.z);liveTeleportPresetName=payload.presetName||"";liveTeleportTargetActorId=payload.targetActorId||"";liveTeleportTargetActorType=payload.targetActorType||"";liveSelectedCoordinates={...payload.clickedMapPosition,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(payload.clickedMapPosition.x));setText("liveClickedY",formatLiveCoord(payload.clickedMapPosition.y));setTeleportElevationSource(payload.elevationSource,true);updateLiveMapDebug(latlng);}
-async function handleLiveMapPlayerDrag(row,marker,originalPoint,event){const next=event.target.getLatLng();const originalLatLng=L.latLng(originalPoint[0],originalPoint[1]);const log=document.getElementById("teleportLog");try{const payload=liveMapDragTeleportPayload(row,next);applyDragTeleportPayloadToForm(payload,next);if(log)log.textContent="Drag destination selected for "+payload.characterName+" at X "+payload.x+" / Y "+payload.y+" / Z 5000. Press Teleport to send the live command.";playUiSound("click");}catch(error){marker.setLatLng(originalLatLng);if(log)log.textContent=betterError(error);addActivity("error","Live map drag destination failed",error.message);playUiSound("warning");}}
-function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(row.type||kind.slice(0,-1)||kind),draggable:kind==="players"}).bindPopup(liveMapMarkerPopup(row));liveMapMarkerIndex[liveMapMarkerKey(row)]=marker;marker.on("click",()=>{liveMapSelectedEntity=row;if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});updateLiveMapDebug();});if(kind==="players")marker.on("dragend",event=>handleLiveMapPlayerDrag(row,marker,point,event));marker.addTo(liveMapLayerGroup);});return count;}
+async function handleLiveMapPlayerDrag(row,marker,originalPoint,event){const next=event.target.getLatLng();const originalLatLng=L.latLng(originalPoint[0],originalPoint[1]);const log=document.getElementById("teleportLog");try{if(!dragTeleportEnabled())throw new Error("Drag-to-teleport is disabled in Settings.");const payload=liveMapDragTeleportPayload(row,next);applyDragTeleportPayloadToForm(payload,next);if(log)log.textContent="Drag ended. Sending live safe-ground teleport...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;if(log)log.textContent=renderTeleportResult(data)+"\n\nDrag teleport sent, verifying database position...";showToast(payload.characterName+" teleported.","success");playUiSound("success");await refreshAfterTeleport(payload,data);}catch(error){marker.setLatLng(originalLatLng);if(log)log.textContent=betterError(error);showToast("Drag teleport failed: "+betterError(error),"error");addActivity("error","Live map drag teleport failed",error.message);playUiSound("warning");}finally{refreshTeleportReadiness();}}
+function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(row.type||kind.slice(0,-1)||kind),draggable:kind==="players"&&dragTeleportEnabled()}).bindPopup(liveMapMarkerPopup(row));liveMapMarkerIndex[liveMapMarkerKey(row)]=marker;marker.on("click",()=>{liveMapSelectedEntity=row;if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});updateLiveMapDebug();});if(kind==="players"&&dragTeleportEnabled())marker.on("dragend",event=>handleLiveMapPlayerDrag(row,marker,point,event));marker.addTo(liveMapLayerGroup);});return count;}
 function liveMapVisibleRows(){const layers=liveMapData?.layers||{};const rows=[];if(liveMapChecked("liveLayerPlayers"))rows.push(...(layers.players||[]));if(liveMapChecked("liveLayerVehicles"))rows.push(...(layers.vehicles||[]));if(liveMapChecked("liveLayerBases"))rows.push(...(layers.bases||[]));return rows;}
 function renderLiveMapMarkerTable(){const body=document.getElementById("liveMapMarkerRows");if(!body)return;const rows=liveMapVisibleRows();if(!rows.length){body.innerHTML='<tr><td colspan="3">No markers loaded.</td></tr>';return;}body.innerHTML=rows.slice(0,300).map(row=>'<tr data-live-marker-key="'+esc(liveMapMarkerKey(row))+'"><td>'+esc(row.type||"marker")+'</td><td>'+esc(row.name||row.id||"Marker")+'<span class="live-map-marker-label">'+esc(row.status||"unknown")+(row.updatedAt?" / "+row.updatedAt:"")+'</span></td><td>'+esc(formatLiveCoord(row.x))+'<br>'+esc(formatLiveCoord(row.y))+'</td></tr>').join("");body.querySelectorAll("[data-live-marker-key]").forEach(row=>row.addEventListener("click",()=>centerLiveMapMarker(row.dataset.liveMarkerKey)));}
 function centerLiveMapMarker(key){const rows=liveMapVisibleRows();const row=rows.find(item=>liveMapMarkerKey(item)===key);const marker=liveMapMarkerIndex[key];if(!row)return;liveMapSelectedEntity=row;const point=liveMapProject(row);if(point&&liveMap){liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});if(marker)marker.openPopup();playUiSound("click");}}
@@ -10981,7 +11014,7 @@ async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,me
 async function finishSetup(){try{if(!setupDatabaseTestSignature||setupDatabaseTestSignature!==currentSetupDatabaseSignature())throw new Error("Test the current database settings successfully before finishing setup.");const payload={...configPayload("setup"),setupComplete:true};const checks=await Promise.all([["serverInstallPath","setupServerInstallPathWarning"],["awakeningServerPath","setupAwakeningServerPathWarning"]].map(async([key,warningId])=>{const data=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload[key]||""));setServerInstallPathWarning(warningId,data.serverInstallPath);return data.serverInstallPath;}));if(checks.some(status=>!status?.valid))throw new Error("Both server paths must be valid folders on this machine. Use Browse to select each folder.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified||!data.pathsVerified)throw new Error("Setup path save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified in config.json and managed .env. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);await loadSettings();closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
 function setupTestLine(label,result){return label+": "+(result?.ok?"PASS":"CHECK")+" - "+(result?.message||result?.error||"No result")+(result?.error?" / "+result.error:"");}
 async function saveAndTestSetup(){const box=document.getElementById("setupFinishResult");try{if(!setupDatabaseTestSignature||setupDatabaseTestSignature!==currentSetupDatabaseSignature())throw new Error("Test the current database settings successfully before saving setup.");const payload={...configPayload("setup"),setupComplete:true};if(box)box.textContent="Saving configuration, regenerating managed .env, and testing connections...";const data=await getJson("/api/setup/save-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:60000});fillSetup(data.config||payload);await loadSettings();if(box){box.textContent=[data.message||"Save & Test complete.","Config: "+(data.configPath||"App data"),"Managed .env: "+(data.managedEnvPath||"App data .env"),setupTestLine("SSH",data.tests?.ssh),setupTestLine("Database",data.tests?.database),setupTestLine("Receiver",data.tests?.receiver)].join("\n");}await refreshLiveGiveEnv();await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){if(box)box.textContent=betterError(e);playUiSound("warning");}}
-async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);applyUiMode(cfg.uiMode);refreshReceiverStatus();refreshBattlegroups();refreshDatabaseTunnelStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
+async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);setChecked("settingsDragTeleportEnabled",cfg.dragTeleportEnabled!==false);applyUiMode(cfg.uiMode);refreshReceiverStatus();refreshBattlegroups();refreshDatabaseTunnelStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
 async function saveSettings(){try{const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...appConfig,...collectSettings()})});fillSettings(data.config||{});setText("settingsSaveStatus","Settings saved. Restart the suite for receiver startup environment changes.");playUiSound("success");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
 async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");const label=data.ok?"Receiver Online":"Receiver Offline";setText("receiverManagerStatus",label+" / "+data.healthUrl);setText("settingsReceiver",label);tone("receiverState",label);if(!data.ok)tone("rabbitState","Dry Run Active");return data;}catch(e){setText("receiverManagerStatus",betterError(e));tone("receiverState","Receiver Offline");tone("rabbitState","Dry Run Active");}}
 async function receiverAction(action){try{if(action==="start")await saveSettings();const data=await getJson("/api/receiver/"+action,{method:"POST"});setText("receiverManagerStatus",data.message||data.status||"Receiver action complete");await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){setText("receiverManagerStatus",betterError(e));playUiSound("warning");}}
@@ -11531,6 +11564,11 @@ async function route(req, res) {
     } catch (error) {
       await json(res, { ok: false, error: error.message }, Number(error.statusCode || 400));
     }
+    return;
+  }
+  if (url.pathname === "/api/live-map/teleport/presets" && req.method === "DELETE") {
+    try { await json(res, deleteTeleportLocationPreset(url.searchParams.get("name"))); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
     return;
   }
   if (url.pathname === "/api/live-map/teleport/status" && req.method === "GET") {

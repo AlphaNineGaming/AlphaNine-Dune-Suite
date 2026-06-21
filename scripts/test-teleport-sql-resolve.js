@@ -162,6 +162,13 @@ async function post(baseUrl, route, body) {
     const dragHandler = page.match(/async function handleLiveMapPlayerDrag[\s\S]*?\nfunction addLiveMapMarkers/)?.[0] || "";
     assert.equal(dragHandler.includes("appConfirm"), false, "Drag teleport must not show a confirmation dialog.");
     assert.match(page, /draggable:kind==="players"/);
+    assert.match(dragHandler, /\/api\/live-map\/teleport\/execute/);
+    assert.match(dragHandler, /showToast\(payload\.characterName\+" teleported\."/);
+    assert.match(page, /dryRun:false,test:false/);
+    assert.match(page, /Player Saved Locations/);
+    assert.match(page, /Clicked World Coordinates[\s\S]*?panel pad advanced-only|panel pad advanced-only[\s\S]*?Clicked World Coordinates/);
+    assert.match(page, /Coordinate Search[\s\S]*?advanced-only|advanced-only[\s\S]*?Coordinate Search/);
+    assert.match(page, /Enable drag-to-teleport/);
     assert.equal(fake.queries.some((sql) => /dune\.player_state[\s\S]+dune\.actors[\s\S]+dune\.world_partition/.test(sql)), true);
     console.log("Teleport SQL resolution tests passed.");
   } finally {

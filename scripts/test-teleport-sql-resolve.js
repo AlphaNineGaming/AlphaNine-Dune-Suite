@@ -5,8 +5,14 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const { applyTeleportRequestMode } = require("../lib/teleport-request-mode");
 
 const ROOT = path.join(__dirname, "..");
+
+const forcedPreview = applyTeleportRequestMode({ dryRun: false, test: false }, { frontendRequestMode: "preview", execution: false });
+assert.deepEqual(forcedPreview, { dryRun: true, test: true, frontendRequestMode: "preview", backendRequestMode: "preview" });
+const forcedExecute = applyTeleportRequestMode({ dryRun: true, test: true }, { frontendRequestMode: "execute", execution: true });
+assert.deepEqual(forcedExecute, { dryRun: false, test: false, frontendRequestMode: "execute", backendRequestMode: "execute" });
 
 function int16(value) { const b = Buffer.alloc(2); b.writeInt16BE(value, 0); return b; }
 function int32(value) { const b = Buffer.alloc(4); b.writeInt32BE(value, 0); return b; }
@@ -112,12 +118,17 @@ async function post(baseUrl, route, body) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
-    const mapClick = await post(baseUrl, "/api/live-map/teleport", { playerId: "source-fls", x: 111, y: 222, z: 9999, partitionId: 9999, map: "HaggaBasin", elevationSource: "unknown" });
+    const mapClick = await post(baseUrl, "/api/live-map/teleport", { requestMode: "preview", playerId: "source-fls", x: 111, y: 222, z: 9999, partitionId: 9999, map: "HaggaBasin", elevationSource: "unknown" });
     assert.equal(mapClick.canExecute, true, JSON.stringify(mapClick));
     assert.equal(mapClick.resolution.diagnostics.selectedPartitionId, 7);
     assert.match(mapClick.resolution.diagnostics.partitionReason, /source player/i);
     assert.equal(mapClick.request.z, 5000);
     assert.equal(mapClick.request.commandMode, "safe-ground");
+    assert.equal(mapClick.request.dryRun, true);
+    assert.equal(mapClick.request.test, true);
+    assert.equal(mapClick.resolution.diagnostics.frontendRequestMode, "preview");
+    assert.equal(mapClick.resolution.diagnostics.finalBackendMode, "preview");
+    assert.match(mapClick.message, /No live teleport command was sent/i);
     assert.match(mapClick.command, /^TeleportTo /);
     assert.match(mapClick.resolution.diagnostics.safeZReason, /dispatch altitude 5000|safe ground/i);
 

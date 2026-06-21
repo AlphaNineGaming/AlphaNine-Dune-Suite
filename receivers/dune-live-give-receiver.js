@@ -182,6 +182,9 @@ async function handleTeleport(req, res) {
       flsId: request.flsId,
       dryRun: request.dryRun,
       test: request.test,
+      frontendRequestMode: request.frontendRequestMode,
+      backendRequestMode: request.backendRequestMode,
+      finalReceiverMode: request.dryRun || request.test ? "preview" : "execute",
       auth
     });
 
@@ -210,7 +213,10 @@ async function handleTeleport(req, res) {
       requestId: request.requestId,
       flsId: request.flsId,
       path: result.path,
-      command: result.command
+      command: result.command,
+      frontendRequestMode: request.frontendRequestMode,
+      backendRequestMode: request.backendRequestMode,
+      finalReceiverMode: "execute"
     });
     res.json({
       ok: true,
@@ -389,6 +395,8 @@ function validateTeleport(payload) {
   const dryRun = payload.dryRun === true || payload.dryRun === "true" || payload.test === true || payload.test === "true";
   const test = payload.test === true || payload.test === "true";
   const commandMode = String(payload.commandMode || "exact").trim().toLowerCase();
+  const frontendRequestMode = String(payload.frontendRequestMode || "unspecified").trim().toLowerCase();
+  const backendRequestMode = String(payload.backendRequestMode || (dryRun || test ? "preview" : "execute")).trim().toLowerCase();
 
   if (!flsId || flsId.length > 128 || !/^[A-Za-z0-9_.:+\-#@ ]+$/.test(flsId)) {
     const error = new Error("fls_id must be a valid Dune FLS/player id.");
@@ -427,6 +435,8 @@ function validateTeleport(payload) {
     dryRun,
     test,
     commandMode,
+    frontendRequestMode,
+    backendRequestMode,
     warning: zInfo.warning
   };
 }
@@ -477,6 +487,9 @@ function buildTeleportPreview(pathname, request) {
       partition_id: request.partitionId,
       dryRun: request.dryRun,
       test: request.test,
+      frontendRequestMode: request.frontendRequestMode,
+      backendRequestMode: request.backendRequestMode,
+      finalReceiverMode: request.dryRun || request.test ? "preview" : "execute",
       requestId: request.requestId,
       warning: request.warning
     }

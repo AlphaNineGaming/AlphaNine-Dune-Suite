@@ -7,6 +7,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const Coordinates = require("./assets/coordinate-system");
+const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 
 const APP_VERSION = "0.3.9-beta";
 const HOST = "127.0.0.1";
@@ -7550,7 +7551,7 @@ function teleportStateSummary(state) {
 }
 
 async function liveMapTeleportPreview(payload) {
-  const preview = await liveMapTeleportRequest(payload, { dryRun: true, test: true, execution: false });
+  const preview = await liveMapTeleportRequest({ ...payload, requestMode: "preview" }, { dryRun: true, test: true, execution: false });
   return {
     ok: true,
     status: "preview",
@@ -7812,6 +7813,8 @@ async function resolveLiveMapTeleportPlan(payload) {
 
 async function liveMapTeleportRequest(payload, options = {}) {
   const cfg = loadConfig();
+  const frontendRequestMode = String(payload.requestMode || "unspecified").trim().toLowerCase();
+  const finalBackendMode = options.execution === true ? "execute" : "preview";
   const plan = await resolveLiveMapTeleportPlan(payload);
   const { playerId, characterName, x, y, z, map, partitionId } = plan;
   const mapConfig = Coordinates.mapConfig(map);
@@ -7823,6 +7826,8 @@ async function liveMapTeleportRequest(payload, options = {}) {
     targetState: plan.targetKind === "player" ? teleportStateSummary(plan.target) : null,
     targetKind: plan.targetKind,
     commandMode: plan.commandMode,
+    frontendRequestMode,
+    finalBackendMode,
     selectedPartitionId: partitionId,
     partitionReason: plan.partitionReason,
     safeZReason: plan.safeZReason,
@@ -7834,7 +7839,7 @@ async function liveMapTeleportRequest(payload, options = {}) {
     return {
       endpoint: teleportReceiverUrl(cfg),
       command: "",
-      request: { playerId, characterName, x, y, z, partition_id: partitionId, map, dryRun: true, test: true },
+      request: { playerId, characterName, x, y, z, partition_id: partitionId, map, dryRun: true, test: true, frontendRequestMode, backendRequestMode: "preview" },
       warning: plan.blockers.join(" "),
       elevationSource: plan.safeZReason,
       canExecute: false,
@@ -7867,6 +7872,9 @@ async function liveMapTeleportRequest(payload, options = {}) {
   let requestPayload;
   try { requestPayload = JSON.parse(rendered); }
   catch (error) { throw new Error(`Teleport HTTP JSON payload template rendered invalid JSON: ${error.message}`); }
+  // The API route owns execution mode. Saved templates and caller flags cannot
+  // downgrade Execute into another preview (or promote Preview into execution).
+  applyTeleportRequestMode(requestPayload, { frontendRequestMode, execution: options.execution === true });
   requestPayload.commandMode = plan.commandMode;
   requestPayload.targetKind = plan.targetKind;
   const result = {
@@ -7922,7 +7930,7 @@ async function liveMapTeleportStatus() {
 
 async function liveMapTeleportExecute(payload) {
   const status = await liveMapTeleportStatus();
-  const preview = await liveMapTeleportRequest(payload, { dryRun: false, test: false, execution: true });
+  const preview = await liveMapTeleportRequest({ ...payload, requestMode: "execute" }, { dryRun: false, test: false, execution: true });
   if (!status.serverHealthy) return { ok: false, status: "blocked", error: "Server is not online.", ...preview, readiness: status };
   if (!status.receiverReachable) return { ok: false, status: "blocked", error: "Receiver offline.", ...preview, readiness: status };
   if (!status.liveTeleportEnabled) return { ok: false, status: "blocked", error: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.", ...preview, readiness: status };
@@ -7940,6 +7948,10 @@ async function liveMapTeleportExecute(payload) {
     safetyOffset: 0,
     finalPayload: preview.request,
     resolution: preview.resolution?.diagnostics || null,
+    frontendRequestMode: preview.resolution?.diagnostics?.frontendRequestMode || "unknown",
+    finalBackendMode: preview.resolution?.diagnostics?.finalBackendMode || "unknown",
+    finalDryRun: preview.request.dryRun,
+    finalTest: preview.request.test,
     playerId: preview.request.playerId,
     characterName: preview.request.characterName,
     x: preview.request.x,
@@ -10888,7 +10900,7 @@ async function refreshLiveMap(){
   }
 }
 function teleportPayload(){const p=selectedPlayer();const current=liveMapPosition(currentTeleportPlayer());return{playerId:document.getElementById("teleportPlayerId").value,characterName:p?.character_name||p?.name||"",targetPlayerId:document.getElementById("teleportTargetPlayerId")?.value||"",x:document.getElementById("teleportX").value,y:document.getElementById("teleportY").value,z:document.getElementById("teleportZ").value,map:liveMapKey,elevationSource:liveTeleportElevationSource,elevationConfirmed:liveTeleportElevationConfirmed,presetName:liveTeleportPresetName,targetActorId:liveTeleportTargetActorId,targetActorType:liveTeleportTargetActorType,debug:liveMapDebugEnabled(),playerCurrent:current,clickedMapPosition:liveSelectedCoordinates?{x:liveSelectedCoordinates.x,y:liveSelectedCoordinates.y,px:liveSelectedCoordinates.lng,py:liveSelectedCoordinates.lat}:null};}
-function renderTeleportResult(data){return (data.message||data.error||data.status||"Teleport response")+(data.warning?"\\nWarning: "+data.warning:"")+"\\nEndpoint: "+(data.endpoint||"-")+"\\nCommand: "+(data.command||"-")+"\\nPayload:\\n"+JSON.stringify(data.request||{},null,2)+(data.resolution?.diagnostics?"\\n\\nSQL resolution:\\n"+JSON.stringify(data.resolution.diagnostics,null,2):"")+(data.response?"\\n\\nReceiver response:\\n"+JSON.stringify(data.response,null,2):"")+(data.reasons?.length?"\\n\\nReadiness:\\n"+data.reasons.join("\\n"):"");}
+function renderTeleportResult(data){const d=data.resolution?.diagnostics||{};const mode="Frontend request: "+String(d.frontendRequestMode||data.request?.frontendRequestMode||"unknown")+" / Backend mode: "+String(d.finalBackendMode||data.request?.backendRequestMode||"unknown");return (data.message||data.error||data.status||"Teleport response")+"\\n"+mode+(data.warning?"\\nWarning: "+data.warning:"")+"\\nEndpoint: "+(data.endpoint||"-")+"\\nCommand: "+(data.command||"-")+"\\nPayload:\\n"+JSON.stringify(data.request||{},null,2)+(data.resolution?.diagnostics?"\\n\\nSQL resolution:\\n"+JSON.stringify(data.resolution.diagnostics,null,2):"")+(data.response?"\\n\\nReceiver response:\\n"+JSON.stringify(data.response,null,2):"")+(data.reasons?.length?"\\n\\nReadiness:\\n"+data.reasons.join("\\n"):"");}
 async function refreshAfterTeleport(payload,data){
   if(!data?.ok)return false;
   const resolution=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics||{};
@@ -10925,8 +10937,8 @@ async function refreshAfterTeleport(payload,data){
   throw new Error("Teleport verification failed: "+liveTeleportVerificationResult.reason);
 }
 async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){const executable=liveTeleportReady&&liveTeleportPreviewExecutable&&Boolean(liveTeleportPreviewSignature);status.className=(executable?"empty mt":"warning mt")+" advanced-status";status.textContent=!liveTeleportReady?(data.reasons||["Live Teleport unavailable."]).join(" "):executable?"Resolved preview confirmed. Live Teleport is armed.":liveTeleportPreviewSignature?"Preview available, but Execute is blocked until the target and partition resolve.":"Live Teleport ready. Preview a target to resolve current player state.";}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt advanced-status";status.textContent=betterError(e);}return null;}}
-async function previewTeleport(){const payload=teleportPayload();invalidateTeleportPreview();try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||null;const sent=liveTeleportResolutionDiagnostics?.sent;if(sent){setValue("teleportX",sent.x);setValue("teleportY",sent.y);setValue("teleportZ",sent.z!==null&&sent.z!==""&&Number.isFinite(Number(sent.z))?sent.z:"");}liveTeleportPreviewExecutable=data.canExecute===true;liveTeleportPreviewSignature=teleportPayloadSignature(teleportPayload());document.getElementById("teleportLog").textContent=renderTeleportResult(data);updateLiveMapDebug();await refreshTeleportReadiness();playUiSound(data.canExecute?"success":"warning");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
-async function executeLiveTeleport(){const payload=teleportPayload();try{if(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload))throw new Error("Teleport target changed or has not been previewed. Preview the current target before live teleport.");if(!liveTeleportPreviewExecutable)throw new Error("Execute is blocked because preview did not resolve a valid target and partition.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}finally{refreshTeleportReadiness();}}
+async function previewTeleport(){const payload={...teleportPayload(),requestMode:"preview"};invalidateTeleportPreview();document.getElementById("teleportLog").textContent="Preview requested. No command will be sent.";try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||null;const sent=liveTeleportResolutionDiagnostics?.sent;if(sent){setValue("teleportX",sent.x);setValue("teleportY",sent.y);setValue("teleportZ",sent.z!==null&&sent.z!==""&&Number.isFinite(Number(sent.z))?sent.z:"");}liveTeleportPreviewExecutable=data.canExecute===true;liveTeleportPreviewSignature=teleportPayloadSignature(teleportPayload());document.getElementById("teleportLog").textContent=renderTeleportResult(data);updateLiveMapDebug();await refreshTeleportReadiness();playUiSound(data.canExecute?"success":"warning");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
+async function executeLiveTeleport(){const payload={...teleportPayload(),requestMode:"execute"};try{if(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload))throw new Error("Teleport target changed or has not been previewed. Preview the current target before live teleport.");if(!liveTeleportPreviewExecutable)throw new Error("Execute is blocked because preview did not resolve a valid target and partition.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));document.getElementById("teleportLog").textContent="Execute requested. Sending a live teleport command...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}finally{refreshTeleportReadiness();}}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}

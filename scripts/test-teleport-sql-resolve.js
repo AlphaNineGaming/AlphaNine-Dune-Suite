@@ -155,7 +155,13 @@ async function post(baseUrl, route, body) {
 
     const page = await (await fetch(baseUrl)).text();
     assert.equal(page.includes('id="teleportPartitionId"'), false, "Partition input must not be exposed in the UI.");
-    assert.match(page, /Map-click preview is allowed/);
+    assert.match(page, /Map-click and dragged-marker destinations send immediately with safe-ground mode and dispatch altitude Z 5000/);
+    assert.match(page, /id="liveTeleportButton" onclick="executeLiveTeleport\(\)" disabled>Teleport</);
+    assert.equal(page.includes('onclick="previewTeleport()">Preview Teleport'), false, "Map-click must not require a preview button.");
+    assert.match(page, /function liveMapDragTeleportPayload[\s\S]*?z:5000[\s\S]*?commandMode:"safe-ground"/);
+    const dragHandler = page.match(/async function handleLiveMapPlayerDrag[\s\S]*?\nfunction addLiveMapMarkers/)?.[0] || "";
+    assert.equal(dragHandler.includes("appConfirm"), false, "Drag teleport must not show a confirmation dialog.");
+    assert.match(page, /draggable:kind==="players"/);
     assert.equal(fake.queries.some((sql) => /dune\.player_state[\s\S]+dune\.actors[\s\S]+dune\.world_partition/.test(sql)), true);
     console.log("Teleport SQL resolution tests passed.");
   } finally {

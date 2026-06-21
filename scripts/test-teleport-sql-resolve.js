@@ -113,11 +113,13 @@ async function post(baseUrl, route, body) {
     }
 
     const mapClick = await post(baseUrl, "/api/live-map/teleport", { playerId: "source-fls", x: 111, y: 222, z: 9999, partitionId: 9999, map: "HaggaBasin", elevationSource: "unknown" });
-    assert.equal(mapClick.canExecute, false);
+    assert.equal(mapClick.canExecute, true, JSON.stringify(mapClick));
     assert.equal(mapClick.resolution.diagnostics.selectedPartitionId, 7);
     assert.match(mapClick.resolution.diagnostics.partitionReason, /source player/i);
-    assert.equal(mapClick.request.z, null);
-    assert.match(mapClick.warning, /safe target Z|safe Z/i);
+    assert.equal(mapClick.request.z, 5000);
+    assert.equal(mapClick.request.commandMode, "safe-ground");
+    assert.match(mapClick.command, /^TeleportTo /);
+    assert.match(mapClick.resolution.diagnostics.safeZReason, /dispatch altitude 5000|safe ground/i);
 
     const playerPreview = await post(baseUrl, "/api/live-map/teleport", { playerId: "source-fls", targetPlayerId: "target-fls", targetActorType: "player", x: -1, y: -2, z: -3, partitionId: 9999, map: "HaggaBasin", elevationSource: "player-position" });
     assert.equal(playerPreview.canExecute, true, JSON.stringify(playerPreview));
@@ -134,6 +136,11 @@ async function post(baseUrl, route, body) {
     assert.equal(verified.verified, true, JSON.stringify(verified));
     assert.deepEqual(verified.postTeleport, { x: 900, y: 800, z: 700, map: "HaggaBasin", partitionId: 42 });
     assert.match(verified.reason, /match the sent target/i);
+
+    const safeGroundVerified = await post(baseUrl, "/api/live-map/teleport/verify", { playerId: "source-fls", commandMode: "safe-ground", expected: { x: 900, y: 800, z: 5000, partitionId: 42 } });
+    assert.equal(safeGroundVerified.verified, true, JSON.stringify(safeGroundVerified));
+    assert.equal(safeGroundVerified.postTeleport.z, 700);
+    assert.match(safeGroundVerified.reason, /game resolved the landing Z/i);
 
     const page = await (await fetch(baseUrl)).text();
     assert.equal(page.includes('id="teleportPartitionId"'), false, "Partition input must not be exposed in the UI.");

@@ -388,6 +388,7 @@ function validateTeleport(payload) {
   const requestId = String(payload.requestId || `teleport-${Date.now()}-${Math.random().toString(16).slice(2)}`).trim();
   const dryRun = payload.dryRun === true || payload.dryRun === "true" || payload.test === true || payload.test === "true";
   const test = payload.test === true || payload.test === "true";
+  const commandMode = String(payload.commandMode || "exact").trim().toLowerCase();
 
   if (!flsId || flsId.length > 128 || !/^[A-Za-z0-9_.:+\-#@ ]+$/.test(flsId)) {
     const error = new Error("fls_id must be a valid Dune FLS/player id.");
@@ -409,6 +410,11 @@ function validateTeleport(payload) {
     error.statusCode = 400;
     throw error;
   }
+  if (!["exact", "safe-ground"].includes(commandMode)) {
+    const error = new Error("commandMode must be exact or safe-ground.");
+    error.statusCode = 400;
+    throw error;
+  }
   return {
     flsId,
     characterName,
@@ -420,6 +426,7 @@ function validateTeleport(payload) {
     requestId,
     dryRun,
     test,
+    commandMode,
     warning: zInfo.warning
   };
 }
@@ -453,7 +460,7 @@ function validateTeleportToPlayer(payload) {
 }
 
 function buildTeleportPreview(pathname, request) {
-  const command = buildTeleportToExactServerCommand(request);
+  const command = buildTeleportServerCommand(request);
   return {
     endpoint: pathname,
     liveTeleportEnabled: LIVE_TELEPORT_ENABLED,
@@ -479,7 +486,7 @@ function buildTeleportPreview(pathname, request) {
 async function processTeleportCoords(request) {
   let rmqError = null;
   try {
-    const result = await publishTeleportToExact(request);
+    const result = await publishTeleport(request);
     return {
       path: "rmq",
       message: "Teleport command sent. Verify in game.",
@@ -516,9 +523,9 @@ async function processTeleportCoords(request) {
   };
 }
 
-async function publishTeleportToExact(request) {
+async function publishTeleport(request) {
   const target = await resolveMqTarget();
-  const serverCommand = buildTeleportToExactServerCommand(request);
+  const serverCommand = buildTeleportServerCommand(request);
   const erlang = buildRabbitEval(serverCommand, request.requestId);
   const rmq = {
     exchange: "heartbeats",
@@ -971,6 +978,19 @@ function buildTeleportToExactServerCommand(command) {
     Y: command.y,
     Z: command.z
   };
+}
+
+function buildTeleportServerCommand(command) {
+  if (command.commandMode === "safe-ground") {
+    return {
+      ServerCommand: "TeleportTo",
+      PlayerId: command.flsId,
+      X: command.x,
+      Y: command.y,
+      Z: command.z
+    };
+  }
+  return buildTeleportToExactServerCommand(command);
 }
 
 function buildRabbitEval(serverCommand, requestId) {

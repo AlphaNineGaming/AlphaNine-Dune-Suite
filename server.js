@@ -7733,11 +7733,13 @@ async function resolveLiveMapTeleportPlan(payload) {
   let map = source.map || requestedMap;
   let partitionId = source.partitionId;
   let partitionReason = "source player's current pawn partition_id from SQL";
-  let safeZReason = "No database-backed or verified safe Z is available for this map-click target.";
+  let safeZReason = "map-click dispatch altitude 5000; TeleportTo resolves safe ground in the game receiver";
+  let commandMode = "safe-ground";
   const blockers = [];
 
   if (targetPlayerIdentity) {
     targetKind = "player";
+    commandMode = "exact";
     target = await resolveTeleportPlayerState(targetPlayerIdentity, "target");
     x = target.x;
     y = target.y;
@@ -7750,6 +7752,7 @@ async function resolveLiveMapTeleportPlan(payload) {
     if (!target.partitionValid) blockers.push("Target player's current database partition_id is missing or inactive.");
   } else if (preset) {
     targetKind = "verified-preset";
+    commandMode = "exact";
     x = preset.x;
     y = preset.y;
     z = preset.z;
@@ -7758,6 +7761,7 @@ async function resolveLiveMapTeleportPlan(payload) {
     if (source.map && map !== source.map) blockers.push(`Verified preset is on ${map}, but the source player's current world is ${source.map}.`);
   } else if (payload.targetActorId && targetType && targetType !== "player") {
     targetKind = "actor";
+    commandMode = "exact";
     const actor = await verifiedTeleportActor(payload, "actor-transform");
     x = Number(actor.x);
     y = Number(actor.y);
@@ -7776,8 +7780,8 @@ async function resolveLiveMapTeleportPlan(payload) {
     };
     if (!target.positionValid) blockers.push("Target actor does not have a complete current X/Y/Z transform in the database.");
   } else {
+    z = 5000;
     if (requestedMap && source.map && requestedMap !== source.map) blockers.push(`Map-click target is on ${requestedMap}, but the source player's current world is ${source.map}.`);
-    blockers.push("Map-click execution requires a safe target Z resolved by the server; preview is still available.");
   }
 
   if (!source.positionValid) blockers.push("Source player does not have a complete current X/Y/Z transform in the database.");
@@ -7791,6 +7795,7 @@ async function resolveLiveMapTeleportPlan(payload) {
     source,
     target,
     targetKind,
+    commandMode,
     playerId: source.playerId || submittedPlayerId,
     characterName: source.playerName,
     x,
@@ -7817,6 +7822,7 @@ async function liveMapTeleportRequest(payload, options = {}) {
     sourceState: teleportStateSummary(plan.source),
     targetState: plan.targetKind === "player" ? teleportStateSummary(plan.target) : null,
     targetKind: plan.targetKind,
+    commandMode: plan.commandMode,
     selectedPartitionId: partitionId,
     partitionReason: plan.partitionReason,
     safeZReason: plan.safeZReason,
@@ -7844,7 +7850,7 @@ async function liveMapTeleportRequest(payload, options = {}) {
     z,
     map,
     partitionId: Math.trunc(partitionId)
-  }) : `TeleportToExact ${playerId} ${x} ${y} ${z}`;
+  }) : `${plan.commandMode === "safe-ground" ? "TeleportTo" : "TeleportToExact"} ${playerId} ${x} ${y} ${z}`;
   const values = {
     playerId: jsonPathEscape(playerId),
     characterName: jsonPathEscape(characterName),
@@ -7861,6 +7867,8 @@ async function liveMapTeleportRequest(payload, options = {}) {
   let requestPayload;
   try { requestPayload = JSON.parse(rendered); }
   catch (error) { throw new Error(`Teleport HTTP JSON payload template rendered invalid JSON: ${error.message}`); }
+  requestPayload.commandMode = plan.commandMode;
+  requestPayload.targetKind = plan.targetKind;
   const result = {
     endpoint: teleportReceiverUrl(cfg),
     command,
@@ -7965,6 +7973,7 @@ async function liveMapTeleportExecute(payload) {
 
 async function verifyLiveMapTeleport(payload) {
   const playerId = String(payload.playerId || "").trim();
+  const commandMode = String(payload.commandMode || payload.expected?.commandMode || "exact").trim().toLowerCase();
   const expected = {
     x: Number(payload.expected?.x ?? payload.x),
     y: Number(payload.expected?.y ?? payload.y),
@@ -7977,11 +7986,14 @@ async function verifyLiveMapTeleport(payload) {
   const xyDistance = Math.hypot(state.x - expected.x, state.y - expected.y);
   const zDistance = Math.abs(state.z - expected.z);
   const partitionMatches = Number.isInteger(expected.partitionId) && state.partitionId === expected.partitionId;
-  const verified = xyDistance < 50 && zDistance < 100 && partitionMatches;
+  if (!["exact", "safe-ground"].includes(commandMode)) throw new Error("Teleport verification commandMode must be exact or safe-ground.");
+  const zMatches = commandMode === "safe-ground" || zDistance < 100;
+  const verified = xyDistance < 50 && zMatches && partitionMatches;
   let reason = "Database position has not reached the sent teleport target yet.";
   if (!partitionMatches) reason = `Post-teleport partition_id ${state.partitionId ?? "missing"} does not match sent partition_id ${expected.partitionId}.`;
   else if (xyDistance >= 50) reason = `Post-teleport X/Y is ${Math.round(xyDistance)} units from the sent target.`;
-  else if (zDistance >= 100) reason = `Post-teleport Z is ${Math.round(zDistance)} units from the sent target.`;
+  else if (!zMatches) reason = `Post-teleport Z is ${Math.round(zDistance)} units from the sent target.`;
+  else if (verified && commandMode === "safe-ground") reason = "Post-teleport database X/Y and partition_id match; the game resolved the landing Z.";
   else if (verified) reason = "Post-teleport database X/Y/Z and partition_id match the sent target.";
   if (verified) appendAdminAudit("teleport_database_verified", { playerId, sourceActorId: state.actorId, expected, postTeleport: { x: state.x, y: state.y, z: state.z, map: state.map, partitionId: state.partitionId }, reason });
   return {
@@ -7996,6 +8008,7 @@ async function verifyLiveMapTeleport(payload) {
     xyDistance,
     zDistance,
     partitionMatches,
+    commandMode,
     reason,
     checkedAt: new Date().toISOString()
   };
@@ -10631,7 +10644,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <label>Preview Command Template<input id="settingsTeleportCommandTemplate" placeholder="TeleportToExact {playerId} {x} {y} {z}"></label>
           </div>
           <label class="mt">HTTP JSON Payload Template<textarea id="settingsTeleportPayloadTemplate" rows="9"></textarea></label>
-          <div class="warning mt">Live Teleport calls the receiver HTTP JSON endpoint. Coordinate teleport requires a verified Z/elevation. The receiver publishes TeleportToExact for online players and uses the DB offline-position path for offline players.</div>
+          <div class="warning mt">Live Teleport calls the receiver HTTP JSON endpoint. Map-click teleport uses TeleportTo with the proven 5000 dispatch altitude so the game resolves safe ground. Exact actor, preset, and player targets use TeleportToExact.</div>
         </div>
         <div class="panel pad">
           <div class="label">Backup & Restore</div>
@@ -10894,7 +10907,7 @@ async function refreshAfterTeleport(payload,data){
   if(log)log.textContent+=(log.textContent?"\n\n":"")+"Teleport sent, waiting for database position update...";
   for(let attempt=0;attempt<12;attempt++){
     let verification;
-    try{verification=await getJson("/api/live-map/teleport/verify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,expected:{x:target.x,y:target.y,z:target.z,partitionId:Number(data.request?.partition_id??resolution.selectedPartitionId)}}),timeoutMs:20000});}
+    try{verification=await getJson("/api/live-map/teleport/verify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,commandMode:String(data.request?.commandMode||resolution.commandMode||"exact"),expected:{x:target.x,y:target.y,z:target.z,partitionId:Number(data.request?.partition_id??resolution.selectedPartitionId)}}),timeoutMs:20000});}
     catch(error){verification={ok:false,status:"pending",verified:false,playerId,postTeleport:null,reason:betterError(error)};}
     liveTeleportVerificationResult={...verification,attempt:attempt+1,oldPosition,target};
     updateLiveMapDebug();
@@ -10911,9 +10924,9 @@ async function refreshAfterTeleport(payload,data){
   liveTeleportPending=null;if(liveMap)renderLiveMapLayers();updateLiveMapDebug();
   throw new Error("Teleport verification failed: "+liveTeleportVerificationResult.reason);
 }
-async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){const executable=liveTeleportReady&&liveTeleportPreviewExecutable&&Boolean(liveTeleportPreviewSignature);status.className=(executable?"empty mt":"warning mt")+" advanced-status";status.textContent=!liveTeleportReady?(data.reasons||["Live Teleport unavailable."]).join(" "):executable?"SQL-resolved preview confirmed. Live Teleport is armed.":liveTeleportPreviewSignature?"Preview available, but Execute is blocked until partition and safe Z resolve.":"Live Teleport ready. Preview a target to resolve current database state.";}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt advanced-status";status.textContent=betterError(e);}return null;}}
+async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){const executable=liveTeleportReady&&liveTeleportPreviewExecutable&&Boolean(liveTeleportPreviewSignature);status.className=(executable?"empty mt":"warning mt")+" advanced-status";status.textContent=!liveTeleportReady?(data.reasons||["Live Teleport unavailable."]).join(" "):executable?"Resolved preview confirmed. Live Teleport is armed.":liveTeleportPreviewSignature?"Preview available, but Execute is blocked until the target and partition resolve.":"Live Teleport ready. Preview a target to resolve current player state.";}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt advanced-status";status.textContent=betterError(e);}return null;}}
 async function previewTeleport(){const payload=teleportPayload();invalidateTeleportPreview();try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||null;const sent=liveTeleportResolutionDiagnostics?.sent;if(sent){setValue("teleportX",sent.x);setValue("teleportY",sent.y);setValue("teleportZ",sent.z!==null&&sent.z!==""&&Number.isFinite(Number(sent.z))?sent.z:"");}liveTeleportPreviewExecutable=data.canExecute===true;liveTeleportPreviewSignature=teleportPayloadSignature(teleportPayload());document.getElementById("teleportLog").textContent=renderTeleportResult(data);updateLiveMapDebug();await refreshTeleportReadiness();playUiSound(data.canExecute?"success":"warning");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
-async function executeLiveTeleport(){const payload=teleportPayload();try{if(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload))throw new Error("Teleport target changed or has not been previewed. Preview the current target before live teleport.");if(!liveTeleportPreviewExecutable)throw new Error("Execute is blocked because preview did not resolve a valid partition and safe Z.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}finally{refreshTeleportReadiness();}}
+async function executeLiveTeleport(){const payload=teleportPayload();try{if(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload))throw new Error("Teleport target changed or has not been previewed. Preview the current target before live teleport.");if(!liveTeleportPreviewExecutable)throw new Error("Execute is blocked because preview did not resolve a valid target and partition.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}finally{refreshTeleportReadiness();}}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}

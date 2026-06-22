@@ -8,8 +8,9 @@ const path = require("path");
 const crypto = require("crypto");
 const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
+const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.4.0";
+const APP_VERSION = "0.4.1";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -2436,6 +2437,78 @@ async function sshCommand(command, timeout = 180000, options = {}) {
   ], { timeout, maxBuffer: options.maxBuffer });
 }
 
+function parseMetricPair(line) {
+  const parts = String(line || "").trim().split(/\s+/).map(Number);
+  return parts.every(Number.isFinite) ? parts : [];
+}
+
+function bytesRateLabel(bytesPerSecond) {
+  const value = Number(bytesPerSecond);
+  if (!Number.isFinite(value) || value < 0) return "Unknown";
+  const units = ["B/s", "KB/s", "MB/s", "GB/s"];
+  let amount = value;
+  let index = 0;
+  while (amount >= 1024 && index < units.length - 1) {
+    amount /= 1024;
+    index += 1;
+  }
+  return `${amount >= 10 || index === 0 ? Math.round(amount) : amount.toFixed(1)} ${units[index]}`;
+}
+
+async function vmResourceTelemetry() {
+  const command = `
+printf "__CPU1__ "; awk '/^cpu /{idle=$5+$6; total=0; for(i=2;i<=NF;i++) total+=$i; print idle,total; exit}' /proc/stat
+printf "__NET1__ "; awk -F'[: ]+' 'NR>2 && $1 !~ /^lo$/ {rx+=$3; tx+=$11} END{print rx+0,tx+0}' /proc/net/dev
+sleep 0.5
+printf "__CPU2__ "; awk '/^cpu /{idle=$5+$6; total=0; for(i=2;i<=NF;i++) total+=$i; print idle,total; exit}' /proc/stat
+printf "__NET2__ "; awk -F'[: ]+' 'NR>2 && $1 !~ /^lo$/ {rx+=$3; tx+=$11} END{print rx+0,tx+0}' /proc/net/dev
+printf "__MEM__ "; awk '/^MemTotal:/ {total=$2} /^MemAvailable:/ {available=$2} END{print total+0,available+0}' /proc/meminfo
+printf "__DISK__ "; df -P / | awk 'NR==2{gsub("%","",$5); print $2,$3,$4,$5}'
+printf "__LOAD__ "; cat /proc/loadavg
+printf "__HOST__ "; hostname
+`;
+  const result = await sshCommand(command, 12000, { maxBuffer: 1024 * 128 });
+  if (!result.ok) {
+    return {
+      source: "remote-vm",
+      ok: false,
+      error: result.stderr || result.stdout || result.error || "VM telemetry unavailable."
+    };
+  }
+  const metrics = {};
+  for (const line of String(result.stdout || "").split(/\r?\n/)) {
+    const match = line.match(/^__(CPU1|CPU2|NET1|NET2|MEM|DISK|LOAD|HOST)__\s*(.*)$/);
+    if (match) metrics[match[1].toLowerCase()] = match[2].trim();
+  }
+  const [idle1, total1] = parseMetricPair(metrics.cpu1);
+  const [idle2, total2] = parseMetricPair(metrics.cpu2);
+  const cpuDelta = total2 - total1;
+  const idleDelta = idle2 - idle1;
+  const cpuPercent = cpuDelta > 0 ? Math.max(0, Math.min(100, (1 - (idleDelta / cpuDelta)) * 100)) : null;
+  const [memTotal, memAvailable] = parseMetricPair(metrics.mem);
+  const memoryPercent = memTotal > 0 ? Math.max(0, Math.min(100, ((memTotal - memAvailable) / memTotal) * 100)) : null;
+  const [, , , diskUsedPercent] = parseMetricPair(metrics.disk);
+  const [rx1, tx1] = parseMetricPair(metrics.net1);
+  const [rx2, tx2] = parseMetricPair(metrics.net2);
+  const networkBytesPerSec = Number.isFinite(rx1) && Number.isFinite(tx1) && Number.isFinite(rx2) && Number.isFinite(tx2)
+    ? Math.max(0, ((rx2 - rx1) + (tx2 - tx1)) / 0.5)
+    : null;
+  return {
+    source: "remote-vm",
+    ok: true,
+    hostname: metrics.host || "",
+    loadAverage: metrics.load || "",
+    cpuPercent,
+    memoryPercent,
+    memoryTotalBytes: memTotal > 0 ? memTotal * 1024 : null,
+    memoryAvailableBytes: memAvailable > 0 ? memAvailable * 1024 : null,
+    diskPercent: Number.isFinite(diskUsedPercent) ? Math.max(0, Math.min(100, diskUsedPercent)) : null,
+    networkBytesPerSec,
+    networkLabel: bytesRateLabel(networkBytesPerSec),
+    checkedAt: new Date().toISOString()
+  };
+}
+
 function parseStatus(text) {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const summary = {};
@@ -2561,30 +2634,84 @@ async function battlegroupResource() {
   return item;
 }
 
-function mapRowsFromResource(item) {
+function mapRowsFromResource(item, scaleRows = []) {
   const active = new Map();
   for (const server of item.status?.servers || []) {
     const key = server.partitionMap || server.map;
     if (!key) continue;
     active.set(key, (active.get(key) || 0) + 1);
   }
+  const dedicatedScales = new Map(scaleRows.map((scale) => [scale.map, scale]));
   return (item.spec?.serverGroup?.template?.spec?.sets || []).map((set, index) => ({
     index,
     map: set.map || `Map ${index + 1}`,
-    replicas: Number(set.replicas || 0),
+    replicas: set.dedicatedScaling ? Number(dedicatedScales.get(set.map)?.replicas || 0) : Number(set.replicas || 0),
     running: active.get(set.map) || 0,
     memory: set.resources?.limits?.memory || "",
     dedicatedScaling: Boolean(set.dedicatedScaling),
-    deploymentMode: set.dedicatedScaling ? "Dedicated" : "Standard"
+    scaleResource: dedicatedScales.get(set.map)?.name || "",
+    deploymentMode: set.dedicatedScaling ? "Dedicated" : "Standard",
+    partitions: battlegroupMapPartitionIds(item, set.map || "")
   }));
+}
+
+function normalizeBattlegroupMapKey(value) {
+  return String(value || "")
+    .trim()
+    .replace(/_\d+$/, "")
+    .replace(/[^A-Za-z0-9]+/g, "")
+    .toLowerCase();
+}
+
+function battlegroupMapPartitionAliases(mapName) {
+  const raw = String(mapName || "").trim();
+  const normalized = normalizeBattlegroupMapKey(raw);
+  const aliases = new Set([normalized]);
+  if (normalized === "haggabasin") aliases.add("survival");
+  if (normalized === "survival") aliases.add("haggabasin");
+  if (normalized === "overland") aliases.add("overmap");
+  if (normalized === "overmap") aliases.add("overland");
+  return aliases;
+}
+
+function battlegroupMapPartitions(item, mapName) {
+  const worldPartitions = item.spec?.database?.template?.spec?.deployment?.worldPartitions || [];
+  const aliases = battlegroupMapPartitionAliases(mapName);
+  const entries = worldPartitions.filter((partition) => aliases.has(normalizeBattlegroupMapKey(partition.map)));
+  return entries.flatMap((entry) => (entry?.partitions || []).map((partition) => ({
+    map: entry.map || "",
+    id: Number(partition.id)
+  }))).filter((partition) => Number.isInteger(partition.id) && partition.id >= 0);
+}
+
+function battlegroupMapPartitionIds(item, mapName) {
+  return [...new Set(battlegroupMapPartitions(item, mapName).map((partition) => partition.id))];
+}
+
+async function serverSetScaleRows(namespace) {
+  if (!namespace) return [];
+  const result = await sshCommand(`sudo kubectl get igwsss -n ${shQuote(namespace)} -o json`, 30000);
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Could not read dedicated map scaling resources.");
+  let data = null;
+  try { data = JSON.parse(result.stdout || "{}"); }
+  catch { throw new Error("Could not parse dedicated map scaling resources."); }
+  return (Array.isArray(data.items) ? data.items : []).map((item) => ({
+    name: item.metadata?.name || "",
+    namespace: item.metadata?.namespace || namespace,
+    map: item.metadata?.annotations?.["igw.funcom.com/map-name"] || "",
+    replicas: Number(item.spec?.replicas || 0),
+    partitions: Array.isArray(item.spec?.partitions) ? item.spec.partitions.map(Number).filter(Number.isInteger) : [],
+    serverSet: item.metadata?.labels?.serverset || ""
+  })).filter((row) => row.name && row.map);
 }
 
 async function mapDeploymentList() {
   const item = await battlegroupResource();
+  const scales = await serverSetScaleRows(item.metadata?.namespace || "");
   return {
     battlegroup: item.metadata?.name || "",
     namespace: item.metadata?.namespace || "",
-    maps: mapRowsFromResource(item)
+    maps: mapRowsFromResource(item, scales)
   };
 }
 
@@ -2636,7 +2763,8 @@ async function worldMapMetadata() {
     `)
   ]);
 
-  const serverRows = mapRowsFromResource(item);
+  const scaleRows = await serverSetScaleRows(item.metadata?.namespace || "");
+  const serverRows = mapRowsFromResource(item, scaleRows);
   const serverByMap = new Map(serverRows.map((row) => [row.map, row]));
   const namesById = new Map();
   const mapNames = mapNamesRaw ? mapNamesRaw.split(/\r?\n/).filter(Boolean).map((line) => {
@@ -2761,11 +2889,32 @@ async function setMapReplicas(mapName, replicas) {
   if (!Number.isInteger(count) || count < 0 || count > 3) throw new Error("Replica count must be between 0 and 3.");
 
   const item = await battlegroupResource();
-  const rows = mapRowsFromResource(item);
+  const scales = await serverSetScaleRows(item.metadata?.namespace || "");
+  const rows = mapRowsFromResource(item, scales);
   const row = rows.find((entry) => entry.map === cleanMap);
   if (!row) throw new Error("Map was not found in the battlegroup.");
-  if (row.dedicatedScaling && count > 0) {
-    throw new Error(`${cleanMap} is a dedicated-scaling map. The current safe deploy button can only start standard maps; dedicated maps need battlegroup director scaling first.`);
+  const resolvedPartitions = battlegroupMapPartitions(item, cleanMap);
+  const partitionIds = [...new Set(resolvedPartitions.map((partition) => partition.id))];
+  if (row.dedicatedScaling) {
+    const scale = scales.find((entry) => entry.map === cleanMap);
+    if (!scale) throw new Error(`${cleanMap} is a dedicated-scaling map, but no ServerSetScale resource was found.`);
+    const namespace = item.metadata?.namespace;
+    const spec = { replicas: count };
+    if (count > 0) {
+      if (!partitionIds.length) throw new Error(`${cleanMap} is a dedicated-scaling map, but no partitions were found in the battlegroup worldPartitions.`);
+      spec.partitions = partitionIds;
+    }
+    const patch = JSON.stringify({ spec });
+    const command = [
+      "sudo kubectl patch igwsss",
+      shQuote(scale.name),
+      "-n",
+      shQuote(namespace),
+      "--type=merge",
+      `-p=${shQuote(patch)}`
+    ].join(" ");
+    const result = await sshCommand(command, 120000);
+    return { ...result, map: cleanMap, replicas: count, deploymentMode: "Dedicated", scaleResource: scale.name, partitions: spec.partitions || scale.partitions || partitionIds, resolvedPartitions };
   }
 
   const namespace = item.metadata?.namespace;
@@ -2780,7 +2929,7 @@ async function setMapReplicas(mapName, replicas) {
     `-p=${shQuote(patch)}`
   ].join(" ");
   const result = await sshCommand(command, 120000);
-  return { ...result, map: cleanMap, replicas: count };
+  return { ...result, map: cleanMap, replicas: count, deploymentMode: "Standard", partitions: partitionIds, resolvedPartitions };
 }
 
 function gearCatalog() {
@@ -5421,6 +5570,7 @@ async function progressionPlayerLookup(queryValue) {
   result.progressionDebug.techKnowledgeTarget = techScan.target || null;
   result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...techScan.fieldStatus };
   result.techKnowledge = techScan.values;
+  result.hydration = await timer.step("hydration_lookup", () => playerHydrationForPawnActor(player.player_pawn_id)).catch((error) => ({ ...extractHydrationFromGasAttributes(null, { pawnActorId: player.player_pawn_id }), error: error.message }));
   console.info("[progression/player] Tech lookup", {
     actor_id: techScan.target?.actor_id || resolvedIdentifiers.actor_id || "",
     entity_id: techScan.target?.entity_id || "",
@@ -5658,6 +5808,34 @@ async function progressionPlayerComponentSupport(actorId) {
   `, 20000);
   const [faction = "false", tech = "false"] = String(output || "").split("\t");
   return { factionComponent: /^true$/i.test(faction), techKnowledgeComponent: /^true$/i.test(tech) };
+}
+
+async function playerHydrationForPawnActor(pawnActorId) {
+  const idText = String(pawnActorId || "").trim();
+  if (!/^\d+$/.test(idText)) {
+    return extractHydrationFromGasAttributes(null, { pawnActorId: idText });
+  }
+  try {
+    const output = await dbQuery(`
+      select coalesce(gas_attributes::text, '')
+      from dune.actors
+      where id = ${requireInteger(idText, "player_pawn_id", 1)}
+      limit 1
+    `, 8000);
+    return extractHydrationFromGasAttributes(output || null, { pawnActorId: idText });
+  } catch (error) {
+    const hydration = extractHydrationFromGasAttributes(null, { pawnActorId: idText });
+    hydration.error = error.message;
+    return hydration;
+  }
+}
+
+async function attachHydrationToPlayers(players) {
+  const list = Array.isArray(players) ? players : [];
+  await Promise.all(list.map(async (player) => {
+    player.hydration = await playerHydrationForPawnActor(player.player_pawn_id);
+  }));
+  return list;
 }
 
 async function progressionPreview(payload) {
@@ -6854,6 +7032,7 @@ async function adminPlayers(options = {}) {
     diagnostics.joinPathUsed = "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id";
     diagnostics.characterNamesResolved = resolvedCount;
     diagnostics.playersFound = players.length;
+    await attachHydrationToPlayers(players);
     if (players.length) {
       if (!resolvedCount) diagnostics.reason = "Player rows were found, but none had a character_name in dune.player_state.";
       return {
@@ -7189,6 +7368,7 @@ function normalizeLiveMapActorRow(row, type, fallbackName) {
     funcom_id: row.funcom_id || "",
     player_controller_id: row.player_controller_id || "",
     pawn_entity_id: row.pawn_entity_id || row.actor_id || "",
+    hydration: row.hydration || extractHydrationFromGasAttributes(row.gas_attributes || null, { pawnActorId: row.pawn_entity_id || row.actor_id || "" }),
     online: liveMapNormalizeStatus(row.status || row.online_status),
     online_status: row.status || row.online_status || "",
     map,
@@ -7225,6 +7405,7 @@ async function liveMapActorsTransformPlayers() {
            coalesce(a.map, 'HaggaBasin') as map,
            coalesce(a.partition_id, 0)::text as partition_id,
            coalesce(ps.last_avatar_activity::text, '') as updated_at,
+           coalesce(a.gas_attributes::text, '') as gas_attributes,
            'dune.actors transform / player_state.player_pawn_id' as source
     from dune.actors a
     join dune.player_state ps on ps.player_pawn_id = a.id
@@ -7301,13 +7482,16 @@ async function liveMapActorsTransformBases() {
 }
 
 function liveMapConfigPayload() {
+  const defaultMap = Coordinates.mapConfig(loadConfig().mapDefault).key;
+  const defaultConfig = LIVE_MAP_WORLD_BOUNDS[defaultMap] || LIVE_MAP_WORLD_BOUNDS.HaggaBasin;
+  const defaultImage = defaultMap === "HaggaBasin" ? "/assets/hagga-basin-map.png" : defaultMap === "DeepDesert" ? "/assets/deep-desert-map.png" : "/assets/world-map-overland.png";
   return {
-    map: { ...LIVE_MAP_WORLD_BOUNDS.HaggaBasin, actorMap: "HaggaBasin", image: "/assets/hagga-basin-map.png", fallbackImage: "/assets/world-map-overland.png" },
+    map: { ...defaultConfig, actorMap: defaultMap, image: defaultImage, fallbackImage: "/assets/world-map-overland.png" },
     maps: {
       HaggaBasin: { ...LIVE_MAP_WORLD_BOUNDS.HaggaBasin, actorMap: "HaggaBasin", image: "/assets/hagga-basin-map.png", fallbackImage: "/assets/world-map-overland.png" },
       DeepDesert: { ...LIVE_MAP_WORLD_BOUNDS.DeepDesert, actorMap: "DeepDesert", image: "/assets/deep-desert-map.png", fallbackImage: "/assets/world-map-overland.png" }
     },
-    defaultMap: "HaggaBasin"
+    defaultMap
   };
 }
 
@@ -9054,7 +9238,11 @@ async function json(res, body, status = 200) {
 function serveStatic(res, baseDir, requestPath) {
   const filePath = safeFile(baseDir, requestPath);
   if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return false;
-  res.writeHead(200, { "Content-Type": contentTypeFor(filePath), "Cache-Control": "no-store" });
+  const ext = path.extname(filePath).toLowerCase();
+  const cacheControl = [".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".css", ".js"].includes(ext)
+    ? "public, max-age=86400"
+    : "no-store";
+  res.writeHead(200, { "Content-Type": contentTypeFor(filePath), "Cache-Control": cacheControl });
   fs.createReadStream(filePath).pipe(res);
   return true;
 }
@@ -9168,62 +9356,104 @@ function appPage() {
   <script src="/assets/coordinate-system.js"></script>
   <style>
     :root {
-      --bg:#050603; --bg-2:#090b07; --panel:rgba(15,17,11,.92); --panel-2:rgba(27,24,14,.84);
-      --glass:rgba(245,199,93,.055); --line:rgba(214,166,69,.46); --line-strong:rgba(240,201,106,.72); --line-blue:rgba(143,197,219,.45);
-      --text:#eee5d2; --muted:#a99b77; --sand:#d0a44e; --gold:#d7a84c; --gold-bright:#f3cf73; --blue:#8fc5db;
-      --good:#66d17a; --warn:#f0b95c; --bad:#ff6262; --shadow:0 28px 90px rgba(0,0,0,.62);
-      --content-max:1812px; --panel-gap:12px; --panel-pad:18px; --panel-cut:14px; --panel-radius:0;
+      --bg:#030303; --bg-2:#12110d; --panel:rgba(8,8,7,.9); --panel-2:rgba(30,25,14,.76);
+      --glass:rgba(10,9,7,.64); --line:rgba(246,190,86,.5); --line-strong:rgba(255,225,150,.86); --line-blue:rgba(134,200,255,.32);
+      --text:#fff4df; --muted:#d6bf91; --sand:#ffe5b5; --gold:#f6bf55; --gold-bright:#ffe196; --blue:#86c8ff;
+      --good:#75d982; --warn:#ffbd5e; --bad:#ff705f; --shadow:0 26px 80px rgba(0,0,0,.58);
+      --content-max:1812px; --panel-gap:10px; --panel-pad:14px; --panel-cut:14px; --panel-radius:22px;
       --font-panel-label:10.5px; --font-panel-title:15.5px; --font-panel-body:12.5px; --font-panel-value:21px; --font-panel-subtle:11.5px; --font-button:12.5px; --font-table:12.5px;
+      --hero-banner:url("/assets/theme-alpha-gold-banner.webp"); --hero-size:100% auto; --hero-ratio:2007 / 626; --grid-opacity:.14; --theme-glow:rgba(255,198,91,.28);
       color-scheme:dark; font-family:"Rajdhani","Segoe UI",system-ui,sans-serif;
+    }
+    body.theme-command {
+      --bg:#010101; --bg-2:#050403; --panel:rgba(3,3,3,.96); --panel-2:rgba(12,9,5,.9);
+      --glass:rgba(0,0,0,.78); --line:rgba(188,132,45,.42); --line-strong:rgba(219,164,67,.76); --line-blue:rgba(56,109,184,.28);
+      --text:#f0e4d0; --muted:#aa9168; --sand:#d7b06d; --gold:#c98e32; --gold-bright:#dba443; --blue:#4d8dd4;
+      --hero-banner:url("/assets/theme-command-console-banner.webp"); --hero-size:100% auto; --hero-ratio:1792 / 627; --grid-opacity:.16; --theme-glow:rgba(114,74,18,.14);
+    }
+    body.theme-purple {
+      --bg:#100613; --bg-2:#2b1231; --panel:rgba(28,12,34,.9); --panel-2:rgba(48,20,55,.8);
+      --glass:rgba(22,10,28,.66); --line:rgba(180,94,203,.46); --line-strong:rgba(229,139,255,.76); --line-blue:rgba(255,159,202,.34);
+      --text:#f7eafd; --muted:#c7a3d0; --sand:#f2d9ff; --gold:#c982ff; --gold-bright:#e58bff; --blue:#ff9fca;
+      --good:#89e89d; --warn:#ffbd73; --bad:#ff6e84; --hero-banner:url("/assets/theme-purple-desert-banner.webp"); --hero-size:100% auto; --hero-ratio:1740 / 626; --grid-opacity:.18; --theme-glow:rgba(201,130,255,.2);
+    }
+    body.theme-contrast {
+      --bg:#070503; --bg-2:#20140b; --panel:rgba(24,16,10,.92); --panel-2:rgba(43,28,16,.82);
+      --glass:rgba(18,12,8,.7); --line:rgba(166,113,55,.48); --line-strong:rgba(214,159,83,.82); --line-blue:rgba(138,183,215,.34);
+      --text:#f2e7d7; --muted:#b69a78; --sand:#dcc4a2; --gold:#c89446; --gold-bright:#d69f53; --blue:#8ab7d7;
+      --warn:#e1a85f; --hero-banner:url("/assets/theme-high-contrast-banner.webp"); --hero-size:100% auto; --hero-ratio:2008 / 627; --grid-opacity:.18; --theme-glow:rgba(202,138,64,.18);
+    }
+    body.theme-royal {
+      color-scheme:light; --bg:#efe5d4; --bg-2:#d7b77f; --panel:rgba(255,250,238,.9); --panel-2:rgba(242,222,184,.78);
+      --glass:rgba(255,250,238,.64); --line:rgba(175,119,35,.36); --line-strong:rgba(199,139,43,.72); --line-blue:rgba(111,135,149,.3);
+      --text:#221914; --muted:#756048; --sand:#6b5032; --gold:#b77a22; --gold-bright:#c98b2b; --blue:#6f8795;
+      --good:#2f8143; --warn:#aa671b; --bad:#b43b2c; --shadow:0 22px 70px rgba(98,58,18,.22); --hero-banner:url("/assets/theme-royal-desert-banner.webp"); --hero-size:100% auto; --hero-ratio:1712 / 626; --grid-opacity:.1; --theme-glow:rgba(255,238,194,.55);
     }
     * { box-sizing:border-box; }
     body { margin:0; min-height:100vh; color:var(--text); background:
-      radial-gradient(circle at 75% 7%, rgba(214,166,69,.22), transparent 25%),
-      radial-gradient(circle at 18% 0%, rgba(111,80,30,.24), transparent 28%),
-      linear-gradient(160deg, #050603 0%, #0d0f08 48%, #060704 100%); }
-    body::before { content:""; position:fixed; inset:0; pointer-events:none; opacity:.2; background:
-      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px); background-size:42px 42px; }
+      radial-gradient(circle at 72% -8%, var(--theme-glow), transparent 32%),
+      radial-gradient(circle at 12% 4%, var(--theme-glow), transparent 30%),
+      linear-gradient(150deg, var(--bg) 0%, var(--bg-2) 46%, var(--bg) 100%); }
+    body::before { content:""; position:fixed; inset:0; pointer-events:none; opacity:var(--grid-opacity); background:
+      linear-gradient(rgba(240,206,145,.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(240,206,145,.045) 1px, transparent 1px); background-size:54px 54px; }
     body::after { content:""; position:fixed; inset:0; pointer-events:none; opacity:.13; mix-blend-mode:screen; background:
       repeating-linear-gradient(0deg, rgba(255,255,255,.06) 0 1px, transparent 1px 4px),
       radial-gradient(circle at 86% 19%, rgba(240,201,106,.3), transparent 12%); }
     button, input, select { font:inherit; }
     button { cursor:pointer; }
-    .shell { min-height:100vh; display:grid; grid-template-columns:300px minmax(0,1fr); }
-    .sidebar { position:sticky; top:0; height:100vh; display:flex; flex-direction:column; overflow:hidden; box-sizing:border-box; padding:26px 18px; border-right:1px solid var(--line); background:
-      linear-gradient(180deg, rgba(13,14,9,.98), rgba(4,6,4,.96)),
-      radial-gradient(circle at 70% 12%, rgba(214,166,69,.16), transparent 30%); box-shadow:var(--shadow), inset -18px 0 40px rgba(0,0,0,.35); }
-    .brand { flex:0 0 auto; position:relative; padding:22px 18px 28px; border:1px solid rgba(214,166,69,.26); background:linear-gradient(135deg, rgba(214,166,69,.09), rgba(255,255,255,.015)); clip-path:polygon(0 0, 88% 0, 100% 18px, 100% 100%, 12px 100%, 0 calc(100% - 12px)); }
+    .shell { min-height:100vh; display:grid; grid-template-columns:276px minmax(0,1fr); }
+    .sidebar { position:sticky; top:0; height:100vh; display:flex; flex-direction:column; overflow:hidden; box-sizing:border-box; padding:20px 14px; border-right:1px solid var(--line); background:
+      linear-gradient(180deg, var(--panel), var(--glass)),
+      radial-gradient(circle at 22% 0%, rgba(224,173,99,.16), transparent 35%); box-shadow:var(--shadow), inset -18px 0 40px rgba(0,0,0,.35); }
+    .brand { flex:0 0 auto; position:relative; padding:18px 16px 20px; border:1px solid rgba(214,166,69,.34); background:linear-gradient(135deg, rgba(214,166,69,.12), rgba(255,255,255,.018)); clip-path:polygon(0 0, 88% 0, 100% 18px, 100% 100%, 12px 100%, 0 calc(100% - 12px)); box-shadow:inset 0 0 0 1px rgba(240,201,106,.045), 0 0 24px rgba(214,166,69,.08); }
     .brand::before { content:""; display:block; width:58px; height:58px; margin-bottom:14px; border:1px solid var(--line-strong); background:
       linear-gradient(30deg, transparent 45%, rgba(240,201,106,.65) 46% 54%, transparent 55%),
       radial-gradient(circle, rgba(240,201,106,.22), rgba(4,6,4,.65)); box-shadow:0 0 28px rgba(240,201,106,.18); }
     .brand h1 { margin:0; font-size:28px; line-height:.95; letter-spacing:.09em; text-transform:uppercase; color:var(--gold-bright); }
     .brand p { margin:9px 0 0; color:var(--sand); font-size:14px; text-transform:uppercase; letter-spacing:.18em; }
-    .build-info { display:grid; gap:3px; margin-top:14px; padding-top:12px; border-top:1px solid rgba(214,166,69,.18); color:rgba(208,164,78,.72); font-size:11px; line-height:1.25; letter-spacing:.08em; text-transform:uppercase; }
+    .build-info { display:grid; gap:3px; margin-top:14px; padding-top:12px; border-top:1px solid rgba(214,166,69,.18); color:rgba(240,201,106,.78); font-size:11px; line-height:1.25; letter-spacing:.08em; text-transform:uppercase; }
     .build-info span { display:block; }
     .nav { flex:1 1 auto; min-height:0; display:grid; align-content:start; gap:5px; margin-top:18px; padding-right:7px; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-color:rgba(240,201,106,.58) rgba(5,7,5,.68); scrollbar-width:thin; }
     .nav::-webkit-scrollbar { width:9px; }
     .nav::-webkit-scrollbar-track { background:rgba(5,7,5,.68); border:1px solid rgba(214,166,69,.1); }
     .nav::-webkit-scrollbar-thumb { background:linear-gradient(180deg, rgba(240,201,106,.72), rgba(111,80,30,.74)); border:1px solid rgba(240,201,106,.34); }
     .nav::-webkit-scrollbar-thumb:hover { background:linear-gradient(180deg, rgba(255,222,129,.88), rgba(154,107,41,.82)); }
-    .tab { width:100%; min-height:42px; display:flex; align-items:center; justify-content:flex-start; gap:10px; border:1px solid rgba(214,166,69,.08); border-radius:0; background:rgba(255,255,255,.01); color:var(--sand); text-align:left; text-transform:uppercase; letter-spacing:.055em; font-size:12px; line-height:1.2; font-weight:760; clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+    .tab { width:100%; min-height:46px; display:flex; align-items:center; justify-content:flex-start; gap:10px; border:1px solid transparent; border-radius:14px; background:transparent; color:var(--muted); text-align:left; text-transform:uppercase; letter-spacing:.055em; font-size:12px; line-height:1.2; font-weight:760; }
     .tab::before { content:""; flex:0 0 auto; width:8px; height:8px; border:1px solid currentColor; transform:rotate(45deg); box-shadow:0 0 8px currentColor; opacity:.72; }
-    .tab.active, .tab:hover { color:var(--gold-bright); border-color:rgba(240,201,106,.58); background:linear-gradient(90deg, rgba(214,166,69,.22), rgba(214,166,69,.045)); box-shadow:inset 0 0 22px rgba(240,201,106,.075), 0 0 14px rgba(214,166,69,.1); }
+    .tab.active, .tab:hover { color:var(--text); border-color:var(--line); background:rgba(246,202,135,.1); box-shadow:inset 0 0 22px rgba(246,202,135,.07), 0 0 14px rgba(224,173,99,.09); }
     .tab.active { font-size:12px; font-weight:850; }
+    .nav-group { display:grid; gap:5px; margin-bottom:8px; }
+    .nav-group-title { display:flex; align-items:center; gap:9px; margin:8px 4px 2px; color:rgba(243,204,140,.72); font-size:9.5px; line-height:1; font-weight:900; text-transform:uppercase; letter-spacing:.18em; }
+    .nav-group-title::after { content:""; height:1px; flex:1 1 auto; background:linear-gradient(90deg, rgba(240,201,106,.34), transparent); }
+    .nav-group.advanced-nav { border-top:1px solid rgba(214,166,69,.13); padding-top:5px; }
     .sidebar-foot { flex:0 0 auto; margin-top:16px; color:var(--muted); font-size:12px; line-height:1.5; }
+    .sidebar-links { display:grid; gap:8px; margin-top:10px; }
+    .sidebar-links a, .sidebar-foot button { width:100%; justify-content:flex-start; min-height:34px; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--gold-bright); text-decoration:none; border:1px solid rgba(214,166,69,.24); background:rgba(255,255,255,.018); padding:8px 10px; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .sidebar-links a:hover, .sidebar-foot button:hover { border-color:var(--line-strong); background:rgba(214,166,69,.1); box-shadow:0 0 18px rgba(214,166,69,.11); }
     .legal-notice { margin-top:12px; padding-top:10px; border-top:1px solid rgba(214,166,69,.16); color:rgba(214,196,151,.68); font-size:10px; line-height:1.35; }
-    .content { min-width:0; padding:18px 24px 30px; overflow-x:hidden; }
-    .topbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(260px,1fr) auto; gap:16px; align-items:center; margin:-18px -24px 18px; padding:16px 24px; backdrop-filter:blur(18px); background:linear-gradient(90deg, rgba(7,8,4,.94), rgba(23,19,10,.88)); border-bottom:1px solid var(--line); box-shadow:0 14px 42px rgba(0,0,0,.36); }
-    .topbar-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:12px; }
+    body.theme-royal .build-info { border-top-color:rgba(105,73,32,.28); color:#3f2d1d; }
+    body.theme-royal .build-info span { color:#3f2d1d; }
+    body.theme-royal .nav-group-title { color:#4f351b; }
+    body.theme-royal .nav-group-title::after { background:linear-gradient(90deg, rgba(105,73,32,.42), transparent); }
+    body.theme-royal .nav-group.advanced-nav { border-top-color:rgba(105,73,32,.24); }
+    body.theme-royal .sidebar-foot,
+    body.theme-royal .legal-notice { color:#4f3b26; border-top-color:rgba(105,73,32,.24); }
+    body.theme-royal .sidebar-foot .subtle,
+    body.theme-royal .sidebar-foot small { color:#4f3b26; }
+    .content { min-width:0; padding:14px 18px 22px; overflow-x:hidden; }
+    .topbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(260px,1fr) auto; gap:12px; align-items:center; margin:-14px -18px 12px; padding:14px 18px; backdrop-filter:blur(18px); background:linear-gradient(90deg, var(--panel), var(--glass)); border-bottom:1px solid var(--line); box-shadow:0 14px 42px rgba(0,0,0,.32); }
+    .topbar-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:10px; }
     .ui-mode-control { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.09em; white-space:nowrap; }
     .ui-mode-control select { width:auto; min-width:112px; min-height:34px; padding:0 28px 0 10px; font-size:11px; }
     body.simple-mode .advanced-only { display:none !important; }
+    body.simple-mode .advanced-nav { display:none !important; }
     body.simple-mode .advanced-status.empty { display:none !important; }
     body.simple-mode .metric-tile .subtle { display:none; }
     .title h2 { margin:0; font-size:24px; letter-spacing:.12em; text-transform:uppercase; color:var(--gold-bright); }
     .title p { margin:5px 0 0; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-size:12px; }
     .status-strip { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
-    .badge { display:inline-flex; min-height:31px; align-items:center; gap:7px; border:1px solid var(--line); border-radius:0; padding:6px 11px; background:rgba(0,0,0,.28); color:var(--muted); font-size:11.5px; line-height:1.15; white-space:normal; text-transform:uppercase; letter-spacing:.055em; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .badge { display:inline-flex; min-height:31px; align-items:center; gap:7px; border:1px solid rgba(224,173,99,.32); border-radius:999px; padding:6px 11px; background:rgba(246,202,135,.1); color:var(--gold-bright); font-size:11.5px; line-height:1.15; white-space:normal; text-transform:uppercase; letter-spacing:.055em; clip-path:none; }
     .badge::before { content:""; width:7px; height:7px; border-radius:999px; background:currentColor; box-shadow:0 0 10px currentColor; }
     .badge.ok { color:var(--good); border-color:rgba(86,214,143,.35); }
     .badge.warn { color:var(--warn); border-color:rgba(234,191,98,.35); }
@@ -9231,39 +9461,73 @@ function appPage() {
     .view { display:none; width:100%; max-width:var(--content-max); margin:0 auto; animation:fade .16s ease-out; }
     .view.active { display:block; }
     @keyframes fade { from { opacity:.2; transform:translateY(4px); } to { opacity:1; transform:none; } }
-    .hero { position:relative; overflow:hidden; min-height:190px; margin-bottom:16px; border:1px solid var(--line-strong); border-radius:0; background:
-      linear-gradient(90deg, rgba(5,6,3,.88), rgba(5,6,3,.42) 50%, rgba(5,6,3,.84)),
-      linear-gradient(180deg, rgba(5,6,3,.08), rgba(5,6,3,.88)),
-      url("/manager/assets/desert-command.png") center / cover; box-shadow:var(--shadow), inset 0 0 120px rgba(0,0,0,.55), 0 0 36px rgba(214,166,69,.18); clip-path:polygon(0 0, calc(100% - 24px) 0, 100% 24px, 100% 100%, 24px 100%, 0 calc(100% - 24px)); }
-    .hero::before { content:""; position:absolute; inset:0; background:
-      radial-gradient(ellipse at 76% 14%, rgba(240,201,106,.26), transparent 26%),
-      radial-gradient(ellipse at 34% 82%, rgba(215,168,76,.2), transparent 36%),
-      linear-gradient(164deg, transparent 0 52%, rgba(214,166,69,.24) 53%, rgba(214,166,69,.06) 66%, transparent 67%); }
-    .hero-body { position:relative; min-height:190px; display:grid; align-content:center; box-sizing:border-box; width:100%; max-width:920px; padding:30px; padding-right:250px; }
-    .hero-actions { position:absolute; right:28px; bottom:24px; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; max-width:230px; }
-    .hero-actions button { min-height:34px; padding:7px 11px; font-size:12px; line-height:1.15; text-transform:none; letter-spacing:.025em; background:rgba(6,8,5,.74); border-color:rgba(240,201,106,.44); color:var(--gold-bright); box-shadow:0 0 18px rgba(0,0,0,.2); }
+    .hero { position:relative; overflow:hidden; min-height:0; aspect-ratio:var(--hero-ratio); margin-bottom:10px; border:1px solid var(--line); border-radius:28px; background:
+      linear-gradient(90deg, rgba(8,6,4,.15), rgba(8,6,4,.12)),
+      var(--hero-banner) center / var(--hero-size) no-repeat,
+      var(--panel-2); box-shadow:var(--shadow); clip-path:none; }
+    .hero::before { display:none; }
+    .hero-body { display:none; }
     .kicker, .label { color:var(--gold-bright); font-size:var(--font-panel-label); text-transform:uppercase; letter-spacing:.11em; font-weight:900; line-height:1.2; }
-    .hero h3 { margin:9px 0 0; font-size:clamp(26px, 2.1vw, 31px); line-height:1.08; letter-spacing:.075em; text-transform:uppercase; color:var(--gold-bright); text-shadow:0 0 24px rgba(240,201,106,.16); max-width:600px; }
-    .hero p { margin:10px 0 0; color:#ded3c1; line-height:1.45; max-width:600px; }
     .grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:var(--panel-gap); }
     .grid.four { grid-template-columns:repeat(4,minmax(0,1fr)); }
-    .panel { position:relative; width:100%; min-width:0; border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.94), rgba(5,7,5,.88)); box-shadow:inset 0 0 0 1px rgba(240,201,106,.05), inset 0 -42px 70px rgba(0,0,0,.34), 0 18px 54px rgba(0,0,0,.32); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
+    .panel { position:relative; width:100%; min-width:0; border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, var(--panel-2), var(--panel)); box-shadow:0 14px 44px rgba(0,0,0,.28); backdrop-filter:blur(16px); clip-path:none; }
     .panel::before { content:""; position:absolute; left:12px; right:12px; top:8px; height:1px; background:linear-gradient(90deg, transparent, rgba(240,201,106,.42), transparent); pointer-events:none; }
     .panel::after { content:""; position:absolute; inset:0; pointer-events:none; box-shadow:inset 0 0 38px rgba(240,201,106,.06), 0 0 18px rgba(214,166,69,.08); }
     .panel.pad { padding:var(--panel-pad); }
+    .page-section-title { display:flex; align-items:center; gap:10px; margin:10px 0 8px; color:var(--gold-bright); font-size:11px; font-weight:900; text-transform:uppercase; letter-spacing:.13em; }
+    .page-section-title::after { content:""; height:1px; flex:1 1 auto; background:linear-gradient(90deg, rgba(240,201,106,.38), transparent); }
+    .user-summary-card { border:1px solid rgba(240,201,106,.34); border-radius:18px; background:linear-gradient(135deg, rgba(246,202,135,.12), rgba(255,255,255,.025)); padding:11px 12px; box-shadow:inset 0 0 24px rgba(240,201,106,.045); }
+    .user-summary-card strong { display:block; color:var(--gold-bright); font-size:18px; line-height:1.18; overflow-wrap:anywhere; }
+    .user-summary-card span { display:block; margin-top:4px; color:var(--muted); font-size:11.5px; line-height:1.35; overflow-wrap:anywhere; }
+    .danger-zone { border-color:rgba(255,112,95,.5); background:linear-gradient(180deg, rgba(54,15,10,.74), rgba(13,8,6,.84)); }
+    .danger-zone::before { background:linear-gradient(90deg, transparent, rgba(255,112,95,.5), transparent); }
+    .danger-zone .label, .danger-zone .panel-head .label { color:#ffc0b8; }
+    .progression-fold.danger-zone { border-color:rgba(255,112,95,.5); background:linear-gradient(180deg, rgba(54,15,10,.62), rgba(13,8,6,.8)); }
+    .progression-fold.danger-zone > summary { color:#ffc0b8; }
+    .primary-action-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .primary-action-row button { min-height:44px; padding:9px 16px; font-size:13px; }
     .value { margin-top:10px; font-size:var(--font-panel-value); line-height:1.12; font-weight:800; color:var(--gold-bright); overflow-wrap:anywhere; letter-spacing:.02em; }
     .subtle { color:var(--muted); font-size:var(--font-panel-subtle); line-height:1.42; }
     .dashboard-grid { display:grid; grid-template-columns:minmax(280px,.82fr) minmax(420px,1.2fr) minmax(320px,.92fr); gap:var(--panel-gap); align-items:start; margin-top:var(--panel-gap); }
-    .panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid rgba(214,166,69,.14); padding-bottom:10px; margin-bottom:12px; }
+    #dashboard { --dashboard-gap:6px; }
+    #dashboard .hero { margin-bottom:var(--dashboard-gap); }
+    #dashboard .grid { gap:var(--dashboard-gap); }
+    #dashboard .dashboard-grid { grid-template-columns:minmax(320px,1fr) minmax(320px,1fr) minmax(300px,.9fr); gap:var(--dashboard-gap); margin-top:var(--dashboard-gap); }
+    #dashboard .layout-3.mt { gap:var(--dashboard-gap); margin-top:var(--dashboard-gap); }
+    #dashboard .panel.pad { padding:12px; }
+    #dashboard .metric-tile { min-height:102px; padding:11px 12px !important; }
+    #dashboard .metric-tile .value { margin-top:6px; }
+    #dashboard .metric-tile .subtle { margin-top:6px; line-height:1.24; }
+    #dashboard .panel-head { gap:8px; padding-bottom:6px; margin-bottom:7px; }
+    #dashboard .resource-bars { gap:10px; }
+    #dashboard .resource-row { grid-template-columns:82px minmax(0,1fr) 40px; gap:8px; }
+    #dashboard .player-feed, #dashboard .activity { gap:6px; }
+    #dashboard .vm-monitor { grid-column:1 / span 2; grid-row:1; }
+    #dashboard .dashboard-activity { grid-column:3; grid-row:1; }
+    #dashboard .dashboard-activity .activity { max-height:258px; }
+    #dashboard .activity-item { padding:7px 9px; }
+    #dashboard .vm-status-grid { gap:6px; margin-top:7px; }
+    #dashboard .vm-status-card { min-height:64px; padding:8px; }
+    #dashboard .vm-status-card strong { margin-top:4px; font-size:15px; }
+    #dashboard .vm-monitor-lists { gap:8px; margin-top:8px; }
+    #dashboard .ops-list { gap:7px; }
+    #dashboard .ops-row { gap:8px; padding:8px 0; }
+    #dashboard .sound-widget { gap:6px; margin-top:7px; padding:8px; }
+    #dashboard .dashboard-footer { gap:6px; margin-top:7px; padding-top:7px; }
+    @media (max-width:1300px) {
+      #dashboard .vm-monitor, #dashboard .dashboard-activity { grid-column:auto; grid-row:auto; }
+      #dashboard .dashboard-activity .activity { max-height:240px; }
+    }
+    .panel-head { display:flex; align-items:center; justify-content:space-between; gap:10px; border-bottom:1px solid rgba(214,166,69,.14); padding-bottom:8px; margin-bottom:10px; }
     .micro { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.12em; }
     .resource-bars { display:grid; gap:14px; }
     .resource-row { display:grid; grid-template-columns:92px minmax(0,1fr) 42px; gap:10px; align-items:center; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
     .bar { position:relative; height:17px; border:1px solid rgba(214,166,69,.22); background:repeating-linear-gradient(90deg, rgba(0,0,0,.36) 0 13px, rgba(214,166,69,.12) 13px 15px); overflow:hidden; box-shadow:inset 0 0 20px rgba(0,0,0,.45); }
     .bar span { display:block; height:100%; background:linear-gradient(90deg, rgba(148,101,32,.95), rgba(240,201,106,.9)); box-shadow:0 0 18px rgba(240,201,106,.28); }
-    .world-map-panel { margin-top:12px; }
-    .map-explorer { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:12px; align-items:start; }
+    .world-map-panel { margin-top:10px; }
+    .map-explorer { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:10px; align-items:start; }
     .world-map { position:relative; min-height:380px; overflow:hidden; border:1px solid rgba(214,166,69,.34); background:#070604; box-shadow:inset 0 0 110px rgba(0,0,0,.66), inset 0 0 0 1px rgba(240,201,106,.05); touch-action:none; }
-    .map-workspace { display:grid; gap:12px; }
+    .map-workspace { display:grid; gap:10px; }
     .world-map.full { min-height:calc(100vh - 130px); }
     .world-map:fullscreen { width:100vw; height:100vh; min-height:100vh; background:#050503; }
     .overland-layer { position:absolute; inset:0; z-index:2; overflow:hidden; cursor:grab; }
@@ -9304,11 +9568,11 @@ function appPage() {
     .map-intel-card { border:1px solid rgba(214,166,69,.34); background:linear-gradient(180deg, rgba(6,8,5,.78), rgba(19,15,8,.7)); box-shadow:0 0 24px rgba(214,166,69,.1), inset 0 0 24px rgba(0,0,0,.36); padding:10px 12px; clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
     .map-intel-card strong { display:block; color:var(--gold-bright); font-size:18px; letter-spacing:.04em; }
     .map-intel-card span { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.1em; }
-    .map-intel-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }
+    .map-intel-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:10px; }
     .map-intel-tile { min-height:92px; border:1px solid rgba(214,166,69,.24); background:rgba(255,255,255,.025); padding:12px; clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
     .map-intel-tile strong { display:block; color:var(--gold-bright); font-size:22px; margin-top:5px; }
-    .map-region-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }
-    .operations-intel { position:sticky; top:86px; display:grid; gap:12px; }
+    .map-region-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:10px; }
+    .operations-intel { position:sticky; top:86px; display:grid; gap:10px; }
     .intel-stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
     .intel-stat { border:1px solid rgba(214,166,69,.22); background:rgba(255,255,255,.025); padding:10px; min-height:72px; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
     .intel-stat span { display:block; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
@@ -9326,13 +9590,187 @@ function appPage() {
     .live-map-canvas { position:relative; width:100%; height:auto; aspect-ratio:1 / 1; border:1px solid rgba(214,166,69,.34); background:#070604; overflow:hidden; }
     .live-map-canvas .leaflet-container { width:100%; height:100%; background:#070604; font:inherit; }
     .live-map-canvas .leaflet-control-attribution { display:none; }
-    .live-map-marker { border:1px solid currentColor; background:rgba(5,7,5,.88); box-shadow:0 0 14px currentColor; }
-    .live-map-marker.player { color:var(--good); border-radius:999px; }
+    .live-map-canvas { border-radius:28px; box-shadow:var(--shadow), inset 0 0 80px rgba(0,0,0,.38); }
+    .live-map-canvas .leaflet-control-zoom a { border:1px solid var(--line)!important; background:linear-gradient(180deg, var(--panel-2), var(--panel))!important; color:var(--gold-bright)!important; font-weight:900; }
+    .live-map-result-badge { position:absolute; z-index:650; left:50%; top:14px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; max-width:min(720px, calc(100% - 36px)); border:1px solid rgba(117,217,130,.55); border-radius:999px; padding:9px 13px; background:rgba(8,20,11,.86); color:var(--text); box-shadow:0 0 28px rgba(117,217,130,.18); font-size:12px; font-weight:900; pointer-events:none; transition:opacity .18s ease, transform .18s ease; }
+    .live-map-result-badge.hidden { opacity:0; transform:translate(-50%,-8px); }
+    .live-map-result-badge.fail { border-color:rgba(255,112,95,.65); background:rgba(34,9,8,.88); box-shadow:0 0 28px rgba(255,112,95,.18); }
+    .live-map-result-badge.working { border-color:rgba(255,189,94,.65); background:rgba(34,22,8,.88); box-shadow:0 0 28px rgba(255,189,94,.18); }
+    .live-map-result-badge .pulse-dot { width:10px; height:10px; border-radius:999px; background:var(--good); box-shadow:0 0 14px var(--good); flex:0 0 auto; }
+    .live-map-result-badge.fail .pulse-dot { background:var(--bad); box-shadow:0 0 14px var(--bad); }
+    .live-map-result-badge.working .pulse-dot { background:var(--warn); box-shadow:0 0 14px var(--warn); animation:pulse 1s ease-in-out infinite; }
+    .live-map-marker { border:2px solid currentColor; background:rgba(5,18,34,.92); box-shadow:0 0 14px currentColor; transition:filter .16s ease, box-shadow .16s ease, transform .16s ease; }
+    .live-map-marker.player { color:var(--blue); background:#1264b8; border-color:#8bc8ff; border-radius:999px; box-shadow:0 0 18px rgba(139,200,255,.75); }
+    .live-map-marker.selected { border-width:3px; border-color:#d9efff; box-shadow:0 0 0 9px rgba(18,100,184,.25),0 0 34px rgba(139,200,255,.9); filter:saturate(1.2) brightness(1.1); }
+    .live-map-marker.snapback { animation:liveSnapBack .72s ease-in-out; }
+    @keyframes liveSnapBack { 0%{filter:none;box-shadow:0 0 14px currentColor;} 35%{filter:saturate(1.5);box-shadow:0 0 0 12px rgba(255,112,95,.22),0 0 32px var(--bad);} 100%{filter:none;box-shadow:0 0 14px currentColor;} }
     .live-map-marker.pending { color:var(--warn); border-style:dashed; border-radius:999px; animation:pulse 1.2s ease-in-out infinite; }
-    .live-map-marker.vehicle { color:var(--blue); transform:rotate(45deg); }
-    .live-map-marker.base { color:var(--gold-bright); }
-    .live-map-panel { width:360px; min-width:0; display:grid; gap:12px; }
+    .live-map-marker.vehicle { color:#8bc8ff; background:#1b6daa; border-color:#b9dcff; transform:rotate(45deg); border-radius:4px; }
+    .live-map-marker.base { color:var(--gold-bright); background:var(--gold-bright); border-color:#fff0c7; border-radius:6px; box-shadow:0 0 14px rgba(243,204,140,.65); }
+    .live-map-cluster { width:46px; height:46px; border:2px solid rgba(255,240,199,.82); border-radius:999px; background:rgba(18,100,184,.84); color:var(--text); box-shadow:0 0 28px rgba(139,200,255,.45); display:grid; place-items:center; font-weight:1000; font-size:13px; }
+    .live-map-cluster.base { background:rgba(243,204,140,.84); color:#211408; box-shadow:0 0 28px rgba(243,204,140,.42); }
+    .live-map-cluster.vehicle { background:rgba(139,200,255,.78); color:#071019; }
+    .live-map-panel { width:360px; min-width:0; display:grid; gap:var(--panel-gap); }
     .live-map-layer-row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(214,166,69,.1); }
+    .live-map-filter-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px; }
+    .live-map-filter-chip { position:relative; display:inline-flex; align-items:center; justify-content:center; min-height:30px; padding:0 12px; border:1px solid rgba(224,173,99,.26); border-radius:999px; background:rgba(246,202,135,.055); color:var(--muted); cursor:pointer; user-select:none; text-transform:uppercase; letter-spacing:.08em; font-size:11px; font-weight:900; transition:background .14s ease, border-color .14s ease, color .14s ease, box-shadow .14s ease, transform .14s ease; }
+    .live-map-filter-icon { width:18px; height:18px; display:inline-grid; place-items:center; margin-right:7px; border:1px solid rgba(224,173,99,.24); border-radius:999px; background:rgba(0,0,0,.2); font-size:10px; line-height:1; box-shadow:inset 0 0 10px rgba(255,255,255,.025); }
+    .live-map-filter-chip input { position:absolute; opacity:0; pointer-events:none; width:1px; height:1px; }
+    .live-map-filter-chip:hover { transform:translateY(-1px); border-color:var(--line-strong); color:var(--text); }
+    .live-map-filter-chip:has(input:checked) { color:var(--text); border-color:var(--line-strong); box-shadow:0 0 16px rgba(246,202,135,.12); }
+    .live-map-filter-chip:has(input:checked) .live-map-filter-icon { border-color:currentColor; background:rgba(255,255,255,.08); box-shadow:0 0 10px currentColor; }
+    .live-map-filter-chip.players:has(input:checked) { color:#a9f5b2; border-color:rgba(117,217,130,.48); background:rgba(117,217,130,.12); box-shadow:0 0 16px rgba(117,217,130,.16); }
+    .live-map-filter-chip.bases:has(input:checked) { color:var(--gold-bright); border-color:rgba(246,202,135,.52); background:rgba(246,202,135,.13); box-shadow:0 0 16px rgba(246,202,135,.16); }
+    .live-map-filter-chip.vehicles:has(input:checked) { color:#b9dcff; border-color:rgba(139,200,255,.48); background:rgba(139,200,255,.12); box-shadow:0 0 16px rgba(139,200,255,.16); }
+    body.theme-royal #maps,
+    body.theme-royal #live-map,
+    body.theme-royal .map-explorer,
+    body.theme-royal .live-map-panel,
+    body.theme-royal .map-intel-overlay,
+    body.theme-royal .map-region-grid { color:#221914; }
+    body.theme-royal #maps .panel,
+    body.theme-royal #live-map .panel,
+    body.theme-royal .live-map-panel .panel,
+    body.theme-royal .map-intel-card,
+    body.theme-royal .map-region-card,
+    body.theme-royal .region-detail-panel,
+    body.theme-royal .map-intel-tile,
+    body.theme-royal .intel-stat { color:#221914; background:linear-gradient(180deg, rgba(255,250,238,.94), rgba(242,222,184,.86)); }
+    body.theme-royal #maps .label,
+    body.theme-royal #live-map .label,
+    body.theme-royal #maps .kicker,
+    body.theme-royal #live-map .kicker,
+    body.theme-royal #maps .micro,
+    body.theme-royal #live-map .micro,
+    body.theme-royal #maps .subtle,
+    body.theme-royal #live-map .subtle,
+    body.theme-royal .live-map-marker-label,
+    body.theme-royal .live-map-type-cell,
+    body.theme-royal .map-region-card .line,
+    body.theme-royal .map-metadata-note { color:#4f3b26; }
+    body.theme-royal #maps .value,
+    body.theme-royal #live-map .value,
+    body.theme-royal #maps strong,
+    body.theme-royal #live-map strong,
+    body.theme-royal .map-intel-card strong,
+    body.theme-royal .map-region-card h4,
+    body.theme-royal .map-region-card .line strong,
+    body.theme-royal .region-detail-panel h4,
+    body.theme-royal .live-map-type-icon { color:#221914; }
+    body.theme-royal #maps table,
+    body.theme-royal #live-map table,
+    body.theme-royal #maps td,
+    body.theme-royal #live-map td,
+    body.theme-royal #maps th,
+    body.theme-royal #live-map th,
+    body.theme-royal #mapLog,
+    body.theme-royal #liveMapLog,
+    body.theme-royal #teleportLog { color:#221914; }
+    body.theme-royal #maps input,
+    body.theme-royal #maps select,
+    body.theme-royal #maps button,
+    body.theme-royal #live-map input,
+    body.theme-royal #live-map select,
+    body.theme-royal #live-map button,
+    body.theme-royal .map-subnav button,
+    body.theme-royal .map-controls button { color:#221914; background:rgba(255,250,238,.82); border-color:rgba(105,73,32,.34); }
+    body.theme-royal .map-subnav button.active,
+    body.theme-royal .map-controls button:hover,
+    body.theme-royal #maps button:hover,
+    body.theme-royal #live-map button:hover { color:#221914; background:rgba(230,190,122,.44); border-color:rgba(105,73,32,.58); }
+    body.theme-royal .live-map-filter-chip { border-color:rgba(105,73,32,.34); background:rgba(255,250,238,.78); color:#221914; box-shadow:none; }
+    body.theme-royal .live-map-filter-icon { border-color:rgba(105,73,32,.38); background:rgba(255,255,255,.48); color:#221914; }
+    body.theme-royal .live-map-filter-chip:hover { border-color:rgba(105,73,32,.58); color:#221914; background:rgba(246,224,184,.9); }
+    body.theme-royal .live-map-filter-chip:has(input:checked) { color:#221914; border-color:rgba(105,73,32,.72); background:rgba(230,190,122,.48); box-shadow:0 0 14px rgba(117,78,28,.12); }
+    body.theme-royal .live-map-filter-chip.players:has(input:checked) { color:#143719; border-color:rgba(47,129,67,.58); background:rgba(182,220,169,.62); box-shadow:0 0 12px rgba(47,129,67,.12); }
+    body.theme-royal .live-map-filter-chip.bases:has(input:checked) { color:#4b2f0e; border-color:rgba(183,122,34,.68); background:rgba(232,198,130,.66); box-shadow:0 0 12px rgba(117,78,28,.12); }
+    body.theme-royal .live-map-filter-chip.vehicles:has(input:checked) { color:#20394b; border-color:rgba(64,103,130,.58); background:rgba(186,209,224,.66); box-shadow:0 0 12px rgba(64,103,130,.1); }
+    body.theme-royal .live-map-result-badge { color:#143719; background:rgba(236,248,230,.92); border-color:rgba(47,129,67,.44); }
+    body.theme-royal .live-map-result-badge.fail { color:#5b1d16; background:rgba(252,232,226,.94); border-color:rgba(180,59,44,.5); }
+    body.theme-royal .live-map-result-badge.working { color:#5b3712; background:rgba(255,242,212,.94); border-color:rgba(170,103,27,.5); }
+    body.theme-royal .map-deployment-panel {
+      border-color:rgba(145,94,30,.42);
+      background:
+        linear-gradient(180deg, rgba(255,251,241,.96), rgba(242,222,184,.88)),
+        radial-gradient(circle at 12% 0%, rgba(255,255,255,.58), transparent 36%);
+      box-shadow:0 18px 48px rgba(116,73,24,.16), inset 0 0 0 1px rgba(255,255,255,.45);
+    }
+    body.theme-royal .map-deployment-panel > summary {
+      color:#221914;
+      border-bottom:1px solid rgba(145,94,30,.22);
+      background:linear-gradient(90deg, rgba(230,190,122,.32), rgba(255,250,238,.22));
+    }
+    body.theme-royal .map-deployment-panel > summary::after { color:#6d4518; }
+    body.theme-royal .map-deployment-panel .progression-fold-body { padding:18px; }
+    body.theme-royal .map-deployment-panel .label {
+      color:#6d4518;
+      letter-spacing:.13em;
+    }
+    body.theme-royal .map-deployment-panel label {
+      color:#4f3b26;
+    }
+    body.theme-royal .map-deployment-panel select,
+    body.theme-royal .map-deployment-panel input {
+      color:#221914;
+      background:linear-gradient(180deg, rgba(255,253,247,.96), rgba(246,229,194,.86));
+      border-color:rgba(128,85,32,.42);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.65);
+    }
+    body.theme-royal .map-deployment-panel select:focus,
+    body.theme-royal .map-deployment-panel input:focus {
+      border-color:#8d5c21;
+      box-shadow:0 0 0 3px rgba(183,122,34,.16), inset 0 1px 0 rgba(255,255,255,.7);
+    }
+    body.theme-royal .map-deployment-panel .action-row button {
+      color:#221914;
+      background:linear-gradient(180deg, rgba(255,250,238,.95), rgba(230,190,122,.58));
+      border-color:rgba(128,85,32,.5);
+      box-shadow:0 8px 20px rgba(116,73,24,.1);
+    }
+    body.theme-royal .map-deployment-panel .action-row button:hover {
+      background:linear-gradient(180deg, rgba(255,253,247,.98), rgba(218,171,94,.68));
+      border-color:rgba(105,73,32,.72);
+    }
+    body.theme-royal .map-deployment-panel .action-row .primary {
+      color:#fff9ea !important;
+      background:linear-gradient(180deg, #9f681f, #6d4518) !important;
+      border-color:rgba(96,61,20,.82) !important;
+      box-shadow:0 10px 24px rgba(109,69,24,.2);
+    }
+    body.theme-royal .map-deployment-panel .grid.four .panel {
+      border-color:rgba(145,94,30,.28);
+      background:linear-gradient(180deg, rgba(255,253,247,.9), rgba(246,229,194,.72));
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.34), 0 10px 24px rgba(116,73,24,.08);
+    }
+    body.theme-royal .map-deployment-panel .grid.four .value {
+      color:#221914;
+    }
+    body.theme-royal .map-deployment-panel table {
+      border:1px solid rgba(145,94,30,.28);
+      background:rgba(255,253,247,.68);
+    }
+    body.theme-royal .map-deployment-panel th {
+      color:#6d4518;
+      background:rgba(230,190,122,.28);
+      border-bottom-color:rgba(145,94,30,.22);
+    }
+    body.theme-royal .map-deployment-panel td {
+      color:#221914;
+      border-bottom-color:rgba(145,94,30,.16);
+    }
+    body.theme-royal .map-deployment-panel tr:hover td {
+      background:rgba(230,190,122,.16);
+    }
+    body.theme-royal .map-deployment-panel td.ok {
+      color:#205f2d;
+      font-weight:900;
+    }
+    body.theme-royal .map-deployment-panel #mapLog {
+      color:#221914;
+      background:linear-gradient(180deg, rgba(255,253,247,.9), rgba(246,229,194,.72));
+      border-color:rgba(145,94,30,.3);
+      box-shadow:inset 0 0 18px rgba(145,94,30,.06);
+    }
     .live-map-log { max-height:180px; overflow:auto; }
     .live-map-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
     .live-map-marker-table { max-height:360px; overflow:auto; }
@@ -9340,9 +9778,21 @@ function appPage() {
     .live-map-marker-table tr { cursor:pointer; }
     .live-map-marker-table tr:hover { background:rgba(214,166,69,.08); }
     .live-map-marker-label { display:block; margin-top:2px; color:var(--muted); font-size:10.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .live-map-marker.player { width:16px !important; height:16px !important; }
+    .live-map-type-cell { display:inline-flex; align-items:center; gap:7px; text-transform:uppercase; letter-spacing:.05em; font-size:11px; font-weight:900; color:var(--muted); }
+    .live-map-type-icon { width:24px; height:24px; display:inline-grid; place-items:center; border:1px solid rgba(224,173,99,.26); border-radius:9px; background:rgba(246,202,135,.07); color:var(--gold-bright); box-shadow:inset 0 0 10px rgba(255,255,255,.025); }
+    .live-map-type-icon.player { color:var(--blue); border-color:rgba(139,200,255,.38); background:rgba(139,200,255,.1); }
+    .live-map-type-icon.vehicle { color:#b9dcff; border-color:rgba(139,200,255,.34); background:rgba(139,200,255,.08); }
+    .live-map-type-icon.base { color:var(--gold-bright); border-color:rgba(246,202,135,.42); background:rgba(246,202,135,.1); }
+    .live-map-marker.player { width:22px !important; height:22px !important; }
+    .live-map-marker.player.selected { width:30px !important; height:30px !important; }
     .live-map-marker.vehicle { width:16px !important; height:16px !important; }
     .live-map-marker.base { width:17px !important; height:17px !important; }
+    .live-map-teleport-toggle { display:flex; align-items:center; justify-content:space-between; gap:10px; border:1px solid rgba(224,173,99,.34); border-radius:16px; padding:10px 12px; background:rgba(255,255,255,.025); }
+    .live-map-teleport-toggle .switch { position:relative; width:48px; height:26px; border-radius:999px; background:rgba(117,217,130,.28); border:1px solid rgba(117,217,130,.6); flex:0 0 auto; }
+    .live-map-teleport-toggle .switch::after { content:""; position:absolute; right:3px; top:3px; width:18px; height:18px; border-radius:999px; background:var(--good); box-shadow:0 0 10px rgba(117,217,130,.55); transition:left .16s ease, right .16s ease, background .16s ease; }
+    .live-map-teleport-toggle input { position:absolute; opacity:0; pointer-events:none; }
+    .live-map-teleport-toggle:has(input:not(:checked)) .switch { background:rgba(255,112,95,.16); border-color:rgba(255,112,95,.42); }
+    .live-map-teleport-toggle:has(input:not(:checked)) .switch::after { right:25px; background:var(--bad); box-shadow:0 0 10px rgba(255,112,95,.48); }
     .live-map-coordinate-readout { position:absolute; z-index:600; right:12px; bottom:12px; border:1px solid rgba(214,166,69,.34); background:rgba(0,0,0,.62); color:var(--gold-bright); padding:7px 9px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; pointer-events:none; }
     .coordinate-card { display:grid; gap:7px; }
     .coordinate-pair { display:grid; grid-template-columns:44px minmax(0,1fr); gap:8px; align-items:center; color:var(--muted); }
@@ -9356,14 +9806,14 @@ function appPage() {
     .metric-tile .subtle { margin-top:8px; color:rgba(169,155,119,.74); font-size:11.5px; line-height:1.3; }
     .layout-2 { display:grid; grid-template-columns:minmax(300px,390px) minmax(0,1fr); gap:var(--panel-gap); align-items:start; }
     .layout-3 { display:grid; grid-template-columns:1.1fr .9fr; gap:var(--panel-gap); align-items:start; }
-    .controls, .action-row { display:flex; flex-wrap:wrap; gap:10px; }
-    .sound-widget { display:grid; gap:9px; margin-top:14px; padding:12px; border:1px solid rgba(214,166,69,.28); background:linear-gradient(180deg, rgba(240,201,106,.055), rgba(0,0,0,.18)); clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+    .controls, .action-row { display:flex; flex-wrap:wrap; gap:8px; }
+    .sound-widget { display:grid; gap:8px; margin-top:10px; padding:10px; border:1px solid rgba(214,166,69,.28); background:linear-gradient(180deg, rgba(240,201,106,.055), rgba(0,0,0,.18)); clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
     .sound-widget-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
     .sound-toggle { min-height:34px; padding:7px 11px; border-color:rgba(143,197,219,.42); color:var(--gold-bright); }
     .sound-slider { display:grid; grid-template-columns:auto minmax(120px,1fr) 46px; gap:10px; align-items:center; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.1em; }
     .sound-slider input[type="range"] { min-height:30px; padding:0; accent-color:var(--gold-bright); }
     .sound-volume-readout { color:var(--gold-bright); text-align:right; font-weight:900; }
-    .dashboard-footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid rgba(214,166,69,.16); color:var(--muted); font-size:12px; }
+    .dashboard-footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin-top:10px; padding-top:10px; border-top:1px solid rgba(214,166,69,.16); color:var(--muted); font-size:12px; }
     .dashboard-footer a, .support-links a { color:var(--gold-bright); overflow-wrap:anywhere; }
     .about-overlay { position:fixed; inset:0; z-index:5100; background:rgba(3,4,5,.76); backdrop-filter:blur(8px); display:grid; place-items:center; padding:20px; }
     .about-card { width:min(560px,100%); border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.94)); box-shadow:var(--shadow); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
@@ -9371,20 +9821,47 @@ function appPage() {
     .suite-modal-card { width:min(520px,100%); border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.96)); box-shadow:var(--shadow); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
     .suite-modal-card h3 { margin:0; font-size:18px; color:var(--gold-bright); letter-spacing:0; }
     .suite-modal-card p { margin:10px 0 0; color:var(--muted); line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; }
-    .suite-toast { position:fixed; right:20px; bottom:20px; z-index:7000; max-width:360px; padding:11px 14px; border:1px solid var(--line); background:rgba(8,10,7,.96); color:var(--text); box-shadow:var(--shadow); transition:opacity .18s ease, transform .18s ease; }
-    .suite-toast.hidden { display:block!important; opacity:0; transform:translateY(12px); pointer-events:none; }
+    .suite-toast { position:fixed; left:50%; top:50%; z-index:7000; width:min(420px, calc(100vw - 36px)); min-height:78px; display:flex; align-items:center; justify-content:center; gap:12px; padding:17px 20px; border:1px solid var(--line); border-radius:18px; background:linear-gradient(180deg, var(--panel-2), var(--panel)); color:var(--text); box-shadow:var(--shadow), 0 0 0 9999px rgba(0,0,0,.18); transform:translate(-50%,-50%) scale(1); text-align:center; font-size:16px; line-height:1.25; font-weight:900; letter-spacing:.02em; transition:opacity .18s ease, transform .18s ease; clip-path:none; }
+    .suite-toast::before { content:""; width:13px; height:13px; flex:0 0 auto; border-radius:999px; background:currentColor; box-shadow:0 0 16px currentColor; }
+    .suite-toast.hidden { display:flex!important; opacity:0; transform:translate(-50%,-42%) scale(.96); pointer-events:none; }
     .suite-toast.success { border-color:rgba(102,209,122,.7); color:var(--good); }
     .suite-toast.error { border-color:rgba(255,98,98,.7); color:var(--bad); }
+    .suite-toast.working { border-color:rgba(240,201,106,.7); color:var(--gold-bright); }
+    body.theme-royal .suite-toast { color:#221914; border-color:rgba(145,94,30,.42); background:linear-gradient(180deg, rgba(255,253,247,.98), rgba(242,222,184,.94)); box-shadow:0 24px 70px rgba(116,73,24,.24), inset 0 0 0 1px rgba(255,255,255,.5), 0 0 0 9999px rgba(74,43,12,.16); }
+    body.theme-royal .suite-toast.success { color:#205f2d; border-color:rgba(47,129,67,.46); background:linear-gradient(180deg, rgba(248,255,242,.98), rgba(226,242,205,.94)); }
+    body.theme-royal .suite-toast.error { color:#7d2d1f; border-color:rgba(180,59,44,.52); background:linear-gradient(180deg, rgba(255,248,244,.98), rgba(246,218,207,.94)); }
+    body.theme-royal .suite-toast.working { color:#6d4518; border-color:rgba(170,103,27,.5); background:linear-gradient(180deg, rgba(255,253,247,.98), rgba(246,229,194,.94)); }
+    .suite-action-center { position:fixed; right:20px; top:84px; z-index:6; width:min(360px, calc(100vw - 40px)); pointer-events:none; display:grid; gap:8px; }
+    .suite-action-card { pointer-events:auto; border:1px solid rgba(214,166,69,.32); background:linear-gradient(180deg, rgba(18,18,12,.96), rgba(6,8,5,.94)); box-shadow:0 18px 54px rgba(0,0,0,.32); padding:11px 12px; color:var(--text); clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); transition:opacity .18s ease, transform .18s ease; }
+    .suite-action-card.hidden { opacity:0; transform:translateY(-8px); pointer-events:none; }
+    .suite-action-card.working { border-color:rgba(240,201,106,.72); }
+    .suite-action-card.success { border-color:rgba(102,209,122,.72); }
+    .suite-action-card.error { border-color:rgba(255,98,98,.72); }
+    .suite-action-card strong { display:block; color:var(--gold-bright); font-size:13px; text-transform:uppercase; letter-spacing:.08em; }
+    .suite-action-card span { display:block; margin-top:4px; color:var(--muted); font-size:12px; line-height:1.35; }
+    .suite-action-card .mini-progress { height:2px; margin-top:9px; background:rgba(214,166,69,.16); overflow:hidden; }
+    .suite-action-card .mini-progress i { display:block; width:42%; height:100%; background:linear-gradient(90deg, transparent, var(--gold-bright), transparent); animation:actionSweep 1.1s linear infinite; }
+    .suite-action-card.success .mini-progress, .suite-action-card.error .mini-progress { display:none; }
+    @keyframes actionSweep { from { transform:translateX(-100%); } to { transform:translateX(260%); } }
+    button.action-working, .button.action-working { position:relative; color:var(--gold-bright)!important; border-color:var(--line-strong)!important; box-shadow:0 0 20px rgba(240,201,106,.16)!important; cursor:progress; }
+    button.action-working::after, .button.action-working::after { content:""; width:12px; height:12px; margin-left:8px; border:2px solid rgba(240,201,106,.28); border-top-color:var(--gold-bright); border-radius:999px; animation:spin .85s linear infinite; }
+    button.action-done, .button.action-done { border-color:rgba(102,209,122,.7)!important; color:var(--good)!important; }
+    button.action-failed, .button.action-failed { border-color:rgba(255,98,98,.7)!important; color:var(--bad)!important; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .suite-health-strip { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin:0 auto 12px; max-width:var(--content-max); }
+    .suite-health-card { border:1px solid rgba(214,166,69,.26); background:rgba(255,255,255,.025); padding:9px 10px; display:flex; align-items:center; justify-content:space-between; gap:10px; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .suite-health-card span { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.09em; font-weight:900; }
+    .suite-health-card strong { color:var(--gold-bright); font-size:12px; overflow-wrap:anywhere; text-align:right; }
     .inline-validation { min-height:18px; color:var(--warn); font-size:12px; line-height:1.35; }
-    .preset-actions { display:grid; gap:10px; margin-top:12px; }
-    .preset-name-row { display:grid; grid-template-columns:minmax(180px,1fr) auto; gap:10px; align-items:end; }
+    .preset-actions { display:grid; gap:8px; margin-top:10px; }
+    .preset-name-row { display:grid; grid-template-columns:minmax(180px,1fr) auto; gap:8px; align-items:end; }
     .give-layout { display:grid; grid-template-columns:minmax(250px,25fr) minmax(400px,45fr) minmax(300px,30fr); grid-template-areas:"form catalog presets"; gap:var(--panel-gap); align-items:start; }
     .give-form { grid-area:form; }
     .give-catalog { grid-area:catalog; }
     .give-sidebar { grid-area:presets; position:sticky; top:92px; max-height:calc(100vh - 112px); overflow:auto; display:flex; flex-direction:column; }
     .give-primary-actions { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:stretch; }
     .give-result { min-height:46px; display:flex; align-items:center; overflow-wrap:anywhere; }
-    .give-diagnostics { margin-top:12px; border-top:1px solid rgba(214,166,69,.16); padding-top:10px; }
+    .give-diagnostics { margin-top:10px; border-top:1px solid rgba(214,166,69,.16); padding-top:8px; }
     .give-diagnostics summary { cursor:pointer; color:var(--sand); text-transform:uppercase; letter-spacing:.08em; font-size:11px; font-weight:900; }
     .give-sidebar .preset-name-row { grid-template-columns:minmax(0,1fr) auto; }
     .give-sidebar textarea { min-height:120px; }
@@ -9399,18 +9876,112 @@ function appPage() {
     #giveQueueSummary { order:9; }
     #giveQueueLog { order:10; }
     body.simple-mode .unsupported-control { display:none !important; }
-    .support-links { display:grid; gap:8px; margin-top:12px; color:var(--muted); font-size:13px; }
-    .field-grid { display:grid; gap:10px; }
+    .support-links { display:grid; gap:8px; margin-top:10px; color:var(--muted); font-size:13px; }
+    .field-grid { display:grid; gap:8px; }
     label { display:grid; gap:6px; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
-    select, input, textarea { width:100%; min-height:44px; border:1px solid rgba(214,166,69,.34); border-radius:0; background:rgba(6,8,5,.9); color:var(--text); padding:0 12px; outline:none; }
+    select, input, textarea { width:100%; min-height:44px; border:1px solid rgba(224,173,99,.34); border-radius:14px; background:rgba(12,10,8,.72); color:var(--text); padding:0 12px; outline:none; }
     textarea { min-height:160px; padding:10px 12px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; line-height:1.35; }
     select:focus, input:focus, textarea:focus { border-color:var(--blue); box-shadow:0 0 0 3px rgba(114,164,242,.12); }
-    .button, .controls button, button { display:inline-flex; align-items:center; justify-content:center; min-height:38px; max-width:100%; border:1px solid rgba(214,166,69,.38); border-radius:0; background:linear-gradient(180deg, rgba(30,29,18,.95), rgba(10,12,8,.95)); color:var(--sand); padding:7px 13px; text-decoration:none; text-transform:uppercase; letter-spacing:.045em; font-size:var(--font-button); line-height:1.18; font-weight:760; text-align:center; white-space:normal; overflow-wrap:anywhere; }
+    .button, .controls button, button { display:inline-flex; align-items:center; justify-content:center; min-height:38px; max-width:100%; border:1px solid rgba(224,173,99,.42); border-radius:14px; background:linear-gradient(180deg, rgba(49,38,24,.92), rgba(16,12,8,.92)); color:var(--sand); padding:7px 13px; text-decoration:none; text-transform:uppercase; letter-spacing:.045em; font-size:var(--font-button); line-height:1.18; font-weight:760; text-align:center; white-space:normal; overflow-wrap:anywhere; }
     .primary { font-size:13px; }
     .panel-head button, .action-row button, .controls button, .setup-card button, .live-map-panel button, .settings-grid button, .vm-details button { font-size:12.5px; min-height:36px; padding:7px 12px; letter-spacing:.04em; }
     .panel-head button, .action-row button, .live-map-panel button, .settings-grid button, .vm-monitor-lists button, .dashboard-footer button { text-transform:none; }
     .primary { background:linear-gradient(180deg, rgba(159,111,38,.98), rgba(78,55,22,.98)) !important; border-color:rgba(240,201,106,.78) !important; color:#fff1c8 !important; box-shadow:0 0 24px rgba(240,201,106,.16); }
     .danger { background:linear-gradient(180deg, rgba(112,42,42,.98), rgba(63,25,25,.98)) !important; border-color:rgba(255,102,102,.5) !important; }
+    body.theme-royal select,
+    body.theme-royal input,
+    body.theme-royal textarea {
+      color:#221914;
+      background:linear-gradient(180deg, rgba(255,253,247,.97), rgba(246,229,194,.88));
+      border-color:rgba(128,85,32,.42);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.68), 0 8px 18px rgba(116,73,24,.06);
+    }
+    body.theme-royal select option {
+      color:#221914;
+      background:#fff8ea;
+    }
+    body.theme-royal select:focus,
+    body.theme-royal input:focus,
+    body.theme-royal textarea:focus {
+      border-color:#8d5c21;
+      box-shadow:0 0 0 3px rgba(183,122,34,.16), inset 0 1px 0 rgba(255,255,255,.72);
+    }
+    body.theme-royal button,
+    body.theme-royal .button,
+    body.theme-royal .controls button,
+    body.theme-royal .action-row button,
+    body.theme-royal .panel-head button,
+    body.theme-royal .settings-grid button,
+    body.theme-royal .vm-details button,
+    body.theme-royal .dashboard-footer button,
+    body.theme-royal .sidebar-foot button,
+    body.theme-royal .sidebar-links a {
+      color:#221914;
+      background:linear-gradient(180deg, rgba(255,250,238,.96), rgba(230,190,122,.58));
+      border-color:rgba(128,85,32,.5);
+      box-shadow:0 8px 20px rgba(116,73,24,.1), inset 0 1px 0 rgba(255,255,255,.62);
+    }
+    body.theme-royal button:hover,
+    body.theme-royal .button:hover,
+    body.theme-royal .controls button:hover,
+    body.theme-royal .action-row button:hover,
+    body.theme-royal .panel-head button:hover,
+    body.theme-royal .settings-grid button:hover,
+    body.theme-royal .vm-details button:hover,
+    body.theme-royal .dashboard-footer button:hover,
+    body.theme-royal .sidebar-foot button:hover,
+    body.theme-royal .sidebar-links a:hover {
+      color:#221914;
+      background:linear-gradient(180deg, rgba(255,253,247,.99), rgba(218,171,94,.68));
+      border-color:rgba(105,73,32,.72);
+      box-shadow:0 10px 24px rgba(116,73,24,.14), inset 0 1px 0 rgba(255,255,255,.7);
+    }
+    body.theme-royal .primary,
+    body.theme-royal button.primary,
+    body.theme-royal .action-row .primary {
+      color:#fff9ea !important;
+      background:linear-gradient(180deg, #9f681f, #6d4518) !important;
+      border-color:rgba(96,61,20,.82) !important;
+      box-shadow:0 10px 24px rgba(109,69,24,.2), inset 0 1px 0 rgba(255,255,255,.18);
+    }
+    body.theme-royal .primary:hover,
+    body.theme-royal button.primary:hover,
+    body.theme-royal .action-row .primary:hover {
+      color:#fff9ea !important;
+      background:linear-gradient(180deg, #b77a22, #7c501b) !important;
+      border-color:rgba(96,61,20,.9) !important;
+    }
+    body.theme-royal .danger,
+    body.theme-royal button.danger {
+      color:#fff8f5 !important;
+      background:linear-gradient(180deg, #b25a45, #773423) !important;
+      border-color:rgba(122,48,32,.72) !important;
+      box-shadow:0 10px 24px rgba(122,48,32,.16), inset 0 1px 0 rgba(255,255,255,.14);
+    }
+    body.theme-royal button:disabled,
+    body.theme-royal .button:disabled,
+    body.theme-royal input:disabled,
+    body.theme-royal select:disabled,
+    body.theme-royal textarea:disabled {
+      color:#8d7a60 !important;
+      background:rgba(232,216,187,.62) !important;
+      border-color:rgba(128,85,32,.2) !important;
+      box-shadow:none !important;
+      opacity:.78;
+    }
+    body.theme-royal .tab {
+      color:#4f3b26;
+      background:transparent;
+      border-color:transparent;
+      box-shadow:none;
+    }
+    body.theme-royal .tab:hover,
+    body.theme-royal .tab.active {
+      color:#221914;
+      background:rgba(230,190,122,.32);
+      border-color:rgba(128,85,32,.34);
+      box-shadow:inset 0 0 18px rgba(255,255,255,.28), 0 8px 18px rgba(116,73,24,.08);
+    }
     .player-list, .admin-items { display:grid; gap:8px; max-height:520px; overflow:auto; padding-right:4px; }
     .player-card, .admin-item { display:grid; grid-template-columns:46px minmax(0,1fr); gap:10px; align-items:center; width:100%; border:1px solid rgba(214,166,69,.24); border-radius:0; padding:10px; background:rgba(255,255,255,.025); color:var(--text); text-align:left; clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
     .player-card.active, .admin-item.active { border-color:var(--gold); background:rgba(217,178,111,.13); box-shadow:0 0 18px rgba(240,197,107,.08); }
@@ -9427,16 +9998,16 @@ function appPage() {
     .item-db-icon { width:52px; height:52px; display:grid; place-items:center; border:1px solid rgba(114,164,242,.24); border-radius:6px; background:#0b0e12; color:var(--blue); font-weight:900; }
     .item-db-icon img { width:48px; height:48px; object-fit:contain; }
     .item-db-meta { display:flex; flex-wrap:wrap; gap:6px; color:var(--muted); font-size:11.5px; line-height:1.3; margin-top:4px; }
-    .item-db-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:12px; }
-    .detail-list { display:grid; gap:8px; margin-top:12px; }
-    .detail-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:8px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); }
+    .item-db-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:10px; }
+    .detail-list { display:grid; gap:6px; margin-top:10px; }
+    .detail-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:8px; padding:7px 0; border-bottom:1px solid rgba(255,255,255,.06); }
     .env-stack { display:grid; gap:var(--panel-gap); max-width:var(--content-max); margin:0 auto; }
-    .env-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+    .env-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
     .env-card { min-width:0; border:1px solid rgba(214,166,69,.18); background:rgba(255,255,255,.022); padding:10px 12px; }
     .env-card span { display:block; color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.09em; line-height:1.25; }
     .env-card strong { display:block; margin-top:5px; color:var(--gold-bright); font-size:12.5px; line-height:1.35; overflow-wrap:anywhere; word-break:break-word; }
-    .env-var-list { display:grid; gap:8px; margin-top:12px; }
-    .env-var-row { display:grid; grid-template-columns:minmax(180px,.42fr) minmax(0,1fr); gap:12px; align-items:start; padding:10px 0; border-bottom:1px solid rgba(255,255,255,.06); min-width:0; }
+    .env-var-list { display:grid; gap:7px; margin-top:10px; }
+    .env-var-row { display:grid; grid-template-columns:minmax(180px,.42fr) minmax(0,1fr); gap:10px; align-items:start; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); min-width:0; }
     .env-var-name, .env-var-value, .env-path-value { font-family:ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; overflow-wrap:anywhere; word-break:break-word; }
     .env-var-name { color:var(--sand); font-size:12px; line-height:1.35; }
     .env-var-source { display:block; margin-top:4px; color:var(--muted); font-family:inherit; font-size:10.5px; line-height:1.3; text-transform:uppercase; letter-spacing:.075em; overflow-wrap:anywhere; }
@@ -9452,17 +10023,17 @@ function appPage() {
     .activity-item { border-left:2px solid var(--gold); padding:9px 11px; background:rgba(255,255,255,.025); border-radius:0; }
     .activity-time { color:var(--muted); font-size:12px; margin-bottom:3px; }
     .vm-monitor { grid-column:1/-1; }
-    .vm-monitor-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .vm-monitor-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
     .health-score { min-width:86px; text-align:right; }
     .health-score strong { display:block; color:var(--gold-bright); font-size:30px; line-height:1; }
-    .vm-status-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }
+    .vm-status-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:10px; }
     .vm-status-card { min-height:82px; border:1px solid rgba(214,166,69,.22); background:rgba(255,255,255,.025); padding:10px; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
     .vm-status-card span { display:block; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
     .vm-status-card strong { display:block; margin-top:6px; color:var(--gold-bright); font-size:18px; overflow-wrap:anywhere; }
     .vm-status-card.ok { border-color:rgba(89,213,139,.46); }
     .vm-status-card.warn { border-color:rgba(255,184,77,.5); }
     .vm-status-card.bad { border-color:rgba(255,102,102,.52); }
-    .vm-monitor-lists { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; }
+    .vm-monitor-lists { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }
     .vm-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); }
     .vm-row strong { overflow-wrap:anywhere; }
     .vm-row small { display:block; color:var(--muted); margin-top:2px; }
@@ -9470,14 +10041,42 @@ function appPage() {
     .status-pill.ok { color:var(--good); border-color:rgba(89,213,139,.46); background:rgba(89,213,139,.08); }
     .status-pill.warn { color:var(--warn); border-color:rgba(255,184,77,.5); background:rgba(255,184,77,.08); }
     .status-pill.bad { color:var(--bad); border-color:rgba(255,102,102,.52); background:rgba(255,102,102,.08); }
-    .restore-timeline { display:grid; gap:7px; margin-top:12px; }
+    .restore-timeline { display:grid; gap:7px; margin-top:10px; }
     .restore-step { display:flex; align-items:center; gap:9px; padding:7px 9px; border:1px solid rgba(214,166,69,.18); background:rgba(0,0,0,.18); color:var(--muted); font-size:12px; }
     .restore-step span { width:18px; color:currentColor; text-align:center; }
     .restore-step.ok { color:var(--good); border-color:rgba(89,213,139,.34); background:rgba(89,213,139,.06); }
     .restore-step.warn { color:var(--warn); border-color:rgba(255,184,77,.45); background:rgba(255,184,77,.08); }
     .restore-step.bad { color:var(--bad); border-color:rgba(255,102,102,.48); background:rgba(255,102,102,.08); }
-    .vm-details { margin-top:12px; border-top:1px solid rgba(214,166,69,.14); padding-top:10px; }
+    .vm-details { margin-top:10px; border-top:1px solid rgba(214,166,69,.14); padding-top:8px; }
     .vm-details summary { cursor:pointer; color:var(--sand); text-transform:uppercase; letter-spacing:.08em; font-size:12px; font-weight:900; }
+    .progression-shell { display:grid; gap:var(--panel-gap); }
+    .progression-hero { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; padding:2px 0 6px; }
+    .progression-hero h2 { margin:0; font-size:clamp(38px,5vw,64px); line-height:.95; letter-spacing:-.04em; color:var(--text); }
+    .progression-hero .subtle { max-width:720px; font-size:15px; }
+    .progression-profile-card { display:grid; grid-template-columns:118px minmax(0,1fr) auto; gap:18px; align-items:center; padding:20px; border:1px solid rgba(224,173,99,.38); border-radius:22px; background:linear-gradient(135deg, rgba(18,14,10,.94), rgba(10,8,5,.82)); box-shadow:0 24px 70px rgba(0,0,0,.25); }
+    .progression-avatar { width:116px; height:116px; border:1px solid rgba(240,201,106,.66); border-radius:24px; display:grid; place-items:center; color:var(--sand); background:radial-gradient(circle at 45% 38%, rgba(246,202,135,.14), rgba(0,0,0,.22)); font-size:58px; line-height:1; }
+    .progression-profile-name { margin:0; font-size:26px; line-height:1.1; color:var(--text); }
+    .progression-profile-meta { margin-top:8px; color:var(--muted); font-size:13px; }
+    .progression-bars { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin-top:26px; }
+    .progression-bar label { display:flex; justify-content:space-between; gap:8px; margin-bottom:7px; color:var(--sand); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+    .progression-meter { height:11px; border-radius:999px; overflow:hidden; background:rgba(255,255,255,.08); }
+    .progression-meter span { display:block; height:100%; width:var(--pct,35%); background:linear-gradient(90deg, var(--sand), var(--gold-bright)); box-shadow:0 0 18px rgba(240,201,106,.22); }
+    .progression-main-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(320px,.75fr); gap:var(--panel-gap); align-items:start; }
+    .progression-stack { display:grid; gap:var(--panel-gap); }
+    .progression-fold { border:1px solid rgba(224,173,99,.34); border-radius:22px; background:linear-gradient(180deg, rgba(18,14,10,.91), rgba(6,5,3,.76)); box-shadow:0 20px 60px rgba(0,0,0,.18); overflow:hidden; }
+    .progression-fold > summary { list-style:none; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 18px; color:var(--text); font-size:19px; font-weight:850; }
+    .progression-fold > summary::-webkit-details-marker { display:none; }
+    .progression-fold > summary::after { content:"⌄"; color:var(--gold-bright); font-size:18px; transition:transform .16s ease; }
+    .progression-fold[open] > summary::after { transform:rotate(180deg); }
+    .progression-fold-body { padding:0 18px 18px; }
+    .progression-editor-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .progression-recent-list { display:grid; gap:10px; }
+    .progression-recent-item { display:grid; grid-template-columns:42px minmax(0,1fr); gap:10px; align-items:start; padding:11px 0; border-bottom:1px solid rgba(214,166,69,.12); }
+    .progression-recent-time { width:42px; height:42px; border:1px solid rgba(240,201,106,.38); border-radius:999px; display:grid; place-items:center; color:var(--gold-bright); background:rgba(240,201,106,.06); font-size:12px; font-weight:900; text-transform:uppercase; }
+    .progression-recent-item strong { display:block; color:var(--text); }
+    .progression-recent-item span { display:block; margin-top:3px; color:var(--muted); font-size:12px; }
+    .progression-compact-support { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:12px; }
+    @media (max-width:1050px) { .progression-main-grid,.progression-profile-card{grid-template-columns:1fr}.progression-bars,.progression-editor-grid,.progression-compact-support{grid-template-columns:1fr}.progression-hero{align-items:flex-start;flex-direction:column}.progression-avatar{width:88px;height:88px;font-size:44px} }
     .ping-graph { display:flex; align-items:end; gap:3px; min-height:70px; margin-top:10px; padding:8px; border:1px solid rgba(214,166,69,.16); background:rgba(0,0,0,.22); }
     .ping-bar { flex:1; min-width:3px; max-width:9px; height:8px; background:var(--bad); opacity:.78; }
     .ping-bar.ok { background:var(--good); }
@@ -9495,6 +10094,31 @@ function appPage() {
     .feed-status.online { color:var(--good); }
     .feed-status.offline { color:var(--muted); }
     .feed-status.unknown { color:var(--warn); }
+    body.theme-royal #dashboard .subtle,
+    body.theme-royal #dashboard .micro,
+    body.theme-royal #dashboard .empty,
+    body.theme-royal #dashboard .metric-tile .subtle,
+    body.theme-royal #dashboard .activity-time,
+    body.theme-royal #dashboard .activity-item .subtle,
+    body.theme-royal #dashboard .vm-status-card span,
+    body.theme-royal #dashboard .vm-row small,
+    body.theme-royal #dashboard .feed-id,
+    body.theme-royal #dashboard .resource-row span,
+    body.theme-royal #dashboard .detail-row .subtle {
+      color:#4f3b26;
+    }
+    body.theme-royal #dashboard .label,
+    body.theme-royal #dashboard .panel-head .micro,
+    body.theme-royal #dashboard .resource-row,
+    body.theme-royal #dashboard .feed-level,
+    body.theme-royal #dashboard .feed-status.offline {
+      color:#6d4518;
+    }
+    body.theme-royal #dashboard .activity-item,
+    body.theme-royal #dashboard .feed-row,
+    body.theme-royal #dashboard .vm-row {
+      border-color:rgba(105,73,32,.2);
+    }
     table { width:100%; border-collapse:collapse; font-size:var(--font-table); line-height:1.35; }
     th, td { text-align:left; border-bottom:1px solid rgba(255,255,255,.08); padding:9px 8px; overflow-wrap:anywhere; }
     th { color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.07em; }
@@ -9534,7 +10158,7 @@ function appPage() {
     .test-result.bad { color:var(--bad); border-color:rgba(255,102,102,.52); }
     .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--panel-gap); }
     .diagnostic-log { min-height:220px; max-height:420px; overflow:auto; white-space:pre-wrap; }
-    .mt { margin-top:12px; } .mb { margin-bottom:12px; }
+    .mt { margin-top:8px; } .mb { margin-bottom:8px; }
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
@@ -9559,6 +10183,7 @@ function appPage() {
       <strong>Community &amp; Support</strong>
       <div>Discord: <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">https://discord.gg/tuUv3hYTv</a></div>
       <div>YouTube: <a href="https://www.youtube.com/@AlphanineGaming" target="_blank" rel="noopener">https://www.youtube.com/@AlphanineGaming</a></div>
+      <div>Twitch: <a href="https://www.twitch.tv/alphanine_gaming" target="_blank" rel="noopener">https://www.twitch.tv/alphanine_gaming</a></div>
     </div>
     <div class="legal-notice mt">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
   </div>
@@ -9574,6 +10199,13 @@ function appPage() {
   </div>
 </div>
 <div id="suiteToast" class="suite-toast hidden" role="status" aria-live="polite"></div>
+<div class="suite-action-center" aria-live="polite" aria-label="Current Suite action">
+  <div id="suiteActionCard" class="suite-action-card hidden">
+    <strong id="suiteActionTitle">Action received</strong>
+    <span id="suiteActionDetail">The Suite heard your click.</span>
+    <div class="mini-progress"><i></i></div>
+  </div>
+</div>
 <div id="setupWizard" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-label="AlphaNine Dune Suite setup wizard">
   <div class="setup-card">
     <div class="panel-head">
@@ -9695,23 +10327,39 @@ function appPage() {
       </div>
     </div>
     <nav class="nav">
-      <button class="tab active" data-view="dashboard">Dashboard</button>
-      <button class="tab" data-view="players">Players</button>
-      <button class="tab" data-view="give">Give Item</button>
-      <button class="tab" data-view="admin">Admin Tools</button>
-      <button class="tab" data-view="progression">Progression Inspector</button>
-      <button class="tab" data-view="database">Database</button>
-      <button class="tab" data-view="server">Server Control</button>
-      <button class="tab" data-view="live-map">Live Map</button>
-      <button class="tab" data-view="management">Server Management</button>
-      <button class="tab" data-view="item-database">Item Database</button>
-      <button class="tab" data-view="env">Env Setup</button>
-      <button class="tab advanced-only" data-view="logs">Logs</button>
-      <button class="tab advanced-only" data-view="diagnostics">Diagnostics</button>
-      <button class="tab" data-view="settings">Settings</button>
+      <div class="nav-group">
+        <div class="nav-group-title">Main</div>
+        <button class="tab active" data-view="dashboard">Dashboard</button>
+        <button class="tab" data-view="live-map">Live Map</button>
+        <button class="tab" data-view="players">Players</button>
+        <button class="tab" data-view="give">Give Item</button>
+        <button class="tab" data-view="progression">Progression Inspector</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">Server</div>
+        <button class="tab" data-view="server">Server Control</button>
+        <button class="tab" data-view="database">Database</button>
+        <button class="tab" data-view="management">Server Management</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">Tools</div>
+        <button class="tab" data-view="item-database">Item Database</button>
+        <button class="tab" data-view="settings">Settings</button>
+      </div>
+      <div class="nav-group advanced-nav">
+        <div class="nav-group-title">Advanced</div>
+        <button class="tab advanced-only" data-view="admin">Admin Tools</button>
+        <button class="tab advanced-only" data-view="env">Env Setup</button>
+        <button class="tab advanced-only" data-view="logs">Logs</button>
+        <button class="tab advanced-only" data-view="diagnostics">Diagnostics</button>
+      </div>
     </nav>
     <div class="sidebar-foot">
-      <button type="button" onclick="openAboutDialog()">About</button>
+      <button type="button" data-feedback-ignore="true" onclick="openAboutDialog()">About</button>
+      <div class="sidebar-links" aria-label="Community links">
+        <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">Discord Support</a>
+        <a href="https://ko-fi.com/E1W220NMPA" target="_blank" rel="noopener">Support on Ko-fi</a>
+      </div>
       <div class="legal-notice">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
     </div>
   </aside>
@@ -9725,6 +10373,15 @@ function appPage() {
         <label class="ui-mode-control">UI Mode
           <select id="headerUiMode" onchange="changeUiMode(this.value)"><option value="simple">Simple</option><option value="advanced">Advanced</option></select>
         </label>
+        <label class="ui-mode-control">Theme
+          <select id="headerTheme" onchange="changeTheme(this.value)">
+            <option value="gold">AlphaNine Gold</option>
+            <option value="command">Command Console</option>
+            <option value="purple">Purple Desert</option>
+            <option value="contrast">High Contrast</option>
+            <option value="royal">Royal Desert</option>
+          </select>
+        </label>
         <div class="status-strip">
           <span id="topServer" class="badge warn">Server checking</span>
           <span id="topDb" class="badge warn">DB checking</span>
@@ -9734,28 +10391,22 @@ function appPage() {
         </div>
       </div>
     </div>
+    <div class="suite-health-strip" aria-label="Suite health summary">
+      <div class="suite-health-card"><span>Suite</span><strong id="uxSuiteHealth">Online</strong></div>
+      <div class="suite-health-card"><span>Server</span><strong id="uxServerHealth">Checking</strong></div>
+      <div class="suite-health-card"><span>Database</span><strong id="uxDatabaseHealth">Checking</strong></div>
+      <div class="suite-health-card"><span>Last Action</span><strong id="uxLastAction">Ready</strong></div>
+    </div>
 
     <section id="dashboard" class="view active">
-      <div class="hero">
-        <div class="hero-body">
-          <div class="kicker">Server operations command</div>
-          <h3>Dune Awakening Server Operations Center</h3>
-          <p>Live status, VM control, player telemetry, grant transport, database health, receiver bridge, and audit visibility for SH-HAGGA BASIN.</p>
-        </div>
-        <div class="hero-actions" aria-label="Support links">
-          <button type="button" onclick="openSupportDiscord()">Discord Support</button>
-          <span class="kofi-widget-slot">
-            <script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script>
-            <script type='text/javascript'>if(window.kofiwidget2){kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'E1W220NMPA');kofiwidget2.draw();}</script>
-          </span>
-        </div>
-      </div>
+      <div class="hero" role="img" aria-label="AlphaNine Dune Suite banner"></div>
       <div class="grid">
-        <div class="panel pad metric-tile"><div class="label">VM Status</div><div id="dashboardVmStatus" class="value">Checking...</div><div class="subtle">Hyper-V VM state.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Server Population</div><div id="players" class="value">Checking...</div><div class="subtle">Current known player state.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Database Link</div><div id="adminDb" class="value">Checking...</div><div class="subtle">Postgres/admin probe.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Server</div><div id="dashboardVmStatus" class="value">Checking...</div><div class="subtle">VM and battlegroup readiness.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Players</div><div id="players" class="value">Checking...</div><div class="subtle">Known live population.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Database</div><div id="adminDb" class="value">Checking...</div><div class="subtle">Postgres/admin probe.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Receiver</div><div id="receiverState" class="value">Checking...</div><div class="subtle">Live command bridge.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Last Action</div><div id="dashboardLastAction" class="value">Ready</div><div class="subtle">Most recent Suite command.</div></div>
         <div class="panel pad metric-tile advanced-only"><div class="label">Give Transport</div><div id="adminLive" class="value">Checking...</div><div class="subtle">Runtime grant route.</div></div>
-        <div class="panel pad metric-tile advanced-only"><div class="label">Receiver Bridge</div><div id="receiverState" class="value">Checking...</div><div class="subtle">HTTP JSON receiver health.</div></div>
         <div class="panel pad metric-tile advanced-only"><div class="label">Queue Bridge</div><div id="rabbitState" class="value">Checking...</div><div class="subtle">RabbitMQ command target.</div></div>
       </div>
       <div class="dashboard-grid">
@@ -9772,7 +10423,7 @@ function appPage() {
           <div class="panel-head"><div class="label">Player Feed</div><div id="playerFeedStamp" class="micro">Loading</div></div>
           <div id="playerFeed" class="player-feed"><div class="empty">Loading players...</div></div>
         </div>
-        <div class="panel pad advanced-only">
+        <div class="panel pad advanced-only dashboard-activity">
           <div class="panel-head"><div class="label">Activity Feed</div><div class="micro">All events</div></div>
           <div id="activityFeed" class="activity"><div class="empty">Activity will appear after probes, refreshes, grants, and errors.</div></div>
         </div>
@@ -9859,18 +10510,23 @@ function appPage() {
           <div class="panel-head">
             <div><div class="label">Live Map</div><div id="liveMapStamp" class="micro">Hagga Basin DB overlay</div></div>
             <div class="live-map-toolbar">
+              <label>Map<select id="liveMapSelector" onchange="selectLiveMap(this.value)"><option value="HaggaBasin">Hagga Basin</option><option value="DeepDesert">Deep Desert</option></select></label>
               <label class="check-row"><input id="liveMapAutoRefresh" type="checkbox" checked>Auto-refresh</label>
               <button type="button" onclick="refreshLiveMap()">Refresh</button>
             </div>
           </div>
-          <div id="liveMapCanvas" class="live-map-canvas"></div>
+          <div id="liveMapCanvas" class="live-map-canvas">
+            <div id="liveMapResultBadge" class="live-map-result-badge hidden"><span class="pulse-dot"></span><span id="liveMapResultText">Last teleport result will appear here.</span></div>
+          </div>
         </div>
         <div class="live-map-panel">
           <div class="panel pad">
-            <div class="label">Layers</div>
-            <label class="live-map-layer-row"><span>Players</span><input id="liveLayerPlayers" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
-            <label class="live-map-layer-row"><span>Vehicles</span><input id="liveLayerVehicles" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
-            <label class="live-map-layer-row"><span>Bases</span><input id="liveLayerBases" type="checkbox" checked onchange="renderLiveMapLayers()"></label>
+            <div class="label">Filters</div>
+            <div class="live-map-filter-row" aria-label="Live map filters">
+              <label class="live-map-filter-chip players"><input id="liveLayerPlayers" type="checkbox" checked onchange="renderLiveMapLayers()"><span class="live-map-filter-icon">●</span><span>Players</span></label>
+              <label class="live-map-filter-chip bases"><input id="liveLayerBases" type="checkbox" checked onchange="renderLiveMapLayers()"><span class="live-map-filter-icon">◆</span><span>Bases</span></label>
+              <label class="live-map-filter-chip vehicles"><input id="liveLayerVehicles" type="checkbox" checked onchange="renderLiveMapLayers()"><span class="live-map-filter-icon">◇</span><span>Vehicles</span></label>
+            </div>
             <div id="liveMapBoundsWarning" class="warning mt hidden">Some markers are outside configured map bounds.</div>
             <div id="liveEntityAvailability" class="warning mt hidden"><span id="liveEntityAvailabilityText">Live Map data unavailable.</span><button id="liveMapRetryTunnel" type="button" class="mt hidden" onclick="retryLiveMapDatabaseTunnel()">Retry DB Tunnel</button></div>
           </div>
@@ -9889,24 +10545,13 @@ function appPage() {
               </table>
             </div>
           </div>
-          <div class="panel pad advanced-only">
-            <div class="label">Clicked World Coordinates</div>
-            <div class="coordinate-card mt">
-              <div class="coordinate-pair"><span>X</span><strong id="liveClickedX">--</strong></div>
-              <div class="coordinate-pair"><span>Y</span><strong id="liveClickedY">--</strong></div>
-              <button type="button" onclick="copyLiveCoordinates()">Copy Coordinates</button>
-            </div>
-          </div>
-          <div class="panel pad advanced-only">
-            <div class="label">Coordinate Search</div>
-            <div class="field-grid mt">
-              <label>X<input id="liveSearchX" type="number" step="0.01"></label>
-              <label>Y<input id="liveSearchY" type="number" step="0.01"></label>
-              <button type="button" class="primary" onclick="goToLiveCoordinates()">Go To</button>
-            </div>
-          </div>
           <div class="panel pad">
             <div class="label">Live Teleport</div>
+            <label class="live-map-teleport-toggle mt">
+              <span><strong>Enable drag-to-teleport</strong><span class="subtle">Drag a player marker, release, and the Suite sends live safe-ground teleport.</span></span>
+              <input id="liveMapDragTeleportToggle" type="checkbox" checked onchange="toggleDragTeleport(this.checked)">
+              <span class="switch" aria-hidden="true"></span>
+            </label>
             <div class="field-grid mt">
               <label>Player / Controller ID<input id="teleportPlayerId" placeholder="player_controller_id or account id"></label>
               <label class="advanced-only">X<input id="teleportX" type="number" step="0.01"></label>
@@ -9991,17 +10636,20 @@ function appPage() {
       <div class="give-layout">
         <div class="panel pad give-form">
           <div class="label">Give Item</div>
+          <div id="giveTargetSummary" class="user-summary-card mt">
+            <strong>Select player and item</strong>
+            <span>Choose a player, item, quantity, and mode before sending.</span>
+          </div>
           <div class="field-grid mt">
             <label>Player Search<input id="givePlayerSearch" placeholder="Search player or account" oninput="renderPlayerSelect()"></label>
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
-            <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1"></label>
+            <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1" oninput="updateGiveTargetSummary()"></label>
             <label id="adminQualityWrap" class="unsupported-control">Durability<input id="adminQuality" type="number" min="0" max="100" value="0" disabled oninput="syncQualityWarning()"></label>
             <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute">Live Give</option></select></label>
             <div class="give-primary-actions">
               <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
               <button id="addGiveQueueButton" onclick="addSelectedItemToGiveQueue()">Add to Queue</button>
             </div>
-            <div id="giveItemResult" class="empty give-result">Ready to give an item.</div>
           </div>
           <details class="advanced-only give-diagnostics">
             <summary>Troubleshooting and Status</summary>
@@ -10211,119 +10859,171 @@ DUNE_RECEIVER_SSH_KEY</pre>
     </section>
 
     <section id="progression" class="view">
-      <div class="grid four">
-        <div class="panel pad"><div class="label">Database</div><div id="progressionDbStatus" class="value">Checking...</div><div class="subtle">Progression metadata probe.</div></div>
-        <div class="panel pad"><div class="label">Safety</div><div id="progressionSafety" class="value">Read Only</div><div class="subtle">Live editing disabled.</div></div>
-        <div class="panel pad"><div class="label">Schema</div><div id="progressionSchema" class="value">Unknown</div><div class="subtle">Detected Dune schema signature.</div></div>
-        <div class="panel pad"><div class="label">Duration</div><div id="progressionDuration" class="value">--</div><div class="subtle">Metadata query time.</div></div>
-      </div>
-      <div class="panel pad mt advanced-only">
-        <div class="panel-head">
-          <div><div class="label">Progression / XP Reputation Inspector</div><div class="subtle">Read-only database metadata discovery. No SQL input and no write actions.</div></div>
-          <button type="button" onclick="refreshProgressionInspector()">Refresh Inspector</button>
-        </div>
-        <div id="progressionUnavailable" class="warning mt hidden">Progression database unavailable</div>
-        <div class="layout-3 mt">
+      <div class="progression-shell">
+        <div class="progression-hero">
           <div>
-            <div class="label">Support Detection</div>
-            <div id="progressionSupportList" class="detail-list mt"><div class="empty">Open or refresh the inspector.</div></div>
+            <div class="kicker">Player Progression</div>
+            <h2>Progression</h2>
+            <div class="subtle">Large player identity first, then focused foldable panels for lookup, XP, skill points, and diagnostics.</div>
           </div>
+          <button type="button" class="primary" onclick="refreshProgressionInspector()">Refresh Inspector</button>
+        </div>
+
+        <div class="progression-profile-card">
+          <div class="progression-avatar">☼</div>
           <div>
-            <div class="label">Safety Status</div>
-            <div id="progressionSafetyList" class="detail-list mt">
-              <div class="detail-row"><span class="subtle">Read-only mode</span><strong>Active</strong></div>
-              <div class="detail-row"><span class="subtle">Live editing</span><strong>Disabled</strong></div>
-              <div class="detail-row"><span class="subtle">Raw SQL input</span><strong>Disabled</strong></div>
+            <h3 id="progressionProfileName" class="progression-profile-name">No player selected</h3>
+            <div id="progressionProfileMeta" class="progression-profile-meta">Search for a player to load progression values.</div>
+            <div class="progression-bars" aria-label="Progression quick readout">
+              <div class="progression-bar"><label><span>XP</span><strong id="progressionProfileXp">--</strong></label><div class="progression-meter"><span id="progressionProfileXpMeter" style="--pct:0%"></span></div></div>
+              <div class="progression-bar"><label><span>Skill Points</span><strong id="progressionProfileSkill">--</strong></label><div class="progression-meter"><span id="progressionProfileSkillMeter" style="--pct:0%"></span></div></div>
+              <div class="progression-bar"><label><span>Knowledge</span><strong id="progressionProfileKnowledge">--</strong></label><div class="progression-meter"><span id="progressionProfileKnowledgeMeter" style="--pct:0%"></span></div></div>
             </div>
           </div>
-          <div>
-            <div class="label">Schema Signature</div>
-            <pre id="progressionSignature" class="mt">Not loaded.</pre>
+          <div class="progression-compact-support">
+            <span id="progressionDbStatus" class="badge warn">Checking DB</span>
+            <span id="progressionSafety" class="badge ok">Read Only</span>
+            <span id="progressionSchema" class="badge warn">Schema Unknown</span>
+            <span id="progressionDuration" class="badge warn">--</span>
           </div>
         </div>
-      </div>
-      <div class="panel pad mt">
-        <div class="panel-head">
-          <div><div class="label">Read-Only Player Lookup</div><div class="subtle">Search by character name, player name, actor id, or player id when available.</div></div>
-          <span class="badge ok">Read-only</span>
-        </div>
-        <div class="field-grid mt">
-          <label>Player Search<input id="progressionPlayerQuery" placeholder="Character name, actor id, player id"></label>
-          <button type="button" class="primary" onclick="lookupProgressionPlayer()">Lookup Player</button>
-        </div>
-        <div id="progressionPlayerStatus" class="empty mt">No player lookup has been run.</div>
-        <div class="layout-3 mt">
-          <div>
-            <div class="label">Player Identity</div>
-            <div id="progressionPlayerIdentity" class="detail-list mt"><div class="empty">No player selected.</div></div>
+
+        <div id="progressionUnavailable" class="warning hidden">Progression database unavailable</div>
+
+        <div class="progression-main-grid">
+          <div class="progression-stack">
+            <details class="progression-fold" open>
+              <summary>Player Lookup</summary>
+              <div class="progression-fold-body">
+                <div class="subtle">Search by character name, player name, actor id, or player id when available.</div>
+                <div class="field-grid mt">
+                  <label>Player Search<input id="progressionPlayerQuery" placeholder="Character name, actor id, player id"></label>
+                  <button type="button" class="primary" onclick="lookupProgressionPlayer()">Lookup Player</button>
+                </div>
+                <div id="progressionPlayerStatus" class="empty mt">No player lookup has been run.</div>
+                <details class="vm-details mt">
+                  <summary>Loaded Player Details</summary>
+                  <div class="layout-3 mt">
+                    <div>
+                      <div class="label">Player Identity</div>
+                      <div id="progressionPlayerIdentity" class="detail-list mt"><div class="empty">No player selected.</div></div>
+                    </div>
+                    <div>
+                      <div class="label">Character XP</div>
+                      <div id="progressionCharacterXp" class="detail-list mt"><div class="empty">No character XP loaded.</div></div>
+                    </div>
+                    <div>
+                      <div class="label">Warnings</div>
+                      <div id="progressionPlayerWarnings" class="detail-list mt"><div class="empty">No warnings.</div></div>
+                    </div>
+                  </div>
+                </details>
+              </div>
+            </details>
+
+            <details class="progression-fold danger-zone" open>
+              <summary>Progression Editing</summary>
+              <div class="progression-fold-body">
+                <div class="warning">Live progression editing can corrupt player data. Generate Preview creates a backup first, then Apply requires confirmation.</div>
+                <div class="field-grid mt">
+                  <input id="progressionAction" type="hidden" value="character_xp_skill_points">
+                  <div class="progression-editor-grid">
+                    <label class="progression-edit-field progression-character">Total XP Earned<input id="progressionTotalXp" type="number" min="0" max="999999999" step="1" value="0"></label>
+                    <label class="progression-edit-field progression-character">Total Skill Points<input id="progressionTotalSkillPoints" type="number" min="0" max="999" step="1" value="0"></label>
+                    <label class="progression-edit-field progression-character">Unspent Skill Points<input id="progressionUnspentSkillPoints" type="number" min="0" max="999" step="1" value="0"></label>
+                    <label class="progression-edit-field progression-character">Tech Knowledge Points<input id="progressionTechKnowledgePoints" type="number" min="0" step="1" value="0"></label>
+                  </div>
+                  <label class="check-row progression-edit-field progression-character advanced-only"><input id="progressionAdvancedOverride" type="checkbox"> Advanced override: allow UnspentSkillPoints above TotalSkillPoints</label>
+                  <div class="action-row">
+                    <button type="button" onclick="previewProgressionApply()">Generate Preview + Backup</button>
+                    <button type="button" class="danger" onclick="applyProgressionLive()">Apply Live Change</button>
+                  </div>
+                  <label>Type APPLY PROGRESSION<input id="progressionConfirmText" placeholder="APPLY PROGRESSION"></label>
+                </div>
+                <details class="vm-details mt">
+                  <summary>Preview, Backup, and Apply Log</summary>
+                  <pre id="progressionPreviewLog" class="mt">No live progression preview generated.</pre>
+                </details>
+              </div>
+            </details>
+
+            <details class="progression-fold">
+              <summary>Specialization and Reputation</summary>
+              <div class="progression-fold-body">
+                <div class="layout-2">
+                  <div>
+                    <div class="label">Specialization Tracks</div>
+                    <table class="mt">
+                      <thead><tr><th>Track</th><th>XP</th><th>Level</th></tr></thead>
+                      <tbody id="progressionSpecRows"><tr><td colspan="3">No player loaded.</td></tr></tbody>
+                    </table>
+                  </div>
+                  <div>
+                    <div class="label">Faction Reputation</div>
+                    <table class="mt">
+                      <thead><tr><th>Faction ID</th><th>Reputation</th></tr></thead>
+                      <tbody id="progressionFactionRows"><tr><td colspan="2">No player loaded.</td></tr></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </details>
           </div>
-          <div>
-            <div class="label">Character XP</div>
-            <div id="progressionCharacterXp" class="detail-list mt"><div class="empty">No character XP loaded.</div></div>
+
+          <div class="progression-stack">
+            <div class="panel pad">
+              <div class="label">Recent Progression Changes</div>
+              <div id="progressionRecentChanges" class="progression-recent-list mt">
+                <div class="progression-recent-item"><div class="progression-recent-time">--</div><div><strong>No changes yet</strong><span>Preview or apply a progression change to see it here.</span></div></div>
+              </div>
+            </div>
+
+            <details class="progression-fold advanced-only">
+              <summary>Inspector Diagnostics</summary>
+              <div class="progression-fold-body">
+                <div class="label">Support Detection</div>
+                <div id="progressionSupportList" class="detail-list mt"><div class="empty">Open or refresh the inspector.</div></div>
+                <div class="label mt">Safety Status</div>
+                <div id="progressionSafetyList" class="detail-list mt">
+                  <div class="detail-row"><span class="subtle">Read-only mode</span><strong>Active</strong></div>
+                  <div class="detail-row"><span class="subtle">Live editing</span><strong>Disabled</strong></div>
+                  <div class="detail-row"><span class="subtle">Raw SQL input</span><strong>Disabled</strong></div>
+                </div>
+                <div class="label mt">Schema Signature</div>
+                <pre id="progressionSignature" class="mt">Not loaded.</pre>
+                <div class="label mt">Character XP Detection Debug</div>
+                <div id="progressionCharacterDebug" class="detail-list mt"><div class="empty">Run a player lookup to inspect actor/entity component paths.</div></div>
+              </div>
+            </details>
           </div>
-          <div>
-            <div class="label">Warnings</div>
-            <div id="progressionPlayerWarnings" class="detail-list mt"><div class="empty">No warnings.</div></div>
+        </div>
+
+        <details class="progression-fold advanced-only">
+          <summary>Detected Tables, Functions, and Columns</summary>
+          <div class="progression-fold-body">
+            <div class="layout-2">
+              <div>
+                <div class="label">Detected Progression Tables</div>
+                <table class="mt">
+                  <thead><tr><th>Schema</th><th>Table</th><th>Status</th></tr></thead>
+                  <tbody id="progressionTableRows"><tr><td colspan="3">Not loaded.</td></tr></tbody>
+                </table>
+              </div>
+              <div>
+                <div class="label">Detected Progression Functions</div>
+                <table class="mt">
+                  <thead><tr><th>Schema</th><th>Function</th><th>Arguments</th><th>Status</th></tr></thead>
+                  <tbody id="progressionFunctionRows"><tr><td colspan="4">Not loaded.</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="label mt">XP / Reputation Related Columns</div>
+            <table class="mt">
+              <thead><tr><th>Table</th><th>Column</th><th>Type</th><th>Status</th></tr></thead>
+              <tbody id="progressionColumnRows"><tr><td colspan="4">Not loaded.</td></tr></tbody>
+            </table>
           </div>
-        </div>
-        <div class="label mt advanced-only">Character XP Detection Debug</div>
-        <div id="progressionCharacterDebug" class="detail-list mt advanced-only"><div class="empty">Run a player lookup to inspect actor/entity component paths.</div></div>
-      </div>
-      <div class="panel pad mt">
-        <div class="label">Character EXP / Skill Point Editing</div>
-        <div class="warning mt">Live progression editing can corrupt player data. Backup first.</div>
-        <div class="subtle mt">Generate Preview creates a read-only backup and old/new summary. Apply is blocked unless Settings enables progression editing, the player is offline, detected JSON paths are valid, and you type APPLY PROGRESSION.</div>
-        <div class="field-grid mt">
-          <input id="progressionAction" type="hidden" value="character_xp_skill_points">
-          <label class="progression-edit-field progression-character">Total XP Earned<input id="progressionTotalXp" type="number" min="0" max="999999999" step="1" value="0"></label>
-          <label class="progression-edit-field progression-character">Total Skill Points<input id="progressionTotalSkillPoints" type="number" min="0" max="999" step="1" value="0"></label>
-          <label class="progression-edit-field progression-character">Unspent Skill Points<input id="progressionUnspentSkillPoints" type="number" min="0" max="999" step="1" value="0"></label>
-          <label class="progression-edit-field progression-character">Tech Knowledge Points<input id="progressionTechKnowledgePoints" type="number" min="0" step="1" value="0"></label>
-          <label class="check-row progression-edit-field progression-character advanced-only"><input id="progressionAdvancedOverride" type="checkbox"> Advanced override: allow UnspentSkillPoints above TotalSkillPoints</label>
-          <button type="button" onclick="previewProgressionApply()">Generate Preview + Backup</button>
-          <label>Type APPLY PROGRESSION<input id="progressionConfirmText" placeholder="APPLY PROGRESSION"></label>
-          <button type="button" class="danger" onclick="applyProgressionLive()">Apply Live Change</button>
-        </div>
-        <pre id="progressionPreviewLog" class="mt">No live progression preview generated.</pre>
-      </div>
-      <div class="layout-2 mt advanced-only">
-        <div class="panel pad">
-          <div class="label">Detected Progression Tables</div>
-          <table class="mt">
-            <thead><tr><th>Schema</th><th>Table</th><th>Status</th></tr></thead>
-            <tbody id="progressionTableRows"><tr><td colspan="3">Not loaded.</td></tr></tbody>
-          </table>
-        </div>
-        <div class="panel pad">
-          <div class="label">Detected Progression Functions</div>
-          <table class="mt">
-            <thead><tr><th>Schema</th><th>Function</th><th>Arguments</th><th>Status</th></tr></thead>
-            <tbody id="progressionFunctionRows"><tr><td colspan="4">Not loaded.</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="panel pad mt advanced-only">
-        <div class="label">XP / Reputation Related Columns</div>
-        <table class="mt">
-          <thead><tr><th>Table</th><th>Column</th><th>Type</th><th>Status</th></tr></thead>
-          <tbody id="progressionColumnRows"><tr><td colspan="4">Not loaded.</td></tr></tbody>
-        </table>
-      </div>
-      <div class="layout-2 mt">
-        <div class="panel pad">
-          <div class="label">Specialization Tracks</div>
-          <table class="mt">
-            <thead><tr><th>Track</th><th>XP</th><th>Level</th></tr></thead>
-            <tbody id="progressionSpecRows"><tr><td colspan="3">No player loaded.</td></tr></tbody>
-          </table>
-        </div>
-        <div class="panel pad">
-          <div class="label">Faction Reputation</div>
-          <table class="mt">
-            <thead><tr><th>Faction ID</th><th>Reputation</th></tr></thead>
-            <tbody id="progressionFactionRows"><tr><td colspan="2">No player loaded.</td></tr></tbody>
-          </table>
-        </div>
+        </details>
       </div>
     </section>
 
@@ -10333,6 +11033,30 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel pad"><div class="label">Battlegroup</div><div id="battlegroup" class="value">Checking...</div></div>
         <div class="panel pad"><div class="label">Database</div><div id="sdb" class="value">Checking...</div></div>
         <div class="panel pad"><div class="label">Uptime</div><div id="suptime" class="value">Checking...</div></div>
+      </div>
+      <div class="page-section-title">Server Power Controls</div>
+      <div class="panel pad">
+        <div class="panel-head">
+          <div>
+            <div class="label">Battlegroup Actions</div>
+            <div class="subtle">Primary live server controls. Use Stop/Restart only when players are prepared.</div>
+          </div>
+          <button onclick="refresh()">Refresh</button>
+        </div>
+        <div class="primary-action-row mt">
+          <button class="primary" onclick="act('start')">Start Server</button>
+          <button onclick="act('restart')">Restart Server</button>
+          <button class="danger" onclick="act('stop')">Stop Server</button>
+        </div>
+        <div class="page-section-title">Maintenance</div>
+        <div class="controls mt">
+          <button onclick="act('backup')">Backup</button>
+          <button onclick="act('update')">Update</button>
+          <button onclick="openDirector()">Open Director</button>
+          <button onclick="act('logs-export')">Export Logs</button>
+          <button onclick="act('operator-logs-export')">Export Operator Logs</button>
+        </div>
+        <pre id="serverLog" class="mt advanced-only">Ready.</pre>
       </div>
       <div class="panel pad mt">
         <div class="panel-head">
@@ -10354,22 +11078,9 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="subtle mt advanced-only"><a href="https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/manage/manage-hyper-v-hosts" target="_blank" rel="noopener">How to fix Hyper-V permissions</a></div>
         <pre id="vmControlLog" class="mt advanced-only">Ready.</pre>
       </div>
-      <div class="panel pad mt">
-        <div class="label">Battlegroup Actions</div>
-        <div class="controls mt">
-          <button onclick="refresh()">Refresh</button>
-          <button class="primary" onclick="act('start')">Start Server</button>
-          <button onclick="act('restart')">Restart Server</button>
-          <button class="danger" onclick="act('stop')">Stop Server</button>
-          <button onclick="act('backup')">Backup</button>
-          <button onclick="act('update')">Update</button>
-          <button onclick="openDirector()">Open Director</button>
-          <button onclick="act('logs-export')">Export Logs</button>
-          <button onclick="act('operator-logs-export')">Export Operator Logs</button>
-        </div>
-        <pre id="serverLog" class="mt advanced-only">Ready.</pre>
-      </div>
-      <div class="panel pad mt">
+      <details class="progression-fold map-deployment-panel advanced-only mt">
+        <summary>Map Deployment</summary>
+        <div class="progression-fold-body">
         <div class="label">Map Deployment</div>
         <div class="layout-2 mt">
           <div class="field-grid">
@@ -10387,11 +11098,12 @@ DUNE_RECEIVER_SSH_KEY</pre>
           </div>
         </div>
         <table class="mt advanced-only">
-          <thead><tr><th>Map</th><th>Type</th><th>Wanted</th><th>Running</th><th>Memory</th></tr></thead>
-          <tbody id="mapRows"><tr><td colspan="5">Loading maps...</td></tr></tbody>
+          <thead><tr><th>Map</th><th>Type</th><th>Wanted</th><th>Running</th><th>Memory</th><th>Partitions</th></tr></thead>
+          <tbody id="mapRows"><tr><td colspan="6">Loading maps...</td></tr></tbody>
         </table>
         <pre id="mapLog" class="mt advanced-only">Ready.</pre>
-      </div>
+        </div>
+      </details>
     </section>
 
     <section id="database" class="view">
@@ -10413,7 +11125,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
       </div>
       <div class="layout-3 mt">
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Battlegroup Backup</div><div class="subtle">Create a backup using the Dune Self-Hosting Battlegroup backup mechanism.</div></div></div>
+          <div class="panel-head"><div><div class="label">Backup Manager</div><div class="subtle">Create and manage safe Battlegroup backups before risky changes.</div></div></div>
           <div class="action-row mt">
             <button class="primary" onclick="createDatabaseBackup()">Create Backup</button>
             <button onclick="createSafetyBackupOnly()">Create Safety Backup Only</button>
@@ -10421,8 +11133,8 @@ DUNE_RECEIVER_SSH_KEY</pre>
           </div>
           <div id="dbBackupResult" class="empty mt">No backup created in this session.</div>
         </div>
-        <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Import Battlegroup Backup</div><div class="subtle">Import requires the server to be stopped, IMPORT confirmation, and a safety Battlegroup backup first.</div></div></div>
+        <div class="panel pad danger-zone">
+          <div class="panel-head"><div><div class="label">Import / Restore Danger Zone</div><div class="subtle">Import can overwrite live server data. Stop the server and confirm the exact backup first.</div></div></div>
           <div class="field-grid">
             <label>Backup File<input id="dbRestoreFile" placeholder="Choose a Battlegroup .zip, .tar, .backup, .bgbackup, or metadata .json file"></label>
             <label>Confirmation<input id="dbRestoreConfirm" placeholder="Type IMPORT before importing"></label>
@@ -10705,6 +11417,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div class="label">App Preferences</div>
           <div class="field-grid mt">
             <label>UI Mode<select id="settingsUiMode" onchange="changeUiMode(this.value)"><option value="simple">Simple</option><option value="advanced">Advanced</option></select></label>
+            <label>Theme<select id="settingsTheme" onchange="changeTheme(this.value)"><option value="gold">AlphaNine Gold</option><option value="command">Command Console</option><option value="purple">Purple Desert</option><option value="contrast">High Contrast</option><option value="royal">Royal Desert</option></select></label>
             <label class="check-row"><input id="uiSoundsEnabled" type="checkbox">Enable UI Sounds</label>
             <label>UI Sound Volume <span id="uiSoundVolumeLabel" class="micro">100%</span><input id="uiSoundVolume" type="range" min="0" max="100" value="100"></label>
             <div id="uiSoundStatus" class="empty">Sounds ON. Volume 100%.</div>
@@ -10743,21 +11456,33 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
-async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setText("settingsSaveStatus",betterError(error));}}
+async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
 async function deleteTeleportPreset(){const select=document.getElementById("teleportPreset");const preset=select&&select.value!==""?liveTeleportPresets[Number(select.value)]:null;try{if(!preset)throw new Error("Choose a saved location first.");if(!(await appConfirm("Delete saved location","Delete '"+preset.name+"'?","Delete","Cancel")))return;const data=await getJson("/api/live-map/teleport/presets?name="+encodeURIComponent(preset.name),{method:"DELETE"});await loadTeleportPresets();setText("savedLocationStatus",data.message||"Saved location deleted.");showToast(data.message||"Saved location deleted.","success");playUiSound("success");}catch(error){setText("savedLocationStatus",betterError(error));showToast(betterError(error),"error");playUiSound("warning");}}
 async function teleportToSavedLocation(){const select=document.getElementById("teleportPreset");try{if(!select||select.value==="")throw new Error("Choose a saved location first.");applyTeleportPreset();await executeLiveTeleport(false);}catch(error){setText("savedLocationStatus",betterError(error));showToast(betterError(error),"error");}}
 function appConfirm(title,message,okText="Continue",cancelText="Cancel"){return new Promise(resolve=>{const dialog=document.getElementById("suiteConfirmDialog");const titleEl=document.getElementById("suiteConfirmTitle");const messageEl=document.getElementById("suiteConfirmMessage");const ok=document.getElementById("suiteConfirmOk");const cancel=document.getElementById("suiteConfirmCancel");if(!dialog||!ok||!cancel){resolve(false);return;}titleEl.textContent=title||"Confirm";messageEl.textContent=message||"";ok.textContent=okText;cancel.textContent=cancelText;const cleanup=result=>{dialog.classList.add("hidden");ok.onclick=null;cancel.onclick=null;document.removeEventListener("keydown",onKey,true);resolve(result);};const onKey=event=>{if(event.key==="Escape")cleanup(false);if(event.key==="Enter")cleanup(true);};ok.onclick=()=>cleanup(true);cancel.onclick=()=>cleanup(false);document.addEventListener("keydown",onKey,true);dialog.classList.remove("hidden");ok.focus();});}
-let suiteToastTimer=null;function showToast(message,kind="success"){const toast=document.getElementById("suiteToast");if(!toast)return;window.clearTimeout(suiteToastTimer);toast.textContent=String(message||"");toast.className="suite-toast "+(kind==="error"?"error":"success");suiteToastTimer=window.setTimeout(()=>toast.classList.add("hidden"),3200);}
+let suiteToastTimer=null,suiteActionTimer=null;function setUxText(id,value){const el=document.getElementById(id);if(el)el.textContent=String(value||"");}
+function normalizeActionKind(kind){const text=String(kind||"").toLowerCase();if(text==="error"||text==="bad"||text==="failed")return"error";if(text==="working"||text==="warn"||text==="pending")return"working";return"success";}
+function setActionCenter(title,detail,kind="working"){const card=document.getElementById("suiteActionCard");if(!card)return;const normalized=normalizeActionKind(kind);const titleEl=document.getElementById("suiteActionTitle");const detailEl=document.getElementById("suiteActionDetail");if(titleEl)titleEl.textContent=String(title||"Action received");if(detailEl)detailEl.textContent=String(detail||"The Suite heard your click.");card.className="suite-action-card "+normalized;clearActionCenterSoon(4000);}
+function clearActionCenterSoon(delay=4000){const card=document.getElementById("suiteActionCard");if(!card)return;window.clearTimeout(suiteActionTimer);suiteActionTimer=window.setTimeout(()=>card.classList.add("hidden"),delay);}
+function showToast(message,kind="success"){const toast=document.getElementById("suiteToast");if(!toast)return;const normalized=normalizeActionKind(kind);window.clearTimeout(suiteToastTimer);toast.textContent=String(message||"");toast.className="suite-toast "+normalized;setActionCenter(normalized==="error"?"Action needs attention":normalized==="working"?"Working":"Action complete",String(message||""),normalized);suiteToastTimer=window.setTimeout(()=>toast.classList.add("hidden"),4000);}
+function buttonActionLabel(button){if(!button)return"";const explicit=button.getAttribute("aria-label")||button.getAttribute("title")||button.dataset.actionLabel;if(explicit)return explicit.trim();const open=button.dataset.open;if(open)return"Open "+open.replace(/-/g," ");const text=(button.textContent||"").replace(/\s+/g," ").trim();return text.slice(0,90);}
+function registerActionFeedback(){document.addEventListener("click",event=>{const button=event.target.closest("button");if(!button||button.disabled||button.dataset.feedbackIgnore==="true"||button.closest("#suiteConfirmDialog")||button.closest("#aboutDialog"))return;const onclick=String(button.getAttribute("onclick")||"");if(/openAboutDialog|openSupportDiscord|openSupportKofi/i.test(onclick))return;const label=buttonActionLabel(button);if(!label)return;setUxText("uxLastAction",label);setActionCenter("Action received",label+" — working now.","working");button.classList.remove("action-done","action-failed");button.classList.add("action-working");window.setTimeout(()=>{button.classList.remove("action-working");},1400);},true);}
+registerActionFeedback();
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function normalizeUiMode(value){return String(value||"").toLowerCase()==="advanced"?"advanced":"simple";}
 function applyUiMode(value){uiMode=normalizeUiMode(value);document.body.classList.toggle("simple-mode",uiMode==="simple");document.body.classList.toggle("advanced-mode",uiMode==="advanced");setValue("headerUiMode",uiMode);setValue("settingsUiMode",uiMode);if(appConfig)appConfig.uiMode=uiMode;if(uiMode==="simple"&&(document.getElementById("logs")?.classList.contains("active")||document.getElementById("diagnostics")?.classList.contains("active")))setView("dashboard");}
 async function changeUiMode(value){const previous=uiMode;applyUiMode(value);try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,uiMode})});appConfig=data.config||{...current,uiMode};applyUiMode(appConfig.uiMode);setText("settingsSaveStatus","UI mode saved.");playUiSound("click");}catch(error){applyUiMode(previous);setText("settingsSaveStatus","Could not save UI mode: "+betterError(error));playUiSound("warning");}}
 async function loadUiMode(){try{const config=await getJson("/api/config");appConfig=config;applyUiMode(config.uiMode);}catch{applyUiMode("simple");}}
+function normalizeTheme(value){const key=String(value||"").toLowerCase();return ["gold","command","purple","contrast","royal"].includes(key)?key:"gold";}
+function applyTheme(value){uiTheme=normalizeTheme(value);document.body.classList.remove("theme-gold","theme-command","theme-purple","theme-contrast","theme-royal");document.body.classList.add("theme-"+uiTheme);setValue("headerTheme",uiTheme);setValue("settingsTheme",uiTheme);try{localStorage.setItem("alphaNineTheme",uiTheme);}catch{}}
+function changeTheme(value){applyTheme(value);showToast("Theme changed","success");playUiSound("click");}
+function loadTheme(){let saved="gold";try{saved=localStorage.getItem("alphaNineTheme")||"gold";}catch{}applyTheme(saved);}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
 function managerFrameHasContent(){const frame=document.getElementById("managerFrame");try{return Boolean(frame&&frame.contentDocument&&frame.contentDocument.body&&frame.contentDocument.body.innerText.trim());}catch{return false;}}
@@ -10770,13 +11495,13 @@ const SERVER_STATUS_OFFLINE=["stopped","failed","error","unreachable","missing",
 function mapServerStatusValue(value){const raw=String(value||"").trim();const key=raw.toLowerCase();if(!raw||key==="unknown")return{raw:raw||"Unknown",label:"Warning",kind:"warn",online:false};if(SERVER_STATUS_ONLINE.includes(key))return{raw,label:"Online",kind:"ok",online:true};if(SERVER_STATUS_OFFLINE.includes(key))return{raw,label:"Offline",kind:"bad",online:false};return{raw,label:"Warning",kind:"warn",online:false};}
 function mapServerSummary(data){const s=data?.status?.summary||data?.summary||data?.status||{};const phase=mapServerStatusValue(s.phase||s.status);const checks=[s.servergroup,s.gateway,s.director].filter(value=>String(value||"").trim()).map(mapServerStatusValue);if(phase.kind==="bad"||checks.some(check=>check.kind==="bad"))return{label:"Offline",kind:"bad",online:false,phase,checks};if(phase.online&&checks.every(check=>check.kind!=="bad"))return{label:"Online",kind:"ok",online:true,phase,checks};return{label:"Warning",kind:"warn",online:false,phase,checks};}
 function statusClass(value){const text=String(value||"");if(/offline|failed|error|missing|not|false|unavailable|unsupported|stopped|unreachable/i.test(text))return"bad";if(/healthy|ready|running|reconciling|updating|starting|progressing|online|enabled|reachable|available|true|detected|connected/i.test(text))return"ok";return"warn";}
-function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");}
-function badge(id,value){const el=document.getElementById(id);if(!el)return;const advancedOnly=el.classList.contains("advanced-only");el.className="badge "+statusClass(value)+(advancedOnly?" advanced-only":"");el.textContent=String(value||"Unknown");}
+function tone(id,value){const el=document.getElementById(id);if(!el)return;el.className="value "+statusClass(value);el.textContent=String(value||"Unknown");if(id==="dashboardVmStatus")setUxText("uxServerHealth",String(value||"Unknown"));if(id==="adminDb"||id==="adminDbMirror")setUxText("uxDatabaseHealth",String(value||"Unknown"));}
+function badge(id,value){const el=document.getElementById(id);if(!el)return;const advancedOnly=el.classList.contains("advanced-only");el.className="badge "+statusClass(value)+(advancedOnly?" advanced-only":"");el.textContent=String(value||"Unknown");if(id==="topServer")setUxText("uxServerHealth",String(value||"Unknown"));if(id==="topDb")setUxText("uxDatabaseHealth",String(value||"Unknown"));}
 function telemetryPercent(value){const number=Number(value);return Number.isFinite(number)&&number>=0&&number<=100?number:null;}
-function setResourceMetric(key,value){const percent=telemetryPercent(value);const label=document.getElementById("resource"+key);const bar=document.getElementById("resource"+key+"Bar");if(label)label.textContent=percent===null?"Unknown":Math.round(percent)+"%";if(bar)bar.style.width=percent===null?"0%":Math.max(0,Math.min(100,percent))+"%";}
-function telemetrySourceLabel(source){const text=String(source||"").toLowerCase();if(text==="local"||text==="local pc")return"Local PC";if(text==="remote"||text==="vm"||text==="remote vm")return"Remote VM";if(text==="receiver")return"Receiver";return"Unknown";}
-function renderServerResources(telemetry){const data=telemetry&&typeof telemetry==="object"?telemetry:null;const source=telemetrySourceLabel(data?.source);setText("resourceSource","Source: "+source);setResourceMetric("Cpu",data?.cpuPercent??data?.cpu);setResourceMetric("Memory",data?.memoryPercent??data?.memory);setResourceMetric("Disk",data?.diskPercent??data?.disk);setResourceMetric("Network",data?.networkPercent??data?.network);return Boolean(data&&source!=="Unknown"&&[data.cpuPercent??data.cpu,data.memoryPercent??data.memory,data.diskPercent??data.disk,data.networkPercent??data.network].some(value=>telemetryPercent(value)!==null));}
-function addActivity(type,message,detail){const item={time:new Date().toLocaleTimeString(),type,message,detail:detail||""};activity.unshift(item);activity=activity.slice(0,40);renderActivity();}
+function setResourceMetric(key,value,labelValue){const percent=telemetryPercent(value);const label=document.getElementById("resource"+key);const bar=document.getElementById("resource"+key+"Bar");if(label)label.textContent=labelValue||(percent===null?"Unknown":Math.round(percent)+"%");if(bar)bar.style.width=percent===null?"0%":Math.max(0,Math.min(100,percent))+"%";}
+function telemetrySourceLabel(source){const text=String(source||"").toLowerCase();if(text==="local"||text==="local pc")return"Local PC";if(text==="remote"||text==="vm"||text==="remote vm"||text==="remote-vm")return"Remote VM";if(text==="receiver")return"Receiver";return"Unknown";}
+function renderServerResources(telemetry){const data=telemetry&&typeof telemetry==="object"?telemetry:null;if(data?.ok===false){setText("resourceSource","Source: VM unavailable");setResourceMetric("Cpu",null);setResourceMetric("Memory",null);setResourceMetric("Disk",null);setResourceMetric("Network",null);return false;}const source=telemetrySourceLabel(data?.source);setText("resourceSource","Source: "+source);setResourceMetric("Cpu",data?.cpuPercent??data?.cpu);setResourceMetric("Memory",data?.memoryPercent??data?.memory);setResourceMetric("Disk",data?.diskPercent??data?.disk);setResourceMetric("Network",data?.networkPercent??data?.network,data?.networkLabel);return Boolean(data&&source!=="Unknown"&&([data.cpuPercent??data.cpu,data.memoryPercent??data.memory,data.diskPercent??data.disk,data.networkPercent??data.network].some(value=>telemetryPercent(value)!==null)||Boolean(data.networkLabel&&data.networkLabel!=="Unknown")));}
+function addActivity(type,message,detail){const item={time:new Date().toLocaleTimeString(),type,message,detail:detail||""};activity.unshift(item);activity=activity.slice(0,40);renderActivity();setUxText("uxLastAction",String(message||type||"Activity"));setText("dashboardLastAction",String(message||type||"Activity"));}
 const LIVE_COORDINATES=window.AlphaNineCoordinates;
 const LIVE_MAP_IMAGE=LIVE_COORDINATES.IMAGE_SIZE;
 // Leaflet CRS.Simple uses [lat, lng] as [pixelY, pixelX]. All map and teleport
@@ -10788,9 +11513,13 @@ LIVE_MAP_CONFIGS.DeepDesert.image="/assets/deep-desert-map.png";
 LIVE_MAP_CONFIGS.DeepDesert.fallbackImage="/assets/world-map-overland.png";
 LIVE_MAP_CONFIGS.Arrakeen.image="/assets/world-map-overland.png";
 LIVE_MAP_CONFIGS.HarkoVillage.image="/assets/world-map-overland.png";
-let liveMapKey="HaggaBasin",liveMapImageOverlay=null,liveMapMarkerIndex={};
+let liveMapKey="HaggaBasin",liveMapUserSelected=false,liveMapImageOverlay=null,liveMapMarkerIndex={},liveMapMarkerRowsIndex={};
 function liveMapConfig(){return LIVE_MAP_CONFIGS[liveMapKey]||LIVE_MAP_CONFIGS.HaggaBasin;}
-function mergeLiveMapConfig(data){if(data?.maps){Object.entries(data.maps).forEach(([key,value])=>{LIVE_MAP_CONFIGS[key]={...(LIVE_MAP_CONFIGS[key]||{}),...value,key};});}if(data?.map){const key=data.map.key||data.map.actorMap||liveMapKey;LIVE_MAP_CONFIGS[key]={...(LIVE_MAP_CONFIGS[key]||{}),...data.map,key};liveMapKey=key;}}
+function liveMapLabel(key=liveMapKey){return LIVE_MAP_CONFIGS[key]?.label||key||"Map";}
+function liveMapSelectableKeys(){return ["HaggaBasin","DeepDesert"].filter(key=>LIVE_MAP_CONFIGS[key]);}
+function syncLiveMapSelector(){const select=document.getElementById("liveMapSelector");if(!select)return;const current=select.value||liveMapKey;select.innerHTML=liveMapSelectableKeys().map(key=>'<option value="'+esc(key)+'">'+esc(liveMapLabel(key))+'</option>').join("");select.value=LIVE_MAP_CONFIGS[current]?current:liveMapKey;}
+function mergeLiveMapConfig(data){if(data?.maps){Object.entries(data.maps).forEach(([key,value])=>{LIVE_MAP_CONFIGS[key]={...(LIVE_MAP_CONFIGS[key]||{}),...value,key};});}if(data?.map){const key=data.map.key||data.map.actorMap||liveMapKey;LIVE_MAP_CONFIGS[key]={...(LIVE_MAP_CONFIGS[key]||{}),...data.map,key};if(!liveMapUserSelected)liveMapKey=key;}syncLiveMapSelector();}
+function selectLiveMap(key){if(!LIVE_MAP_CONFIGS[key])return;liveMapUserSelected=true;liveMapKey=key;liveSelectedCoordinates=null;liveMapSelectedEntity=null;liveMapSelectedMarkerKey="";invalidateTeleportPreview();syncLiveMapSelector();setLiveMapImage();renderLiveMapLayers();updateLiveMapDebug();setText("liveMapStamp",liveMapLabel()+" DB overlay");addActivity("maps","Live map selected",liveMapLabel());}
 function liveMapBounds(){const cfg=liveMapConfig();const width=Number(cfg.width||LIVE_MAP_IMAGE.width),height=Number(cfg.height||LIVE_MAP_IMAGE.height);return [[0,0],[height,width]];}
 function liveMapSize(cfg=liveMapConfig()){return {width:Number(cfg.width||LIVE_MAP_IMAGE.width),height:Number(cfg.height||LIVE_MAP_IMAGE.height)};}
 function liveMapWithinBounds(row,cfg=liveMapConfig()){return LIVE_COORDINATES.withinBounds(row,cfg);}
@@ -10806,10 +11535,13 @@ function invalidateTeleportPreview(){liveTeleportPreviewSignature="";liveTelepor
 function syncTeleportButtons(){const exactPreviewReady=liveTeleportReady&&liveTeleportPreviewExecutable&&Boolean(liveTeleportPreviewSignature);const button=document.getElementById("liveTeleportButton");const playerButton=document.getElementById("liveTeleportToPlayerButton");if(button)button.disabled=!liveTeleportReady;if(playerButton)playerButton.disabled=!exactPreviewReady;}
 function currentTeleportPlayer(){return findLiveMapPlayerByTeleportId(document.getElementById("teleportPlayerId")?.value||"");}
 function setLiveMapImage(){if(!liveMap)return;const cfg=liveMapConfig(),bounds=liveMapBounds();if(liveMapImageOverlay){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=null;}liveMapImageOverlay=L.imageOverlay(cfg.image||"/assets/hagga-basin-map.png",bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);liveMapImageOverlay.once("error",()=>{if(cfg.fallbackImage&&liveMap){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=L.imageOverlay(cfg.fallbackImage,bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);setText("liveMapStamp","Primary map image missing; using fallback.");}});liveMap.fitBounds(bounds);}
-function initLiveMap(){if(!window.L||!LIVE_COORDINATES){setText("liveMapStamp","Map coordinate runtime unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;document.getElementById("liveMapDiagnosticsPanel")?.classList.toggle("hidden",!liveMapDebugEnabled());if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});setLiveMapImage();liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>updateLiveMapDebug());document.getElementById("teleportPlayerId")?.addEventListener("input",invalidateTeleportPreview);["teleportX","teleportY"].forEach(id=>document.getElementById(id)?.addEventListener("input",()=>{invalidateTeleportPreview();liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("unknown",false);}));document.getElementById("teleportTargetPlayerId")?.addEventListener("input",invalidateTeleportPreview);}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
+function initLiveMap(){if(!window.L||!LIVE_COORDINATES){setText("liveMapStamp","Map coordinate runtime unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;document.getElementById("liveMapDiagnosticsPanel")?.classList.toggle("hidden",!liveMapDebugEnabled());syncLiveMapSelector();syncLiveMapDragToggle();if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});setLiveMapImage();liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>selectLiveCoordinates(event.latlng,{fillTeleport:true}));liveMap.on("zoomend moveend",()=>{renderLiveMapLayers();updateLiveMapDebug();});document.getElementById("teleportPlayerId")?.addEventListener("input",invalidateTeleportPreview);["teleportX","teleportY"].forEach(id=>document.getElementById(id)?.addEventListener("input",()=>{invalidateTeleportPreview();liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("unknown",false);}));document.getElementById("teleportTargetPlayerId")?.addEventListener("input",invalidateTeleportPreview);}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
 function liveMapChecked(id){const el=document.getElementById(id);return !el||el.checked;}
 function liveMapProject(entity){const x=Number(entity.x),y=Number(entity.y);if(!Number.isFinite(x)||!Number.isFinite(y))return null;return duneToLeaflet(x,y);}
-function liveMapIcon(kind){const size=kind==="base"?17:16;return L.divIcon({className:"",html:'<div class="live-map-marker '+kind+'"></div>',iconSize:[size,size],iconAnchor:[size/2,size/2]});}
+function syncLiveMapDragToggle(){setChecked("liveMapDragTeleportToggle",dragTeleportEnabled());}
+function showLiveMapResultBadge(message,type="success"){const badge=document.getElementById("liveMapResultBadge");const text=document.getElementById("liveMapResultText");if(!badge||!text)return;text.textContent=message||"Live Map updated.";badge.className="live-map-result-badge "+(type==="fail"?"fail":type==="working"?"working":"");badge.classList.remove("hidden");clearTimeout(showLiveMapResultBadge.timer);showLiveMapResultBadge.timer=setTimeout(()=>badge.classList.add("hidden"),4000);}
+function liveMapIcon(kind,selected=false){const safeKind=liveMapTypeKind(kind);const size=selected&&safeKind==="player"?30:(safeKind==="player"?22:safeKind==="base"?17:16);return L.divIcon({className:"",html:'<div class="live-map-marker '+safeKind+(selected?' selected':'')+'"></div>',iconSize:[size,size],iconAnchor:[size/2,size/2]});}
+function liveMapClusterIcon(kind,count){const safeKind=liveMapTypeKind(kind);return L.divIcon({className:"",html:'<div class="live-map-cluster '+safeKind+'">'+esc(count)+'</div>',iconSize:[46,46],iconAnchor:[23,23]});}
 function liveTeleportPlayerId(row){return row?.fls_id||row?.funcom_id||row?.player_controller_id||"";}
 function liveMapPlayerKeys(row){return [row?.fls_id,row?.funcom_id,row?.player_controller_id,row?.id,row?.account_id,row?.name].filter(value=>value!==undefined&&value!==null&&String(value).trim()).map(value=>String(value).trim());}
 function sameLiveMapPlayer(row,playerId){const target=String(playerId||"").trim();return Boolean(target)&&liveMapPlayerKeys(row).includes(target);}
@@ -10821,17 +11553,27 @@ function clearCachedTeleportPlayer(playerId){if(!liveMapData?.layers?.players)re
 function renderPendingTeleportMarker(){if(!liveTeleportPending||!liveMapLayerGroup||!liveMapChecked("liveLayerPlayers"))return 0;const target=liveTeleportPending.target;if(!target)return 0;const point=duneToLeaflet(target.x,target.y);const marker=L.marker(point,{icon:L.divIcon({className:"",html:'<div class="live-map-marker pending" style="width:18px;height:18px"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).bindPopup('<strong>Teleport pending</strong><br>Teleport sent, waiting for server position update...<br>'+esc(formatLivePosition(target)));marker.addTo(liveMapLayerGroup);return 1;}
 function reconcileTeleportPending(){if(!liveTeleportPending)return;const player=findLiveMapPlayerByTeleportId(liveTeleportPending.playerId);const next=liveMapPosition(player);if(!next)return;const nearTarget=liveMapDistance(next,liveTeleportPending.target)<50;if(nearTarget){const detail="Player "+liveTeleportPending.playerId+" old "+formatLivePosition(liveTeleportPending.oldPosition)+" -> new "+formatLivePosition(next);console.debug("[AlphaNine Live Map] teleport position refresh",{playerId:liveTeleportPending.playerId,oldPosition:liveTeleportPending.oldPosition,newPosition:next,target:liveTeleportPending.target});addActivity("maps","Teleport position confirmed",detail);const log=document.getElementById("teleportLog");if(log&&!/Server position confirmed/.test(log.textContent||""))log.textContent+=(log.textContent?"\n\n":"")+"Server position confirmed.\n"+detail;liveTeleportPending=null;}}
 function liveMapMarkerKey(row){return String(row?.type||"marker")+":"+String(row?.id||row?.actor_id||row?.name||"");}
-function liveMapMarkerPopup(row){return '<strong>'+esc(row.name||row.id||row.type||"Marker")+'</strong><br>'+esc(row.type||"marker")+' / '+esc(row.status||"unknown")+'<br>World X '+esc(formatLiveCoord(row.x))+' / World Y '+esc(formatLiveCoord(row.y))+(row.z!=null?' / World Z '+esc(formatLiveCoord(row.z)):'')+(row.updatedAt?'<br>Updated '+esc(row.updatedAt):'')+(row.actor_id?'<br>Actor '+esc(row.actor_id):'')+(row.type==="player"?'<br>Drag marker to select a teleport destination.':'');}
+function liveMapTypeKind(type){const key=String(type||"marker").toLowerCase();if(key.includes("player"))return"player";if(key.includes("vehicle"))return"vehicle";if(key.includes("base")||key.includes("building"))return"base";return"marker";}
+function liveMapTypeIcon(type){const kind=liveMapTypeKind(type);return kind==="player"?"●":kind==="vehicle"?"◇":kind==="base"?"◆":"✦";}
+function liveMapTypeBadge(type){const label=String(type||"marker");const kind=liveMapTypeKind(label);return '<span class="live-map-type-cell"><span class="live-map-type-icon '+esc(kind)+'">'+esc(liveMapTypeIcon(label))+'</span>'+esc(label)+'</span>';}
+function hydrationValueText(h){if(!h||h.value==null)return"Unavailable";const value=Number(h.rounded??h.value);return Number.isFinite(value)?value.toFixed(1):"Unavailable";}
+function hydrationBadgeHtml(){return '<span class="item-grade-badge" title="'+esc(HYDRATION_TOOLTIP_TEXT)+'">Read-only</span>';}
+function hydrationDetailRow(h){return '<div class="detail-row" title="'+esc(HYDRATION_TOOLTIP_TEXT)+'"><span class="subtle">Water / Hydration '+hydrationBadgeHtml()+'</span><strong>'+esc(hydrationValueText(h))+'</strong></div>';}
+function hydrationPopupHtml(h){if(!h)return"";return '<br>Water / Hydration '+esc(hydrationValueText(h))+' <span title="'+esc(HYDRATION_TOOLTIP_TEXT)+'">(Read-only)</span>';}
+function liveMapMarkerPopup(row){return '<strong>'+esc(row.name||row.id||row.type||"Marker")+'</strong><br>'+esc(row.type||"marker")+' / '+esc(row.status||"unknown")+(row.type==="player"?hydrationPopupHtml(row.hydration):'')+'<br>World X '+esc(formatLiveCoord(row.x))+' / World Y '+esc(formatLiveCoord(row.y))+(row.z!=null?' / World Z '+esc(formatLiveCoord(row.z)):'')+(row.updatedAt?'<br>Updated '+esc(row.updatedAt):'')+(row.actor_id?'<br>Actor '+esc(row.actor_id):'')+(row.type==="player"?'<br>Drag marker to select a teleport destination.':'');}
 function liveMapPlayerDisplayName(row){return String(row?.character_name||row?.name||row?.player_name||row?.id||"Player").trim()||"Player";}
 function dragTeleportEnabled(){return appConfig?.dragTeleportEnabled!==false;}
 function liveMapDragTeleportPayload(row,latlng){const coords=leafletToDune(latlng);const playerId=liveTeleportPlayerId(row);if(!playerId)throw new Error("Player marker has no FLS/controller id for teleport.");return{playerId,characterName:liveMapPlayerDisplayName(row),x:Math.round(Number(coords.x)),y:Math.round(Number(coords.y)),z:5000,map:liveMapKey,elevationSource:"safe-ground",elevationConfirmed:true,presetName:"",targetActorId:"",targetActorType:"",commandMode:"safe-ground",requestMode:"execute",dryRun:false,test:false,debug:true,playerCurrent:liveMapPosition(row),clickedMapPosition:{x:coords.x,y:coords.y,px:Number(latlng.lng),py:Number(latlng.lat)},safetyOffset:0};}
 function applyDragTeleportPayloadToForm(payload,latlng){setValue("teleportPlayerId",payload.playerId);setValue("teleportX",payload.x);setValue("teleportY",payload.y);setValue("teleportZ",payload.z);liveTeleportPresetName=payload.presetName||"";liveTeleportTargetActorId=payload.targetActorId||"";liveTeleportTargetActorType=payload.targetActorType||"";liveSelectedCoordinates={...payload.clickedMapPosition,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(payload.clickedMapPosition.x));setText("liveClickedY",formatLiveCoord(payload.clickedMapPosition.y));setTeleportElevationSource(payload.elevationSource,true);updateLiveMapDebug(latlng);}
-async function handleLiveMapPlayerDrag(row,marker,originalPoint,event){const next=event.target.getLatLng();const originalLatLng=L.latLng(originalPoint[0],originalPoint[1]);const log=document.getElementById("teleportLog");try{if(!dragTeleportEnabled())throw new Error("Drag-to-teleport is disabled in Settings.");const payload=liveMapDragTeleportPayload(row,next);applyDragTeleportPayloadToForm(payload,next);if(log)log.textContent="Drag ended. Sending live safe-ground teleport...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;if(log)log.textContent=renderTeleportResult(data)+"\n\nDrag teleport sent, verifying database position...";showToast(payload.characterName+" teleported.","success");playUiSound("success");await refreshAfterTeleport(payload,data);}catch(error){marker.setLatLng(originalLatLng);if(log)log.textContent=betterError(error);showToast("Drag teleport failed: "+betterError(error),"error");addActivity("error","Live map drag teleport failed",error.message);playUiSound("warning");}finally{refreshTeleportReadiness();}}
-function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;(rows||[]).forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;count+=1;const marker=L.marker(point,{icon:liveMapIcon(row.type||kind.slice(0,-1)||kind),draggable:kind==="players"&&dragTeleportEnabled()}).bindPopup(liveMapMarkerPopup(row));liveMapMarkerIndex[liveMapMarkerKey(row)]=marker;marker.on("click",()=>{liveMapSelectedEntity=row;if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});updateLiveMapDebug();});if(kind==="players"&&dragTeleportEnabled())marker.on("dragend",event=>handleLiveMapPlayerDrag(row,marker,point,event));marker.addTo(liveMapLayerGroup);});return count;}
-function liveMapVisibleRows(){const layers=liveMapData?.layers||{};const rows=[];if(liveMapChecked("liveLayerPlayers"))rows.push(...(layers.players||[]));if(liveMapChecked("liveLayerVehicles"))rows.push(...(layers.vehicles||[]));if(liveMapChecked("liveLayerBases"))rows.push(...(layers.bases||[]));return rows;}
-function renderLiveMapMarkerTable(){const body=document.getElementById("liveMapMarkerRows");if(!body)return;const rows=liveMapVisibleRows();if(!rows.length){body.innerHTML='<tr><td colspan="3">No markers loaded.</td></tr>';return;}body.innerHTML=rows.slice(0,300).map(row=>'<tr data-live-marker-key="'+esc(liveMapMarkerKey(row))+'"><td>'+esc(row.type||"marker")+'</td><td>'+esc(row.name||row.id||"Marker")+'<span class="live-map-marker-label">'+esc(row.status||"unknown")+(row.updatedAt?" / "+row.updatedAt:"")+'</span></td><td>'+esc(formatLiveCoord(row.x))+'<br>'+esc(formatLiveCoord(row.y))+'</td></tr>').join("");body.querySelectorAll("[data-live-marker-key]").forEach(row=>row.addEventListener("click",()=>centerLiveMapMarker(row.dataset.liveMarkerKey)));}
-function centerLiveMapMarker(key){const rows=liveMapVisibleRows();const row=rows.find(item=>liveMapMarkerKey(item)===key);const marker=liveMapMarkerIndex[key];if(!row)return;liveMapSelectedEntity=row;const point=liveMapProject(row);if(point&&liveMap){liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});if(marker)marker.openPopup();playUiSound("click");}}
-function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;reconcileTeleportPending();liveMapLayerGroup.clearLayers();liveMapMarkerIndex={};liveMarkerCount=0;const playerRows=liveTeleportPending?(liveMapData.layers?.players||[]).filter(row=>!sameLiveMapPlayer(row,liveTeleportPending.playerId)):liveMapData.layers?.players;liveMarkerCount+=addLiveMapMarkers("players",playerRows);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapData.layers?.vehicles);liveMarkerCount+=addLiveMapMarkers("bases",liveMapData.layers?.bases);liveMarkerCount+=renderPendingTeleportMarker();renderLiveMapMarkerTable();updateLiveMapDebug();}
+async function handleLiveMapPlayerDrag(row,marker,originalPoint,event){const next=event.target.getLatLng();const originalLatLng=L.latLng(originalPoint[0],originalPoint[1]);const log=document.getElementById("teleportLog");try{if(!dragTeleportEnabled())throw new Error("Drag-to-teleport is disabled in Settings.");const payload=liveMapDragTeleportPayload(row,next);applyDragTeleportPayloadToForm(payload,next);showLiveMapResultBadge("Drag teleport: sending live command...","working");if(log)log.textContent="Drag ended. Sending live safe-ground teleport...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;if(log)log.textContent=renderTeleportResult(data)+"\n\nDrag teleport sent, verifying database position...";showLiveMapResultBadge("Last teleport: Success — "+payload.characterName+" moved to X "+payload.x+" / Y "+payload.y,"success");showToast(payload.characterName+" teleported.","success");playUiSound("success");await refreshAfterTeleport(payload,data);}catch(error){marker.setLatLng(originalLatLng);const el=marker.getElement()?.querySelector(".live-map-marker");if(el){el.classList.remove("snapback");void el.offsetWidth;el.classList.add("snapback");setTimeout(()=>el.classList.remove("snapback"),900);}if(log)log.textContent=betterError(error);showLiveMapResultBadge("Last teleport: Failed — marker snapped back to verified SQL position","fail");showToast("Drag teleport failed: "+betterError(error),"error");addActivity("error","Live map drag teleport failed",error.message);playUiSound("warning");}finally{refreshTeleportReadiness();}}
+function liveMapClusterRows(kind,rows){if(!liveMap||!rows||rows.length<36)return rows.map(row=>({type:"row",row}));const zoom=liveMap.getZoom();const bucketSize=zoom>=2?72:zoom>=1?96:128;const buckets=new Map();rows.forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;const layer=liveMap.latLngToLayerPoint(point);const key=Math.floor(layer.x/bucketSize)+":"+Math.floor(layer.y/bucketSize);if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(row);});const output=[];buckets.forEach(group=>{if(group.length>=7){let sx=0,sy=0;group.forEach(row=>{const p=liveMapProject(row);sx+=p[0];sy+=p[1];});output.push({type:"cluster",kind,count:group.length,point:[sx/group.length,sy/group.length],rows:group});}else group.forEach(row=>output.push({type:"row",row}));});return output;}
+function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;liveMapClusterRows(kind,rows||[]).forEach(item=>{if(item.type==="cluster"){const clusterKind=kind==="players"?"player":kind==="vehicles"?"vehicle":"base";const marker=L.marker(item.point,{icon:liveMapClusterIcon(clusterKind,item.count)}).bindPopup('<strong>'+esc(item.count)+' '+esc(kind)+'</strong><br>Zoom in or use the marker table to inspect individual entries.');marker.addTo(liveMapLayerGroup);count+=item.count;return;}const row=item.row;const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;count+=1;const key=liveMapMarkerKey(row);const markerKind=liveMapTypeKind(row.type||kind.slice(0,-1)||kind);const marker=L.marker(point,{icon:liveMapIcon(markerKind,key===liveMapSelectedMarkerKey),draggable:kind==="players"&&dragTeleportEnabled()}).bindPopup(liveMapMarkerPopup(row));liveMapMarkerIndex[key]=marker;liveMapMarkerRowsIndex[key]=row;marker.on("click",()=>{liveMapSelectedEntity=row;liveMapSelectedMarkerKey=key;if(kind==="players"){const playerId=liveTeleportPlayerId(row);const input=document.getElementById("teleportPlayerId");const targetInput=document.getElementById("teleportTargetPlayerId");if(input&&!input.value&&playerId)input.value=playerId;else if(targetInput&&!targetInput.value&&playerId)targetInput.value=playerId;}selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});renderLiveMapLayers();const selectedMarker=liveMapMarkerIndex[key];if(selectedMarker)selectedMarker.openPopup();updateLiveMapDebug();});if(kind==="players"&&dragTeleportEnabled())marker.on("dragend",event=>handleLiveMapPlayerDrag(row,marker,point,event));marker.addTo(liveMapLayerGroup);});return count;}
+function liveMapRowMatchesSelectedMap(row){const rowMap=String(row?.map||liveMapKey||"").trim();return !rowMap||rowMap===liveMapKey;}
+function liveMapRowsForSelectedMap(rows){return (rows||[]).filter(liveMapRowMatchesSelectedMap);}
+function liveMapVisibleRows(){const layers=liveMapData?.layers||{};const rows=[];if(liveMapChecked("liveLayerPlayers"))rows.push(...liveMapRowsForSelectedMap(layers.players));if(liveMapChecked("liveLayerVehicles"))rows.push(...liveMapRowsForSelectedMap(layers.vehicles));if(liveMapChecked("liveLayerBases"))rows.push(...liveMapRowsForSelectedMap(layers.bases));return rows;}
+function renderLiveMapMarkerTable(){const body=document.getElementById("liveMapMarkerRows");if(!body)return;const rows=liveMapVisibleRows();if(!rows.length){body.innerHTML='<tr><td colspan="3">No markers loaded.</td></tr>';return;}body.innerHTML=rows.slice(0,300).map(row=>'<tr data-live-marker-key="'+esc(liveMapMarkerKey(row))+'"><td>'+liveMapTypeBadge(row.type)+'</td><td>'+esc(row.name||row.id||"Marker")+'<span class="live-map-marker-label">'+esc(row.status||"unknown")+(row.updatedAt?" / "+row.updatedAt:"")+'</span></td><td>'+esc(formatLiveCoord(row.x))+'<br>'+esc(formatLiveCoord(row.y))+'</td></tr>').join("");body.querySelectorAll("[data-live-marker-key]").forEach(row=>row.addEventListener("click",()=>centerLiveMapMarker(row.dataset.liveMarkerKey)));}
+function centerLiveMapMarker(key){const rows=liveMapVisibleRows();const row=rows.find(item=>liveMapMarkerKey(item)===key);if(!row)return;liveMapSelectedEntity=row;liveMapSelectedMarkerKey=key;const point=liveMapProject(row);if(point&&liveMap){liveMap.setView(point,Math.max(liveMap.getZoom(),2));selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});renderLiveMapLayers();const marker=liveMapMarkerIndex[key];if(marker)marker.openPopup();playUiSound("click");}}
+function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;reconcileTeleportPending();liveMapLayerGroup.clearLayers();liveMapMarkerIndex={};liveMapMarkerRowsIndex={};liveMarkerCount=0;syncLiveMapDragToggle();const playerRows=liveTeleportPending?liveMapRowsForSelectedMap(liveMapData.layers?.players).filter(row=>!sameLiveMapPlayer(row,liveTeleportPending.playerId)):liveMapRowsForSelectedMap(liveMapData.layers?.players);liveMarkerCount+=addLiveMapMarkers("players",playerRows);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapRowsForSelectedMap(liveMapData.layers?.vehicles));liveMarkerCount+=addLiveMapMarkers("bases",liveMapRowsForSelectedMap(liveMapData.layers?.bases));liveMarkerCount+=renderPendingTeleportMarker();renderLiveMapMarkerTable();updateLiveMapDebug();}
 function updateLiveMouseCoordinates(latlng){const coords=leafletToDune(latlng);const readout=document.getElementById("liveMouseReadout");if(readout)readout.textContent="World X "+formatLiveCoord(coords.x)+" / World Y "+formatLiveCoord(coords.y);}
 function selectLiveCoordinates(latlng,options={}){const coords=leafletToDune(latlng);liveSelectedCoordinates={...coords,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(coords.x));setText("liveClickedY",formatLiveCoord(coords.y));const searchX=document.getElementById("liveSearchX");const searchY=document.getElementById("liveSearchY");if(searchX)searchX.value=formatLiveCoord(coords.x);if(searchY)searchY.value=formatLiveCoord(coords.y);if(options.fillTeleport){setValue("teleportX",Math.round(coords.x));setValue("teleportY",Math.round(coords.y));setValue("teleportZ",5000);liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("safe-ground",true);}updateLiveMapDebug(latlng);}
 async function copyLiveCoordinates(){if(!liveSelectedCoordinates){playUiSound("warning");return;}const text="X "+formatLiveCoord(liveSelectedCoordinates.x)+", Y "+formatLiveCoord(liveSelectedCoordinates.y);try{await navigator.clipboard.writeText(text);playUiSound("success");addActivity("maps","Coordinates copied",text);}catch{playUiSound("warning");}}
@@ -10870,8 +11612,8 @@ function updateLiveMapDebug(latlng){
   setText("liveDebugTeleportPost",verification.postTeleport?formatLivePosition(verification.postTeleport):"--");
   setText("liveDebugTeleportReason",verification.reason||(teleportDiag.blockers||[]).join(" ")||"--");
   setText("liveDebugVerification",liveTeleportVerificationResult?JSON.stringify(liveTeleportVerificationResult):"--");
-  setText("liveDebugBounds",cfg.minX+".."+cfg.maxX+" / "+cfg.minY+".."+cfg.maxY+" / flipY "+Boolean(cfg.flipY));
-  const counts=liveMapData?.debug?.rowCounts||{players:(liveMapData?.layers?.players||[]).length,vehicles:(liveMapData?.layers?.vehicles||[]).length,bases:(liveMapData?.layers?.bases||[]).length};
+  setText("liveDebugBounds",liveMapLabel()+" / "+cfg.minX+".."+cfg.maxX+" / "+cfg.minY+".."+cfg.maxY+" / flipY "+Boolean(cfg.flipY));
+  const counts={players:liveMapRowsForSelectedMap(liveMapData?.layers?.players).length,vehicles:liveMapRowsForSelectedMap(liveMapData?.layers?.vehicles).length,bases:liveMapRowsForSelectedMap(liveMapData?.layers?.bases).length};
   const raw=liveMapData?.debug?.rawDbRowCounts||{};
   setText("liveDebugPlayers",String(counts.players||0)+" rows / raw "+(raw.players||0));setText("liveDebugVehicles",String(counts.vehicles||0)+" rows / raw "+(raw.vehicles||0));setText("liveDebugBases",String(counts.bases||0)+" rows / raw "+(raw.bases||0));setText("liveDebugMarkers",String(liveMarkerCount));
   const debug=liveMapData?.debug||{};
@@ -10895,14 +11637,14 @@ async function refreshLiveMap(){
     setLiveMapImage();
     liveMapData=data;
     renderLiveMapLayers();
-    const counts=data.debug?.rowCounts||{players:(data.layers?.players||[]).length,vehicles:(data.layers?.vehicles||[]).length,bases:(data.layers?.bases||[]).length};
+    const counts={players:liveMapRowsForSelectedMap(data.layers?.players).length,vehicles:liveMapRowsForSelectedMap(data.layers?.vehicles).length,bases:liveMapRowsForSelectedMap(data.layers?.bases).length};
     const elapsed=Math.round(performance.now()-started);
     const boundsWarning=document.getElementById("liveMapBoundsWarning");
-    const allRows=data.rows||[];
+    const allRows=liveMapRowsForSelectedMap(data.rows);
     const outside=allRows.filter(row=>!liveMapWithinBounds(row)).length;
     if(boundsWarning){
       boundsWarning.classList.toggle("hidden",outside===0&&!data.debug?.outsideBoundsWarning);
-      boundsWarning.textContent=outside?outside+" marker(s) are outside Hagga Basin bounds. Check map/partition before trusting alignment.":"Some returned coordinates are outside configured map bounds.";
+      boundsWarning.textContent=outside?outside+" marker(s) are outside "+liveMapLabel()+" bounds. Check map/partition before trusting alignment.":"Some returned coordinates are outside configured map bounds.";
     }
     if(data.demo){
       const unavailable=document.getElementById("liveEntityAvailability");
@@ -10910,12 +11652,12 @@ async function refreshLiveMap(){
       if(unavailable)unavailable.className="empty mt";
       if(text)text.textContent="Debug marker mode: fake markers are shown for UI rendering validation only.";
       document.getElementById("liveMapRetryTunnel")?.classList.add("hidden");
-      setText("liveMapStamp","Debug markers / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");
+      setText("liveMapStamp",liveMapLabel()+" debug markers / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");
     }else if(data.debug?.dbConnected===false||(data.errors||[]).length){
       const message=data.debug?.tunnelLastError||data.debug?.lastDbError||(data.errors||[])[0]||"Database connection failed.";
       setLiveMapDatabaseNotice("failed",message);
     }else{
-      setLiveMapDatabaseNotice("connected","Database connected / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");
+      setLiveMapDatabaseNotice("connected",liveMapLabel()+" / Database connected / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");
     }
     const log=document.getElementById("liveMapLog");
     if(log)log.textContent=JSON.stringify({demo:Boolean(data.demo),message:data.message||"",db:{connected:data.debug?.dbConnected,source:data.debug?.connectionSource,resolvedSource:data.debug?.resolvedSource,manualDbConfigExists:data.debug?.manualDbConfigExists,configuredHost:data.debug?.configuredDbHost,configuredPort:data.debug?.configuredDbPort,configuredName:data.debug?.configuredDbName,usedHost:data.debug?.usedHost,usedPort:data.debug?.usedPort,tunnelExpected:data.debug?.tunnelExpected,tunnelListening:data.debug?.tunnelListening,tunnelState:data.debug?.tunnelState,tunnelAttemptCount:data.debug?.tunnelAttemptCount,tunnelLastError:data.debug?.tunnelLastError,lastDbError:data.debug?.lastDbError,didCallGetVM:data.debug?.didCallGetVM},rowCounts:data.debug?.rowCounts,rawDbRowCounts:data.debug?.rawDbRowCounts,rejectedCoordinateCount:data.debug?.rejectedCoordinateCount,coordinateRange:data.debug?.coordinateRange,bounds:data.debug?.bounds,sources:data.sources||[],errors:data.errors||[],sample:{player:data.layers?.players?.[0]||null,vehicle:data.layers?.vehicles?.[0]||null,base:data.layers?.bases?.[0]||null}},null,2);
@@ -10958,17 +11700,18 @@ async function refreshAfterTeleport(payload,data){
       const detail="Player "+playerId+" old "+formatLivePosition(oldPosition)+" -> DB "+formatLivePosition(next);
       updateLiveMapDebug();
       if(log&&!/Database position confirmed/.test(log.textContent||""))log.textContent+=(log.textContent?"\n\n":"")+"Database position confirmed.\n"+detail+"\n"+verification.reason;
-      addActivity("maps","Teleport database position confirmed",detail);liveTeleportPending=null;if(liveMap)await refreshLiveMap();return true;
+      addActivity("maps","Teleport database position confirmed",detail);showLiveMapResultBadge("Last teleport: Success — database position confirmed","success");liveTeleportPending=null;if(liveMap)await refreshLiveMap();return true;
     }
     await new Promise(resolve=>setTimeout(resolve,5000));
   }
   liveTeleportVerificationResult={...liveTeleportVerificationResult,status:"failed",verified:false,reason:liveTeleportVerificationResult?.reason||"Database position did not update to the sent target."};
   liveTeleportPending=null;if(liveMap)renderLiveMapLayers();updateLiveMapDebug();
+  showLiveMapResultBadge("Last teleport: Failed — database verification timed out","fail");
   throw new Error("Teleport verification failed: "+liveTeleportVerificationResult.reason);
 }
 async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){status.className=(liveTeleportReady?"empty mt":"warning mt")+" advanced-status";status.textContent=!liveTeleportReady?(data.reasons||["Live Teleport unavailable."]).join(" "):"Live Teleport ready. Map-click and drag destinations send directly; exact player targets still use resolved preview.";}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt advanced-status";status.textContent=betterError(e);}return null;}}
 async function previewTeleport(){const payload={...teleportPayload(),requestMode:"preview"};invalidateTeleportPreview();document.getElementById("teleportLog").textContent="Preview requested. No command will be sent.";try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||null;const sent=liveTeleportResolutionDiagnostics?.sent;if(sent){setValue("teleportX",sent.x);setValue("teleportY",sent.y);setValue("teleportZ",sent.z!==null&&sent.z!==""&&Number.isFinite(Number(sent.z))?sent.z:"");}liveTeleportPreviewExecutable=data.canExecute===true;liveTeleportPreviewSignature=teleportPayloadSignature(teleportPayload());document.getElementById("teleportLog").textContent=renderTeleportResult(data);updateLiveMapDebug();await refreshTeleportReadiness();playUiSound(data.canExecute?"success":"warning");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
-async function executeLiveTeleport(requireExactPreview=false){const payload={...teleportPayload(),requestMode:"execute"};try{if(requireExactPreview&&(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload)))throw new Error("Exact player target changed or has not been previewed. Preview the current target before live teleport.");if(requireExactPreview&&!liveTeleportPreviewExecutable)throw new Error("Exact player teleport is blocked because preview did not resolve a valid target and partition.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));document.getElementById("teleportLog").textContent="Teleport clicked. Sending the live command immediately...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}finally{refreshTeleportReadiness();}}
+async function executeLiveTeleport(requireExactPreview=false){const payload={...teleportPayload(),requestMode:"execute"};try{if(requireExactPreview&&(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload)))throw new Error("Exact player target changed or has not been previewed. Preview the current target before live teleport.");if(requireExactPreview&&!liveTeleportPreviewExecutable)throw new Error("Exact player teleport is blocked because preview did not resolve a valid target and partition.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));showLiveMapResultBadge("Teleport: sending live command...","working");document.getElementById("teleportLog").textContent="Teleport clicked. Sending the live command immediately...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";showLiveMapResultBadge("Last teleport: Sent — verifying database position","working");await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);showLiveMapResultBadge("Last teleport: Failed — "+betterError(e),"fail");playUiSound("warning");}finally{refreshTeleportReadiness();}}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
@@ -11014,7 +11757,7 @@ async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,me
 async function finishSetup(){try{if(!setupDatabaseTestSignature||setupDatabaseTestSignature!==currentSetupDatabaseSignature())throw new Error("Test the current database settings successfully before finishing setup.");const payload={...configPayload("setup"),setupComplete:true};const checks=await Promise.all([["serverInstallPath","setupServerInstallPathWarning"],["awakeningServerPath","setupAwakeningServerPathWarning"]].map(async([key,warningId])=>{const data=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload[key]||""));setServerInstallPathWarning(warningId,data.serverInstallPath);return data.serverInstallPath;}));if(checks.some(status=>!status?.valid))throw new Error("Both server paths must be valid folders on this machine. Use Browse to select each folder.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified||!data.pathsVerified)throw new Error("Setup path save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified in config.json and managed .env. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);await loadSettings();closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
 function setupTestLine(label,result){return label+": "+(result?.ok?"PASS":"CHECK")+" - "+(result?.message||result?.error||"No result")+(result?.error?" / "+result.error:"");}
 async function saveAndTestSetup(){const box=document.getElementById("setupFinishResult");try{if(!setupDatabaseTestSignature||setupDatabaseTestSignature!==currentSetupDatabaseSignature())throw new Error("Test the current database settings successfully before saving setup.");const payload={...configPayload("setup"),setupComplete:true};if(box)box.textContent="Saving configuration, regenerating managed .env, and testing connections...";const data=await getJson("/api/setup/save-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:60000});fillSetup(data.config||payload);await loadSettings();if(box){box.textContent=[data.message||"Save & Test complete.","Config: "+(data.configPath||"App data"),"Managed .env: "+(data.managedEnvPath||"App data .env"),setupTestLine("SSH",data.tests?.ssh),setupTestLine("Database",data.tests?.database),setupTestLine("Receiver",data.tests?.receiver)].join("\n");}await refreshLiveGiveEnv();await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){if(box)box.textContent=betterError(e);playUiSound("warning");}}
-async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);setChecked("settingsDragTeleportEnabled",cfg.dragTeleportEnabled!==false);applyUiMode(cfg.uiMode);refreshReceiverStatus();refreshBattlegroups();refreshDatabaseTunnelStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
+async function loadSettings(){try{const cfg=await getJson("/api/config");fillSettings(cfg);setChecked("settingsDragTeleportEnabled",cfg.dragTeleportEnabled!==false);setChecked("liveMapDragTeleportToggle",cfg.dragTeleportEnabled!==false);applyUiMode(cfg.uiMode);refreshReceiverStatus();refreshBattlegroups();refreshDatabaseTunnelStatus();}catch(e){setText("settingsSaveStatus",betterError(e));}}
 async function saveSettings(){try{const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...appConfig,...collectSettings()})});fillSettings(data.config||{});setText("settingsSaveStatus","Settings saved. Restart the suite for receiver startup environment changes.");playUiSound("success");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
 async function refreshReceiverStatus(){try{const data=await getJson("/api/receiver/status");const label=data.ok?"Receiver Online":"Receiver Offline";setText("receiverManagerStatus",label+" / "+data.healthUrl);setText("settingsReceiver",label);tone("receiverState",label);if(!data.ok)tone("rabbitState","Dry Run Active");return data;}catch(e){setText("receiverManagerStatus",betterError(e));tone("receiverState","Receiver Offline");tone("rabbitState","Dry Run Active");}}
 async function receiverAction(action){try{if(action==="start")await saveSettings();const data=await getJson("/api/receiver/"+action,{method:"POST"});setText("receiverManagerStatus",data.message||data.status||"Receiver action complete");await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){setText("receiverManagerStatus",betterError(e));playUiSound("warning");}}
@@ -11055,9 +11798,9 @@ async function runVmAction(action){const log=document.getElementById("vmControlL
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const data=await getJson("/api/action/"+action,{method:"POST"});let output=data.stdout||data.stderr||data.error||"Done.";if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
-async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>'<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td></tr>').join(""):'<tr><td colspan="5">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="5">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
+async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>{const partitionText=Array.isArray(m.partitions)&&m.partitions.length?m.partitions.join(","):"Read on deploy";return '<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td><td>'+esc(partitionText)+'</td></tr>';}).join(""):'<tr><td colspan="6">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
 function setText(id,value){const el=document.getElementById(id);if(el)el.textContent=String(value);}
-async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Setting "+map+" to "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});document.getElementById("mapLog").textContent=data.stdout||data.stderr||"Map deployment updated.";addActivity("maps","Map deployment updated",map+" -> "+replicas);playUiSound("success");setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);playUiSound("warning");}}
+async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Reading "+map+" partitions, then setting "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});const partitionText=Array.isArray(data.partitions)&&data.partitions.length?" / partitions "+data.partitions.join(","):" / no partitions reported";const detail=data.deploymentMode==="Dedicated"&&data.scaleResource?"Dedicated scaling updated via "+data.scaleResource+partitionText+".":"Map deployment updated"+partitionText+".";document.getElementById("mapLog").textContent=data.stdout||data.stderr||detail;addActivity("maps","Map deployment updated",map+" -> "+replicas+partitionText);playUiSound("success");setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);playUiSound("warning");}}
 function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
 function liveGiveTransportMessage(transport){const missing=transport?.missingEnv||[];if(missing.includes("DUNE_ADMIN_GIVE_ITEM_TRANSPORT"))return"Live Give unavailable: missing DUNE_ADMIN_GIVE_ITEM_TRANSPORT.";if(missing.length)return"Live Give unavailable: missing "+missing.join(", ")+".";return"Live Give unavailable: "+(transport?.dryRunReason||transport?.reason||"transport is not configured.");}
 function renderEnvSetupLegacy(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagnostics=data;const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong>'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}const runtime=(data?.activeRuntimeConfig||liveGiveEnvDiagnostics?.activeRuntimeConfig||{});const help=(data?.requiredModesHelp||liveGiveEnvDiagnostics?.requiredModesHelp||null);const paths=document.getElementById("envRuntimePaths");const values=document.getElementById("envRuntimeValues");const priority=document.getElementById("envSourcePriority");const guide=document.getElementById("envLiveGuide");if(paths){const envFiles=(runtime.envFiles||[]).map(file=>'<div class="detail-row"><span class="subtle">'+esc(file.label)+(file.override?" override":"")+'</span><strong>'+esc((file.exists?"Found: ":"Missing: ")+(file.path||""))+'</strong></div>').join("");paths.innerHTML='<div class="detail-row"><span class="subtle">Active config</span><strong>'+esc(runtime.activeConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Backend config</span><strong>'+esc(runtime.backendConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Manager config</span><strong>'+esc(runtime.managerConfigPath||"Unknown")+'</strong></div>'+envFiles;}if(values){const envValues=runtime.loadedEnvironmentVariables||runtime.values||[];const rows=envValues.map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.name)+'<br>'+esc(item.source||"unknown")+(item.detail?' · '+esc(item.detail):'')+'</span><strong>'+esc(item.displayValue||item.value||"(empty)")+'</strong></div>').join("");values.innerHTML=rows||'<div class="empty">No runtime environment details returned.</div>';}if(priority){priority.innerHTML=(runtime.sourcePriority||[]).map((item,index)=>'<div class="detail-row"><span class="subtle">'+(index+1)+'</span><strong>'+esc(item)+'</strong></div>').join("")||'<div class="empty">No source priority returned.</div>';}if(guide&&help){guide.textContent=[help.note||"",...(help.lines||[])].filter(Boolean).join("\\n\\n");}}
@@ -11109,13 +11852,14 @@ function wireDatabaseImportControls(){const file=document.getElementById("dbRest
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
-function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;}
+function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Template: '+esc(item.id||"--")+'</span>';}
+function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;updateGiveTargetSummary();}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
-function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
+function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div>'+hydrationDetailRow(p.hydration)+'<div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
 function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
 function permissionQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
 async function refreshPermissions(){const summary=document.getElementById("permissionSummary");if(summary)summary.textContent="Loading permission views...";try{permissionState=await getJson("/api/admin/permissions"+permissionQuery());renderPermissions();addActivity("permissions","Permission views refreshed",permissionState.playerControllerId?("controller "+permissionState.playerControllerId):"all players");}catch(e){if(summary)summary.textContent=betterError(e);addActivity("error","Permission refresh failed",e.message);}}
@@ -11126,18 +11870,68 @@ async function setPermissionRank(){updatePermissionPreviews();const payload={act
 async function createAccessCode(){updatePermissionPreviews();const payload={accountId:document.getElementById("accessAccountId").value,accessCode:document.getElementById("accessCodeValue").value,accessCodeType:document.getElementById("accessCodeType").value,isResettable:document.getElementById("accessResettable").checked,confirmed:document.getElementById("accessCodeConfirm").checked};try{const data=await getJson("/api/admin/permissions/create-access-code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});document.getElementById("adminLog").textContent=data.message+"\\n"+data.sql;document.getElementById("accessCodeConfirm").checked=false;addActivity("permissions","Access code function executed",data.sql);playUiSound("success");await refreshPermissions();}catch(e){document.getElementById("adminLog").textContent=betterError(e)+"\\n"+document.getElementById("accessCodePreview").textContent;addActivity("error","Access code function blocked",e.message);playUiSound("warning");}}
 function progressionBadge(status){return '<span class="badge '+statusClass(status)+'">'+esc(status||"unknown")+'</span>';}
 function progressionSupportDetails(item){const details=item?.details;if(!details)return"";if(item.label!=="Faction Component Cache Sync")return"";return '<pre class="mt">'+esc(JSON.stringify({actorIds:details.actorIds||[],componentPaths:details.componentPaths||[],arrayPaths:details.arrayPaths||[],factionRelatedPaths:details.factionRelatedPaths||[],error:details.error||""},null,2))+'</pre>';}
-function renderProgressionInspector(data){const unavailable=document.getElementById("progressionUnavailable");if(unavailable)unavailable.classList.toggle("hidden",data?.status!=="unavailable");tone("progressionDbStatus",data?.database?.status||"Unknown");tone("progressionSafety",data?.safety?.readOnlyMode?"Read-only active":"Unknown");tone("progressionSchema",data?.database?.schema||"Unknown");tone("progressionDuration",data?.durationMs!=null?data.durationMs+" ms":"--");setText("progressionSignature",data?.schemaSignature||"unknown");const supports=Object.values(data?.supports||{});const supportList=document.getElementById("progressionSupportList");if(supportList)supportList.innerHTML=supports.length?supports.map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.label)+'</span><strong>'+progressionBadge(item.status)+'</strong></div><div class="subtle">'+esc(item.evidence||"")+'</div>'+progressionSupportDetails(item)).join(""):'<div class="empty">No progression support metadata found.</div>';const safety=document.getElementById("progressionSafetyList");if(safety)safety.innerHTML='<div class="detail-row"><span class="subtle">Read-only mode</span><strong>'+progressionBadge(data?.safety?.readOnlyMode?"active":"unknown")+'</strong></div><div class="detail-row"><span class="subtle">Live editing</span><strong>'+progressionBadge(data?.safety?.liveEditingEnabled?"enabled":"disabled")+'</strong></div><div class="detail-row"><span class="subtle">Raw SQL input</span><strong>'+progressionBadge(data?.safety?.rawSqlInputEnabled?"enabled":"disabled")+'</strong></div><div class="subtle">'+esc(data?.safety?.message||"Read-only mode active. Live editing disabled.")+'</div>';const tableRows=document.getElementById("progressionTableRows");if(tableRows)tableRows.innerHTML=(data?.tables||[]).length?(data.tables||[]).map(row=>'<tr><td>'+esc(row.schema)+'</td><td>'+esc(row.table)+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="3">No target progression tables detected.</td></tr>';const functionRows=document.getElementById("progressionFunctionRows");if(functionRows)functionRows.innerHTML=(data?.functions||[]).length?(data.functions||[]).map(row=>'<tr><td>'+esc(row.schema)+'</td><td>'+esc(row.function)+'</td><td>'+esc(row.arguments||"")+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="4">No target progression functions detected.</td></tr>';const columnRows=document.getElementById("progressionColumnRows");if(columnRows)columnRows.innerHTML=(data?.columns||[]).length?(data.columns||[]).map(row=>'<tr><td>'+esc(row.schema+"."+row.table)+'</td><td>'+esc(row.column)+'</td><td>'+esc(row.dataType||row.udtName||"")+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="4">No target progression columns detected.</td></tr>';}
+function progressionStatusBadge(id,text,kind="warn"){const el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+kind;}
+function progressionMeterPct(value,max){const n=Number(value);if(!Number.isFinite(n)||n<=0)return"0%";return Math.max(8,Math.min(100,Math.round((n/max)*100)))+"%";}
+function pushProgressionRecent(title,detail,kind="3M"){const wrap=document.getElementById("progressionRecentChanges");if(!wrap)return;const item='<div class="progression-recent-item"><div class="progression-recent-time">'+esc(kind)+'</div><div><strong>'+esc(title)+'</strong><span>'+esc(detail||"")+'</span></div></div>';wrap.innerHTML=item+wrap.innerHTML.replace(/<div class="progression-recent-item"><div class="progression-recent-time">--<\/div>[\s\S]*?<\/div><\/div>/,"");}
+function renderProgressionInspector(data){
+  const unavailable=document.getElementById("progressionUnavailable");
+  if(unavailable)unavailable.classList.toggle("hidden",data?.status!=="unavailable");
+  progressionStatusBadge("progressionDbStatus",data?.database?.status||"Unknown",data?.ok?"ok":"warn");
+  progressionStatusBadge("progressionSafety",data?.safety?.readOnlyMode?"Read-only":"Unknown",data?.safety?.readOnlyMode?"ok":"warn");
+  progressionStatusBadge("progressionSchema",data?.database?.schema||"Schema unknown",data?.database?.schema?"ok":"warn");
+  progressionStatusBadge("progressionDuration",data?.durationMs!=null?data.durationMs+" ms":"--",data?.durationMs!=null?"ok":"warn");
+  setText("progressionSignature",data?.schemaSignature||"unknown");
+  const supports=Object.values(data?.supports||{});
+  const supportList=document.getElementById("progressionSupportList");
+  if(supportList)supportList.innerHTML=supports.length?supports.map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.label)+'</span><strong>'+progressionBadge(item.status)+'</strong></div><div class="subtle">'+esc(item.evidence||"")+'</div>'+progressionSupportDetails(item)).join(""):'<div class="empty">No progression support metadata found.</div>';
+  const safety=document.getElementById("progressionSafetyList");
+  if(safety)safety.innerHTML='<div class="detail-row"><span class="subtle">Read-only mode</span><strong>'+progressionBadge(data?.safety?.readOnlyMode?"active":"unknown")+'</strong></div><div class="detail-row"><span class="subtle">Live editing</span><strong>'+progressionBadge(data?.safety?.liveEditingEnabled?"enabled":"disabled")+'</strong></div><div class="detail-row"><span class="subtle">Raw SQL input</span><strong>'+progressionBadge(data?.safety?.rawSqlInputEnabled?"enabled":"disabled")+'</strong></div><div class="subtle">'+esc(data?.safety?.message||"Read-only mode active. Live editing disabled.")+'</div>';
+  const tableRows=document.getElementById("progressionTableRows");
+  if(tableRows)tableRows.innerHTML=(data?.tables||[]).length?(data.tables||[]).map(row=>'<tr><td>'+esc(row.schema)+'</td><td>'+esc(row.table)+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="3">No target progression tables detected.</td></tr>';
+  const functionRows=document.getElementById("progressionFunctionRows");
+  if(functionRows)functionRows.innerHTML=(data?.functions||[]).length?(data.functions||[]).map(row=>'<tr><td>'+esc(row.schema)+'</td><td>'+esc(row.function)+'</td><td>'+esc(row.arguments||"")+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="4">No target progression functions detected.</td></tr>';
+  const columnRows=document.getElementById("progressionColumnRows");
+  if(columnRows)columnRows.innerHTML=(data?.columns||[]).length?(data.columns||[]).map(row=>'<tr><td>'+esc(row.schema+"."+row.table)+'</td><td>'+esc(row.column)+'</td><td>'+esc(row.dataType||row.udtName||"")+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="4">No target progression columns detected.</td></tr>';
+}
 async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});addActivity("warn","Progression database unavailable",e.message);}}
 function detailRows(rows){return Object.entries(rows||{}).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value||"--")+'</strong></div>').join("");}
-function renderProgressionPlayer(data){progressionPlayerState=data?.ok?data:null;progressionPreviewState=null;const status=document.getElementById("progressionPlayerStatus");if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Current values loaded into the guarded editor.":(data?.reason||data?.error||"Progression player lookup failed.");}const identity=document.getElementById("progressionPlayerIdentity");if(identity){const p=data?.player||{};identity.innerHTML=data?.ok?detailRows({"player_id":p.player_id,"actor_id":p.actor_id,"character_actor_id":p.character_actor_id,"character_name":p.character_name,"account_id":p.account_id,"controller_id":p.player_controller_id,"pawn_id":p.player_pawn_id,"online_status":p.online_status,"map":p.map}):'<div class="empty">No player selected.</div>';}const xp=document.getElementById("progressionCharacterXp");const character=data?.characterXp||{};const tech=data?.techKnowledge||{};if(xp){xp.innerHTML=data?.ok?(detailRows({"TotalXPEarned":character.TotalXPEarned||"Unsupported / not found","TotalSkillPoints":character.TotalSkillPoints||"Unsupported / not found","UnspentSkillPoints":character.UnspentSkillPoints||"Unsupported / not found","TechKnowledgePoints":tech.m_TechKnowledgePoints||"Unsupported / not found"})):'<div class="empty">No character XP loaded.</div>';}if(data?.ok){setValue("progressionTotalXp",character.TotalXPEarned||0);setValue("progressionTotalSkillPoints",character.TotalSkillPoints||0);setValue("progressionUnspentSkillPoints",character.UnspentSkillPoints||0);setValue("progressionTechKnowledgePoints",tech.m_TechKnowledgePoints||0);setValue("progressionConfirmText","");}const warnings=document.getElementById("progressionPlayerWarnings");if(warnings){const items=data?.warnings||[];warnings.innerHTML=items.length?items.map(item=>'<div class="warning">'+esc(item)+'</div>').join(""):'<div class="empty">No warnings.</div>';}renderProgressionCharacterDebug(data);const spec=document.getElementById("progressionSpecRows");if(spec)spec.innerHTML=data?.ok?((data.specializationTracks||[]).length?(data.specializationTracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this player.</td></tr>'):'<tr><td colspan="3">No player loaded.</td></tr>';const factions=document.getElementById("progressionFactionRows");if(factions)factions.innerHTML=data?.ok?((data.factionReputation||[]).length?(data.factionReputation||[]).map(row=>'<tr><td>'+esc(row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';}
+function renderProgressionPlayer(data){
+  progressionPlayerState=data?.ok?data:null;
+  progressionPreviewState=null;
+  const status=document.getElementById("progressionPlayerStatus");
+  if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Current values loaded into the guarded editor.":(data?.reason||data?.error||"Progression player lookup failed.");}
+  const p=data?.player||{};
+  const character=data?.characterXp||{};
+  const tech=data?.techKnowledge||{};
+  setText("progressionProfileName",data?.ok?(p.character_name||p.player_name||p.actor_id||"Selected player"):"No player selected");
+  setText("progressionProfileMeta",data?.ok?[(p.online_status||"status unknown"),p.map?("Map "+p.map):"",p.actor_id?("Actor "+p.actor_id):""].filter(Boolean).join(" · "):"Search for a player to load progression values.");
+  setText("progressionProfileXp",data?.ok?(character.TotalXPEarned||0):"--");
+  setText("progressionProfileSkill",data?.ok?((character.UnspentSkillPoints||0)+" / "+(character.TotalSkillPoints||0)):"--");
+  setText("progressionProfileKnowledge",data?.ok?(tech.m_TechKnowledgePoints||0):"--");
+  const xpMeter=document.getElementById("progressionProfileXpMeter");if(xpMeter)xpMeter.style.setProperty("--pct",data?.ok?progressionMeterPct(character.TotalXPEarned,1000000):"0%");
+  const skillMeter=document.getElementById("progressionProfileSkillMeter");if(skillMeter)skillMeter.style.setProperty("--pct",data?.ok?progressionMeterPct(character.UnspentSkillPoints,Math.max(1,Number(character.TotalSkillPoints)||100)):"0%");
+  const knowledgeMeter=document.getElementById("progressionProfileKnowledgeMeter");if(knowledgeMeter)knowledgeMeter.style.setProperty("--pct",data?.ok?progressionMeterPct(tech.m_TechKnowledgePoints,100):"0%");
+  const identity=document.getElementById("progressionPlayerIdentity");
+  if(identity){identity.innerHTML=data?.ok?(detailRows({"player_id":p.player_id,"actor_id":p.actor_id,"character_actor_id":p.character_actor_id,"character_name":p.character_name,"account_id":p.account_id,"controller_id":p.player_controller_id,"pawn_id":p.player_pawn_id,"online_status":p.online_status,"map":p.map})+hydrationDetailRow(data.hydration)):'<div class="empty">No player selected.</div>';}
+  const xp=document.getElementById("progressionCharacterXp");
+  if(xp){xp.innerHTML=data?.ok?(detailRows({"TotalXPEarned":character.TotalXPEarned||"Unsupported / not found","TotalSkillPoints":character.TotalSkillPoints||"Unsupported / not found","UnspentSkillPoints":character.UnspentSkillPoints||"Unsupported / not found","TechKnowledgePoints":tech.m_TechKnowledgePoints||"Unsupported / not found"})):'<div class="empty">No character XP loaded.</div>';}
+  if(data?.ok){setValue("progressionTotalXp",character.TotalXPEarned||0);setValue("progressionTotalSkillPoints",character.TotalSkillPoints||0);setValue("progressionUnspentSkillPoints",character.UnspentSkillPoints||0);setValue("progressionTechKnowledgePoints",tech.m_TechKnowledgePoints||0);setValue("progressionConfirmText","");pushProgressionRecent("Player loaded",p.character_name||p.actor_id||"Selected player","NOW");}
+  const warnings=document.getElementById("progressionPlayerWarnings");
+  if(warnings){const items=data?.warnings||[];warnings.innerHTML=items.length?items.map(item=>'<div class="warning">'+esc(item)+'</div>').join(""):'<div class="empty">No warnings.</div>';}
+  renderProgressionCharacterDebug(data);
+  const spec=document.getElementById("progressionSpecRows");
+  if(spec)spec.innerHTML=data?.ok?((data.specializationTracks||[]).length?(data.specializationTracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this player.</td></tr>'):'<tr><td colspan="3">No player loaded.</td></tr>';
+  const factions=document.getElementById("progressionFactionRows");
+  if(factions)factions.innerHTML=data?.ok?((data.factionReputation||[]).length?(data.factionReputation||[]).map(row=>'<tr><td>'+esc(row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';
+}
 function compactProgressionRows(title,rows){return '<div class="detail-row"><span class="subtle">'+esc(title)+'</span><strong></strong></div>'+detailRows(rows);}
-function renderProgressionCharacterDebug(data){const el=document.getElementById("progressionCharacterDebug");if(!el)return;const debug=data?.progressionDebug||{};if(!data?.ok){el.innerHTML='<div class="empty">No progression player lookup debug data.</div>';return;}const p=data.player||{};const f=debug.fLevelTarget||{};const t=debug.techKnowledgeTarget||{};const links=(debug.fglEntityLinks||[]).filter(row=>row.found).map(row=>[row.actor_id,row.entity_id,row.slot_name].filter(Boolean).join(" / ")).join("; ")||"None";const components=(debug.componentNames||[]).slice(0,12).join(", ")||"None";const fieldStatus=debug.fieldStatus||{};el.innerHTML=compactProgressionRows("Player",{character:p.character_name||"--",actor_id:p.actor_id||"--",pawn_id:p.player_pawn_id||"--",online_status:p.online_status||"--"})+compactProgressionRows("Targets",{fLevelActor:f.actor_id||"--",fLevelEntity:f.entity_id||"--",fLevelSlot:f.slot_name||"--",techActor:t.actor_id||"--",techPath:t.path||"--"})+compactProgressionRows("Components",{checkedActorIds:(debug.checkedActorIds||[]).join(", ")||"--",fglLinks:links,components})+compactProgressionRows("Timings",data.timings||{})+compactProgressionRows("Safety",{readOnly:data.safety?.readOnlyMode?"yes":"no",liveEditing:data.safety?.liveEditingEnabled?"enabled":"disabled",TotalXPEarned:fieldStatus.TotalXPEarned||"--",TotalSkillPoints:fieldStatus.TotalSkillPoints||"--",UnspentSkillPoints:fieldStatus.UnspentSkillPoints||"--",TechKnowledgePoints:fieldStatus.m_TechKnowledgePoints||"--"});}
+function renderProgressionCharacterDebug(data){const el=document.getElementById("progressionCharacterDebug");if(!el)return;const debug=data?.progressionDebug||{};if(!data?.ok){el.innerHTML='<div class="empty">No progression player lookup debug data.</div>';return;}const p=data.player||{};const f=debug.fLevelTarget||{};const t=debug.techKnowledgeTarget||{};const links=(debug.fglEntityLinks||[]).filter(row=>row.found).map(row=>[row.actor_id,row.entity_id,row.slot_name].filter(Boolean).join(" / ")).join("; ")||"None";const components=(debug.componentNames||[]).slice(0,12).join(", ")||"None";const fieldStatus=debug.fieldStatus||{};const h=data.hydration||{};el.innerHTML=compactProgressionRows("Player",{character:p.character_name||"--",actor_id:p.actor_id||"--",pawn_id:p.player_pawn_id||"--",online_status:p.online_status||"--"})+compactProgressionRows("Targets",{fLevelActor:f.actor_id||"--",fLevelEntity:f.entity_id||"--",fLevelSlot:f.slot_name||"--",techActor:t.actor_id||"--",techPath:t.path||"--",hydrationPath:h.source?.valuePath||"--"})+compactProgressionRows("Components",{checkedActorIds:(debug.checkedActorIds||[]).join(", ")||"--",fglLinks:links,components})+compactProgressionRows("Timings",data.timings||{})+compactProgressionRows("Safety",{readOnly:data.safety?.readOnlyMode?"yes":"no",liveEditing:data.safety?.liveEditingEnabled?"enabled":"disabled",WaterHydration:hydrationValueText(h),TotalXPEarned:fieldStatus.TotalXPEarned||"--",TotalSkillPoints:fieldStatus.TotalSkillPoints||"--",UnspentSkillPoints:fieldStatus.UnspentSkillPoints||"--",TechKnowledgePoints:fieldStatus.m_TechKnowledgePoints||"--"});}
 async function lookupProgressionPlayer(){const query=document.getElementById("progressionPlayerQuery")?.value||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:20000});renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="timeout")addActivity("warn","Progression player lookup timed out",(data.step||"unknown step")+" / "+(data.hint||"Try exact character name."));else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||data.error||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup failed",e.message);}}
 setTimeout(()=>{const input=document.getElementById("progressionPlayerQuery");if(input)input.addEventListener("keydown",event=>{if(event.key==="Enter")lookupProgressionPlayer();});},0);
 function syncProgressionActionFields(){const actionEl=document.getElementById("progressionAction");if(actionEl)actionEl.value="character_xp_skill_points";document.querySelectorAll(".progression-character").forEach(el=>el.classList.remove("hidden"));progressionPreviewState=null;setText("progressionPreviewLog","No live progression preview generated.");}
 function progressionPayload(){const selected=progressionPlayerState?{player:progressionPlayerState.player||null,characterXp:progressionPlayerState.characterXp||null,techKnowledge:progressionPlayerState.techKnowledge||null,fLevelTarget:progressionPlayerState.progressionDebug?.fLevelTarget||null,techKnowledgeTarget:progressionPlayerState.progressionDebug?.techKnowledgeTarget||null,fieldStatus:progressionPlayerState.progressionDebug?.fieldStatus||{}}:null;return{action:"character_xp_skill_points",query:document.getElementById("progressionPlayerQuery")?.value||"",selectedPlayer:selected,totalXpEarned:document.getElementById("progressionTotalXp")?.value||0,totalSkillPoints:document.getElementById("progressionTotalSkillPoints")?.value||0,unspentSkillPoints:document.getElementById("progressionUnspentSkillPoints")?.value||0,techKnowledgePoints:document.getElementById("progressionTechKnowledgePoints")?.value||0,advancedOverride:document.getElementById("progressionAdvancedOverride")?.checked===true};}
-async function previewProgressionApply(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before generating a preview.");const data=await getJson("/api/progression/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(progressionPayload())});if(!data.ok)throw new Error(data.reason||data.error||"Progression preview failed.");progressionPreviewState=data;const target={player:data.player,playerOffline:data.playerOffline,fLevelTarget:data.fLevelTarget,techKnowledgeTarget:data.techKnowledgeTarget,auditLogPath:data.auditLogPath};setText("progressionPreviewLog","Preview generated. Backup created before any write.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nTarget paths:\\n"+JSON.stringify(target,null,2)+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nOperation:\\n"+data.sqlPreview+"\\n\\nType APPLY PROGRESSION before applying.");addActivity("progression","Progression backup created",data.backupPath);playUiSound("success");}catch(e){progressionPreviewState=null;setText("progressionPreviewLog",betterError(e));addActivity("error","Progression preview failed",e.message);playUiSound("warning");}}
-async function applyProgressionLive(){try{if(!progressionPreviewState)throw new Error("Generate Preview + Backup first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionPreviewState.previewId,confirmText:document.getElementById("progressionConfirmText")?.value||""})});if(!data.ok)throw new Error((data.warning||data.error||"Progression apply failed")+"\\n"+JSON.stringify(data.debug||{},null,2));setText("progressionPreviewLog","Live progression apply succeeded.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nRead-back verification:\\n"+JSON.stringify(data.debug?.readBackValues||{},null,2));addActivity("progression","Progression live edit applied",data.action);progressionPreviewState=null;document.getElementById("progressionConfirmText").value="";await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionPreviewLog",betterError(e));addActivity("error","Progression live edit failed",e.message);playUiSound("warning");}}
+async function previewProgressionApply(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before generating a preview.");const data=await getJson("/api/progression/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(progressionPayload())});if(!data.ok)throw new Error(data.reason||data.error||"Progression preview failed.");progressionPreviewState=data;const target={player:data.player,playerOffline:data.playerOffline,fLevelTarget:data.fLevelTarget,techKnowledgeTarget:data.techKnowledgeTarget,auditLogPath:data.auditLogPath};setText("progressionPreviewLog","Preview generated. Backup created before any write.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nTarget paths:\\n"+JSON.stringify(target,null,2)+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nOperation:\\n"+data.sqlPreview+"\\n\\nType APPLY PROGRESSION before applying.");pushProgressionRecent("Preview created","Backup ready before live apply.","NOW");addActivity("progression","Progression backup created",data.backupPath);playUiSound("success");}catch(e){progressionPreviewState=null;setText("progressionPreviewLog",betterError(e));pushProgressionRecent("Preview failed",betterError(e),"ERR");addActivity("error","Progression preview failed",e.message);playUiSound("warning");}}
+async function applyProgressionLive(){try{if(!progressionPreviewState)throw new Error("Generate Preview + Backup first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionPreviewState.previewId,confirmText:document.getElementById("progressionConfirmText")?.value||""})});if(!data.ok)throw new Error((data.warning||data.error||"Progression apply failed")+"\\n"+JSON.stringify(data.debug||{},null,2));setText("progressionPreviewLog","Live progression apply succeeded.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nRead-back verification:\\n"+JSON.stringify(data.debug?.readBackValues||{},null,2));pushProgressionRecent("Live edit applied",data.action||"Progression values updated.","NOW");addActivity("progression","Progression live edit applied",data.action);progressionPreviewState=null;document.getElementById("progressionConfirmText").value="";await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionPreviewLog",betterError(e));pushProgressionRecent("Apply failed",betterError(e),"ERR");addActivity("error","Progression live edit failed",e.message);playUiSound("warning");}}
 function skillRepQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
 async function refreshSkillReputation(){return;}
 function renderSkillReputation(){const data=skillRepState||{};const trackSelect=document.getElementById("skillTrack");if(trackSelect){const selected=trackSelect.value;trackSelect.innerHTML=(data.availableTracks||[]).map(t=>'<option value="'+esc(t)+'">'+esc(t)+'</option>').join("")||'<option value="">No tracks found</option>';if(selected)trackSelect.value=selected;}const factionSelect=document.getElementById("reputationFaction");if(factionSelect){const selected=factionSelect.value;factionSelect.innerHTML=(data.factions||[]).filter(f=>f.name!=="None").map(f=>'<option value="'+esc(f.id)+'">'+esc(f.name)+' ('+esc(f.id)+')</option>').join("")||'<option value="">No factions found</option>';if(selected)factionSelect.value=selected;}const skillRows=document.getElementById("skillRows");if(skillRows)skillRows.innerHTML=(data.tracks||[]).length?(data.tracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this selection.</td></tr>';const repRows=document.getElementById("reputationRows");if(repRows){const current=new Map((data.currentFactions||[]).map(row=>[String(row.faction_id),row]));repRows.innerHTML=(data.reputation||[]).length?(data.reputation||[]).map(row=>'<tr><td>'+esc(row.faction_name||row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td><td>'+esc(current.has(String(row.faction_id))?'yes':'no')+'</td></tr>').join(""):'<tr><td colspan="3">No reputation rows found for this selection.</td></tr>';}updateSkillReputationPreviews();}
@@ -11166,7 +11960,7 @@ function renderItemDatabaseDetails(item){const detail=document.getElementById("i
 function renderItemDatabase(){const rows=filteredItemDatabaseItems();const list=document.getElementById("itemDbList");const count=document.getElementById("itemDbCount");if(count)count.textContent=rows.length+" shown / "+itemDatabaseItems.length+" loaded";if(!selectedItemDatabaseId&&rows[0])selectedItemDatabaseId=rows[0].id;if(list){list.innerHTML=rows.slice(0,250).map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);return '<button type="button" class="item-db-card '+(selectedItemDatabaseId===item.id?'active':'')+'" data-item-db-id="'+esc(item.id)+'">'+itemDbIcon(item)+'<span><strong>'+esc(item.name||item.id)+'</strong><span class="item-db-meta"><span class="item-grade-badge">'+esc(itemGrade)+'</span><span>'+esc(item.category||"Unknown")+'</span><span>'+esc(item.subtype||item.type||"")+'</span><span>'+esc(item.tier||"")+'</span></span><span class="subtle env-path-value">'+esc(item.id||"")+'</span></span></button>';}).join("")||'<div class="empty">No items match the current filters.</div>';list.querySelectorAll("[data-item-db-id]").forEach(el=>el.addEventListener("click",()=>{selectedItemDatabaseId=el.dataset.itemDbId;renderItemDatabase();}));}renderItemDatabaseDetails(itemDatabaseItems.find(item=>item.id===selectedItemDatabaseId)||rows[0]);}
 async function refreshItemDatabase(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Loading bundled item database...";}const data=await getJson("/api/item-database/items?grade=all");itemDatabaseItems=data.items||[];if(!selectedItemDatabaseId&&itemDatabaseItems[0])selectedItemDatabaseId=itemDatabaseItems[0].id;fillItemDbFilters();renderItemDatabase();if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML='<strong>'+esc(itemDatabaseItems.length)+' items loaded.</strong><div class="subtle">Source: shared bundled/user item catalog. No server scan required.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
 function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select an item from the catalog below.";return;}selected.className="detail-row";selected.innerHTML='<span class="subtle">Selected Item</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>';}
-function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();renderSelectedGiveItem();syncGiveItemControls();}
+function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();}
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;if(!supported)input.value=0;}if(!warning)return;warning.classList.toggle("hidden",supported);warning.textContent=supported?"":"Durability is not supported by the current receiver method.";}
 function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1)};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
 function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / quality "+row.quality:"");}
@@ -11193,7 +11987,7 @@ async function deleteGiveQueuePreset(){const log=document.getElementById("giveQu
 async function exportGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{const name=selectedGiveQueuePresetName();if(!name)throw new Error("Choose a preset first.");const data=await getJson("/api/live-give/queue-presets/get?name="+encodeURIComponent(name));const json=JSON.stringify(data.preset,null,2);const blob=new Blob([json],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=(data.preset.name||"give-queue-preset").replace(/[^A-Za-z0-9_.-]+/g,"-")+".json";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);if(log)log.value="Exported preset: "+data.preset.name;playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
 async function importGiveQueuePresetFile(event){const input=event.target;const log=document.getElementById("giveQueueLog");try{setGiveQueuePresetValidation("");const file=input.files&&input.files[0];if(!file)return;const text=await file.text();const preset=JSON.parse(text);preset.items=normalizeClientPresetItems(preset.items);preset.name=String(preset.name||giveQueuePresetInputName()||file.name.replace(/\\.json$/i,"")).trim();if(!preset.name){setGiveQueuePresetValidation("Enter a preset name before importing this file.");document.getElementById("giveQueuePresetName")?.focus();playUiSound("warning");return;}if(giveQueuePresetExists(preset.name)&&!(await appConfirm("Overwrite preset","A preset named '"+preset.name+"' already exists. Overwrite it?","Overwrite","Cancel")))return;const data=await getJson("/api/live-give/queue-presets/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({preset})});if(log)log.value="Imported preset: "+data.preset.name+"\\nItems: "+data.preset.items.length;await refreshGiveQueuePresets();const select=document.getElementById("giveQueuePresetSelect");if(select)select.value=data.preset.name;setGiveQueuePresetName(data.preset.name);playUiSound("success");}catch(e){if(log)log.value="Import failed: "+betterError(e);playUiSound("warning");}finally{if(input)input.value="";}}
 function isServerOnlineStatus(data){if(data?.runtimeTransport&&typeof data.runtimeTransport.serverOnline==="boolean")return data.runtimeTransport.serverOnline;return mapServerSummary(data).online;}
-function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";syncLiveGiveTransportStatus();syncGiveItemControls();}
+function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";updateGiveTargetSummary();syncLiveGiveTransportStatus();syncGiveItemControls();}
 function syncGiveItemResultFromLog(){if(!document.getElementById("give")?.classList.contains("active"))return;const source=document.getElementById("adminLog");const result=document.getElementById("giveItemResult");const detail=document.getElementById("giveItemResultDetail");const message=String(source?.textContent||"").trim();if(detail)detail.textContent=message||"No Give Item request has run.";if(result){const summary=message.split(/\r?\n/).find(Boolean)||"Ready to give an item.";result.className=(/failed|error|unavailable|offline|blocked/i.test(summary)?"warning":"empty")+" give-result";result.textContent=summary;}}
 function wireGiveItemResult(){const source=document.getElementById("adminLog");if(!source||source.dataset.giveResultWired)return;source.dataset.giveResultWired="true";new MutationObserver(syncGiveItemResultFromLog).observe(source,{childList:true,characterData:true,subtree:true});syncGiveItemResultFromLog();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
@@ -11202,9 +11996,11 @@ async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveI
 async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncLiveGiveMode();await checkGiveItemServerStatus();syncLiveGiveTransportStatus();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
+const giveAdminItemWithoutSentToast=giveAdminItem;
+giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const text=String(document.getElementById("adminLog")?.textContent||"");if(/Live Give (verified|published)/i.test(text))showToast("Item sent","success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();window.uiSoundReady=true;wireUiSounds();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();window.uiSoundReady=true;wireUiSounds();loadTheme();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>
@@ -11237,10 +12033,11 @@ async function route(req, res) {
       raw = statusResult.stdout || statusResult.stderr || statusResult.error || "";
       status = parseStatus(raw);
     }
+    const telemetry = await vmResourceTelemetry().catch((error) => ({ source: "remote-vm", ok: false, error: error.message }));
     const runtimeTransport = await updateRuntimeGiveTransport({ vm, status, raw }, "status");
     const serverStatus = mapServerSummaryStatus(status?.summary || status);
     const topServerStatus = topServerStatusDecision({ vm, status, raw, statusResult });
-    await json(res, { vm, status, serverStatus, topServerStatus, selectedBattlegroup: normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup), onlineDecisionReason: topServerStatus.onlineDecisionReason, hardOfflineReasons: topServerStatus.hardOfflineReasons, confirmationSources: topServerStatus.confirmationSources, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
+    await json(res, { vm, status, telemetry, resources: telemetry, serverStatus, topServerStatus, selectedBattlegroup: normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup), onlineDecisionReason: topServerStatus.onlineDecisionReason, hardOfflineReasons: topServerStatus.hardOfflineReasons, confirmationSources: topServerStatus.confirmationSources, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
     return;
   }
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {

@@ -1961,7 +1961,11 @@ async function testSetupDatabaseConnection(body) {
     if (String(value) !== "1") throw new Error("PostgreSQL did not return the expected SELECT 1 result.");
     return { ok: true, target: "database", message: "Database authentication passed.", detail: "Authenticated PostgreSQL query SELECT 1 completed.", diagnostics, durationMs: result.durationMs };
   } catch (error) {
-    return { ok: false, target: "database", message: "Database authentication failed.", error: redactSensitiveText(error.message, [password]), diagnostics };
+    const detail = redactSensitiveText(error.message, [password]);
+    const hint = /password authentication failed/i.test(detail)
+      ? "The PostgreSQL password does not match this server. Click Use detected DB credentials to read the password from the VM, or paste the POSTGRES_PASSWORD from the Dune server database pod."
+      : "";
+    return { ok: false, target: "database", message: "Database authentication failed.", error: [detail, hint].filter(Boolean).join("\n"), diagnostics };
   }
 }
 
@@ -2616,6 +2620,69 @@ function serverControlConfigured() {
 
 function shQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+async function setupSshCommand(command, body = {}, timeout = 30000, options = {}) {
+  const cfg = loadConfig();
+  const vmName = String(body.vmName || cfg.vmName || configuredVmName()).trim();
+  const typedHost = String(body.sshHost || body.vmIp || body.receiverSshHost || "").trim();
+  const savedHost = String(cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "").trim();
+  let discoveredHost = "";
+  let info = null;
+  if (!typedHost && !savedHost && vmName) {
+    info = await vmInfo(vmName).catch((error) => ({ ok: false, exists: false, error: error.message }));
+    discoveredHost = String(info?.ip || "").trim();
+    if (info?.exists && info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running.", vm: info };
+  }
+  const host = typedHost || savedHost || discoveredHost;
+  if (!host) return { ok: false, stdout: "", stderr: info?.error || "VM IP or SSH host was not found.", error: info?.error || "VM IP or SSH host was not found.", vm: info };
+  const key = sshKeyStatus(body.sshKey || body.receiverSshKey || cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
+  if (!key.exists) return { ok: false, stdout: "", stderr: key.message, error: key.message, sshKey: key };
+  const user = String(body.sshUser || body.receiverSshUser || cfg.sshUser || cfg.receiverSshUser || "dune").trim();
+  return run("ssh", [
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "LogLevel=QUIET",
+    "-i", key.path,
+    `${user}@${host}`,
+    command
+  ], { timeout, maxBuffer: options.maxBuffer });
+}
+
+async function detectSetupDatabaseCredentials(body = {}) {
+  const listed = await setupSshCommand("sudo kubectl get igwbg -A -o json", body, 30000, { maxBuffer: 1024 * 1024 * 4 });
+  if (!listed.ok) throw new Error(listed.stderr || listed.stdout || listed.error || "Could not read battlegroup resources over SSH.");
+  let data = null;
+  try { data = JSON.parse(listed.stdout || "{}"); }
+  catch { throw new Error("Could not parse battlegroup resources."); }
+  const candidates = (data.items || []).map(normalizeBattlegroupCandidate).filter((candidate) => candidate.name && candidate.namespace);
+  if (!candidates.length) throw new Error("No battlegroup resources were found on the VM.");
+  const selected = normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup);
+  const selectedCandidate = selected ? candidates.find((candidate) => candidate.namespace === selected.namespace && candidate.name === selected.name) : null;
+  const candidate = selectedCandidate || (candidates.length === 1 ? candidates[0] : mostRecentCandidate(candidates.filter((row) => !row.hardOffline)) || mostRecentCandidate(candidates));
+  if (!candidate) throw new Error("Could not choose a battlegroup database target.");
+  const passwordCommand = `sudo kubectl exec -n ${shQuote(candidate.namespace)} ${shQuote(candidate.dbPod)} -- printenv POSTGRES_PASSWORD`;
+  const passwordResult = await setupSshCommand(passwordCommand, body, 30000, { maxBuffer: 1024 * 64 });
+  if (!passwordResult.ok) throw new Error(passwordResult.stderr || passwordResult.stdout || passwordResult.error || "Could not read POSTGRES_PASSWORD from the database pod.");
+  const password = String(passwordResult.stdout || "").trim();
+  if (!password) throw new Error("The database pod did not return POSTGRES_PASSWORD.");
+  const cfg = loadConfig();
+  const host = String(body.databaseHost || body.sshHost || body.vmIp || cfg.databaseHost || cfg.sshHost || cfg.vmIp || "").trim();
+  return {
+    ok: true,
+    message: "Detected database credentials from the VM battlegroup.",
+    databaseHost: host,
+    databasePort: Number(body.databasePort || cfg.databasePort || 15432),
+    databaseName: "dune",
+    databaseUser: "postgres",
+    databasePassword: password,
+    battlegroup: publicBattlegroupCandidate(candidate),
+    source: {
+      namespace: candidate.namespace,
+      dbPod: candidate.dbPod,
+      dbService: candidate.dbService,
+      passwordSource: "POSTGRES_PASSWORD"
+    }
+  };
 }
 
 async function battlegroupResource() {
@@ -10259,7 +10326,7 @@ function appPage() {
         <label>Database Name<input id="setupDatabaseName" value="dune" oninput="invalidateSetupDatabaseTest()"></label>
         <label>Database User<input id="setupDatabaseUser" value="postgres" oninput="invalidateSetupDatabaseTest()"></label>
         <label>Database Password<input id="setupDatabasePassword" type="password" placeholder="Required" oninput="invalidateSetupDatabaseTest()"></label>
-        <button type="button" onclick="testSetupDatabase('setupDatabaseResult')">Test Database</button>
+        <div class="action-row"><button type="button" onclick="detectSetupDatabaseCredentials('setupDatabaseResult')">Use detected DB credentials</button><button type="button" onclick="testSetupDatabase('setupDatabaseResult')">Test Database</button></div>
       </div>
       <div id="setupDatabaseResult" class="test-result mt">Not tested.</div>
     </div>
@@ -10286,6 +10353,7 @@ function appPage() {
     <div id="setupPage4" class="setup-page">
       <div class="test-grid">
         <button type="button" onclick="runConnectionTest('ssh','finishSshResult')">Test SSH</button>
+        <button type="button" onclick="detectSetupDatabaseCredentials('finishDbResult')">Use detected DB credentials</button>
         <button type="button" onclick="testSetupDatabase('finishDbResult')">Test Database</button>
         <button type="button" onclick="runConnectionTest('receiver','finishReceiverResult')">Test Receiver</button>
         <button type="button" onclick="runConnectionTest('server','finishServerResult')">Test Server</button>
@@ -11721,10 +11789,12 @@ function setChecked(id,value){const el=document.getElementById(id);if(el)el.chec
 function resultBox(id,data){const el=document.getElementById(id);if(!el)return;el.className="test-result "+(data.ok?"ok":"bad");el.textContent=(data.message||data.status||data.error||"Done")+(data.error&&data.error!==data.message?"\\n"+data.error:"");}
 function isMaskedSecretPlaceholder(value){const normalized=String(value??"").trim().toLowerCase();return normalized==="********"||normalized==="<set>";}
 function setupDatabaseFormPayload(){return{databaseHost:getValue("setupDatabaseHost"),databasePort:getValue("setupDatabasePort"),databaseName:getValue("setupDatabaseName"),databaseUser:getValue("setupDatabaseUser"),databasePassword:getValue("setupDatabasePassword")};}
+function setupDetectionPayload(){return{...setupDatabaseFormPayload(),vmName:getValue("setupVmName"),vmIp:getValue("setupVmIp"),sshHost:getValue("setupSshHost"),sshUser:getValue("setupSshUser"),sshKey:getValue("setupSshKey"),receiverSshHost:getValue("setupReceiverSshHost"),receiverSshUser:getValue("setupReceiverSshUser"),receiverSshKey:getValue("setupReceiverSshKey")};}
 function currentSetupDatabaseSignature(){const value=setupDatabaseFormPayload();return JSON.stringify([value.databaseHost.trim(),value.databasePort.trim(),value.databaseName.trim(),value.databaseUser.trim(),value.databasePassword]);}
 function syncSetupFinishButtons(){const enabled=Boolean(setupDatabaseTestSignature&&setupDatabaseTestSignature===currentSetupDatabaseSignature());for(const id of ["setupFinishButton","setupSaveTestButton"]){const button=document.getElementById(id);if(button)button.disabled=!enabled;}}
 function invalidateSetupDatabaseTest(){setupDatabaseTestSignature="";syncSetupFinishButtons();for(const id of ["setupDatabaseResult","finishDbResult"]){const box=document.getElementById(id);if(box){box.className="test-result mt";box.textContent="Database values changed. Test again before finishing.";}}}
 async function testSetupDatabase(resultId){const payload=setupDatabaseFormPayload();setupDatabaseTestSignature="";syncSetupFinishButtons();resultBox(resultId,{ok:true,message:"Running authenticated SELECT 1..."});try{const data=await getJson("/api/setup/test-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:12000});if(data.ok)setupDatabaseTestSignature=currentSetupDatabaseSignature();resultBox(resultId,data);syncSetupFinishButtons();playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:"Database authentication failed.",error:betterError(e)};resultBox(resultId,data);syncSetupFinishButtons();playUiSound("warning");return data;}}
+async function detectSetupDatabaseCredentials(resultId){setupDatabaseTestSignature="";syncSetupFinishButtons();resultBox(resultId,{ok:true,message:"Detecting database credentials from VM..."});try{const data=await getJson("/api/setup/detect-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(setupDetectionPayload()),timeoutMs:45000});if(!data.ok)throw new Error(data.error||data.message||"Database credential detection failed.");if(data.databaseHost)setValue("setupDatabaseHost",data.databaseHost);if(data.databasePort)setValue("setupDatabasePort",data.databasePort);if(data.databaseName)setValue("setupDatabaseName",data.databaseName);if(data.databaseUser)setValue("setupDatabaseUser",data.databaseUser);if(data.databasePassword)setValue("setupDatabasePassword",data.databasePassword);invalidateSetupDatabaseTest();resultBox(resultId,{ok:true,message:"Detected DB credentials. Testing database now...",detail:data.battlegroup?data.battlegroup.name:""});const tested=await testSetupDatabase(resultId);if(tested.ok)resultBox(resultId,{...tested,message:"Detected and verified database credentials."});return tested;}catch(e){const data={ok:false,message:"Database credential detection failed.",error:betterError(e)+"\\nMake sure SSH settings are correct and the Dune VM is running."};resultBox(resultId,data);syncSetupFinishButtons();playUiSound("warning");return data;}}
 function configPayload(prefix){const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),sshHost:getValue(prefix+"SshHost"),sshUser:getValue(prefix+"SshUser"),sshKey:getValue(prefix+"SshKey"),serverInstallPath:getValue(prefix+"ServerInstallPath"),awakeningServerPath:getValue(prefix+"AwakeningServerPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey"),mapDefault:getValue(prefix+"MapDefault"),logLevel:getValue(prefix+"LogLevel"),updateRepo:getValue(prefix+"UpdateRepo"),teleportEndpointPath:getValue(prefix+"TeleportEndpointPath"),teleportSafeZOffset:getValue(prefix+"TeleportSafeZOffset"),progressionEditingEnabled:document.getElementById(prefix+"ProgressionEditingEnabled")?.checked===true};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");const adminToken=getValue(prefix+"AdminGiveItemToken");if(dbPass&&!isMaskedSecretPlaceholder(dbPass))payload.databasePassword=dbPass;if(token&&!isMaskedSecretPlaceholder(token))payload.receiverToken=token;if(adminToken&&!isMaskedSecretPlaceholder(adminToken))payload.adminGiveItemToken=adminToken;return payload;}
 function fillSecretInput(id,isSet){const input=document.getElementById(id);if(!input)return;if(!input.dataset.emptyPlaceholder)input.dataset.emptyPlaceholder=input.placeholder||"";input.value="";input.placeholder=isSet?"********":input.dataset.emptyPlaceholder;}
 function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupAwakeningServerPath",config.awakeningServerPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("setupSshUser",config.sshUser||"dune");setValue("setupSshKey",config.sshKey||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");fillSecretInput("setupDatabasePassword",config.databasePasswordSet);setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);fillSecretInput("setupReceiverToken",config.receiverTokenSet);fillSecretInput("setupAdminGiveItemToken",config.adminGiveItemTokenSet);setValue("setupReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("setupMapDefault",config.mapDefault||"HaggaBasin");setValue("setupLogLevel",config.logLevel||"info");setValue("setupUpdateRepo",config.updateRepo||"AlphaNineGaming/alphanine-dune-suite");setValue("setupTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("setupTeleportSafeZOffset",config.teleportSafeZOffset||1000);setChecked("setupProgressionEditingEnabled",config.progressionEditingEnabled===true);setSshKeyWarning("setupSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("setupReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("setupServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("setupAwakeningServerPathWarning",config.awakeningServerPathStatus);invalidateSetupDatabaseTest();}
@@ -12132,6 +12202,15 @@ async function route(req, res) {
       await json(res, result);
     } catch (error) {
       await json(res, { ok: false, target: "database", message: "Database authentication test failed.", error: redactSensitiveText(error.message) }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/setup/detect-database" && req.method === "POST") {
+    try {
+      const result = await detectSetupDatabaseCredentials(JSON.parse(await readBody(req) || "{}"));
+      await json(res, result);
+    } catch (error) {
+      await json(res, { ok: false, target: "database", message: "Database credential detection failed.", error: redactSensitiveText(error.message) }, 400);
     }
     return;
   }

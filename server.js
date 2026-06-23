@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.4.2";
+const APP_VERSION = "0.4.3";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -30,6 +30,9 @@ const PROGRESSION_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "progression-back
 const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progression-audit.log");
 const DATABASE_TUNNEL_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "database-tunnel.log");
 let databaseTunnelStartPromise = null;
+const DB_QUERY_CACHE_TTL_MS = 120000;
+let dbRuntimeTargetCache = null;
+let dbPasswordCache = null;
 const databaseTunnelRuntime = {
   state: "idle",
   source: "",
@@ -3929,20 +3932,60 @@ async function discoverDuneItems() {
 }
 
 async function dbQuery(sql, timeout = 45000, runtimeTarget = null) {
-  const target = runtimeTarget || await databaseRuntimeTarget();
+  const target = runtimeTarget || await cachedDatabaseRuntimeTarget();
   const { namespace, dbPod, dbSvc } = target;
-  const command = [
-    `PW=$(sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- printenv POSTGRES_PASSWORD)`,
-    `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD="$PW" psql -v ON_ERROR_STOP=1 -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -c ${shQuote(sql)}`
-  ].join("; ");
-  const result = await sshCommand(command, timeout);
+  const buildCommand = (password) => `sudo kubectl exec -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD=${shQuote(password)} psql -v ON_ERROR_STOP=1 -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -c ${shQuote(sql)}`;
+  let passwordInfo = await cachedDatabasePassword(target);
+  let command = buildCommand(passwordInfo.password);
+  let result = await sshCommand(command, timeout);
+  if (!result.ok && passwordInfo.source === "config") {
+    dbPasswordCache = null;
+    passwordInfo = await cachedDatabasePassword(target, { ignoreConfig: true });
+    command = buildCommand(passwordInfo.password);
+    result = await sshCommand(command, timeout);
+  }
   if (!result.ok) {
+    invalidateDatabaseQueryCache();
     const error = new Error(result.stderr || result.stdout || result.error || "Database query failed.");
     error.diagnostics = target.diagnostics || null;
     error.lastCommand = command;
     throw error;
   }
   return result.stdout.trim();
+}
+
+async function cachedDatabaseRuntimeTarget() {
+  const now = Date.now();
+  if (dbRuntimeTargetCache && now - dbRuntimeTargetCache.cachedAt < DB_QUERY_CACHE_TTL_MS) return dbRuntimeTargetCache.target;
+  const target = await databaseRuntimeTarget();
+  dbRuntimeTargetCache = { target, cachedAt: now };
+  return target;
+}
+
+async function cachedDatabasePassword(target, options = {}) {
+  const now = Date.now();
+  const key = [target.namespace, target.dbPod].join("/");
+  if (dbPasswordCache && dbPasswordCache.key === key && now - dbPasswordCache.cachedAt < DB_QUERY_CACHE_TTL_MS) return dbPasswordCache;
+  const configuredPassword = String(loadConfig().databasePassword || "").trim();
+  if (configuredPassword && !options.ignoreConfig) {
+    dbPasswordCache = { key, password: configuredPassword, source: "config", cachedAt: now };
+    return dbPasswordCache;
+  }
+  const command = `sudo kubectl exec -n ${shQuote(target.namespace)} ${shQuote(target.dbPod)} -- printenv POSTGRES_PASSWORD`;
+  const result = await sshCommand(command, 15000);
+  if (!result.ok) {
+    invalidateDatabaseQueryCache();
+    throw new Error(result.stderr || result.stdout || result.error || "Could not read POSTGRES_PASSWORD from the database pod.");
+  }
+  const password = String(result.stdout || "").trim();
+  if (!password) throw new Error("The database pod did not return POSTGRES_PASSWORD.");
+  dbPasswordCache = { key, password, source: "pod", cachedAt: now };
+  return dbPasswordCache;
+}
+
+function invalidateDatabaseQueryCache() {
+  dbRuntimeTargetCache = null;
+  dbPasswordCache = null;
 }
 
 function shortOutput(value = "", max = 4000) {
@@ -7115,6 +7158,7 @@ async function adminPlayers(options = {}) {
   const query = String(options.query || "").trim();
   const numericQuery = /^\d+$/.test(query);
   const limit = Math.max(1, Math.min(Number(options.limit || (query ? 20 : 200)) || 20, query ? 50 : 200));
+  const includeHydration = options.hydration !== false;
   const diagnostics = {
     serverPath: DEFAULT_SERVER_ROOT || "",
     sshTarget: VM_IP ? `${SSH_USER}@${VM_IP}` : `${SSH_USER}@auto-vm-ip`,
@@ -7210,7 +7254,15 @@ async function adminPlayers(options = {}) {
     from account_ids a
     left join dune.player_state ps on ps.account_id = a.account_id
     left join dune.accounts ac on ac.id = a.account_id
-    order by a.account_id, ps.last_avatar_activity desc nulls last, ps.player_state_id
+    order by
+      case
+        when lower(coalesce(ps.online_status::text, '')) in ('online','connected','active','true','t','1','yes') then 0
+        when lower(coalesce(ps.online_status::text, '')) in ('offline','disconnected','inactive','false','f','0','no') then 2
+        else 1
+      end,
+      ps.last_avatar_activity desc nulls last,
+      a.account_id,
+      ps.player_state_id
     limit ${limit}
   `;
   try {
@@ -7253,7 +7305,7 @@ async function adminPlayers(options = {}) {
     diagnostics.joinPathUsed = "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id";
     diagnostics.characterNamesResolved = resolvedCount;
     diagnostics.playersFound = players.length;
-    await attachHydrationToPlayers(players);
+    if (includeHydration) await attachHydrationToPlayers(players);
     if (players.length) {
       if (!resolvedCount) diagnostics.reason = "Player rows were found, but none had a character_name in dune.player_state.";
       return {
@@ -10106,8 +10158,6 @@ function appPage() {
     .field-grid { display:grid; gap:8px; }
     .map-memory-row-input { min-height:32px; max-width:118px; padding:4px 8px; border-radius:10px; font-size:12px; }
     .map-memory-row-input.invalid { border-color:rgba(255,102,102,.78); box-shadow:0 0 0 3px rgba(255,102,102,.12); }
-    .map-memory-warning { color:#6f201b !important; border-color:rgba(111,32,27,.42) !important; background:rgba(111,32,27,.075) !important; }
-    body.theme-purple .map-memory-warning { color:#b85d7a !important; border-color:rgba(184,93,122,.38) !important; background:rgba(184,93,122,.08) !important; }
     label { display:grid; gap:6px; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
     select, input, textarea { width:100%; min-height:44px; border:1px solid rgba(224,173,99,.34); border-radius:14px; background:rgba(12,10,8,.72); color:var(--text); padding:0 12px; outline:none; }
     textarea { min-height:160px; padding:10px 12px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; line-height:1.35; }
@@ -10245,8 +10295,36 @@ function appPage() {
     .env-help { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; font-family:ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size:12px; line-height:1.45; max-height:none; }
     .env-section-note { margin-top:8px; color:var(--muted); font-size:11.5px; line-height:1.4; }
     .warning { border:1px solid rgba(234,191,98,.42); color:#f4d99c; background:rgba(234,191,98,.08); border-radius:0; padding:10px; font-size:13px; line-height:1.4; }
-    .warning.map-memory-warning { color:#6f201b !important; border-color:rgba(111,32,27,.42) !important; background:rgba(111,32,27,.075) !important; }
-    body.theme-purple .warning.map-memory-warning { color:#b85d7a !important; border-color:rgba(184,93,122,.38) !important; background:rgba(184,93,122,.08) !important; }
+    .warning.map-memory-warning {
+      color:#ffd9a8 !important;
+      border-color:rgba(255,189,94,.44) !important;
+      background:linear-gradient(180deg, rgba(255,189,94,.12), rgba(111,64,18,.1)) !important;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.025);
+    }
+    body.theme-command .warning.map-memory-warning {
+      color:#d8aa62 !important;
+      border-color:rgba(201,142,50,.4) !important;
+      background:linear-gradient(180deg, rgba(201,142,50,.11), rgba(60,39,12,.16)) !important;
+      box-shadow:inset 0 0 0 1px rgba(219,164,67,.035);
+    }
+    body.theme-purple .warning.map-memory-warning {
+      color:#f0b4d1 !important;
+      border-color:rgba(255,159,202,.42) !important;
+      background:linear-gradient(180deg, rgba(255,159,202,.1), rgba(88,32,82,.16)) !important;
+      box-shadow:inset 0 0 0 1px rgba(229,139,255,.035);
+    }
+    body.theme-contrast .warning.map-memory-warning {
+      color:#e0b985 !important;
+      border-color:rgba(214,159,83,.42) !important;
+      background:linear-gradient(180deg, rgba(214,159,83,.1), rgba(76,49,24,.15)) !important;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.025);
+    }
+    body.theme-royal .warning.map-memory-warning {
+      color:#5b1d16 !important;
+      border-color:rgba(180,59,44,.38) !important;
+      background:linear-gradient(180deg, rgba(255,248,244,.96), rgba(246,218,207,.78)) !important;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.42), 0 8px 18px rgba(116,73,24,.06);
+    }
     .warning.hidden { display:none; }
     .hidden { display:none !important; }
     .check-row { display:flex; align-items:center; gap:9px; color:var(--muted); font-size:13px; text-transform:none; letter-spacing:0; }
@@ -10904,6 +10982,8 @@ function appPage() {
             <label>Grade<select id="adminItemGrade" onchange="renderAdminItems()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
             <label>Tier<select id="adminItemTier" onchange="renderAdminItems()"><option value="all">All tiers</option></select></label>
           </div>
+          <div id="buildingStyleFilterNote" class="warning mt hidden">Building Styles / Blueprints only shows non-DLC base styles. DLC and MTX styles are intentionally hidden from this quick filter.</div>
+          <div id="sellerVariantFilterNote" class="warning mt hidden">Seller Variants only shows base-game customization variants that appear safe for Give Item. MTX and chapter/DLC variants are intentionally hidden.</div>
           <div id="selectedGiveItem" class="empty mt">Select an item from the catalogue below.</div>
           <details class="advanced-only give-diagnostics">
             <summary>Catalog Diagnostics</summary>
@@ -12103,11 +12183,12 @@ async function openRestoreLog(){const path=window.lastDatabaseRestoreLogPath||""
 async function pollDatabaseRestoreStatus(jobId){if(window.databaseRestorePolling===jobId)return;window.databaseRestorePolling=jobId;window.activeDatabaseRestoreJobId=jobId;localStorage.setItem("activeDatabaseRestoreJobId",jobId);setDatabaseRestoreRunning(true);let finalJob=null;let pollError=null;try{for(let i=0;i<720;i++){try{const job=await getJson("/api/database/import-status/"+encodeURIComponent(jobId),{timeoutMs:5000});window.lastDatabaseRestoreLogPath=job.logPath||job.result?.logPath||"";renderDatabaseRestoreStatus(job);if(job.status==="success"||job.status==="failed"){finalJob=job;break;}}catch(e){pollError=e;break;}await new Promise(resolve=>setTimeout(resolve,2000));}}finally{window.databaseRestorePolling="";setDatabaseRestoreRunning(false);window.activeDatabaseRestoreJobId="";localStorage.removeItem("activeDatabaseRestoreJobId");await refreshDatabaseImportReadiness().catch(()=>{});}const el=document.getElementById("dbRestoreResult");if(pollError){const msg=betterError(pollError);if(el){el.className="warning mt";el.textContent=/not found|was not found|missing/i.test(msg)?"Import job not found. Cleared stale import state.":msg;}const progress=document.getElementById("dbRestoreProgress");if(progress){progress.className="empty mt";progress.textContent="No import job running.";}addActivity("warn","Import status cleared",msg);return;}if(!finalJob){if(el){el.className="warning mt";el.textContent="Import status polling timed out. Check audit log for details.";}return;}if(el)el.innerHTML=restoreFinalSummaryHtml(finalJob);if(finalJob.status==="success"){document.getElementById("dbRestoreConfirm").value="";addActivity("database","Battlegroup import completed and verified",finalJob.jobId);await refreshDatabaseBackups();playUiSound("success");}else{addActivity("error","Battlegroup import failed",finalJob.error||finalJob.jobId);playUiSound("warning");}}
 async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="IMPORT")throw new Error("Type IMPORT before importing.");await ensureBattlegroupStoppedBeforeImport();if(!(await appConfirm("Import Battlegroup backup","Import Battlegroup backup from this file? Stop the server first. A safety Battlegroup backup will be created first.","Import","Cancel")))return;setDatabaseRestoreRunning(true);el.className="warning mt";el.textContent="Import job starting...";const data=await getJson("/api/database/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:15000});if(!data.jobId)throw new Error(data.error||"Import job was not created.");renderDatabaseRestoreStatus(data);addActivity("database","Battlegroup import started",data.jobId);await pollDatabaseRestoreStatus(data.jobId);}catch(e){setDatabaseRestoreRunning(false);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup import blocked",e.message);playUiSound("warning");}}
 function wireDatabaseImportControls(){const file=document.getElementById("dbRestoreFile");const confirm=document.getElementById("dbRestoreConfirm");if(file){file.addEventListener("input",()=>refreshDatabaseImportReadiness());file.addEventListener("change",()=>refreshDatabaseImportReadiness());}if(confirm){confirm.addEventListener("input",renderDatabaseImportControls);confirm.addEventListener("change",renderDatabaseImportControls);}renderDatabaseImportControls();}
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Template: '+esc(item.id||"--")+'</span>';}
-function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;updateGiveTargetSummary();}
+function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(players[0]&&!selectedPlayerId){selectedPlayerId=players[0].id;select.value=selectedPlayerId;}updateGiveTargetSummary();}
+async function refreshGivePlayersFast(){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();addActivity("probe","Give Item players loaded",adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
 function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
@@ -12201,11 +12282,14 @@ function addReputation(){runReputationAction("add");}
 function setReputation(){runReputationAction("set");}
 function jumpToGive(){setView("give");renderPlayerSelect();}
 function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td><span class="badge '+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</span></td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
-function renderAdminItemFilters(){const select=document.getElementById("adminItemCategory");if(select){const current=select.value;const categories=[...new Set(adminItems.map(item=>item.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All discovered items</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");select.value=[...categories,"","__unknown"].includes(current)?current:"";}const tierSelect=document.getElementById("adminItemTier");if(tierSelect){const current=tierSelect.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tierSelect.innerHTML='<option value="all">All tiers</option>'+tiers.map(tier=>'<option value="'+esc(tier)+'">'+esc(tier)+'</option>').join("");tierSelect.value=tiers.includes(current)?current:"all";}}
+const NON_DLC_BUILDING_STYLE_IDS=new Set(["atreidesset","harkonnenset"]);
+function isNonDlcBuildingStyleItem(item){return NON_DLC_BUILDING_STYLE_IDS.has(String(item?.id||"").trim().toLowerCase());}
+function isSellerVariantItem(item){const id=String(item?.id||"").trim().toLowerCase();const type=String(item?.type||"").trim().toLowerCase();const subtype=String(item?.subtype||"").trim().toLowerCase();const category=String(item?.category||"").trim().toLowerCase();if(!id)return false;if(id.startsWith("mtx_")||id.startsWith("b1c")||id.includes("_b1c"))return false;return category==="customization"&&(type==="variant"||subtype==="variant"||id.includes("variant"));}
+function renderAdminItemFilters(){const select=document.getElementById("adminItemCategory");if(select){const current=select.value;const categories=[...new Set(adminItems.map(item=>item.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All discovered items</option><option value="__building_styles">Building Styles / Blueprints (non-DLC)</option><option value="__seller_variants">Seller Variants (non-DLC)</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");select.value=[...categories,"","__unknown","__building_styles","__seller_variants"].includes(current)?current:"";}const tierSelect=document.getElementById("adminItemTier");if(tierSelect){const current=tierSelect.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tierSelect.innerHTML='<option value="all">All tiers</option>'+tiers.map(tier=>'<option value="'+esc(tier)+'">'+esc(tier)+'</option>').join("");tierSelect.value=tiers.includes(current)?current:"all";}}
 function renderGearDiscoveryStatus(){const el=document.getElementById("gearDiscoveryStatus");if(!el)return;const report=adminItemReport||{};const total=Number(report.totalItemsFound||adminItems.length||0);const named=Number(report.itemsWithDisplayNames||adminItems.filter(item=>item.hasDisplayName).length||0);const unknown=Number(report.unknownOrUnclassifiedItems||adminItems.filter(item=>!item.hasDisplayName||!item.category).length||0);const pages=Number(report.totalFilesScanned||(report.filesScanned||[]).length||0);const downloaded=Number(report.totalImagesDownloaded||0);const reused=Number(report.totalImagesReused||0);const failed=Number(report.failedImageDownloads||0);const missing=Number(report.missingImages||0);const cache=report.cachePath?'<div class="subtle env-path-value">'+esc(report.cachePath)+'</div>':"";el.className=total?"empty mt":"warning mt";el.innerHTML='<strong>Items imported: '+total+'</strong><div class="subtle">Pages scanned: '+pages+' / Display names: '+named+' / Unknown or unclassified: '+unknown+'</div><div class="subtle">Images downloaded: '+downloaded+' / Reused: '+reused+' / Failed: '+failed+' / Missing: '+missing+'</div>'+cache+(report.message?'<div class="subtle">'+esc(report.message)+'</div>':'');}
 async function discoverGearItems(){const status=document.getElementById("gearDiscoveryStatus");try{if(status){status.className="warning mt";status.textContent="Importing Gear items and caching local icons...";}const data=await getJson("/api/gear/discover",{method:"POST",timeoutMs:300000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Gear item import completed",(adminItemReport?.totalItemsFound||adminItems.length)+" items imported");playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Gear item import failed",e.message);playUiSound("warning");}}
 function normalizeUiGrade(value){const text=String(value||"").trim();return ["Common","Uncommon","Rare","Epic","Legendary","Unique","Unknown"].includes(text)?text:"Unknown";}
-function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=document.getElementById("adminItemCategory")?.value||"";const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const filtered=adminItems.filter(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const matchesSearch=(item.name+" "+item.id+" "+item.category+" "+(item.type||"")+" "+(item.subtype||"")+" "+item.detail+" "+itemGrade+" "+itemTier).toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!item.category||!item.hasDisplayName):item.category===category);const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;});const list=filtered.slice(0,120);const wrap=document.getElementById("adminItems");wrap.innerHTML=list.length?list.map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return '<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join(""):'<div class="empty">No matching bundled item templates. Build the bundled catalog with npm run build:item-catalog.</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=document.getElementById("adminItemCategory")?.value||"";const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const styleNote=document.getElementById("buildingStyleFilterNote");if(styleNote)styleNote.classList.toggle("hidden",category!=="__building_styles");const variantNote=document.getElementById("sellerVariantFilterNote");if(variantNote)variantNote.classList.toggle("hidden",category!=="__seller_variants");const filtered=adminItems.filter(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const matchesSearch=(item.name+" "+item.id+" "+item.category+" "+(item.type||"")+" "+(item.subtype||"")+" "+item.detail+" "+itemGrade+" "+itemTier).toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!item.category||!item.hasDisplayName):(category==="__building_styles"?isNonDlcBuildingStyleItem(item):(category==="__seller_variants"?isSellerVariantItem(item):item.category===category)));const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;});const list=filtered.slice(0,120);const wrap=document.getElementById("adminItems");const emptyMessage=category==="__building_styles"?"No matching non-DLC building style item templates were found in the bundled catalog.":(category==="__seller_variants"?"No matching non-DLC seller variant item templates were found in the bundled catalog.":"No matching bundled item templates. Build the bundled catalog with npm run build:item-catalog.");wrap.innerHTML=list.length?list.map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return '<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join(""):'<div class="empty">'+esc(emptyMessage)+'</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
 function itemDbIcon(item){return item.icon?'<span class="item-db-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.remove();this.parentElement.textContent=&quot;IT&quot;"></span>':'<span class="item-db-icon">IT</span>';}
 function itemDbText(item){return [item.name,item.id,item.category,item.subtype,item.type,item.grade,item.rarity,item.tier,item.detail,item.description,item.spawnCode,item.itemCode].filter(Boolean).join(" ").toLowerCase();}
 function fillItemDbFilters(){const cat=document.getElementById("itemDbCategory");const tier=document.getElementById("itemDbTier");if(cat){const current=cat.value;const categories=[...new Set(itemDatabaseItems.map(item=>item.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b));cat.innerHTML='<option value="">All categories</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");cat.value=categories.includes(current)?current:"";}if(tier){const current=tier.value;const tiers=[...new Set(itemDatabaseItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"";}}
@@ -12247,7 +12331,7 @@ function wireGiveItemResult(){const source=document.getElementById("adminLog");i
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
 function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(mode==="execute"&&!adminLiveGiveAvailable);if(give)give.disabled=blocked;if(add)add.disabled=liveGiveBusy||!selectedAdminItem;if(queue)queue.disabled=blocked||!giveQueue.length;if(retry)retry.disabled=blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const data=await getJson("/api/status");liveGiveServerOnline=isServerOnlineStatus(data);setGiveServerStatus(liveGiveServerOnline?"Server Status: Online. Give Item is available.":"Server Status: Offline. Start the server before using Give Item.",liveGiveServerOnline?"ok":"warn");await refreshLiveGiveEnv();return data;}catch(e){liveGiveServerOnline=false;setGiveServerStatus("Server Status: Offline. "+betterError(e),"warn");return null;}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
-async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncLiveGiveMode();await checkGiveItemServerStatus();syncLiveGiveTransportStatus();}
+async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncLiveGiveMode();await Promise.all([refreshGivePlayersFast(),checkGiveItemServerStatus()]);syncLiveGiveTransportStatus();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 const giveAdminItemWithoutSentToast=giveAdminItem;
@@ -12681,7 +12765,7 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/admin/players" && req.method === "GET") {
-    try { await json(res, await adminPlayers({ query: url.searchParams.get("query"), limit: url.searchParams.get("limit") })); }
+    try { await json(res, await adminPlayers({ query: url.searchParams.get("query"), limit: url.searchParams.get("limit"), hydration: !/^(0|false|no)$/i.test(String(url.searchParams.get("hydration") || "true")) })); }
     catch (error) { await json(res, { ok: false, players: [], error: error.message }, 500); }
     return;
   }

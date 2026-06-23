@@ -10106,7 +10106,7 @@ function appPage() {
     .field-grid { display:grid; gap:8px; }
     .map-memory-row-input { min-height:32px; max-width:118px; padding:4px 8px; border-radius:10px; font-size:12px; }
     .map-memory-row-input.invalid { border-color:rgba(255,102,102,.78); box-shadow:0 0 0 3px rgba(255,102,102,.12); }
-    .map-memory-warning { color:var(--muted); border-color:rgba(214,166,69,.24); background:rgba(214,166,69,.045); }
+    .map-memory-warning { color:#8f352b; border-color:rgba(143,53,43,.34); background:rgba(143,53,43,.055); }
     label { display:grid; gap:6px; color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.09em; font-weight:800; }
     select, input, textarea { width:100%; min-height:44px; border:1px solid rgba(224,173,99,.34); border-radius:14px; background:rgba(12,10,8,.72); color:var(--text); padding:0 12px; outline:none; }
     textarea { min-height:160px; padding:10px 12px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; line-height:1.35; }

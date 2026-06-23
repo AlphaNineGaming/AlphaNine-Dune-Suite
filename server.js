@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.4.1";
+const APP_VERSION = "0.4.2";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -2742,7 +2742,7 @@ function battlegroupMapPartitionAliases(mapName) {
 }
 
 function battlegroupMapPartitions(item, mapName) {
-  const worldPartitions = item.spec?.database?.template?.spec?.deployment?.worldPartitions || [];
+  const worldPartitions = item.spec?.database?.template?.spec?.deployment?.spec?.worldPartitions || item.spec?.database?.template?.spec?.deployment?.worldPartitions || [];
   const aliases = battlegroupMapPartitionAliases(mapName);
   const entries = worldPartitions.filter((partition) => aliases.has(normalizeBattlegroupMapKey(partition.map)));
   return entries.flatMap((entry) => (entry?.partitions || []).map((partition) => ({
@@ -2949,9 +2949,82 @@ async function worldMapMetadata() {
   };
 }
 
-async function setMapReplicas(mapName, replicas) {
+function normalizeMapMemoryLimit(value) {
+  if (value === null || value === undefined) return "";
+  const text = String(value).trim();
+  if (!text) return "";
+  if (text.length > 32 || !/^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)(?:Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|k)?$/.test(text)) {
+    throw new Error("Memory limit must use a Kubernetes quantity such as 4096Mi, 4Gi, or 6G.");
+  }
+  return text;
+}
+
+function mapMemoryPatchOps(item, row, memoryLimit) {
+  const set = item.spec?.serverGroup?.template?.spec?.sets?.[row.index] || {};
+  const base = `/spec/serverGroup/template/spec/sets/${row.index}`;
+  const ops = [];
+  if (!set.resources || typeof set.resources !== "object") ops.push({ op: "add", path: `${base}/resources`, value: {} });
+  if (!set.resources?.limits || typeof set.resources.limits !== "object") ops.push({ op: "add", path: `${base}/resources/limits`, value: {} });
+  ops.push({ op: set.resources?.limits && Object.prototype.hasOwnProperty.call(set.resources.limits, "memory") ? "replace" : "add", path: `${base}/resources/limits/memory`, value: memoryLimit });
+  return ops;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function updateDirectorIniSectionValue(ini, sectionName, key, value) {
+  const text = String(ini || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = text.split("\n");
+  let sectionStart = -1;
+  let sectionEnd = lines.length;
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^\s*\[\s*([^\]]+?)\s*\]\s*$/);
+    if (!match) continue;
+    const name = match[1].trim();
+    if (name === sectionName) {
+      sectionStart = index;
+      sectionEnd = lines.length;
+      continue;
+    }
+    if (sectionStart !== -1) {
+      sectionEnd = index;
+      break;
+    }
+  }
+  const keyPattern = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=`);
+  if (sectionStart === -1) {
+    if (lines.length && lines[lines.length - 1].trim()) lines.push("");
+    lines.push(`[ ${sectionName} ]`, `${key} = ${value}`);
+    return `${lines.join("\n").replace(/\n*$/, "")}\n`;
+  }
+  for (let index = sectionStart + 1; index < sectionEnd; index += 1) {
+    if (!keyPattern.test(lines[index])) continue;
+    lines[index] = `${key} = ${value}`;
+    return `${lines.join("\n").replace(/\n*$/, "")}\n`;
+  }
+  lines.splice(sectionEnd, 0, `${key} = ${value}`);
+  return `${lines.join("\n").replace(/\n*$/, "")}\n`;
+}
+
+function mapDirectorMinServersPatchOps(item, mapName, replicas) {
+  const files = item.spec?.utilities?.director?.spec?.configFiles?.files;
+  const directorIni = files?.["director.ini"];
+  if (typeof directorIni !== "string") return [];
+  const minServers = replicas > 0 ? Math.max(1, replicas) : 0;
+  const nextDirectorIni = updateDirectorIniSectionValue(directorIni, mapName, "MinServers", minServers);
+  if (nextDirectorIni === directorIni) return [];
+  return [{
+    op: "replace",
+    path: "/spec/utilities/director/spec/configFiles/files/director.ini",
+    value: nextDirectorIni
+  }];
+}
+
+async function setMapReplicas(mapName, replicas, memoryLimitValue = "") {
   const cleanMap = String(mapName || "").trim();
   const count = Number(replicas);
+  const memoryLimit = normalizeMapMemoryLimit(memoryLimitValue);
   if (!/^[A-Za-z0-9_]+$/.test(cleanMap)) throw new Error("Choose a valid map.");
   if (!Number.isInteger(count) || count < 0 || count > 3) throw new Error("Replica count must be between 0 and 3.");
 
@@ -2966,10 +3039,46 @@ async function setMapReplicas(mapName, replicas) {
     const scale = scales.find((entry) => entry.map === cleanMap);
     if (!scale) throw new Error(`${cleanMap} is a dedicated-scaling map, but no ServerSetScale resource was found.`);
     const namespace = item.metadata?.namespace;
+    const name = item.metadata?.name;
     const spec = { replicas: count };
     if (count > 0) {
       if (!partitionIds.length) throw new Error(`${cleanMap} is a dedicated-scaling map, but no partitions were found in the battlegroup worldPartitions.`);
       spec.partitions = partitionIds;
+    }
+    const battlegroupOps = [];
+    const directorOps = mapDirectorMinServersPatchOps(item, cleanMap, count);
+    if (count > 0 && !item.spec?.utilities?.director?.spec?.configFiles?.files?.["director.ini"]) {
+      throw new Error(`${cleanMap} is a dedicated-scaling map, but the battlegroup director.ini was not found to keep it online.`);
+    }
+    battlegroupOps.push(...directorOps);
+    if (memoryLimit) battlegroupOps.push(...mapMemoryPatchOps(item, row, memoryLimit));
+    let battlegroupResult = { ok: true, stdout: "", stderr: "" };
+    if (battlegroupOps.length) {
+      const battlegroupPatch = JSON.stringify(battlegroupOps);
+      const battlegroupCommand = [
+        "sudo kubectl patch igwbg",
+        shQuote(name),
+        "-n",
+        shQuote(namespace),
+        "--type=json",
+        `-p=${shQuote(battlegroupPatch)}`
+      ].join(" ");
+      battlegroupResult = await sshCommand(battlegroupCommand, 120000);
+      if (!battlegroupResult.ok) {
+        return {
+          ...battlegroupResult,
+          map: cleanMap,
+          replicas: count,
+          memory: memoryLimit || row.memory || "",
+          deploymentMode: "Dedicated",
+          scaleResource: scale.name,
+          partitions: spec.partitions || scale.partitions || partitionIds,
+          resolvedPartitions,
+          directorConfigUpdated: Boolean(directorOps.length),
+          directorConfigError: directorOps.length ? (battlegroupResult.stderr || battlegroupResult.stdout || battlegroupResult.error || "Director config patch failed.") : "",
+          memoryError: memoryLimit ? (battlegroupResult.stderr || battlegroupResult.stdout || battlegroupResult.error || "Memory patch failed.") : ""
+        };
+      }
     }
     const patch = JSON.stringify({ spec });
     const command = [
@@ -2981,12 +3090,27 @@ async function setMapReplicas(mapName, replicas) {
       `-p=${shQuote(patch)}`
     ].join(" ");
     const result = await sshCommand(command, 120000);
-    return { ...result, map: cleanMap, replicas: count, deploymentMode: "Dedicated", scaleResource: scale.name, partitions: spec.partitions || scale.partitions || partitionIds, resolvedPartitions };
+    return {
+      ...result,
+      ok: Boolean(result.ok && battlegroupResult.ok),
+      stdout: [battlegroupResult.stdout, result.stdout].filter(Boolean).join("\n"),
+      stderr: [battlegroupResult.stderr, result.stderr].filter(Boolean).join("\n"),
+      map: cleanMap,
+      replicas: count,
+      memory: memoryLimit || row.memory || "",
+      deploymentMode: "Dedicated",
+      scaleResource: scale.name,
+      partitions: spec.partitions || scale.partitions || partitionIds,
+      resolvedPartitions,
+      directorConfigUpdated: Boolean(directorOps.length)
+    };
   }
 
   const namespace = item.metadata?.namespace;
   const name = item.metadata?.name;
-  const patch = JSON.stringify([{ op: "replace", path: `/spec/serverGroup/template/spec/sets/${row.index}/replicas`, value: count }]);
+  const ops = [{ op: "replace", path: `/spec/serverGroup/template/spec/sets/${row.index}/replicas`, value: count }];
+  if (memoryLimit) ops.push(...mapMemoryPatchOps(item, row, memoryLimit));
+  const patch = JSON.stringify(ops);
   const command = [
     "sudo kubectl patch igwbg",
     shQuote(name),
@@ -2996,7 +3120,37 @@ async function setMapReplicas(mapName, replicas) {
     `-p=${shQuote(patch)}`
   ].join(" ");
   const result = await sshCommand(command, 120000);
-  return { ...result, map: cleanMap, replicas: count, deploymentMode: "Standard", partitions: partitionIds, resolvedPartitions };
+  return { ...result, map: cleanMap, replicas: count, memory: memoryLimit || row.memory || "", deploymentMode: "Standard", partitions: partitionIds, resolvedPartitions };
+}
+
+async function setMapMemoryLimit(mapName, memoryLimitValue = "") {
+  const cleanMap = String(mapName || "").trim();
+  const memoryLimit = normalizeMapMemoryLimit(memoryLimitValue);
+  if (!/^[A-Za-z0-9_]+$/.test(cleanMap)) throw new Error("Choose a valid map.");
+  if (!memoryLimit) throw new Error("Enter a memory limit such as 4096Mi, 4Gi, or 6G.");
+
+  const item = await battlegroupResource();
+  const scales = await serverSetScaleRows(item.metadata?.namespace || "");
+  const rows = mapRowsFromResource(item, scales);
+  const row = rows.find((entry) => entry.map === cleanMap);
+  if (!row) throw new Error("Map was not found in the battlegroup.");
+  if (String(row.memory || "").trim() === memoryLimit) {
+    return { ok: true, code: 0, stdout: "", stderr: "", map: cleanMap, memory: memoryLimit, unchanged: true };
+  }
+
+  const namespace = item.metadata?.namespace;
+  const name = item.metadata?.name;
+  const patch = JSON.stringify(mapMemoryPatchOps(item, row, memoryLimit));
+  const command = [
+    "sudo kubectl patch igwbg",
+    shQuote(name),
+    "-n",
+    shQuote(namespace),
+    "--type=json",
+    `-p=${shQuote(patch)}`
+  ].join(" ");
+  const result = await sshCommand(command, 120000);
+  return { ...result, map: cleanMap, memory: memoryLimit, previousMemory: row.memory || "" };
 }
 
 function gearCatalog() {
@@ -9898,6 +10052,11 @@ function appPage() {
     body.theme-royal .suite-toast.success { color:#205f2d; border-color:rgba(47,129,67,.46); background:linear-gradient(180deg, rgba(248,255,242,.98), rgba(226,242,205,.94)); }
     body.theme-royal .suite-toast.error { color:#7d2d1f; border-color:rgba(180,59,44,.52); background:linear-gradient(180deg, rgba(255,248,244,.98), rgba(246,218,207,.94)); }
     body.theme-royal .suite-toast.working { color:#6d4518; border-color:rgba(170,103,27,.5); background:linear-gradient(180deg, rgba(255,253,247,.98), rgba(246,229,194,.94)); }
+    .suite-tooltip { position:fixed; left:0; top:0; z-index:7600; max-width:min(320px, calc(100vw - 28px)); padding:8px 10px; border:1px solid rgba(224,173,99,.48); border-radius:10px; background:linear-gradient(180deg, rgba(24,18,10,.98), rgba(8,7,5,.98)); color:var(--text); box-shadow:0 14px 38px rgba(0,0,0,.36), inset 0 0 0 1px rgba(255,255,255,.04); font-size:12px; line-height:1.32; font-weight:800; letter-spacing:.02em; text-transform:none; pointer-events:none; opacity:0; transform:translate3d(-9999px,-9999px,0) scale(.98); transition:opacity .12s ease, transform .12s ease; }
+    .suite-tooltip.visible { opacity:1; transform:translate3d(var(--tooltip-x, -9999px), var(--tooltip-y, -9999px), 0) scale(1); }
+    .suite-tooltip::before { content:""; position:absolute; left:14px; top:-5px; width:8px; height:8px; border-left:1px solid rgba(224,173,99,.48); border-top:1px solid rgba(224,173,99,.48); background:rgba(24,18,10,.98); transform:rotate(45deg); }
+    body.theme-royal .suite-tooltip { color:#221914; border-color:rgba(105,73,32,.38); background:linear-gradient(180deg, rgba(255,253,247,.98), rgba(242,222,184,.96)); box-shadow:0 16px 40px rgba(116,73,24,.22), inset 0 0 0 1px rgba(255,255,255,.42); }
+    body.theme-royal .suite-tooltip::before { border-color:rgba(105,73,32,.38); background:rgba(255,253,247,.98); }
     .suite-action-center { position:fixed; right:20px; top:84px; z-index:6; width:min(360px, calc(100vw - 40px)); pointer-events:none; display:grid; gap:8px; }
     .suite-action-card { pointer-events:auto; border:1px solid rgba(214,166,69,.32); background:linear-gradient(180deg, rgba(18,18,12,.96), rgba(6,8,5,.94)); box-shadow:0 18px 54px rgba(0,0,0,.32); padding:11px 12px; color:var(--text); clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); transition:opacity .18s ease, transform .18s ease; }
     .suite-action-card.hidden { opacity:0; transform:translateY(-8px); pointer-events:none; }
@@ -11154,6 +11313,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div class="field-grid">
             <label>Map<select id="mapSelect"></select></label>
             <label>Replicas<input id="mapReplicas" type="number" min="0" max="3" value="1"></label>
+            <label>Memory Limit<input id="mapMemoryLimit" type="text" placeholder="4096Mi"></label>
             <div class="action-row"><button class="primary" onclick="deployMap()">Set Map</button><button onclick="stopSelectedMap()">Stop Map</button></div>
           </div>
           <div class="advanced-only">
@@ -11540,6 +11700,18 @@ function setActionCenter(title,detail,kind="working"){const card=document.getEle
 function clearActionCenterSoon(delay=4000){const card=document.getElementById("suiteActionCard");if(!card)return;window.clearTimeout(suiteActionTimer);suiteActionTimer=window.setTimeout(()=>card.classList.add("hidden"),delay);}
 function showToast(message,kind="success"){const toast=document.getElementById("suiteToast");if(!toast)return;const normalized=normalizeActionKind(kind);window.clearTimeout(suiteToastTimer);toast.textContent=String(message||"");toast.className="suite-toast "+normalized;setActionCenter(normalized==="error"?"Action needs attention":normalized==="working"?"Working":"Action complete",String(message||""),normalized);suiteToastTimer=window.setTimeout(()=>toast.classList.add("hidden"),4000);}
 function buttonActionLabel(button){if(!button)return"";const explicit=button.getAttribute("aria-label")||button.getAttribute("title")||button.dataset.actionLabel;if(explicit)return explicit.trim();const open=button.dataset.open;if(open)return"Open "+open.replace(/-/g," ");const text=(button.textContent||"").replace(/\s+/g," ").trim();return text.slice(0,90);}
+let suiteTooltipEl=null,suiteTooltipTarget=null;
+const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.",management:"Open the embedded server manager console.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run connection tests and view troubleshooting details."};
+const SUITE_ONCLICK_TOOLTIPS=[[/refreshAll\(/,"Refresh the dashboard, VM monitor, maps, players, receiver status, and admin data."],[/refreshLiveMap\(/,"Reload live map actors and location overlays from the server database."],[/executeLiveTeleport\(/,"Teleport the selected player to the prepared live map coordinates."],[/refreshAdmin\(/,"Refresh players, item catalog state, receiver readiness, and live give capability."],[/giveAdminItem\(/,"Send the selected item to the selected player using the active give transport."],[/giveQueuedItems\(/,"Send every item currently staged in the give queue."],[/refreshProgressionInspector\(/,"Scan progression tables, functions, and support metadata again."],[/lookupProgressionPlayer\(/,"Find a player in progression data using the current search value."],[/previewProgressionApply\(/,"Create a backup and preview the progression change before any live write."],[/applyProgressionLive\(/,"Apply the prepared progression change to the live database."],[/refresh\(/,"Refresh server status, players, resources, and recent activity."],[/act\('start'\)/,"Start the battlegroup server after checking VM and map readiness."],[/act\('restart'\)/,"Restart the battlegroup server."],[/act\('stop'\)/,"Stop the battlegroup server."],[/act\('backup'\)/,"Run the configured server backup action."],[/act\('update'\)/,"Run the configured server update action."],[/openDirector\(/,"Open the battlegroup director interface or management endpoint."],[/refreshVmStatus\(/,"Refresh VM power state, IP, uptime, ping, ports, and services."],[/runVmAction\('start'\)/,"Start the configured Hyper-V virtual machine."],[/runVmAction\('stop'\)/,"Stop the configured Hyper-V virtual machine."],[/deployMap\(/,"Read the selected map partitions, set replicas, and apply the requested memory limit."],[/stopSelectedMap\(/,"Scale the selected map down so it stops running."],[/refreshMaps\(/,"Reload map deployment status, available maps, memory limits, and partition readiness."],[/startDatabaseTunnel\(/,"Start or retry the SSH tunnel that exposes Postgres locally."],[/createDatabaseBackup\(/,"Create a database backup using the configured backup location."],[/restoreDatabaseBackup\(/,"Import the selected battlegroup backup into the database."],[/reloadManagerFrame\(/,"Reload the embedded server manager console."],[/refreshItemDatabase\(/,"Reload the bundled item database and filters."],[/refreshDiagnostics\(/,"Refresh diagnostics, connection checks, and version/runtime details."],[/openSetupWizard\(/,"Open the setup wizard to review or change core Suite configuration."],[/refreshBattlegroups\(/,"Reload battlegroups and selected battlegroup metadata."],[/useSelectedBattlegroup\(/,"Make the selected battlegroup the active target for Suite actions."],[/saveBattlegroupTitle\(/,"Save a friendly title for the selected battlegroup."],[/refreshReceiverStatus\(/,"Refresh receiver service status and reachability."],[/receiverAction\('start'\)/,"Start the live give receiver service."],[/receiverAction\('stop'\)/,"Stop the live give receiver service."],[/receiverAction\('restart'\)/,"Restart the live give receiver service."],[/saveSettings\(/,"Save the current Suite settings to config.json."],[/checkUpdates\(/,"Check the configured update source for a newer Suite release."],[/exportSettings\(/,"Export Suite settings to a file."],[/importSettings\(/,"Import Suite settings from a file."],[/openAboutDialog\(/,"Show Suite version, build, links, and project information."]];
+function suitePanelContext(button){const panel=button.closest(".panel,.map-deployment-panel,.setup-card,.suite-modal-card,.about-card");const label=panel?.querySelector(".label,h2,h3,strong")?.textContent;return label?String(label).replace(/\s+/g," ").trim():"";}
+function suiteDescriptiveTooltip(button){if(!button||button.dataset.tooltip==="false")return"";if(button.dataset.tooltip)return button.dataset.tooltip;if(button.classList.contains("tab"))return SUITE_VIEW_TOOLTIPS[button.dataset.view]||("Open the "+buttonActionLabel(button)+" workspace.");if(button.dataset.open)return SUITE_VIEW_TOOLTIPS[button.dataset.open]||("Open the "+button.dataset.open.replace(/-/g," ")+" panel.");const onclick=String(button.getAttribute("onclick")||"");for(const [pattern,text] of SUITE_ONCLICK_TOOLTIPS){if(pattern.test(onclick))return text;}if(button.classList.contains("player-card"))return"Select this player for details, item grants, permission tools, and related actions.";if(button.classList.contains("admin-item"))return"Select this item template for live giving or queue staging.";if(button.classList.contains("item-db-card"))return"Open this item record in the item database details panel.";const text=buttonActionLabel(button);const context=suitePanelContext(button);if(context&&text)return context+": "+text+". Click to run this action.";return text?("Click to run: "+text+"."):"";}
+function suiteTooltipText(button){const text=suiteDescriptiveTooltip(button);return String(text||"").replace(/\s+/g," ").trim().slice(0,180);}
+function ensureSuiteTooltip(){if(suiteTooltipEl)return suiteTooltipEl;suiteTooltipEl=document.createElement("div");suiteTooltipEl.className="suite-tooltip";suiteTooltipEl.setAttribute("role","tooltip");document.body.appendChild(suiteTooltipEl);return suiteTooltipEl;}
+function moveSuiteTooltip(event){if(!suiteTooltipEl||!suiteTooltipEl.classList.contains("visible"))return;const padding=14;const offset=16;const width=suiteTooltipEl.offsetWidth||220;const height=suiteTooltipEl.offsetHeight||40;let x=(event&&event.clientX||0)+offset;let y=(event&&event.clientY||0)+offset;if(x+width+padding>window.innerWidth)x=Math.max(padding,(event&&event.clientX||0)-width-offset);if(y+height+padding>window.innerHeight)y=Math.max(padding,(event&&event.clientY||0)-height-offset);suiteTooltipEl.style.setProperty("--tooltip-x",x+"px");suiteTooltipEl.style.setProperty("--tooltip-y",y+"px");}
+function showSuiteTooltip(button,event){const text=suiteTooltipText(button);if(!text)return;const title=button.getAttribute("title");if(title){button.dataset.tooltipTitle=title;button.removeAttribute("title");}suiteTooltipTarget=button;const tooltip=ensureSuiteTooltip();tooltip.textContent=text;tooltip.classList.add("visible");moveSuiteTooltip(event||{clientX:button.getBoundingClientRect().left,clientY:button.getBoundingClientRect().bottom});}
+function hideSuiteTooltip(){if(suiteTooltipTarget&&suiteTooltipTarget.dataset.tooltipTitle){suiteTooltipTarget.setAttribute("title",suiteTooltipTarget.dataset.tooltipTitle);delete suiteTooltipTarget.dataset.tooltipTitle;}suiteTooltipTarget=null;if(suiteTooltipEl)suiteTooltipEl.classList.remove("visible");}
+function registerSuiteTooltips(){document.addEventListener("mouseover",event=>{const button=event.target.closest("button,.button");if(!button)return;showSuiteTooltip(button,event);},true);document.addEventListener("mousemove",moveSuiteTooltip,true);document.addEventListener("mouseout",event=>{const button=event.target.closest("button,.button");if(button&&(!event.relatedTarget||!button.contains(event.relatedTarget)))hideSuiteTooltip();},true);document.addEventListener("focusin",event=>{const button=event.target.closest("button,.button");if(!button)return;const rect=button.getBoundingClientRect();showSuiteTooltip(button,{clientX:rect.left+Math.min(rect.width,48),clientY:rect.bottom});},true);document.addEventListener("focusout",hideSuiteTooltip,true);document.addEventListener("click",hideSuiteTooltip,true);window.addEventListener("scroll",hideSuiteTooltip,true);window.addEventListener("resize",hideSuiteTooltip);}
+registerSuiteTooltips();
 function registerActionFeedback(){document.addEventListener("click",event=>{const button=event.target.closest("button");if(!button||button.disabled||button.dataset.feedbackIgnore==="true"||button.closest("#suiteConfirmDialog")||button.closest("#aboutDialog"))return;const onclick=String(button.getAttribute("onclick")||"");if(/openAboutDialog|openSupportDiscord|openSupportKofi/i.test(onclick))return;const label=buttonActionLabel(button);if(!label)return;setUxText("uxLastAction",label);setActionCenter("Action received",label+" — working now.","working");button.classList.remove("action-done","action-failed");button.classList.add("action-working");window.setTimeout(()=>{button.classList.remove("action-working");},1400);},true);}
 registerActionFeedback();
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
@@ -11868,9 +12040,12 @@ async function runVmAction(action){const log=document.getElementById("vmControlL
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const data=await getJson("/api/action/"+action,{method:"POST"});let output=data.stdout||data.stderr||data.error||"Done.";if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
-async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));tone("mapMemory","Check RAM");select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>{const partitionText=Array.isArray(m.partitions)&&m.partitions.length?m.partitions.join(","):"Read on deploy";return '<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td><td>'+esc(partitionText)+'</td></tr>';}).join(""):'<tr><td colspan="6">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
+function updateMapMemoryInput(){const select=document.getElementById("mapSelect");const memory=document.getElementById("mapMemoryLimit");const rows=window.mapDeploymentRows||[];const row=rows.find(m=>m.map===select?.value);if(memory&&row){memory.value=row.memory||"";memory.dataset.currentMemory=row.memory||"";memory.dataset.currentMap=row.map||"";}tone("mapMemory",row?.memory||"Unset");}
+async function saveMapMemoryOnly(){const select=document.getElementById("mapSelect");const memory=document.getElementById("mapMemoryLimit");if(!select||!memory)return;const map=select.value;const value=memory.value.trim();const previous=(memory.dataset.currentMemory||"").trim();if(!map||!value||value===previous)return;const confirmed=await appConfirm("Change "+map+" memory limit?","Map name: "+map+"\\nCurrent limit: "+(previous||"unset")+"\\nNew limit: "+value+"\\n\\nThis updates the battlegroup memory limit only and does not start or stop the map.","Commit change","Cancel");if(!confirmed){memory.value=previous;document.getElementById("mapLog").textContent="Memory change cancelled for "+map+".";return;}document.getElementById("mapLog").textContent="Saving "+map+" memory limit to "+value+" without changing replicas...";try{const data=await getJson("/api/maps/memory",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,memory:value})});memory.dataset.currentMemory=data.memory||value;memory.dataset.currentMap=map;tone("mapMemory",data.memory||value);document.getElementById("mapLog").textContent=data.unchanged?"Memory already set to "+(data.memory||value)+".":"Memory limit saved for "+map+": "+(data.previousMemory||previous||"unset")+" -> "+(data.memory||value)+".";addActivity("maps","Map memory updated",map+" -> "+(data.memory||value));playUiSound("success");setTimeout(refreshMaps,1200);}catch(e){memory.value=previous;document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map memory update failed",e.message);playUiSound("warning");}}
+function registerMapMemoryEditor(){const memory=document.getElementById("mapMemoryLimit");if(!memory||memory.dataset.memoryEditorReady==="true")return;memory.dataset.memoryEditorReady="true";memory.addEventListener("change",saveMapMemoryOnly);memory.addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();memory.blur();}});}
+async function refreshMaps(){try{const data=await getJson("/api/maps");const maps=data.maps||[];window.mapDeploymentRows=maps;const select=document.getElementById("mapSelect");const selected=select.value;const active=maps.reduce((sum,m)=>sum+(Number(m.running)||0),0);const wanted=maps.reduce((sum,m)=>sum+(Number(m.replicas)||0),0);tone("mapBattlegroup",data.battlegroup||"Unknown");tone("activeMaps",String(active));tone("wantedMaps",String(wanted));select.innerHTML=maps.map(m=>'<option value="'+esc(m.map)+'">'+esc(m.map)+(m.dedicatedScaling?' (Dedicated)':'')+'</option>').join("")||'<option value="">No maps found</option>';if(selected)select.value=selected;select.onchange=()=>{updateMapMemoryInput();};registerMapMemoryEditor();updateMapMemoryInput();document.getElementById("mapRows").innerHTML=maps.length?maps.map(m=>{const partitionText=Array.isArray(m.partitions)&&m.partitions.length?m.partitions.join(","):"Read on deploy";return '<tr><td class="'+(m.running?'ok':'')+'">'+esc(m.map)+'</td><td>'+esc(m.deploymentMode||'Standard')+'</td><td>'+m.replicas+'</td><td>'+m.running+'</td><td>'+esc(m.memory||'-')+'</td><td>'+esc(partitionText)+'</td></tr>';}).join(""):'<tr><td colspan="6">No map deployments found.</td></tr>';addActivity("maps","Map deployment refreshed",active+" active / "+wanted+" wanted");}catch(e){document.getElementById("mapRows").innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>';document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map refresh failed",e.message);}}
 function setText(id,value){const el=document.getElementById(id);if(el)el.textContent=String(value);}
-async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);document.getElementById("mapLog").textContent="Reading "+map+" partitions, then setting "+replicas+" replica(s)...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas})});const partitionText=Array.isArray(data.partitions)&&data.partitions.length?" / partitions "+data.partitions.join(","):" / no partitions reported";const detail=data.deploymentMode==="Dedicated"&&data.scaleResource?"Dedicated scaling updated via "+data.scaleResource+partitionText+".":"Map deployment updated"+partitionText+".";document.getElementById("mapLog").textContent=data.stdout||data.stderr||detail;addActivity("maps","Map deployment updated",map+" -> "+replicas+partitionText);playUiSound("success");setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);playUiSound("warning");}}
+async function deployMap(){const map=document.getElementById("mapSelect").value;const replicas=Number(document.getElementById("mapReplicas").value||1);const memory=document.getElementById("mapMemoryLimit")?.value.trim()||"";document.getElementById("mapLog").textContent="Reading "+map+" partitions, then setting "+replicas+" replica(s)"+(memory?" and "+memory+" memory":"")+"...";try{const data=await getJson("/api/maps/deploy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,replicas,memory})});const partitionText=Array.isArray(data.partitions)&&data.partitions.length?" / partitions "+data.partitions.join(","):" / no partitions reported";const memoryText=data.memory?" / memory "+data.memory:"";const detail=data.deploymentMode==="Dedicated"&&data.scaleResource?"Dedicated scaling updated via "+data.scaleResource+partitionText+memoryText+".":"Map deployment updated"+partitionText+memoryText+".";document.getElementById("mapLog").textContent=data.stdout||data.stderr||data.memoryError||detail;addActivity("maps","Map deployment updated",map+" -> "+replicas+partitionText+memoryText);playUiSound("success");setTimeout(()=>{refresh();refreshMaps();},1800);}catch(e){document.getElementById("mapLog").textContent=betterError(e);addActivity("error","Map deployment failed",e.message);playUiSound("warning");}}
 function stopSelectedMap(){document.getElementById("mapReplicas").value=0;deployMap();}
 function liveGiveTransportMessage(transport){const missing=transport?.missingEnv||[];if(missing.includes("DUNE_ADMIN_GIVE_ITEM_TRANSPORT"))return"Live Give unavailable: missing DUNE_ADMIN_GIVE_ITEM_TRANSPORT.";if(missing.length)return"Live Give unavailable: missing "+missing.join(", ")+".";return"Live Give unavailable: "+(transport?.dryRunReason||transport?.reason||"transport is not configured.");}
 function renderEnvSetupLegacy(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagnostics=data;const status=document.getElementById("envLiveStatus");const vars=document.getElementById("envMissingVars");if(!status||!vars)return;const missing=liveGiveTransport?.missingEnv||[];status.className=adminLiveGiveAvailable?"empty mt":"warning mt";status.textContent=adminLiveGiveAvailable?"Live Give transport is configured and reachable. Published grants still require inventory verification before they are called verified.":liveGiveUnavailableMessage;if(missing.length){vars.innerHTML=missing.map(name=>'<div class="detail-row"><span class="subtle">Missing</span><strong>'+esc(name)+'</strong></div>').join("");}else{vars.innerHTML='<div class="detail-row"><span class="subtle">Transport</span><strong>'+esc(liveGiveTransport?.mode||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Reachable</span><strong>'+esc(liveGiveTransport?.reachable?"Yes":"No")+'</strong></div>';}const runtime=(data?.activeRuntimeConfig||liveGiveEnvDiagnostics?.activeRuntimeConfig||{});const help=(data?.requiredModesHelp||liveGiveEnvDiagnostics?.requiredModesHelp||null);const paths=document.getElementById("envRuntimePaths");const values=document.getElementById("envRuntimeValues");const priority=document.getElementById("envSourcePriority");const guide=document.getElementById("envLiveGuide");if(paths){const envFiles=(runtime.envFiles||[]).map(file=>'<div class="detail-row"><span class="subtle">'+esc(file.label)+(file.override?" override":"")+'</span><strong>'+esc((file.exists?"Found: ":"Missing: ")+(file.path||""))+'</strong></div>').join("");paths.innerHTML='<div class="detail-row"><span class="subtle">Active config</span><strong>'+esc(runtime.activeConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Backend config</span><strong>'+esc(runtime.backendConfigPath||"Unknown")+'</strong></div><div class="detail-row"><span class="subtle">Manager config</span><strong>'+esc(runtime.managerConfigPath||"Unknown")+'</strong></div>'+envFiles;}if(values){const envValues=runtime.loadedEnvironmentVariables||runtime.values||[];const rows=envValues.map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.name)+'<br>'+esc(item.source||"unknown")+(item.detail?' · '+esc(item.detail):'')+'</span><strong>'+esc(item.displayValue||item.value||"(empty)")+'</strong></div>').join("");values.innerHTML=rows||'<div class="empty">No runtime environment details returned.</div>';}if(priority){priority.innerHTML=(runtime.sourcePriority||[]).map((item,index)=>'<div class="detail-row"><span class="subtle">'+(index+1)+'</span><strong>'+esc(item)+'</strong></div>').join("")||'<div class="empty">No source priority returned.</div>';}if(guide&&help){guide.textContent=[help.note||"",...(help.lines||[])].filter(Boolean).join("\\n\\n");}}
@@ -12469,7 +12644,17 @@ async function route(req, res) {
   if (url.pathname === "/api/maps/deploy" && req.method === "POST") {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
-      const result = await setMapReplicas(body.map, body.replicas);
+      const result = await setMapReplicas(body.map, body.replicas, body.memory);
+      await json(res, result, result.ok ? 200 : 500);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/maps/memory" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await setMapMemoryLimit(body.map, body.memory);
       await json(res, result, result.ok ? 200 : 500);
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 400);

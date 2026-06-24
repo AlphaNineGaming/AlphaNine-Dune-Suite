@@ -7544,9 +7544,9 @@ async function adminPlayers(options = {}) {
   };
   const characterQuery = query ? queriedPlayerSql(false) : `
     with account_ids as (
-      select account_id from dune.communinet_player where account_id is not null
-      union
-      select account_id from dune.player_state where account_id is not null
+      select distinct account_id
+      from dune.player_state
+      where account_id is not null
     )
     select ${selectPlayerColumns}
     from account_ids a
@@ -7565,8 +7565,8 @@ async function adminPlayers(options = {}) {
   `;
   try {
     const started = Date.now();
-    console.info("[admin/players] player lookup SQL started", { query, limit, mode: query ? "queried-exact" : "full-list", timeoutMs: query ? 7000 : 45000 });
-    let output = await dbQuery(characterQuery, query ? 7000 : 45000);
+    console.info("[admin/players] player lookup SQL started", { query, limit, mode: query ? "queried-exact" : "full-list-player-state", timeoutMs: query ? 7000 : 15000 });
+    let output = await dbQuery(characterQuery, query ? 7000 : 15000);
     let players = output ? output.split(/\r?\n/).filter(Boolean).map(normalizeAdminPlayerRow).filter((player) => player.id) : [];
     if (query && !players.length) {
       console.info("[admin/players] exact query returned no players; trying partial query", { query, limit, timeoutMs: 7000 });
@@ -7589,18 +7589,18 @@ async function adminPlayers(options = {}) {
     const resolvedCount = players.filter((player) => player.characterNameResolved).length;
     diagnostics.sourcesChecked.push({
       type: "database",
-      source: "dune.communinet_player + dune.player_state",
-      idColumn: "communinet_player.account_id / player_state.account_id",
+      source: query ? "dune.communinet_player + dune.player_state" : "dune.player_state",
+      idColumn: query ? "communinet_player.account_id / player_state.account_id" : "player_state.account_id",
       nameColumn: "player_state.character_name",
       rows: players.length,
       resolvedNames: resolvedCount,
       ok: true,
-      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id",
+      joinPath: query ? "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id" : "dune.player_state.account_id -> dune.accounts.id",
       query: query || "",
       durationMs: Date.now() - started
     });
     diagnostics.sourceTableUsed = "dune.player_state";
-    diagnostics.joinPathUsed = "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id";
+    diagnostics.joinPathUsed = query ? "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id" : "dune.player_state.account_id -> dune.accounts.id";
     diagnostics.characterNamesResolved = resolvedCount;
     diagnostics.playersFound = players.length;
     if (includeHydration) await attachHydrationToPlayers(players);
@@ -7618,7 +7618,7 @@ async function adminPlayers(options = {}) {
         details: playerDiagnosticLines(diagnostics)
       };
     }
-    diagnostics.reason = "No account/player rows were found in dune.communinet_player or dune.player_state.";
+    diagnostics.reason = query ? "No account/player rows were found in dune.communinet_player or dune.player_state." : "No account/player rows were found in dune.player_state.";
     if (query && !numericQuery) {
       return {
         ok: true,
@@ -12573,12 +12573,12 @@ async function refreshAdmin(){const log=document.getElementById("adminLog");log.
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Template: '+esc(item.id||"--")+'</span>';}
-function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(players[0]&&!selectedPlayerId){selectedPlayerId=players[0].id;select.value=selectedPlayerId;}updateGiveTargetSummary();renderVendorUnlockSelection();}
+function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(players[0]&&!selectedPlayerId){selectedPlayerId=players[0].id;select.value=selectedPlayerId;}updateGiveTargetSummary();}
 async function refreshGivePlayersFast(){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();addActivity("probe","Give Item players loaded",adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
-function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();renderVendorUnlockSelection();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();renderVendorUnlockSelection();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div>'+hydrationDetailRow(p.hydration)+'<div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
 function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}

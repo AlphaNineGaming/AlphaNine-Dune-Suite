@@ -7387,7 +7387,7 @@
     {
       "id": "t6schematicfragmentql1",
       "name": "Schematic Pattern Grade 1",
-      "category": "Misc",
+      "category": "Schematics",
       "type": "Components",
       "subtype": "Components",
       "tier": "Tier 6",
@@ -7405,7 +7405,7 @@
     {
       "id": "t6schematicfragmentql2",
       "name": "Schematic Pattern Grade 2",
-      "category": "Misc",
+      "category": "Schematics",
       "type": "Components",
       "subtype": "Components",
       "tier": "Tier 6",
@@ -7423,7 +7423,7 @@
     {
       "id": "t6schematicfragmentql3",
       "name": "Schematic Pattern Grade 3",
-      "category": "Misc",
+      "category": "Schematics",
       "type": "Components",
       "subtype": "Components",
       "tier": "Tier 6",
@@ -7441,7 +7441,7 @@
     {
       "id": "t6schematicfragmentql4",
       "name": "Schematic Pattern Grade 4",
-      "category": "Misc",
+      "category": "Schematics",
       "type": "Components",
       "subtype": "Components",
       "tier": "Tier 6",
@@ -7459,7 +7459,7 @@
     {
       "id": "t6schematicfragmentql5",
       "name": "Schematic Pattern Grade 5",
-      "category": "Misc",
+      "category": "Schematics",
       "type": "Components",
       "subtype": "Components",
       "tier": "Tier 6",
@@ -7477,7 +7477,7 @@
     {
       "id": "uniquesword_05_damasteel_schematic",
       "name": "Damasteel Sword",
-      "category": "Misc",
+      "category": "Schematics",
       "type": "Contract",
       "subtype": "Contract",
       "tier": "Tier 0",
@@ -7495,7 +7495,7 @@
     {
       "id": "contract_landsraadpowerpackcomponent_schematic",
       "name": "Experimental Power Pack Component",
-      "category": "Items",
+      "category": "Schematics",
       "type": "",
       "subtype": "",
       "tier": "Tier 0",
@@ -7513,7 +7513,7 @@
     {
       "id": "contract_landsraadsurveillancesensor_schematic",
       "name": "Surveillance Sensor Schematic",
-      "category": "Items",
+      "category": "Schematics",
       "type": "",
       "subtype": "",
       "tier": "Tier 0",
@@ -7531,7 +7531,7 @@
     {
       "id": "contract_landsraadexperimentalwindturbinecomponent_schematic",
       "name": "Experimental Wind Turbine Schematic",
-      "category": "Items",
+      "category": "Schematics",
       "type": "",
       "subtype": "",
       "tier": "Tier 0",
@@ -7549,7 +7549,7 @@
     {
       "id": "contract_landsraadsealedrecorder_schematic",
       "name": "Sealed Recorder Schematic",
-      "category": "Items",
+      "category": "Schematics",
       "type": "",
       "subtype": "",
       "tier": "Tier 0",
@@ -7567,7 +7567,7 @@
     {
       "id": "contract_landsraadixiansurveillancedevice_schematic",
       "name": "Ixian Transeye Schematic",
-      "category": "Items",
+      "category": "Schematics",
       "type": "",
       "subtype": "",
       "tier": "Tier 0",
@@ -7585,7 +7585,7 @@
     {
       "id": "t6_augment_damage2_schematic",
       "name": "House Heavy Caliber Upgrade",
-      "category": "Items",
+      "category": "Schematics",
       "type": "",
       "subtype": "",
       "tier": "Tier 6",
@@ -7603,7 +7603,7 @@
     {
       "id": "contract_landsraadraremetalsextractor_schematic",
       "name": "Yafeng Ore Extractor Prototype",
-      "category": "Items",
+      "category": "Schematics",
       "type": "",
       "subtype": "",
       "tier": "Tier 0",
@@ -19609,7 +19609,7 @@
     {
       "id": "journeycarthagschematics",
       "name": "Old Carthag schematics",
-      "category": "Misc",
+      "category": "Schematics",
       "type": "Contract",
       "subtype": "Contract",
       "tier": "Tier 0",

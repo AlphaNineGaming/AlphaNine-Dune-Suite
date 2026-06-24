@@ -23,7 +23,330 @@
       --ok: #62d26f;
       --warning: #ffb84d;
       --shadow: 0 28px 90px rgba(0, 0, 0, 0.62);
+      --manager-bg:
+        radial-gradient(circle at 76% 0%, rgba(212, 165, 74, 0.18), transparent 28%),
+        radial-gradient(circle at 18% 2%, rgba(111, 80, 30, 0.2), transparent 30%),
+        linear-gradient(160deg, #050603 0%, #0d0f08 48%, #060704 100%);
+      --manager-grid:
+        linear-gradient(rgba(212, 165, 74, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(212, 165, 74, 0.03) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(9, 11, 10, 0.86), rgba(9, 11, 10, 0.44) 56%, rgba(9, 11, 10, 0.74)),
+        linear-gradient(180deg, transparent 62%, #050603),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(19, 19, 12, 0.94), rgba(5, 7, 5, 0.88));
+      --manager-surface-strong: linear-gradient(180deg, rgba(18, 18, 12, 0.96), rgba(9, 10, 6, 0.96));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(18, 18, 12, 0.95), rgba(6, 8, 5, 0.9));
+      --manager-control-bg: rgba(6, 8, 5, 0.9);
+      --manager-control-soft: rgba(6, 8, 5, 0.88);
+      --manager-chip-bg: rgba(212, 165, 74, 0.08);
+      --manager-chip-hover: rgba(212, 165, 74, 0.14);
+      --manager-active-bg: rgba(212, 165, 74, 0.1);
+      --manager-button-bg: linear-gradient(180deg, rgba(30, 29, 18, 0.95), rgba(10, 12, 8, 0.95));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(51, 43, 22, 0.96), rgba(14, 13, 8, 0.96));
+      --manager-primary-bg: linear-gradient(180deg, rgba(159, 111, 38, 0.98), rgba(78, 55, 22, 0.98));
+      --manager-primary-text: #fff1c8;
+      --manager-badge-text: #1a1208;
+      --manager-ring-text: #17110b;
+      --manager-ring-inner: #23190b;
+      --server-profile-bg: linear-gradient(135deg, rgba(51, 36, 13, 0.9), rgba(8, 10, 6, 0.94));
+      --server-profile-line: rgba(240, 201, 106, 0.82);
+      --server-profile-glow: rgba(212, 165, 74, 0.18);
+      --server-profile-mark: linear-gradient(180deg, rgba(240, 201, 106, 0.96), rgba(148, 101, 32, 0.72));
+      --server-profile-code-bg: rgba(6, 8, 5, 0.92);
+      --server-profile-text: #f3ead6;
+      --server-profile-muted: #c1a36e;
+      --server-profile-input-bg: rgba(5, 7, 4, 0.92);
+      --server-profile-input-line: rgba(212, 165, 74, 0.38);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(40, 31, 14, 0.96), rgba(11, 12, 7, 0.96));
+      --server-profile-button-text: #f0c96a;
+      --server-profile-primary-bg: linear-gradient(180deg, rgba(184, 130, 40, 0.98), rgba(86, 59, 20, 0.98));
+      --server-profile-primary-text: #fff4cc;
       font-family: "Rajdhani", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    }
+
+    body.theme-command {
+      --bg: #010101;
+      --bg-2: #050403;
+      --panel: rgba(3, 3, 3, 0.96);
+      --panel-solid: #050403;
+      --panel-2: #0c0905;
+      --line: rgba(188, 132, 45, 0.42);
+      --line-soft: rgba(188, 132, 45, 0.16);
+      --line-strong: rgba(219, 164, 67, 0.76);
+      --text: #f0e4d0;
+      --muted: #aa9168;
+      --accent: #c98e32;
+      --accent-bright: #dba443;
+      --manager-bg:
+        radial-gradient(circle at 80% 0%, rgba(219, 164, 67, 0.14), transparent 26%),
+        linear-gradient(160deg, #010101 0%, #060402 52%, #000 100%);
+      --manager-grid:
+        linear-gradient(rgba(219, 164, 67, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(219, 164, 67, 0.026) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(0, 0, 0, 0.9), rgba(10, 6, 2, 0.52) 56%, rgba(0, 0, 0, 0.82)),
+        linear-gradient(180deg, transparent 62%, #010101),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(8, 6, 3, 0.97), rgba(0, 0, 0, 0.92));
+      --manager-surface-strong: linear-gradient(180deg, rgba(12, 8, 3, 0.98), rgba(0, 0, 0, 0.96));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(8, 6, 3, 0.98), rgba(0, 0, 0, 0.94));
+      --manager-control-bg: rgba(0, 0, 0, 0.92);
+      --manager-control-soft: rgba(0, 0, 0, 0.86);
+      --manager-chip-bg: rgba(219, 164, 67, 0.08);
+      --manager-chip-hover: rgba(219, 164, 67, 0.16);
+      --manager-active-bg: rgba(219, 164, 67, 0.1);
+      --manager-button-bg: linear-gradient(180deg, rgba(26, 16, 5, 0.98), rgba(0, 0, 0, 0.96));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(48, 30, 8, 0.98), rgba(0, 0, 0, 0.96));
+      --manager-primary-bg: linear-gradient(180deg, #dba443, #724a12);
+      --manager-primary-text: #050403;
+      --manager-badge-text: #050403;
+      --manager-ring-text: #050403;
+      --manager-ring-inner: #050403;
+      --server-profile-bg:
+        linear-gradient(135deg, rgba(26, 17, 6, 0.98), rgba(0, 0, 0, 0.96)),
+        repeating-linear-gradient(90deg, rgba(219, 164, 67, 0.08) 0 1px, transparent 1px 18px);
+      --server-profile-line: rgba(219, 164, 67, 0.86);
+      --server-profile-glow: rgba(114, 74, 18, 0.25);
+      --server-profile-mark: linear-gradient(180deg, #dba443, #724a12);
+      --server-profile-code-bg: rgba(0, 0, 0, 0.94);
+      --server-profile-text: #f2dec0;
+      --server-profile-muted: #b9863d;
+      --server-profile-input-bg: rgba(0, 0, 0, 0.9);
+      --server-profile-input-line: rgba(219, 164, 67, 0.42);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(24, 14, 4, 0.98), rgba(0, 0, 0, 0.96));
+      --server-profile-button-text: #dba443;
+      --server-profile-primary-bg: linear-gradient(180deg, #dba443, #724a12);
+      --server-profile-primary-text: #050403;
+    }
+
+    body.theme-purple {
+      --bg: #100613;
+      --bg-2: #2b1231;
+      --panel: rgba(28, 12, 34, 0.9);
+      --panel-solid: #1f0e26;
+      --panel-2: #301437;
+      --line: rgba(180, 94, 203, 0.46);
+      --line-soft: rgba(180, 94, 203, 0.18);
+      --line-strong: rgba(229, 139, 255, 0.76);
+      --text: #f7eafd;
+      --muted: #c7a3d0;
+      --accent: #c982ff;
+      --accent-bright: #e58bff;
+      --manager-bg:
+        radial-gradient(circle at 82% 0%, rgba(229, 139, 255, 0.2), transparent 28%),
+        radial-gradient(circle at 18% 5%, rgba(255, 159, 202, 0.12), transparent 30%),
+        linear-gradient(160deg, #100613 0%, #2b1231 52%, #07030c 100%);
+      --manager-grid:
+        linear-gradient(rgba(229, 139, 255, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(229, 139, 255, 0.03) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(16, 6, 19, 0.88), rgba(43, 18, 49, 0.48) 56%, rgba(16, 6, 19, 0.78)),
+        linear-gradient(180deg, transparent 62%, #100613),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(31, 11, 38, 0.94), rgba(12, 5, 17, 0.9));
+      --manager-surface-strong: linear-gradient(180deg, rgba(38, 13, 47, 0.96), rgba(15, 6, 20, 0.96));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(35, 12, 43, 0.94), rgba(14, 5, 18, 0.9));
+      --manager-control-bg: rgba(14, 5, 19, 0.9);
+      --manager-control-soft: rgba(16, 6, 22, 0.88);
+      --manager-chip-bg: rgba(201, 130, 255, 0.1);
+      --manager-chip-hover: rgba(201, 130, 255, 0.18);
+      --manager-active-bg: rgba(201, 130, 255, 0.12);
+      --manager-button-bg: linear-gradient(180deg, rgba(45, 15, 56, 0.96), rgba(15, 6, 21, 0.95));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(70, 22, 88, 0.96), rgba(23, 8, 31, 0.95));
+      --manager-primary-bg: linear-gradient(180deg, #ff9fca, #8f4ec0);
+      --manager-primary-text: #210b2a;
+      --manager-badge-text: #210b2a;
+      --manager-ring-text: #210b2a;
+      --manager-ring-inner: #16071d;
+      --server-profile-bg:
+        radial-gradient(circle at 92% 6%, rgba(255, 159, 202, 0.2), transparent 34%),
+        linear-gradient(135deg, rgba(62, 22, 72, 0.95), rgba(18, 8, 24, 0.95));
+      --server-profile-line: rgba(229, 139, 255, 0.84);
+      --server-profile-glow: rgba(201, 130, 255, 0.3);
+      --server-profile-mark: linear-gradient(180deg, #ff9fca, #c982ff);
+      --server-profile-code-bg: rgba(18, 8, 24, 0.94);
+      --server-profile-text: #fdeaff;
+      --server-profile-muted: #d8a9e4;
+      --server-profile-input-bg: rgba(20, 7, 27, 0.92);
+      --server-profile-input-line: rgba(229, 139, 255, 0.38);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(55, 19, 68, 0.96), rgba(22, 8, 29, 0.96));
+      --server-profile-button-text: #f1a4ff;
+      --server-profile-primary-bg: linear-gradient(180deg, #ff9fca, #8f4ec0);
+      --server-profile-primary-text: #210b2a;
+    }
+
+    body.theme-contrast {
+      --bg: #070503;
+      --bg-2: #20140b;
+      --panel: rgba(24, 16, 10, 0.92);
+      --panel-solid: #18100a;
+      --panel-2: #2b1c10;
+      --line: rgba(166, 113, 55, 0.48);
+      --line-soft: rgba(166, 113, 55, 0.18);
+      --line-strong: rgba(214, 159, 83, 0.82);
+      --text: #f2e7d7;
+      --muted: #b69a78;
+      --accent: #c89446;
+      --accent-bright: #d69f53;
+      --manager-bg:
+        radial-gradient(circle at 78% 0%, rgba(214, 159, 83, 0.18), transparent 28%),
+        radial-gradient(circle at 18% 4%, rgba(126, 78, 30, 0.16), transparent 30%),
+        linear-gradient(160deg, #070503 0%, #20140b 52%, #080503 100%);
+      --manager-grid:
+        linear-gradient(rgba(214, 159, 83, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(214, 159, 83, 0.03) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(10, 7, 5, 0.88), rgba(50, 29, 12, 0.5) 56%, rgba(10, 7, 5, 0.8)),
+        linear-gradient(180deg, transparent 62%, #070503),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(30, 19, 10, 0.96), rgba(10, 7, 5, 0.92));
+      --manager-surface-strong: linear-gradient(180deg, rgba(42, 25, 12, 0.98), rgba(13, 8, 5, 0.96));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(34, 21, 11, 0.96), rgba(9, 6, 4, 0.92));
+      --manager-control-bg: rgba(10, 7, 5, 0.9);
+      --manager-control-soft: rgba(12, 8, 5, 0.88);
+      --manager-chip-bg: rgba(214, 159, 83, 0.09);
+      --manager-chip-hover: rgba(214, 159, 83, 0.17);
+      --manager-active-bg: rgba(214, 159, 83, 0.11);
+      --manager-button-bg: linear-gradient(180deg, rgba(54, 33, 15, 0.98), rgba(12, 8, 5, 0.96));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(79, 49, 20, 0.98), rgba(18, 11, 6, 0.96));
+      --manager-primary-bg: linear-gradient(180deg, #d69f53, #7d4e1e);
+      --manager-primary-text: #fff7e8;
+      --manager-badge-text: #211306;
+      --manager-ring-text: #211306;
+      --manager-ring-inner: #140c06;
+      --server-profile-bg:
+        linear-gradient(135deg, rgba(52, 32, 14, 0.96), rgba(10, 7, 5, 0.96)),
+        repeating-linear-gradient(-45deg, rgba(214, 159, 83, 0.07) 0 2px, transparent 2px 16px);
+      --server-profile-line: rgba(214, 159, 83, 0.86);
+      --server-profile-glow: rgba(202, 138, 64, 0.25);
+      --server-profile-mark: linear-gradient(180deg, #d69f53, #7d4e1e);
+      --server-profile-code-bg: rgba(10, 7, 5, 0.94);
+      --server-profile-text: #fff0dc;
+      --server-profile-muted: #d0a273;
+      --server-profile-input-bg: rgba(10, 7, 5, 0.92);
+      --server-profile-input-line: rgba(214, 159, 83, 0.46);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(57, 35, 15, 0.98), rgba(12, 8, 5, 0.96));
+      --server-profile-button-text: #e8b466;
+      --server-profile-primary-bg: linear-gradient(180deg, #d69f53, #7d4e1e);
+      --server-profile-primary-text: #fff7e8;
+    }
+
+    body.theme-royal {
+      color-scheme: light;
+      --bg: #efe5d4;
+      --bg-2: #d7b77f;
+      --panel: rgba(255, 250, 238, 0.9);
+      --panel-solid: #fff8ea;
+      --panel-2: #f2deb8;
+      --line: rgba(175, 119, 35, 0.36);
+      --line-soft: rgba(105, 73, 32, 0.18);
+      --line-strong: rgba(199, 139, 43, 0.72);
+      --text: #221914;
+      --muted: #756048;
+      --accent: #b77a22;
+      --accent-bright: #8f5d1f;
+      --danger: #b43b2c;
+      --ok: #2f8143;
+      --warning: #aa671b;
+      --shadow: 0 22px 70px rgba(98, 58, 18, 0.22);
+      --manager-bg:
+        radial-gradient(circle at 74% 0%, rgba(255, 241, 199, 0.72), transparent 30%),
+        radial-gradient(circle at 18% 6%, rgba(183, 122, 34, 0.2), transparent 32%),
+        linear-gradient(160deg, #fff8ea 0%, #efd8ab 50%, #d7b77f 100%);
+      --manager-grid:
+        linear-gradient(rgba(105, 73, 32, 0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(105, 73, 32, 0.045) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(60, 38, 15, 0.46), rgba(255, 248, 234, 0.22) 58%, rgba(119, 76, 24, 0.36)),
+        linear-gradient(180deg, transparent 62%, rgba(239, 229, 212, 0.96)),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(242, 222, 184, 0.88));
+      --manager-surface-strong: linear-gradient(180deg, rgba(255, 253, 247, 0.98), rgba(239, 216, 171, 0.92));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(242, 222, 184, 0.88));
+      --manager-control-bg: rgba(255, 253, 247, 0.88);
+      --manager-control-soft: rgba(255, 250, 238, 0.84);
+      --manager-chip-bg: rgba(183, 122, 34, 0.1);
+      --manager-chip-hover: rgba(183, 122, 34, 0.18);
+      --manager-active-bg: rgba(183, 122, 34, 0.12);
+      --manager-button-bg: linear-gradient(180deg, rgba(255, 250, 238, 0.96), rgba(232, 198, 130, 0.84));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(255, 253, 247, 0.98), rgba(221, 179, 96, 0.9));
+      --manager-primary-bg: linear-gradient(180deg, #b77a22, #6d4518);
+      --manager-primary-text: #fff8ea;
+      --manager-badge-text: #221914;
+      --manager-ring-text: #221914;
+      --manager-ring-inner: #fff8ea;
+      --server-profile-bg:
+        linear-gradient(135deg, rgba(255, 253, 247, 0.98), rgba(239, 216, 171, 0.94)),
+        repeating-linear-gradient(90deg, rgba(105, 73, 32, 0.06) 0 1px, transparent 1px 22px);
+      --server-profile-line: rgba(145, 94, 30, 0.72);
+      --server-profile-glow: rgba(183, 122, 34, 0.2);
+      --server-profile-mark: linear-gradient(180deg, #b77a22, #6d4518);
+      --server-profile-code-bg: rgba(255, 253, 247, 0.88);
+      --server-profile-text: #221914;
+      --server-profile-muted: #6c5438;
+      --server-profile-input-bg: rgba(255, 253, 247, 0.9);
+      --server-profile-input-line: rgba(145, 94, 30, 0.34);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(255, 250, 238, 0.96), rgba(232, 198, 130, 0.84));
+      --server-profile-button-text: #5b3712;
+      --server-profile-primary-bg: linear-gradient(180deg, #b77a22, #6d4518);
+      --server-profile-primary-text: #fff8ea;
+    }
+
+    body.theme-royal {
+      background:
+        radial-gradient(circle at 74% 0%, rgba(255, 241, 199, 0.72), transparent 30%),
+        radial-gradient(circle at 18% 6%, rgba(183, 122, 34, 0.2), transparent 32%),
+        linear-gradient(160deg, #fff8ea 0%, #efd8ab 50%, #d7b77f 100%);
+    }
+
+    body.theme-royal::before {
+      opacity: 0.2;
+      background:
+        linear-gradient(rgba(105, 73, 32, 0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(105, 73, 32, 0.045) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+
+    body.theme-royal .hero {
+      background:
+        linear-gradient(90deg, rgba(60, 38, 15, 0.46), rgba(255, 248, 234, 0.22) 58%, rgba(119, 76, 24, 0.36)),
+        linear-gradient(180deg, transparent 62%, rgba(239, 229, 212, 0.96)),
+        url("assets/desert-command.png") center / cover;
+    }
+
+    body.theme-royal .management-toolbar,
+    body.theme-royal .status-strip,
+    body.theme-royal .panel,
+    body.theme-royal .summary,
+    body.theme-royal .rail,
+    body.theme-royal .group,
+    body.theme-royal .reward-panel {
+      color: var(--text);
+      background: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(242, 222, 184, 0.88));
+      border-color: rgba(145, 94, 30, 0.34);
+      box-shadow: 0 18px 46px rgba(98, 58, 18, 0.16), inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+    }
+
+    body.theme-royal .btn {
+      color: #5b3712;
+      border-color: rgba(145, 94, 30, 0.34);
+      background: linear-gradient(180deg, rgba(255, 250, 238, 0.96), rgba(232, 198, 130, 0.84));
+      box-shadow: none;
+    }
+
+    body.theme-royal .btn:hover {
+      color: #221914;
+      border-color: rgba(145, 94, 30, 0.58);
+      background: linear-gradient(180deg, rgba(255, 253, 247, 0.98), rgba(221, 179, 96, 0.9));
+    }
+
+    body.theme-royal .btn.primary,
+    body.theme-royal .btn.set-server {
+      color: #fff8ea;
+      border-color: rgba(109, 69, 24, 0.48);
+      background: linear-gradient(180deg, #b77a22, #6d4518);
+      text-shadow: 0 1px 0 rgba(0, 0, 0, 0.28);
     }
 
     * { box-sizing: border-box; }
@@ -31,10 +354,7 @@
     body {
       margin: 0;
       min-height: 100vh;
-      background:
-        radial-gradient(circle at 76% 0%, rgba(212, 165, 74, 0.18), transparent 28%),
-        radial-gradient(circle at 18% 2%, rgba(111, 80, 30, 0.2), transparent 30%),
-        linear-gradient(160deg, #050603 0%, #0d0f08 48%, #060704 100%);
+      background: var(--manager-bg);
       color: var(--text);
     }
 
@@ -44,29 +364,24 @@
       inset: 0;
       pointer-events: none;
       opacity: 0.35;
-      background:
-        linear-gradient(rgba(212, 165, 74, 0.035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(212, 165, 74, 0.03) 1px, transparent 1px);
+      background: var(--manager-grid);
       background-size: 48px 48px;
       mask-image: linear-gradient(180deg, black, transparent 86%);
     }
 
     *::-webkit-scrollbar { width: 10px; height: 10px; }
-    *::-webkit-scrollbar-track { background: #070806; }
+    *::-webkit-scrollbar-track { background: var(--manager-control-bg); }
     *::-webkit-scrollbar-thumb {
-      background: rgba(212, 165, 74, 0.45);
-      border: 2px solid #070806;
+      background: var(--line);
+      border: 2px solid var(--manager-control-bg);
     }
-    *::-webkit-scrollbar-thumb:hover { background: rgba(240, 201, 106, 0.72); }
+    *::-webkit-scrollbar-thumb:hover { background: var(--line-strong); }
 
     button, input, select, textarea { font: inherit; }
 
     .hero {
       min-height: 330px;
-      background:
-        linear-gradient(90deg, rgba(9, 11, 10, 0.86), rgba(9, 11, 10, 0.44) 56%, rgba(9, 11, 10, 0.74)),
-        linear-gradient(180deg, transparent 62%, #050603),
-        url("assets/desert-command.png") center / cover;
+      background: var(--manager-hero-bg);
       border-bottom: 1px solid var(--line);
     }
 
@@ -93,11 +408,11 @@
     .mark {
       width: 42px;
       height: 42px;
-      border: 1px solid rgba(212, 165, 74, 0.56);
-      background: linear-gradient(135deg, rgba(212, 165, 74, 0.3), rgba(80, 58, 22, 0.22));
+      border: 1px solid var(--line-strong);
+      background: linear-gradient(135deg, var(--manager-chip-hover), var(--manager-active-bg));
       display: grid;
       place-items: center;
-      box-shadow: inset 0 0 0 1px rgba(240, 201, 106, 0.08), 0 0 24px rgba(212, 165, 74, 0.14);
+      box-shadow: inset 0 0 0 1px var(--line-soft), 0 0 24px var(--line-soft);
     }
 
     .mark svg { width: 25px; height: 25px; }
@@ -106,8 +421,8 @@
       width: 48px;
       height: 48px;
       object-fit: cover;
-      border: 1px solid rgba(229, 170, 84, 0.5);
-      background: rgba(0, 0, 0, 0.28);
+      border: 1px solid var(--line);
+      background: var(--manager-control-bg);
     }
 
     h1 {
@@ -143,7 +458,7 @@
     }
 
     .status-strip {
-      background: linear-gradient(180deg, rgba(18, 18, 12, 0.95), rgba(6, 8, 5, 0.9));
+      background: var(--manager-toolbar-bg);
       border: 1px solid var(--line);
       box-shadow: var(--shadow);
       padding: 16px;
@@ -170,8 +485,8 @@
 
     .btn {
       appearance: none;
-      border: 1px solid rgba(212, 165, 74, 0.38);
-      background: linear-gradient(180deg, rgba(30, 29, 18, 0.95), rgba(10, 12, 8, 0.95));
+      border: 1px solid var(--line);
+      background: var(--manager-button-bg);
       color: var(--accent-bright);
       min-height: 40px;
       padding: 0 13px;
@@ -187,13 +502,13 @@
 
     .btn:hover {
       border-color: var(--line-strong);
-      background: linear-gradient(180deg, rgba(51, 43, 22, 0.96), rgba(14, 13, 8, 0.96));
-      box-shadow: 0 0 18px rgba(212, 165, 74, 0.13);
+      background: var(--manager-button-hover-bg);
+      box-shadow: 0 0 18px var(--line-soft);
     }
     .btn.primary, .btn.set-server {
-      background: linear-gradient(180deg, rgba(159, 111, 38, 0.98), rgba(78, 55, 22, 0.98));
-      color: #fff1c8;
-      border-color: rgba(240, 201, 106, 0.78);
+      background: var(--manager-primary-bg);
+      color: var(--manager-primary-text);
+      border-color: var(--line-strong);
       font-weight: 900;
     }
     .btn.icon { width: 40px; padding: 0; }
@@ -212,7 +527,7 @@
       gap: 18px;
       margin-bottom: 14px;
       padding: 14px;
-      background: linear-gradient(180deg, rgba(18, 18, 12, 0.95), rgba(6, 8, 5, 0.9));
+      background: var(--manager-toolbar-bg);
       border: 1px solid var(--line);
       box-shadow: var(--shadow);
       backdrop-filter: blur(14px);
@@ -251,10 +566,10 @@
     }
 
     .rail, .panel, .summary {
-      background: linear-gradient(180deg, rgba(19, 19, 12, 0.94), rgba(5, 7, 5, 0.88));
+      background: var(--manager-surface);
       border: 1px solid var(--line);
       box-shadow:
-        inset 0 0 0 1px rgba(240, 201, 106, 0.05),
+        inset 0 0 0 1px var(--line-soft),
         inset 0 -42px 70px rgba(0, 0, 0, 0.34),
         var(--shadow);
       backdrop-filter: blur(14px);
@@ -269,7 +584,7 @@
       height: 42px;
       color: var(--text);
       border: 1px solid var(--line);
-      background: rgba(6, 8, 5, 0.9);
+      background: var(--manager-control-bg);
       padding: 0 12px;
       outline: none;
     }
@@ -296,14 +611,14 @@
 
     .nav button.active, .nav button:hover {
       color: var(--text);
-      background: rgba(212, 165, 74, 0.1);
+      background: var(--manager-active-bg);
       border-color: var(--line);
     }
 
     .badge {
       min-width: 28px;
       text-align: center;
-      color: #1a1208;
+      color: var(--manager-badge-text);
       background: linear-gradient(180deg, var(--accent-bright), var(--accent));
       padding: 3px 8px;
       font-size: 12px;
@@ -343,7 +658,7 @@
 
     .chip {
       border: 1px solid var(--line);
-      background: rgba(212, 165, 74, 0.08);
+      background: var(--manager-chip-bg);
       color: var(--accent-bright);
       min-height: 34px;
       padding: 0 10px;
@@ -355,7 +670,7 @@
 
     .chip:hover {
       border-color: var(--line-strong);
-      background: rgba(212, 165, 74, 0.14);
+      background: var(--manager-chip-hover);
     }
 
     .groups {
@@ -365,7 +680,7 @@
     }
 
     .group {
-      background: linear-gradient(180deg, rgba(18, 18, 12, 0.96), rgba(9, 10, 6, 0.96));
+      background: var(--manager-surface-strong);
       padding: 18px 20px 20px;
     }
 
@@ -417,7 +732,7 @@
       height: 38px;
       color: var(--text);
       border: 1px solid var(--line);
-      background: rgba(6, 8, 5, 0.88);
+      background: var(--manager-control-soft);
       padding: 0 10px;
     }
 
@@ -432,7 +747,7 @@
 
     .value.current {
       color: var(--accent-bright);
-      background: rgba(212, 165, 74, 0.1);
+      background: var(--manager-active-bg);
     }
 
     .value.modified {
@@ -469,7 +784,7 @@
       width: 44px;
       height: 24px;
       border: 1px solid var(--line);
-      background: rgba(6, 8, 5, 0.88);
+      background: var(--manager-control-soft);
       position: relative;
     }
     .track::after {
@@ -483,7 +798,7 @@
       transition: transform 160ms ease, background 160ms ease;
     }
     .switch input:checked + .track::after { transform: translateX(18px); background: var(--accent-bright); }
-    .switch input:checked + .track { border-color: var(--line-strong); box-shadow: 0 0 14px rgba(212, 165, 74, 0.12); }
+    .switch input:checked + .track { border-color: var(--line-strong); box-shadow: 0 0 14px var(--line-soft); }
 
     .summary { padding: 18px; }
 
@@ -498,24 +813,55 @@
       width: 100%;
       height: 42px;
       margin: 12px 0;
-      border: 1px solid var(--line);
-      background: rgba(6, 8, 5, 0.9);
-      color: var(--text);
+      border: 1px solid var(--server-profile-input-line);
+      background: var(--server-profile-input-bg);
+      color: var(--server-profile-text);
       padding: 0 12px;
     }
 
     .server-panel {
+      position: relative;
+      overflow: hidden;
       display: grid;
       gap: 12px;
       margin: 12px 0 16px;
       padding: 14px;
-      border: 1px solid var(--line-strong);
-      background: linear-gradient(180deg, rgba(38, 29, 13, 0.82), rgba(8, 10, 6, 0.9));
-      box-shadow: inset 0 0 36px rgba(212, 165, 74, 0.07);
+      border: 1px solid var(--server-profile-line);
+      background: var(--server-profile-bg);
+      box-shadow:
+        inset 0 0 42px var(--server-profile-glow),
+        0 20px 46px rgba(0, 0, 0, 0.18);
+    }
+
+    .server-panel::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 5px;
+      background: var(--server-profile-mark);
+      box-shadow: 0 0 24px var(--server-profile-glow);
+      pointer-events: none;
+    }
+
+    .server-panel::after {
+      content: "";
+      position: absolute;
+      right: 12px;
+      top: 12px;
+      width: 42px;
+      height: 42px;
+      border: 1px solid var(--server-profile-line);
+      background:
+        linear-gradient(90deg, transparent 47%, var(--server-profile-line) 47% 53%, transparent 53%),
+        linear-gradient(transparent 47%, var(--server-profile-line) 47% 53%, transparent 53%);
+      opacity: 0.28;
+      pointer-events: none;
     }
 
     .server-panel label {
-      color: var(--text);
+      color: var(--server-profile-text);
       font-size: 13px;
       font-weight: 800;
       line-height: 1.4;
@@ -539,9 +885,9 @@
       min-width: 0;
       width: 100%;
       min-height: 132px;
-      color: var(--text);
-      border: 1px solid var(--line-strong);
-      background: rgba(6, 8, 5, 0.92);
+      color: var(--server-profile-text);
+      border: 1px solid var(--server-profile-input-line);
+      background: var(--server-profile-code-bg);
       padding: 14px;
       font-size: 15px;
       line-height: 1.45;
@@ -551,7 +897,7 @@
     }
 
     .endpoint-help {
-      color: var(--accent);
+      color: var(--server-profile-muted);
       font-size: 12px;
       line-height: 1.45;
       font-weight: 700;
@@ -573,10 +919,79 @@
       width: 100%;
       min-width: 0;
       height: 38px;
-      color: var(--text);
-      border: 1px solid var(--line);
-      background: rgba(6, 8, 5, 0.9);
+      color: var(--server-profile-text);
+      border: 1px solid var(--server-profile-input-line);
+      background: var(--server-profile-input-bg);
       padding: 0 10px;
+    }
+
+    .setup-input {
+      color: var(--server-profile-text);
+      border-color: var(--server-profile-input-line);
+      background: var(--server-profile-input-bg);
+    }
+
+    .server-panel .btn {
+      color: var(--server-profile-button-text);
+      border-color: var(--server-profile-input-line);
+      background: var(--server-profile-button-bg);
+      box-shadow: none;
+    }
+
+    .server-panel .btn:hover {
+      color: var(--server-profile-text);
+      border-color: var(--server-profile-line);
+      box-shadow: 0 0 18px var(--server-profile-glow);
+    }
+
+    .server-panel .btn.primary,
+    .server-panel .btn.set-server {
+      color: var(--server-profile-primary-text);
+      border-color: var(--server-profile-line);
+      background: var(--server-profile-primary-bg);
+    }
+
+    body.theme-royal .profile-name,
+    body.theme-royal .setup-input,
+    body.theme-royal input,
+    body.theme-royal select,
+    body.theme-royal textarea {
+      color: #221914;
+      border-color: rgba(145, 94, 30, 0.34);
+      background: rgba(255, 253, 247, 0.88);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62);
+    }
+
+    body.theme-royal .server-panel {
+      color: #221914;
+      border-color: rgba(145, 94, 30, 0.46);
+      background:
+        radial-gradient(circle at 92% 10%, rgba(255, 241, 199, 0.9), transparent 26%),
+        linear-gradient(135deg, rgba(255, 253, 247, 0.98), rgba(239, 216, 171, 0.94)),
+        repeating-linear-gradient(90deg, rgba(105, 73, 32, 0.06) 0 1px, transparent 1px 22px);
+      box-shadow: 0 20px 48px rgba(98, 58, 18, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.58);
+    }
+
+    body.theme-royal .server-panel label,
+    body.theme-royal .setting strong,
+    body.theme-royal .label strong,
+    body.theme-royal .management-title strong,
+    body.theme-royal .status-row strong {
+      color: #221914;
+    }
+
+    body.theme-royal .server-endpoint {
+      color: #221914;
+      border-color: rgba(145, 94, 30, 0.4);
+      background: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(247, 236, 214, 0.92));
+    }
+
+    body.theme-royal .endpoint-help,
+    body.theme-royal .brand-title,
+    body.theme-royal .status-row,
+    body.theme-royal .setting small,
+    body.theme-royal .muted {
+      color: #6c5438;
     }
 
     .setup-actions {
@@ -584,7 +999,7 @@
     }
 
     .server-status {
-      color: var(--muted);
+      color: var(--server-profile-muted);
       font-size: 12px;
       line-height: 1.45;
       min-height: 18px;
@@ -599,8 +1014,8 @@
       margin: 14px 0 16px;
       padding: 12px;
       border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(25, 21, 12, 0.94), rgba(7, 8, 5, 0.92));
-      box-shadow: inset 0 0 36px rgba(212, 165, 74, 0.05);
+      background: var(--manager-surface-strong);
+      box-shadow: inset 0 0 36px var(--line-soft);
     }
 
     .reward-head {
@@ -703,10 +1118,10 @@
       border-radius: 50%;
       display: grid;
       place-items: center;
-      background: conic-gradient(var(--accent-bright) calc(var(--risk) * 1%), rgba(212, 165, 74, 0.14) 0);
+      background: conic-gradient(var(--accent-bright) calc(var(--risk) * 1%), var(--line-soft) 0);
       position: relative;
       font-weight: 800;
-      color: #17110b;
+      color: var(--manager-ring-text);
     }
 
     .ring::before {
@@ -714,8 +1129,8 @@
       position: absolute;
       inset: 9px;
       border-radius: 50%;
-      background: #23190b;
-      border: 1px solid rgba(240, 201, 106, 0.18);
+      background: var(--manager-ring-inner);
+      border: 1px solid var(--line-soft);
     }
 
     .ring span { position: relative; }

@@ -90,6 +90,27 @@ function gearItemCategory(entity = {}) {
   return titleCaseGearCategory(primary || entity.category || entity.categoryName || entity.mainCategoryName || entity.mainCategoryId || "");
 }
 
+function isSchematicItem(entity = {}) {
+  const text = [
+    entity.id,
+    entity.key,
+    entity.slug,
+    entity.template,
+    entity.assetName,
+    entity.name,
+    entity.displayName,
+    entity.title,
+    entity.type,
+    entity.itemType,
+    entity.subtype,
+    entity.subType,
+    entity.subCategoryName,
+    entity.subCategoryId,
+    ...(Array.isArray(entity.categories) ? entity.categories : [])
+  ].filter(Boolean).join(" ");
+  return /schematics?/i.test(text);
+}
+
 function gearItemSubtype(entity = {}) {
   const categories = Array.isArray(entity.categories) ? entity.categories : [];
   const deepest = categories.slice().sort((a, b) => b.length - a.length)[0] || "";
@@ -274,7 +295,7 @@ function resolveImageUrl(entity) {
 function normalizeItem(entity) {
   const id = firstString(entity.id, entity.key, entity.slug, entity.template, entity.assetName, entity.name);
   const name = firstString(entity.name, entity.displayName, entity.title, id);
-  const category = gearItemCategory(entity);
+  const category = isSchematicItem(entity) ? "Schematics" : gearItemCategory(entity);
   const subtype = gearItemSubtype(entity);
   const type = subtype || firstString(entity.type, entity.itemType, entity.subCategoryName, entity.subCategoryId);
   const tierValue = firstString(entity.tier, entity.itemTier, entity.level);

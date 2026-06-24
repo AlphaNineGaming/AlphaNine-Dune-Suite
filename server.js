@@ -92,7 +92,7 @@ const defaultConfig = {
   sshHost: "",
   sshUser: "dune",
   sshKey: "",
-  databaseHost: "",
+  databaseHost: "127.0.0.1",
   databasePort: 15432,
   databaseName: "dune",
   databaseUser: "postgres",
@@ -124,6 +124,20 @@ const defaultConfig = {
   uiSoundsEnabled: true,
   uiSoundVolume: 100
 };
+
+function isLocalHostLockedServerType(serverType) {
+  const value = String(serverType || "").trim().toLowerCase();
+  return value === "local-hyperv" || value === "local-windows" || value === "hyperv" || value === "hyper-v" || value === "local";
+}
+
+function normalizeLocalConnectionHosts(configValue) {
+  if (!isLocalHostLockedServerType(configValue?.serverType)) return { config: configValue, changed: false };
+  const normalized = { ...configValue, databaseHost: "127.0.0.1", receiverHost: "127.0.0.1" };
+  return {
+    config: normalized,
+    changed: normalized.databaseHost !== configValue.databaseHost || normalized.receiverHost !== configValue.receiverHost
+  };
+}
 
 const MANAGED_ENV_PATH = APPDATA_DIR ? path.join(APPDATA_DIR, ".env") : path.join(__dirname, ".env");
 const MASKED_SECRET_VALUES = new Set(["********", "<set>"]);
@@ -258,8 +272,10 @@ function loadConfig() {
   const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, ""));
   const loaded = { ...defaultConfig, ...raw };
   const repaired = repairMaskedSecrets(loaded);
-  const configValue = repaired.config;
+  const localHostNormalized = normalizeLocalConnectionHosts(repaired.config);
+  const configValue = localHostNormalized.config;
   let changed = repaired.changed;
+  if (localHostNormalized.changed) changed = true;
   // Releases before 0.3.9 used serverInstallPath for both environment variables.
   // Seed the new field once for upgrades, then preserve the two values independently.
   if (!Object.prototype.hasOwnProperty.call(raw, "awakeningServerPath") && String(raw.serverInstallPath || "").trim()) {
@@ -366,6 +382,9 @@ function saveConfig(nextConfig) {
   clean.uiSoundsEnabled = clean.uiSoundsEnabled === true || clean.uiSoundsEnabled === "true";
   clean.uiSoundVolume = Math.max(0, Math.min(100, Number(clean.uiSoundVolume) || 0));
   clean.selectedBattlegroup = normalizeSelectedBattlegroup(clean.selectedBattlegroup);
+  const localHostNormalized = normalizeLocalConnectionHosts(clean);
+  clean.databaseHost = localHostNormalized.config.databaseHost;
+  clean.receiverHost = localHostNormalized.config.receiverHost;
   if (clean.port < 1 || clean.port > 65535) throw new Error("Port must be between 1 and 65535.");
   if (clean.databasePort < 1 || clean.databasePort > 65535) throw new Error("Database port must be between 1 and 65535.");
   if (clean.receiverPort < 1 || clean.receiverPort > 65535) throw new Error("Receiver port must be between 1 and 65535.");
@@ -4705,6 +4724,28 @@ async function databaseStatus() {
   }
 }
 
+async function databaseHealthSnapshot(timeout = 7000) {
+  const started = Date.now();
+  try {
+    const output = await dbQuery("select 1 as ok", timeout);
+    return {
+      ok: /(^|\s)1(\s|$)/.test(output),
+      status: /(^|\s)1(\s|$)/.test(output) ? "reachable" : "unexpected-response",
+      message: /(^|\s)1(\s|$)/.test(output) ? "Database reachable." : "Database returned an unexpected health response.",
+      durationMs: Date.now() - started
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: "unavailable",
+      message: "Database health check failed.",
+      error: error.message,
+      durationMs: Date.now() - started,
+      diagnostics: error.diagnostics || null
+    };
+  }
+}
+
 function parseBattlegroupBackupOutput(output = "") {
   const text = String(output || "");
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -5695,6 +5736,7 @@ async function progressionPlayerLookup(queryValue) {
   let players = (adminPlayerData.players || []).slice(0, 5).map((row) => ({
     actor_id: row.player_controller_id || row.character_id || row.player_pawn_id || row.id || "",
     account_id: row.account_id || row.id || "",
+    account_user: row.fls_id || "",
     character_name: row.character_name || row.name || row.fls_id || row.id || "Unknown",
     player_controller_id: row.player_controller_id || "",
     player_pawn_id: row.player_pawn_id || "",
@@ -5764,6 +5806,7 @@ async function progressionPlayerLookup(queryValue) {
       actor_id: String(progressionActorId),
       character_actor_id: player.actor_id,
       account_id: player.account_id,
+      account_user: player.account_user || "",
       character_name: player.character_name || "Unknown",
       player_controller_id: player.player_controller_id,
       player_pawn_id: player.player_pawn_id,
@@ -5797,6 +5840,7 @@ async function progressionPlayerLookup(queryValue) {
   const actorIdsToCheck = [...new Set([
     player.actor_id,
     player.player_controller_id,
+    player.character_id,
     player.player_pawn_id,
     String(progressionActorId)
   ].map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))];
@@ -5835,6 +5879,20 @@ async function progressionPlayerLookup(queryValue) {
   result.progressionDebug.fieldStatus = { ...result.progressionDebug.fieldStatus, ...techScan.fieldStatus };
   result.techKnowledge = techScan.values;
   result.hydration = await timer.step("hydration_lookup", () => playerHydrationForPawnActor(player.player_pawn_id)).catch((error) => ({ ...extractHydrationFromGasAttributes(null, { pawnActorId: player.player_pawn_id }), error: error.message }));
+  const skillRepScan = await timer.step("skill_reputation_lookup", () => withProgressionStepTimeout(progressionSkillReputationScan(actorIdsToCheck), 7000, "skill_reputation_lookup")).catch((error) => ({
+    specializationTracks: [],
+    factionReputation: [],
+    currentFactions: [],
+    factions: [],
+    specializationStatus: `failed: ${error.message}`,
+    factionReputationStatus: `failed: ${error.message}`
+  }));
+  result.specializationTracks = skillRepScan.specializationTracks || [];
+  result.factionReputation = skillRepScan.factionReputation || [];
+  result.currentFactions = skillRepScan.currentFactions || [];
+  result.factions = skillRepScan.factions || [];
+  result.specializationStatus = skillRepScan.specializationStatus || (result.specializationTracks.length ? "loaded" : "empty");
+  result.factionReputationStatus = skillRepScan.factionReputationStatus || (result.factionReputation.length ? "loaded" : "empty");
   console.info("[progression/player] Tech lookup", {
     actor_id: techScan.target?.actor_id || resolvedIdentifiers.actor_id || "",
     entity_id: techScan.target?.entity_id || "",
@@ -5853,6 +5911,164 @@ async function progressionPlayerLookup(queryValue) {
 
 function sqlValuesList(numbers) {
   return numbers.map((value) => `(${Number(value)})`).join(", ");
+}
+
+const FACTION_RANK_GATE_COMMON_NODES = [
+  "DA_FQ_ClimbTheRanks",
+  "DA_FQ_ClimbTheRanks.JoinAHouse",
+  "DA_FQ_ClimbTheRanks.JoinAHouse.ProveYourself",
+  "DA_FQ_ClimbTheRanks.JoinAHouse.ProveYourself.ChooseASide",
+  "DA_FQ_ClimbTheRanks.JoinAHouse.ProveYourself.Rank1Contracts",
+  "DA_FQ_ClimbTheRanks.JoinAHouse.StrikeADeal",
+  "DA_FQ_ClimbTheRanks.JoinAHouse.StrikeADeal.TalkToARecruiter",
+  "DA_FQ_ClimbTheRanks.JoinAHouse.StrikeADeal.GetSpyMission",
+  "DA_FQ_ClimbTheRanks.JoinAHouse.StrikeADeal.FindTheSpy",
+  "DA_FQ_ClimbTheRanks.Rank5To20",
+  "DA_FQ_ClimbTheRanks.Rank5To20.MeetSponsor",
+  "DA_FQ_ClimbTheRanks.Rank5To20.MeetSponsor.TalkToSponsor",
+  "DA_FQ_ClimbTheRanks.Rank5To20.ReachRank20",
+  "DA_FQ_ClimbTheRanks.Rank5To20.ReachRank20.GrindRanks",
+  "DA_FQ_ClimbTheRanks.Rank5To20.StartLandsraadOnboarding",
+  "DA_FQ_ClimbTheRanks.Rank5To20.StartLandsraadOnboarding.ReportToMasterOfAssassins",
+  "DA_FQ_ClimbTheRanks.Rank5To20.CompleteLandsraadMission",
+  "DA_FQ_ClimbTheRanks.Rank5To20.CompleteLandsraadMission.CompleteOnboardingJourney1",
+  "DA_FQ_ClimbTheRanks.Rank5To20.CraftAugmentation",
+  "DA_FQ_ClimbTheRanks.Rank5To20.CraftAugmentation.CompleteOnboardingJourney2"
+];
+
+const FACTION_RANK_GATE_NODES = {
+  1: [
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Atreides",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Atreides.PledgeAllegiance_Atreides",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Atreides.PledgeAllegiance_Atreides.PledgeAllegiance_Atreides_Sub",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Atreides.DeviseAPlan_Atreides",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Atreides.DeviseAPlan_Atreides.TellThufirAboutDelphis",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Atreides.SecureLastContainer_Atreides",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Atreides.SecureLastContainer_Atreides.RecoverSheolContainer_Atreides",
+    "DA_FQ_ClimbTheRanks.InvestigateKytheria_Atreides",
+    "DA_FQ_ClimbTheRanks.InvestigateKytheria_Atreides.InvestigateWreck_Atreides",
+    "DA_FQ_ClimbTheRanks.InvestigateKytheria_Atreides.InvestigateWreck_Atreides.Complete \"Track Down Skorda\" Contract",
+    "DA_FQ_ClimbTheRanks.InvestigateKytheria_Atreides.InvestigateWreck_Atreides.MeetAndreaGanan",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides.PutFindingsToTest",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides.PutFindingsToTest.SpeakWithGanan",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides.PutFindingsToTest.MeetThufir",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides.PutFindingsToTest.ReturnToGanan",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides.PunishTraitor",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides.PunishTraitor.ChoosePoisonOrSpare",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides.PunishTraitor.CompleteWarProfiteerContract",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides.PunishTraitor.FindBusinessman",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides.PunishTraitor.TalkToThufirAgain",
+    "DA_FQ_ClimbTheRanks.TransitionToCh3_Atre",
+    "DA_FQ_ClimbTheRanks.TransitionToCh3_Atre.TheCall",
+    "DA_FQ_ClimbTheRanks.TransitionToCh3_Atre.TheCall.AnswerTheCall",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Atreides",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Atreides.Ch3Mission",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Atreides.Ch3Mission.GetCallForMission",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Atreides.Ch3Mission.GetMission",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Atreides.Ch3Mission.CompleteMission"
+  ],
+  2: [
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Harkonnen",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Harkonnen.PledgeAllegiance_Harkonnen",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Harkonnen.PledgeAllegiance_Harkonnen.PledgeAllegiance_Harkonnen_Sub",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Harkonnen.DeviseAPlan_Harkonnen",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Harkonnen.DeviseAPlan_Harkonnen.TellPiterAboutEuporia",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Harkonnen.SecureLastContainer_Harkonnen",
+    "DA_FQ_ClimbTheRanks.InvestigateDelphis_Harkonnen.SecureLastContainer_Harkonnen.RecoverSheolContainer_Harkonnen",
+    "DA_FQ_ClimbTheRanks.InvestigateKytheria_Harkonnen",
+    "DA_FQ_ClimbTheRanks.InvestigateKytheria_Harkonnen.InvestigateWreck_Harkonnen",
+    "DA_FQ_ClimbTheRanks.InvestigateKytheria_Harkonnen.InvestigateWreck_Harkonnen.Complete \"Track Down Skorda\" Contract",
+    "DA_FQ_ClimbTheRanks.InvestigateKytheria_Harkonnen.InvestigateWreck_Harkonnen.MeetSimoneVonKonig",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen.LeverageYourFindings",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen.LeverageYourFindings.SpeakWithVonKonig",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen.LeverageYourFindings.MeetPiter",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen.LeverageYourFindings.DeliverResults",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen.LeverageYourFindings.ReturnToVonKonig",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen.TakeALeap",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen.TakeALeap.PoisonOrWarnPiter",
+    "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen.TakeALeap.TalkToPiterAgain",
+    "DA_FQ_ClimbTheRanks.TransitionToCh3_Hark",
+    "DA_FQ_ClimbTheRanks.TransitionToCh3_Hark.TheCall",
+    "DA_FQ_ClimbTheRanks.TransitionToCh3_Hark.TheCall.AnswerTheCall",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Harkonnen",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Harkonnen.Ch3Mission",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Harkonnen.Ch3Mission.GetCallForMission",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Harkonnen.Ch3Mission.GetMission",
+    "DA_FQ_ClimbTheRanks.Rank20_Mission_Harkonnen.Ch3Mission.CompleteMission"
+  ]
+};
+
+function factionRankGateNodes(factionId) {
+  return [...new Set([...FACTION_RANK_GATE_COMMON_NODES, ...(FACTION_RANK_GATE_NODES[Number(factionId)] || [])])];
+}
+
+function sqlTextArray(values) {
+  return `array[${(values || []).map((value) => sqlString(value)).join(", ")}]::text[]`;
+}
+
+async function progressionSkillReputationScan(actorIds) {
+  const cleanActorIds = [...new Set((actorIds || []).map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))];
+  if (!cleanActorIds.length) {
+    return {
+      specializationTracks: [],
+      factionReputation: [],
+      currentFactions: [],
+      factions: [],
+      specializationStatus: "unsupported: no actor ids available",
+      factionReputationStatus: "unsupported: no actor ids available"
+    };
+  }
+  const values = sqlValuesList(cleanActorIds);
+  const sql = `
+    with candidates(actor_id) as (values ${values})
+    select 'track', st.player_id::text, st.track_type::text, st.xp_amount::text, st.level::text
+    from dune.specialization_tracks st
+    join candidates c on c.actor_id = st.player_id
+    order by st.player_id, st.track_type;
+
+    with candidates(actor_id) as (values ${values})
+    select 'reputation', pfr.actor_id::text, pfr.faction_id::text, coalesce(f.name, ''), pfr.reputation_amount::text
+    from dune.player_faction_reputation pfr
+    join candidates c on c.actor_id = pfr.actor_id
+    left join dune.factions f on f.id = pfr.faction_id
+    order by pfr.actor_id, pfr.faction_id;
+
+    with candidates(actor_id) as (values ${values})
+    select 'current_faction', pf.actor_id::text, pf.faction_id::text, coalesce(f.name, ''), coalesce(pf.utc_time_faction_change::text, '')
+    from dune.player_faction pf
+    join candidates c on c.actor_id = pf.actor_id
+    left join dune.factions f on f.id = pf.faction_id
+    order by pf.actor_id;
+
+    select 'faction', id::text, name, '', '' from dune.factions order by id;
+  `;
+  const output = await dbQuery(sql, 7000);
+  const specializationTracks = [];
+  const factionReputation = [];
+  const currentFactions = [];
+  const factions = [];
+  for (const line of output.split(/\r?\n/).filter(Boolean)) {
+    const parts = line.split("\t");
+    if (parts[0] === "track") {
+      specializationTracks.push({ player_id: parts[1] || "", track_type: parts[2] || "", xp_amount: parts[3] || "0", level: parts[4] || "0" });
+    } else if (parts[0] === "reputation") {
+      factionReputation.push({ actor_id: parts[1] || "", faction_id: parts[2] || "", faction_name: parts[3] || "", reputation_amount: parts[4] || "0" });
+    } else if (parts[0] === "current_faction") {
+      currentFactions.push({ actor_id: parts[1] || "", faction_id: parts[2] || "", faction_name: parts[3] || "", changed_at: parts[4] || "" });
+    } else if (parts[0] === "faction") {
+      factions.push({ id: parts[1] || "", name: parts[2] || "" });
+    }
+  }
+  return {
+    specializationTracks,
+    factionReputation,
+    currentFactions,
+    factions,
+    specializationStatus: specializationTracks.length ? "loaded" : "empty",
+    factionReputationStatus: factionReputation.length ? "loaded" : "empty"
+  };
 }
 
 function fieldFoundStatus(value, paths) {
@@ -6122,7 +6338,7 @@ async function progressionPreview(payload) {
     await timer.step("safety_check", async () => {});
     action = await timer.step("request_validate", async () => {
       const requestedAction = String(payload?.action || "").trim();
-      if (!["specialization_xp", "faction_reputation", "character_xp_skill_points"].includes(requestedAction)) {
+      if (!["specialization_xp", "character_xp_skill_points"].includes(requestedAction)) {
         throw new Error("Unsupported progression action.");
       }
       return requestedAction;
@@ -6130,7 +6346,7 @@ async function progressionPreview(payload) {
 
     if (action !== "character_xp_skill_points") {
       const query = String(payload?.query || payload?.playerId || "").trim();
-      const playerData = await timer.step("selected_target_validate", () => withProgressionStepTimeout(progressionPlayerLookup(query), 8000, "selected_target_validate"));
+      const playerData = await timer.step("selected_target_validate", () => withProgressionStepTimeout(progressionPlayerLookup(query), 20000, "selected_target_validate"));
       if (!playerData.ok) return progressionUnsupported(playerData.reason || "Player lookup failed.");
       const inspect = await timer.step("safety_check", () => withProgressionStepTimeout(progressionInspector(), 10000, "safety_check"));
       const actorId = requireInteger(playerData.player.actor_id, "actor_id", 1);
@@ -6154,10 +6370,33 @@ async function progressionPreview(payload) {
         if (!componentSupport.factionComponent) return progressionUnsupported("FactionPlayerComponent cache sync support was not detected for this player; refusing live reputation write.", inspect);
         const factionId = requireInteger(payload?.factionId, "factionId", 1, 32767);
         const reputationAmount = Math.round(clampNumber(payload?.reputationAmount, "reputationAmount", 0, 12474));
-        const current = (playerData.factionReputation || []).find((row) => String(row.faction_id) === String(factionId)) || null;
-        oldValues = current || { faction_id: String(factionId), reputation_amount: "0", missing: true };
-        newValues = { faction_id: factionId, reputation_amount: reputationAmount };
-        sqlPreview = `SELECT dune.set_player_faction_reputation(${actorId}, ${factionId}, ${reputationAmount}); plus FactionPlayerComponent cache rebuild.`;
+        const targetActorIds = [...new Set([
+          playerData.player?.actor_id,
+          playerData.player?.player_id,
+          playerData.player?.player_controller_id,
+          playerData.player?.player_pawn_id,
+          ...(playerData.factionReputation || []).filter((row) => String(row.faction_id) === String(factionId)).map((row) => row.actor_id),
+          ...(playerData.currentFactions || []).filter((row) => String(row.faction_id) === String(factionId)).map((row) => row.actor_id)
+        ].map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))];
+        const currentRows = (playerData.factionReputation || []).filter((row) => String(row.faction_id) === String(factionId));
+        const currentFactionRows = (playerData.currentFactions || []).filter((row) => targetActorIds.includes(Number(row.actor_id)));
+        const rankGateNodes = factionRankGateNodes(factionId);
+        let currentJourneyRows = [];
+        if (rankGateNodes.length) {
+          if (!playerData.player?.account_user) throw new Error("Faction rank story gates require the account user/FLS id.");
+          const accountId = requireInteger(playerData.player?.account_id, "account_id", 1);
+          const journeyOutput = await timer.step("journey_rank_lookup", async () => withProgressionStepTimeout(dbQuery(`
+            select story_node_id, complete_condition_state::text, reveal_condition_state::text
+            from dune.journey_story_node
+            where account_id = ${accountId}
+              and story_node_id = any(${sqlTextArray(rankGateNodes)})
+            order by story_node_id;
+          `, 12000), 14000, "journey_rank_lookup"));
+          currentJourneyRows = parseDbRows(journeyOutput, ["story_node_id", "complete_condition_state", "reveal_condition_state"]);
+        }
+        oldValues = { faction_id: String(factionId), reputation_rows: currentRows, current_faction_rows: currentFactionRows, journey_rank_rows: currentJourneyRows, target_actor_ids: targetActorIds };
+        newValues = { faction_id: factionId, reputation_amount: reputationAmount, target_actor_ids: targetActorIds, account_user: playerData.player?.account_user || "", rank_gate_nodes: rankGateNodes };
+        sqlPreview = `For actor IDs ${targetActorIds.join(", ")}: set current faction to ${factionId}, set reputation to ${reputationAmount}, rebuild FactionPlayerComponent cache, and complete ${rankGateNodes.length} faction rank journey gates. Player must be offline for the journey gate write.`;
       }
       const backupPath = progressionBackupPath(actorId, action, previewId);
       await timer.step("backup_create", async () => fs.writeFileSync(backupPath, JSON.stringify({ createdAt: new Date().toISOString(), action, player: playerData.player, oldValues, source: "progression-preview", readOnlyBackup: true }, null, 2), "utf8"));
@@ -6280,18 +6519,20 @@ function factionComponentArraySql(actorId) {
     set properties = jsonb_set(
       properties,
       '{FactionPlayerComponent,m_FactionDataArray}',
-      (
+      coalesce((
         select jsonb_agg(jsonb_build_object(
-          'Faction', jsonb_build_object('Name', case when fid = 1 then 'Atreides' else 'Harkonnen' end),
+          'Faction', jsonb_build_object('Name', faction_name),
           'timestamp', extract(epoch from now()),
-          'ReputationAmount', rep
-        ))
+          'ReputationAmount', reputation_amount
+        ) order by faction_id)
         from (
-          values
-            (1, coalesce((select reputation_amount from dune.player_faction_reputation where actor_id = ${actorId} and faction_id = 1), 0)),
-            (2, coalesce((select reputation_amount from dune.player_faction_reputation where actor_id = ${actorId} and faction_id = 2), 0))
-        ) as v(fid, rep)
-      ),
+          select pfr.faction_id, coalesce(f.name, pfr.faction_id::text) as faction_name, pfr.reputation_amount
+          from dune.player_faction_reputation pfr
+          left join dune.factions f on f.id = pfr.faction_id
+          where pfr.actor_id = ${actorId}
+            and coalesce(f.name, '') <> 'None'
+        ) as reputation_rows
+      ), '[]'::jsonb),
       true
     )
     where id = ${actorId}
@@ -6372,13 +6613,69 @@ async function progressionApply(payload) {
         const inspect = await withProgressionStepTimeout(progressionInspector(), 10000, "safety_check");
         if (inspect.supports?.factionReputation?.status !== "detected") throw new Error("Faction reputation support is no longer detected.");
         if (!preview.componentSupport?.factionComponent) throw new Error("FactionPlayerComponent cache sync support was not detected.");
+        if ((preview.newValues.rank_gate_nodes || []).length && (!preview.playerOffline || String(preview.player?.online_status || "").toLowerCase().includes("online"))) {
+          throw new Error("Faction rank story gate editing requires the player to be offline.");
+        }
       });
+      const factionTargetActorIds = [...new Set((preview.newValues.target_actor_ids || [actorId]).map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))];
+      const rankGateNodes = Array.isArray(preview.newValues.rank_gate_nodes) ? preview.newValues.rank_gate_nodes : [];
+      const accountUser = String(preview.newValues.account_user || preview.player?.account_user || "").trim();
+      if (rankGateNodes.length && !accountUser) throw new Error("Faction rank story gate editing requires the account user/FLS id.");
+      const completeRankGateSql = rankGateNodes.length
+        ? `select dune.complete_journey_story_nodes_for_player(${sqlString(accountUser)}, ${sqlTextArray(rankGateNodes)});`
+        : "";
       await timer.step("flevel_update", async () => withProgressionStepTimeout(dbQuery(`
+        set search_path to dune, public;
         begin;
-        select dune.set_player_faction_reputation(${actorId}, ${preview.newValues.faction_id}, ${preview.newValues.reputation_amount});
-        ${factionComponentArraySql(actorId)}
+        ${factionTargetActorIds
+          .map((targetId) => `
+        select dune.change_player_faction(${targetId}, ${preview.newValues.faction_id}::smallint, 3::smallint, now()::timestamp);
+        select dune.set_player_faction_reputation(${targetId}, ${preview.newValues.faction_id}::smallint, ${preview.newValues.reputation_amount});
+        ${factionComponentArraySql(targetId)}`).join("\n")}
+        ${completeRankGateSql}
         commit;
       `, 20000), 22000, "flevel_update"));
+      const readBackOutput = await timer.step("verify_readback", async () => withProgressionStepTimeout(dbQuery(`
+        with candidates(actor_id) as (values ${sqlValuesList(factionTargetActorIds)})
+        select c.actor_id::text,
+          coalesce(pf.faction_id::text, '') as current_faction_id,
+          coalesce(cf.name, '') as current_faction_name,
+          coalesce(pfr.reputation_amount::text, '') as reputation_amount
+        from candidates c
+        left join dune.player_faction pf on pf.actor_id = c.actor_id
+        left join dune.factions cf on cf.id = pf.faction_id
+        left join dune.player_faction_reputation pfr on pfr.actor_id = c.actor_id and pfr.faction_id = ${preview.newValues.faction_id}::smallint
+        order by c.actor_id;
+      `, 15000), 17000, "verify_readback"));
+      const readBackValues = parseDbRows(readBackOutput, ["actor_id", "current_faction_id", "current_faction_name", "reputation_amount"]);
+      const journeyReadBackValues = rankGateNodes.length
+        ? parseDbRows(await timer.step("verify_rank_gates", async () => withProgressionStepTimeout(dbQuery(`
+          select story_node_id, complete_condition_state::text, reveal_condition_state::text
+          from dune.journey_story_node
+          where account_id = ${requireInteger(preview.player?.account_id, "account_id", 1)}
+            and story_node_id = any(${sqlTextArray(rankGateNodes)})
+          order by story_node_id;
+        `, 15000), 17000, "verify_rank_gates")), ["story_node_id", "complete_condition_state", "reveal_condition_state"])
+        : [];
+      const expectedFactionId = String(preview.newValues.faction_id);
+      const expectedReputation = String(preview.newValues.reputation_amount);
+      const verified = readBackValues.length === factionTargetActorIds.length
+        && readBackValues.every((row) => row.current_faction_id === expectedFactionId && row.reputation_amount === expectedReputation)
+        && (!rankGateNodes.length || (journeyReadBackValues.length === rankGateNodes.length && journeyReadBackValues.every((row) => row.complete_condition_state === "true" && row.reveal_condition_state === "true")));
+      verificationDebug = {
+        targetActorIds: factionTargetActorIds,
+        rankGateNodes,
+        rowsAffected,
+        readBackValues,
+        journeyReadBackValues,
+        expectedValues: { current_faction_id: expectedFactionId, reputation_amount: expectedReputation }
+      };
+      if (!verified) {
+        progressionPreviews.delete(previewId);
+        await timer.step("audit_write", async () => progressionAudit("progression_apply_verification_failed", { action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: false, verificationFailed: true, timings: timer.timings, debug: verificationDebug }));
+        timer.finish({ status: "verification_failed", previewId, action });
+        return { ok: false, status: "verification_failed", step: "verify_readback", timings: timer.timings, action, player: preview.player, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath, auditLogPath: PROGRESSION_AUDIT_LOG, debug: verificationDebug, warning: "Database write completed, but faction read-back did not match the requested values." };
+      }
     } else if (action === "character_xp_skill_points") {
       await timer.step("player_offline_check", async () => {
         if (!preview.playerOffline || String(preview.player?.online_status || "").toLowerCase().includes("online")) {
@@ -7040,6 +7337,7 @@ async function adminProbe() {
   }
   return {
     ok: true,
+    databaseReachable: true,
     transport: transportDisplayName(transport.mode),
     configured: Boolean(transport.configured),
     reachable: Boolean(transport.reachable),
@@ -9164,7 +9462,7 @@ async function currentReputationRow(playerControllerId, factionId) {
 }
 
 function reputationCall(playerControllerId, factionId, amount) {
-  return `select dune.set_player_faction_reputation(${playerControllerId}, ${factionId}, ${amount});`;
+  return `select dune.set_player_faction_reputation(${playerControllerId}, ${factionId}::smallint, ${amount});`;
 }
 
 async function adminReputationAction(payload, mode) {
@@ -9636,6 +9934,7 @@ function appPage() {
       --content-max:1812px; --panel-gap:10px; --panel-pad:14px; --panel-cut:14px; --panel-radius:22px;
       --font-panel-label:10.5px; --font-panel-title:15.5px; --font-panel-body:12.5px; --font-panel-value:21px; --font-panel-subtle:11.5px; --font-button:12.5px; --font-table:12.5px;
       --hero-banner:url("/assets/theme-alpha-gold-banner.webp"); --hero-size:100% auto; --hero-ratio:2007 / 626; --grid-opacity:.14; --theme-glow:rgba(255,198,91,.28);
+      --wizard-overlay:rgba(3,4,5,.92); --wizard-card-bg:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.94)); --wizard-step-bg:rgba(246,202,135,.06); --wizard-step-active-bg:rgba(246,202,135,.14); --wizard-field-bg:rgba(3,5,4,.78); --wizard-test-bg:rgba(255,255,255,.025); --wizard-test-ok-bg:rgba(117,217,130,.08); --wizard-test-bad-bg:rgba(255,112,95,.08);
       color-scheme:dark; font-family:"Rajdhani","Segoe UI",system-ui,sans-serif;
     }
     body.theme-command {
@@ -9643,24 +9942,28 @@ function appPage() {
       --glass:rgba(0,0,0,.78); --line:rgba(188,132,45,.42); --line-strong:rgba(219,164,67,.76); --line-blue:rgba(56,109,184,.28);
       --text:#f0e4d0; --muted:#aa9168; --sand:#d7b06d; --gold:#c98e32; --gold-bright:#dba443; --blue:#4d8dd4;
       --hero-banner:url("/assets/theme-command-console-banner.webp"); --hero-size:100% auto; --hero-ratio:1792 / 627; --grid-opacity:.16; --theme-glow:rgba(114,74,18,.14);
+      --wizard-overlay:rgba(0,0,0,.94); --wizard-card-bg:linear-gradient(180deg, rgba(8,6,3,.98), rgba(0,0,0,.96)); --wizard-step-bg:rgba(201,142,50,.07); --wizard-step-active-bg:rgba(201,142,50,.16); --wizard-field-bg:rgba(0,0,0,.78); --wizard-test-bg:rgba(201,142,50,.035); --wizard-test-ok-bg:rgba(117,217,130,.07); --wizard-test-bad-bg:rgba(255,112,95,.07);
     }
     body.theme-purple {
       --bg:#100613; --bg-2:#2b1231; --panel:rgba(28,12,34,.9); --panel-2:rgba(48,20,55,.8);
       --glass:rgba(22,10,28,.66); --line:rgba(180,94,203,.46); --line-strong:rgba(229,139,255,.76); --line-blue:rgba(255,159,202,.34);
       --text:#f7eafd; --muted:#c7a3d0; --sand:#f2d9ff; --gold:#c982ff; --gold-bright:#e58bff; --blue:#ff9fca;
       --good:#89e89d; --warn:#ffbd73; --bad:#ff6e84; --hero-banner:url("/assets/theme-purple-desert-banner.webp"); --hero-size:100% auto; --hero-ratio:1740 / 626; --grid-opacity:.18; --theme-glow:rgba(201,130,255,.2);
+      --wizard-overlay:rgba(12,3,17,.94); --wizard-card-bg:linear-gradient(180deg, rgba(35,12,43,.98), rgba(12,5,17,.95)); --wizard-step-bg:rgba(201,130,255,.08); --wizard-step-active-bg:rgba(201,130,255,.18); --wizard-field-bg:rgba(14,5,19,.78); --wizard-test-bg:rgba(201,130,255,.045); --wizard-test-ok-bg:rgba(137,232,157,.08); --wizard-test-bad-bg:rgba(255,110,132,.08);
     }
     body.theme-contrast {
       --bg:#070503; --bg-2:#20140b; --panel:rgba(24,16,10,.92); --panel-2:rgba(43,28,16,.82);
       --glass:rgba(18,12,8,.7); --line:rgba(166,113,55,.48); --line-strong:rgba(214,159,83,.82); --line-blue:rgba(138,183,215,.34);
       --text:#f2e7d7; --muted:#b69a78; --sand:#dcc4a2; --gold:#c89446; --gold-bright:#d69f53; --blue:#8ab7d7;
       --warn:#e1a85f; --hero-banner:url("/assets/theme-high-contrast-banner.webp"); --hero-size:100% auto; --hero-ratio:2008 / 627; --grid-opacity:.18; --theme-glow:rgba(202,138,64,.18);
+      --wizard-overlay:rgba(8,5,3,.94); --wizard-card-bg:linear-gradient(180deg, rgba(34,21,11,.98), rgba(9,6,4,.95)); --wizard-step-bg:rgba(214,159,83,.08); --wizard-step-active-bg:rgba(214,159,83,.18); --wizard-field-bg:rgba(10,7,5,.78); --wizard-test-bg:rgba(214,159,83,.045); --wizard-test-ok-bg:rgba(117,217,130,.07); --wizard-test-bad-bg:rgba(255,112,95,.07);
     }
     body.theme-royal {
       color-scheme:light; --bg:#efe5d4; --bg-2:#d7b77f; --panel:rgba(255,250,238,.9); --panel-2:rgba(242,222,184,.78);
       --glass:rgba(255,250,238,.64); --line:rgba(175,119,35,.36); --line-strong:rgba(199,139,43,.72); --line-blue:rgba(111,135,149,.3);
       --text:#221914; --muted:#756048; --sand:#6b5032; --gold:#b77a22; --gold-bright:#c98b2b; --blue:#6f8795;
       --good:#2f8143; --warn:#aa671b; --bad:#b43b2c; --shadow:0 22px 70px rgba(98,58,18,.22); --hero-banner:url("/assets/theme-royal-desert-banner.webp"); --hero-size:100% auto; --hero-ratio:1712 / 626; --grid-opacity:.1; --theme-glow:rgba(255,238,194,.55);
+      --wizard-overlay:rgba(74,43,12,.34); --wizard-card-bg:linear-gradient(180deg, rgba(255,253,247,.98), rgba(242,222,184,.96)); --wizard-step-bg:rgba(183,122,34,.08); --wizard-step-active-bg:rgba(183,122,34,.18); --wizard-field-bg:rgba(255,253,247,.9); --wizard-test-bg:rgba(255,250,238,.72); --wizard-test-ok-bg:rgba(47,129,67,.1); --wizard-test-bad-bg:rgba(180,59,44,.1);
     }
     * { box-sizing:border-box; }
     body { margin:0; min-height:100vh; color:var(--text); background:
@@ -10136,6 +10439,11 @@ function appPage() {
     .give-layout { display:grid; grid-template-columns:minmax(250px,25fr) minmax(400px,45fr) minmax(300px,30fr); grid-template-areas:"form catalog presets"; gap:var(--panel-gap); align-items:start; }
     .give-form { grid-area:form; }
     .give-catalog { grid-area:catalog; }
+    .give-catalog-filters { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; align-items:end; }
+    .give-filter-row { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(86px,.55fr) minmax(86px,.55fr); gap:8px; align-items:end; min-width:0; }
+    .give-catalog-filters label, .give-filter-row label { min-width:0; }
+    .give-catalog-filters select, .give-filter-row select, .give-catalog-filters input { width:100%; min-width:0; }
+    @media (max-width:560px) { .give-filter-row { grid-template-columns:1fr; } }
     .give-sidebar { grid-area:presets; position:sticky; top:92px; max-height:calc(100vh - 112px); overflow:auto; display:flex; flex-direction:column; }
     .give-primary-actions { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:stretch; }
     .give-result { min-height:46px; display:flex; align-items:center; overflow-wrap:anywhere; }
@@ -10452,20 +10760,100 @@ function appPage() {
     pre { white-space:pre-wrap; background:rgba(3,5,4,.78); border:1px solid rgba(214,166,69,.28); border-radius:0; padding:14px; max-height:430px; overflow:auto; color:#e8dfc8; }
     .frame-wrap { overflow:hidden; min-height:720px; }
     iframe { width:100%; height:78vh; min-height:720px; border:0; display:block; background:#080a0d; }
+    body.theme-gold .frame-wrap {
+      border-color:rgba(214,166,69,.36);
+      background:linear-gradient(180deg, rgba(28,25,15,.94), rgba(7,9,5,.9));
+      box-shadow:0 22px 70px rgba(0,0,0,.34), inset 0 0 0 1px rgba(240,201,106,.06);
+    }
+    body.theme-command .frame-wrap {
+      border-color:rgba(219,164,67,.36);
+      background:
+        repeating-linear-gradient(90deg, rgba(219,164,67,.045) 0 1px, transparent 1px 18px),
+        linear-gradient(180deg, rgba(5,5,3,.98), rgba(0,0,0,.94));
+      box-shadow:0 22px 70px rgba(0,0,0,.54), inset 0 0 0 1px rgba(219,164,67,.08);
+    }
+    body.theme-purple .frame-wrap {
+      border-color:rgba(229,139,255,.34);
+      background:
+        radial-gradient(circle at 92% 0%, rgba(255,159,202,.16), transparent 30%),
+        linear-gradient(180deg, rgba(35,13,43,.94), rgba(15,6,20,.92));
+      box-shadow:0 22px 70px rgba(35,9,49,.38), inset 0 0 0 1px rgba(229,139,255,.08);
+    }
+    body.theme-contrast .frame-wrap {
+      border-color:rgba(214,159,83,.4);
+      background:
+        repeating-linear-gradient(-45deg, rgba(214,159,83,.045) 0 2px, transparent 2px 16px),
+        linear-gradient(180deg, rgba(35,22,12,.96), rgba(9,6,4,.94));
+      box-shadow:0 22px 70px rgba(0,0,0,.42), inset 0 0 0 1px rgba(214,159,83,.08);
+    }
+    body.theme-royal .frame-wrap {
+      border-color:rgba(145,94,30,.34);
+      background:linear-gradient(180deg, rgba(255,253,247,.96), rgba(239,216,171,.88));
+      box-shadow:0 20px 54px rgba(98,58,18,.18), inset 0 0 0 1px rgba(255,255,255,.48);
+    }
+    body.theme-gold iframe { background:#080a0d; }
+    body.theme-command iframe { background:#010101; }
+    body.theme-purple iframe { background:#14071b; }
+    body.theme-contrast iframe { background:#0a0705; }
+    body.theme-royal iframe {
+      background:#fff8ea;
+    }
     .empty { padding:var(--panel-pad); border:1px dashed rgba(217,178,111,.35); border-radius:var(--panel-radius); color:var(--muted); background:rgba(255,255,255,.025); }
-    .setup-overlay { position:fixed; inset:0; z-index:5000; background:rgba(3,4,5,.92); backdrop-filter:blur(10px); display:grid; place-items:center; padding:20px; }
-    .setup-card { width:min(980px,100%); max-height:92vh; overflow:auto; border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.94)); box-shadow:var(--shadow); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
+    .setup-overlay { position:fixed; inset:0; z-index:5000; background:var(--wizard-overlay); backdrop-filter:blur(14px) saturate(1.12); display:grid; place-items:center; padding:20px; }
+    .setup-card { width:min(980px,100%); max-height:92vh; overflow:auto; color:var(--text); border:1px solid var(--line); border-radius:var(--panel-radius); background:var(--wizard-card-bg); box-shadow:var(--shadow), inset 0 0 0 1px var(--line-soft, rgba(255,255,255,.04)); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
+    .setup-card::before { content:""; position:sticky; display:block; top:0; height:1px; margin:-1px 0 10px; background:linear-gradient(90deg, transparent, var(--line-strong), transparent); opacity:.7; }
     .setup-steps { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0; }
-    .setup-step { border:1px solid rgba(214,166,69,.24); color:var(--muted); padding:7px 10px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
-    .setup-step.active { color:var(--gold-bright); border-color:rgba(214,166,69,.6); background:rgba(214,166,69,.08); }
+    .setup-step { border:1px solid var(--line); border-radius:999px; color:var(--muted); background:var(--wizard-step-bg); padding:7px 10px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+    .setup-step.active { color:var(--gold-bright); border-color:var(--line-strong); background:var(--wizard-step-active-bg); box-shadow:0 0 18px var(--theme-glow); }
     .setup-page { display:none; }
     .setup-page.active { display:block; }
     .path-picker-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; }
     .path-picker-row label { min-width:0; }
     .test-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
-    .test-result { min-height:74px; border:1px solid rgba(214,166,69,.2); padding:10px; background:rgba(255,255,255,.025); color:var(--muted); font-size:12px; }
-    .test-result.ok { color:var(--good); border-color:rgba(89,213,139,.46); }
-    .test-result.bad { color:var(--bad); border-color:rgba(255,102,102,.52); }
+    .setup-card label { color:var(--sand); }
+    .setup-card input,
+    .setup-card select,
+    .setup-card textarea,
+    .setup-card pre {
+      color:var(--text);
+      border-color:var(--line);
+      background:var(--wizard-field-bg);
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.025);
+    }
+    .setup-card input:focus,
+    .setup-card select:focus,
+    .setup-card textarea:focus {
+      outline:none;
+      border-color:var(--line-strong);
+      box-shadow:0 0 0 3px var(--theme-glow), inset 0 0 0 1px rgba(255,255,255,.035);
+    }
+    .setup-card .panel,
+    .setup-card .empty {
+      background:var(--wizard-test-bg);
+      border-color:var(--line);
+    }
+    .setup-card button {
+      border-color:var(--line);
+      color:var(--sand);
+      background:linear-gradient(180deg, var(--panel-2), var(--panel));
+    }
+    .setup-card button:hover {
+      color:var(--gold-bright);
+      border-color:var(--line-strong);
+      box-shadow:0 0 18px var(--theme-glow);
+    }
+    .setup-card button.primary,
+    .setup-card .primary {
+      color:var(--bg);
+      border-color:var(--line-strong);
+      background:linear-gradient(180deg, var(--gold-bright), var(--gold));
+      font-weight:900;
+    }
+    .test-result { min-height:74px; border:1px solid var(--line); border-radius:14px; padding:10px; background:var(--wizard-test-bg); color:var(--muted); font-size:12px; }
+    .test-result.ok { color:var(--good); border-color:rgba(89,213,139,.46); background:var(--wizard-test-ok-bg); }
+    .test-result.bad { color:var(--bad); border-color:rgba(255,102,102,.52); background:var(--wizard-test-bad-bg); }
+    body.theme-royal .setup-card button.primary,
+    body.theme-royal .setup-card .primary { color:#fff8ea; background:linear-gradient(180deg, #b77a22, #6d4518); }
     .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--panel-gap); }
     .diagnostic-log { min-height:220px; max-height:420px; overflow:auto; white-space:pre-wrap; }
     .mt { margin-top:8px; } .mb { margin-bottom:8px; }
@@ -10538,7 +10926,7 @@ function appPage() {
     </div>
     <div id="setupPage1" class="setup-page">
       <div class="field-grid">
-        <label>Server Type<select id="setupServerType"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
+        <label>Server Type<select id="setupServerType" onchange="syncConnectionHostLocks('setup')"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
         <div class="path-picker-row">
           <label>DUNE_SERVER_INSTALL_PATH<input id="setupServerInstallPath" placeholder="Browse to the server install folder" onchange="refreshServerInstallPathWarning('setupServerInstallPath','setupServerInstallPathWarning')"></label>
           <button type="button" onclick="browseServerInstallPath('setupServerInstallPath','setupServerInstallPathWarning')">Browse...</button>
@@ -10702,21 +11090,10 @@ function appPage() {
         </div>
       </div>
     </div>
-    <div class="suite-health-strip" aria-label="Suite health summary">
-      <div class="suite-health-card"><span>Suite</span><strong id="uxSuiteHealth">Online</strong></div>
-      <div class="suite-health-card"><span>Server</span><strong id="uxServerHealth">Checking</strong></div>
-      <div class="suite-health-card"><span>Database</span><strong id="uxDatabaseHealth">Checking</strong></div>
-      <div class="suite-health-card"><span>Last Action</span><strong id="uxLastAction">Ready</strong></div>
-    </div>
-
     <section id="dashboard" class="view active">
       <div class="hero" role="img" aria-label="AlphaNine Dune Suite banner"></div>
       <div class="grid">
-        <div class="panel pad metric-tile"><div class="label">Server</div><div id="dashboardVmStatus" class="value">Checking...</div><div class="subtle">VM and battlegroup readiness.</div></div>
         <div class="panel pad metric-tile"><div class="label">Players</div><div id="players" class="value">Checking...</div><div class="subtle">Known live population.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Database</div><div id="adminDb" class="value">Checking...</div><div class="subtle">Postgres/admin probe.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Receiver</div><div id="receiverState" class="value">Checking...</div><div class="subtle">Live command bridge.</div></div>
-        <div class="panel pad metric-tile"><div class="label">Last Action</div><div id="dashboardLastAction" class="value">Ready</div><div class="subtle">Most recent Suite command.</div></div>
         <div class="panel pad metric-tile advanced-only"><div class="label">Give Transport</div><div id="adminLive" class="value">Checking...</div><div class="subtle">Runtime grant route.</div></div>
         <div class="panel pad metric-tile advanced-only"><div class="label">Queue Bridge</div><div id="rabbitState" class="value">Checking...</div><div class="subtle">RabbitMQ command target.</div></div>
       </div>
@@ -10976,11 +11353,13 @@ function appPage() {
         </div>
         <div class="panel pad give-catalog">
           <div class="panel-head"><div><div class="label">Item Catalog</div><div class="subtle">Select one item for Give Item or add several to the queue.</div></div></div>
-          <div class="field-grid mt">
+          <div class="give-catalog-filters mt">
             <label>Item Search<input id="adminSearch" placeholder="Search item name or template" oninput="renderAdminItems()"></label>
-            <label>Item Filter<select id="adminItemCategory" onchange="renderAdminItems()"><option value="">All discovered items</option></select></label>
-            <label>Grade<select id="adminItemGrade" onchange="renderAdminItems()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
-            <label>Tier<select id="adminItemTier" onchange="renderAdminItems()"><option value="all">All tiers</option></select></label>
+            <div class="give-filter-row">
+              <label>Item Filter<select id="adminItemCategory" onchange="renderAdminItems()"><option value="">All discovered items</option></select></label>
+              <label>Grade<select id="adminItemGrade" onchange="renderAdminItems()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
+              <label>Tier<select id="adminItemTier" onchange="renderAdminItems()"><option value="all">All tiers</option></select></label>
+            </div>
           </div>
           <div id="buildingStyleFilterNote" class="warning mt hidden">Building Styles / Blueprints only shows non-DLC base styles. DLC and MTX styles are intentionally hidden from this quick filter.</div>
           <div id="selectedGiveItem" class="empty mt">Select an item from the catalogue below.</div>
@@ -11276,6 +11655,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
                       <thead><tr><th>Faction ID</th><th>Reputation</th></tr></thead>
                       <tbody id="progressionFactionRows"><tr><td colspan="2">No player loaded.</td></tr></tbody>
                     </table>
+                    <div class="empty mt">Faction reputation and rank data are read-only in 0.4.3.</div>
                   </div>
                 </div>
               </div>
@@ -11665,7 +12045,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel pad">
           <div class="label">Network & Server</div>
           <div class="field-grid mt">
-            <label>Server Type<select id="settingsServerType"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
+            <label>Server Type<select id="settingsServerType" onchange="syncConnectionHostLocks('settings')"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
             <label>VM Name<input id="settingsVmName"></label>
             <label>VM IP<input id="settingsVmIp"></label>
             <label>SSH Host<input id="settingsSshHost"></label>
@@ -11772,7 +12152,7 @@ let managerFrameCheckTimer=null;
 function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -11805,11 +12185,12 @@ function applyUiMode(value){uiMode=normalizeUiMode(value);document.body.classLis
 async function changeUiMode(value){const previous=uiMode;applyUiMode(value);try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,uiMode})});appConfig=data.config||{...current,uiMode};applyUiMode(appConfig.uiMode);setText("settingsSaveStatus","UI mode saved.");playUiSound("click");}catch(error){applyUiMode(previous);setText("settingsSaveStatus","Could not save UI mode: "+betterError(error));playUiSound("warning");}}
 async function loadUiMode(){try{const config=await getJson("/api/config");appConfig=config;applyUiMode(config.uiMode);}catch{applyUiMode("simple");}}
 function normalizeTheme(value){const key=String(value||"").toLowerCase();return ["gold","command","purple","contrast","royal"].includes(key)?key:"gold";}
-function applyTheme(value){uiTheme=normalizeTheme(value);document.body.classList.remove("theme-gold","theme-command","theme-purple","theme-contrast","theme-royal");document.body.classList.add("theme-"+uiTheme);setValue("headerTheme",uiTheme);setValue("settingsTheme",uiTheme);try{localStorage.setItem("alphaNineTheme",uiTheme);}catch{}}
+function syncManagerFrameTheme(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.body)return;doc.body.classList.remove("theme-gold","theme-command","theme-purple","theme-contrast","theme-royal");doc.body.classList.add("theme-"+uiTheme);}catch{}}
+function applyTheme(value){uiTheme=normalizeTheme(value);document.body.classList.remove("theme-gold","theme-command","theme-purple","theme-contrast","theme-royal");document.body.classList.add("theme-"+uiTheme);setValue("headerTheme",uiTheme);setValue("settingsTheme",uiTheme);syncManagerFrameTheme();try{localStorage.setItem("alphaNineTheme",uiTheme);}catch{}}
 function changeTheme(value){applyTheme(value);showToast("Theme changed","success");playUiSound("click");}
 function loadTheme(){let saved="gold";try{saved=localStorage.getItem("alphaNineTheme")||"gold";}catch{}applyTheme(saved);}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
-function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
+function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;syncManagerFrameTheme();let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
 function managerFrameHasContent(){const frame=document.getElementById("managerFrame");try{return Boolean(frame&&frame.contentDocument&&frame.contentDocument.body&&frame.contentDocument.body.innerText.trim());}catch{return false;}}
 function handleManagerFrameLoad(){window.clearTimeout(managerFrameCheckTimer);managerFrameCheckTimer=window.setTimeout(checkManagerFrameLoaded,700);}
 async function checkManagerFrameLoaded(){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");try{const service=await fetch("/manager-api/api/server/config",{cache:"no-store"});if(!service.ok){setManagerFrameStatus("Server Manager unavailable.","Manager service not running / failed to start. HTTP "+service.status+" from /manager-api/api/server/config.","bad");return;}const serviceData=await service.json().catch(()=>({}));if(serviceData.warning||serviceData.error){setManagerFrameStatus("Server Manager unavailable.",serviceData.warning||serviceData.error||"Manager service not running / failed to start.","bad");return;}}catch(error){setManagerFrameStatus("Server Manager unavailable.",error&&error.message?error.message:"Manager service not running / failed to start.","bad");return;}if(managerFrameHasContent()){normalizeManagerFrameTypography();if(status)status.style.display="none";if(frame)frame.style.display="block";return;}try{const response=await fetch("/manager/",{cache:"no-store"});if(!response.ok){setManagerFrameStatus("Server Manager unavailable.","HTTP "+response.status+" loading /manager/.","bad");return;}const text=await response.text();if(!text.trim()){setManagerFrameStatus("Server Manager unavailable.","Manager endpoint returned an empty response.","bad");return;}setManagerFrameStatus("Server Manager unavailable.","Embedded manager frame did not finish rendering. The manager endpoint is reachable, but the embedded frame stayed empty. Use Reload Manager or open /manager/ directly.","warn");}catch(error){setManagerFrameStatus("Server Manager unavailable.",error&&error.message?error.message:"Manager service not running / failed to start.","bad");}}
@@ -12043,6 +12424,8 @@ async function getJson(url, options={}){const controller=new AbortController();c
 function setValue(id,value){const el=document.getElementById(id);if(el)el.value=value==null?"":String(value);}
 function getValue(id){return document.getElementById(id)?.value||"";}
 function setChecked(id,value){const el=document.getElementById(id);if(el)el.checked=Boolean(value);}
+function isLocalHostLockedServerType(serverType){const value=String(serverType||"").trim().toLowerCase();return value==="local-hyperv"||value==="local-windows"||value==="hyperv"||value==="hyper-v"||value==="local";}
+function syncConnectionHostLocks(prefix){const locked=isLocalHostLockedServerType(getValue(prefix+"ServerType"));for(const field of ["DatabaseHost","ReceiverHost"]){const input=document.getElementById(prefix+field);if(!input)continue;if(locked)input.value="127.0.0.1";input.readOnly=locked;input.disabled=false;input.classList.toggle("locked-host-field",locked);input.title=locked?"Local Windows / Hyper-V uses the local loopback host. Choose Remote VM or Manual to enter a custom IP.":"";}if(prefix==="setup")invalidateSetupDatabaseTest();}
 function resultBox(id,data){const el=document.getElementById(id);if(!el)return;el.className="test-result "+(data.ok?"ok":"bad");el.textContent=(data.message||data.status||data.error||"Done")+(data.error&&data.error!==data.message?"\\n"+data.error:"");}
 function isMaskedSecretPlaceholder(value){const normalized=String(value??"").trim().toLowerCase();return normalized==="********"||normalized==="<set>";}
 function setupDatabaseFormPayload(){return{databaseHost:getValue("setupDatabaseHost"),databasePort:getValue("setupDatabasePort"),databaseName:getValue("setupDatabaseName"),databaseUser:getValue("setupDatabaseUser"),databasePassword:getValue("setupDatabasePassword")};}
@@ -12050,18 +12433,18 @@ function setupDetectionPayload(){return{...setupDatabaseFormPayload(),vmName:get
 function currentSetupDatabaseSignature(){const value=setupDatabaseFormPayload();return JSON.stringify([value.databaseHost.trim(),value.databasePort.trim(),value.databaseName.trim(),value.databaseUser.trim(),value.databasePassword]);}
 function syncSetupFinishButtons(){const enabled=Boolean(setupDatabaseTestSignature&&setupDatabaseTestSignature===currentSetupDatabaseSignature());for(const id of ["setupFinishButton","setupSaveTestButton"]){const button=document.getElementById(id);if(button)button.disabled=!enabled;}}
 function invalidateSetupDatabaseTest(){setupDatabaseTestSignature="";syncSetupFinishButtons();for(const id of ["setupDatabaseResult","finishDbResult"]){const box=document.getElementById(id);if(box){box.className="test-result mt";box.textContent="Database values changed. Test again before finishing.";}}}
-async function testSetupDatabase(resultId){const payload=setupDatabaseFormPayload();setupDatabaseTestSignature="";syncSetupFinishButtons();resultBox(resultId,{ok:true,message:"Running authenticated SELECT 1..."});try{const data=await getJson("/api/setup/test-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:12000});if(data.ok)setupDatabaseTestSignature=currentSetupDatabaseSignature();resultBox(resultId,data);syncSetupFinishButtons();playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:"Database authentication failed.",error:betterError(e)};resultBox(resultId,data);syncSetupFinishButtons();playUiSound("warning");return data;}}
-async function detectSetupDatabaseCredentials(resultId){setupDatabaseTestSignature="";syncSetupFinishButtons();resultBox(resultId,{ok:true,message:"Detecting database credentials from VM..."});try{const data=await getJson("/api/setup/detect-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(setupDetectionPayload()),timeoutMs:45000});if(!data.ok)throw new Error(data.error||data.message||"Database credential detection failed.");if(data.databaseHost)setValue("setupDatabaseHost",data.databaseHost);if(data.databasePort)setValue("setupDatabasePort",data.databasePort);if(data.databaseName)setValue("setupDatabaseName",data.databaseName);if(data.databaseUser)setValue("setupDatabaseUser",data.databaseUser);if(data.databasePassword)setValue("setupDatabasePassword",data.databasePassword);invalidateSetupDatabaseTest();resultBox(resultId,{ok:true,message:"Detected DB credentials. Testing database now...",detail:data.battlegroup?data.battlegroup.name:""});const tested=await testSetupDatabase(resultId);if(tested.ok)resultBox(resultId,{...tested,message:"Detected and verified database credentials."});return tested;}catch(e){const data={ok:false,message:"Database credential detection failed.",error:betterError(e)+"\\nMake sure SSH settings are correct and the Dune VM is running."};resultBox(resultId,data);syncSetupFinishButtons();playUiSound("warning");return data;}}
-function configPayload(prefix){const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),sshHost:getValue(prefix+"SshHost"),sshUser:getValue(prefix+"SshUser"),sshKey:getValue(prefix+"SshKey"),serverInstallPath:getValue(prefix+"ServerInstallPath"),awakeningServerPath:getValue(prefix+"AwakeningServerPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey"),mapDefault:getValue(prefix+"MapDefault"),logLevel:getValue(prefix+"LogLevel"),updateRepo:getValue(prefix+"UpdateRepo"),teleportEndpointPath:getValue(prefix+"TeleportEndpointPath"),teleportSafeZOffset:getValue(prefix+"TeleportSafeZOffset"),progressionEditingEnabled:document.getElementById(prefix+"ProgressionEditingEnabled")?.checked===true};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");const adminToken=getValue(prefix+"AdminGiveItemToken");if(dbPass&&!isMaskedSecretPlaceholder(dbPass))payload.databasePassword=dbPass;if(token&&!isMaskedSecretPlaceholder(token))payload.receiverToken=token;if(adminToken&&!isMaskedSecretPlaceholder(adminToken))payload.adminGiveItemToken=adminToken;return payload;}
+async function testSetupDatabase(resultId){syncConnectionHostLocks("setup");const payload=setupDatabaseFormPayload();setupDatabaseTestSignature="";syncSetupFinishButtons();resultBox(resultId,{ok:true,message:"Running authenticated SELECT 1..."});try{const data=await getJson("/api/setup/test-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:12000});if(data.ok)setupDatabaseTestSignature=currentSetupDatabaseSignature();resultBox(resultId,data);syncSetupFinishButtons();playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:"Database authentication failed.",error:betterError(e)};resultBox(resultId,data);syncSetupFinishButtons();playUiSound("warning");return data;}}
+async function detectSetupDatabaseCredentials(resultId){setupDatabaseTestSignature="";syncSetupFinishButtons();resultBox(resultId,{ok:true,message:"Detecting database credentials from VM..."});try{const data=await getJson("/api/setup/detect-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(setupDetectionPayload()),timeoutMs:45000});if(!data.ok)throw new Error(data.error||data.message||"Database credential detection failed.");if(data.databaseHost)setValue("setupDatabaseHost",data.databaseHost);if(data.databasePort)setValue("setupDatabasePort",data.databasePort);if(data.databaseName)setValue("setupDatabaseName",data.databaseName);if(data.databaseUser)setValue("setupDatabaseUser",data.databaseUser);if(data.databasePassword)setValue("setupDatabasePassword",data.databasePassword);syncConnectionHostLocks("setup");invalidateSetupDatabaseTest();resultBox(resultId,{ok:true,message:"Detected DB credentials. Testing database now...",detail:data.battlegroup?data.battlegroup.name:""});const tested=await testSetupDatabase(resultId);if(tested.ok)resultBox(resultId,{...tested,message:"Detected and verified database credentials."});return tested;}catch(e){const data={ok:false,message:"Database credential detection failed.",error:betterError(e)+"\\nMake sure SSH settings are correct and the Dune VM is running."};resultBox(resultId,data);syncSetupFinishButtons();playUiSound("warning");return data;}}
+function configPayload(prefix){syncConnectionHostLocks(prefix);const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),sshHost:getValue(prefix+"SshHost"),sshUser:getValue(prefix+"SshUser"),sshKey:getValue(prefix+"SshKey"),serverInstallPath:getValue(prefix+"ServerInstallPath"),awakeningServerPath:getValue(prefix+"AwakeningServerPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey"),mapDefault:getValue(prefix+"MapDefault"),logLevel:getValue(prefix+"LogLevel"),updateRepo:getValue(prefix+"UpdateRepo"),teleportEndpointPath:getValue(prefix+"TeleportEndpointPath"),teleportSafeZOffset:getValue(prefix+"TeleportSafeZOffset"),progressionEditingEnabled:document.getElementById(prefix+"ProgressionEditingEnabled")?.checked===true};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");const adminToken=getValue(prefix+"AdminGiveItemToken");if(dbPass&&!isMaskedSecretPlaceholder(dbPass))payload.databasePassword=dbPass;if(token&&!isMaskedSecretPlaceholder(token))payload.receiverToken=token;if(adminToken&&!isMaskedSecretPlaceholder(adminToken))payload.adminGiveItemToken=adminToken;return payload;}
 function fillSecretInput(id,isSet){const input=document.getElementById(id);if(!input)return;if(!input.dataset.emptyPlaceholder)input.dataset.emptyPlaceholder=input.placeholder||"";input.value="";input.placeholder=isSet?"********":input.dataset.emptyPlaceholder;}
-function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupAwakeningServerPath",config.awakeningServerPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("setupSshUser",config.sshUser||"dune");setValue("setupSshKey",config.sshKey||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");fillSecretInput("setupDatabasePassword",config.databasePasswordSet);setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);fillSecretInput("setupReceiverToken",config.receiverTokenSet);fillSecretInput("setupAdminGiveItemToken",config.adminGiveItemTokenSet);setValue("setupReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("setupMapDefault",config.mapDefault||"HaggaBasin");setValue("setupLogLevel",config.logLevel||"info");setValue("setupUpdateRepo",config.updateRepo||"AlphaNineGaming/alphanine-dune-suite");setValue("setupTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("setupTeleportSafeZOffset",config.teleportSafeZOffset||1000);setChecked("setupProgressionEditingEnabled",config.progressionEditingEnabled===true);setSshKeyWarning("setupSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("setupReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("setupServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("setupAwakeningServerPathWarning",config.awakeningServerPathStatus);invalidateSetupDatabaseTest();}
+function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupAwakeningServerPath",config.awakeningServerPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("setupSshUser",config.sshUser||"dune");setValue("setupSshKey",config.sshKey||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");fillSecretInput("setupDatabasePassword",config.databasePasswordSet);setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);fillSecretInput("setupReceiverToken",config.receiverTokenSet);fillSecretInput("setupAdminGiveItemToken",config.adminGiveItemTokenSet);setValue("setupReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("setupMapDefault",config.mapDefault||"HaggaBasin");setValue("setupLogLevel",config.logLevel||"info");setValue("setupUpdateRepo",config.updateRepo||"AlphaNineGaming/alphanine-dune-suite");setValue("setupTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("setupTeleportSafeZOffset",config.teleportSafeZOffset||1000);setChecked("setupProgressionEditingEnabled",config.progressionEditingEnabled===true);setSshKeyWarning("setupSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("setupReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("setupServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("setupAwakeningServerPathWarning",config.awakeningServerPathStatus);syncConnectionHostLocks("setup");invalidateSetupDatabaseTest();}
 function setSshKeyWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.exists);el.className=ok?"empty mt":"warning mt";el.textContent=status?.message||"SSH key file not found.";if(status?.path)el.textContent+=" "+status.path;}
 async function refreshSshKeyWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/ssh-key/status?path="+encodeURIComponent(path));setSshKeyWarning(warningId,data.sshKey);}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
 async function browseSshKey(inputId,warningId){try{if(!window.alphaNineSuite?.chooseSshKey)throw new Error("File picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseSshKey();if(result?.filePath){setValue(inputId,result.filePath);await refreshSshKeyWarning(inputId,warningId);}}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
 function setServerInstallPathWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.valid);el.className=ok?"empty mt":"warning mt";let text=status?.message||"Selected folder does not appear to be a valid Dune Awakening server installation.";if(status?.path)text+=" "+status.path;const checks=(status?.checks||[]).filter(item=>item.ok).map(item=>item.name);if(checks.length)text+="\nDetected: "+checks.join(", ");el.textContent=text;}
 async function refreshServerInstallPathWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/server-install-path/status?path="+encodeURIComponent(path));setServerInstallPathWarning(warningId,data.serverInstallPath);}catch(e){setServerInstallPathWarning(warningId,{valid:false,message:betterError(e)});}}
 async function browseServerInstallPath(inputId,warningId){try{if(!window.alphaNineSuite?.chooseServerInstallFolder)throw new Error("Folder picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseServerInstallFolder();if(result?.folderPath){setValue(inputId,result.folderPath);await refreshServerInstallPathWarning(inputId,warningId);}}catch(e){setServerInstallPathWarning(warningId,{valid:false,message:betterError(e)});}}
-function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsAwakeningServerPath",config.awakeningServerPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");fillSecretInput("settingsDatabasePassword",config.databasePasswordSet||Boolean(config.databasePassword));setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);fillSecretInput("settingsReceiverToken",config.receiverTokenSet||Boolean(config.receiverToken));fillSecretInput("settingsAdminGiveItemToken",config.adminGiveItemTokenSet||Boolean(config.adminGiveItemToken));setValue("settingsReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("settingsReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportSafeZOffset",config.teleportSafeZOffset||1000);setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setChecked("settingsProgressionEditingEnabled",config.progressionEditingEnabled===true);setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("settingsServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("settingsAwakeningServerPathWarning",config.awakeningServerPathStatus);}
+function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsAwakeningServerPath",config.awakeningServerPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");fillSecretInput("settingsDatabasePassword",config.databasePasswordSet||Boolean(config.databasePassword));setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);fillSecretInput("settingsReceiverToken",config.receiverTokenSet||Boolean(config.receiverToken));fillSecretInput("settingsAdminGiveItemToken",config.adminGiveItemTokenSet||Boolean(config.adminGiveItemToken));setValue("settingsReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("settingsReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportSafeZOffset",config.teleportSafeZOffset||1000);setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setChecked("settingsProgressionEditingEnabled",config.progressionEditingEnabled===true);setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("settingsServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("settingsAwakeningServerPathWarning",config.awakeningServerPathStatus);syncConnectionHostLocks("settings");}
 function collectSettings(){const payload=configPayload("settings");payload.sshHost=getValue("settingsSshHost");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.liveTeleportEnabled=document.getElementById("settingsLiveTeleportEnabled")?.checked===true;payload.teleportEndpointPath=getValue("settingsTeleportEndpointPath");payload.teleportSafeZOffset=getValue("settingsTeleportSafeZOffset");payload.teleportCommandTemplate=getValue("settingsTeleportCommandTemplate");payload.teleportPayloadTemplate=getValue("settingsTeleportPayloadTemplate");payload.progressionEditingEnabled=document.getElementById("settingsProgressionEditingEnabled")?.checked===true;payload.setupComplete=true;return payload;}
 function battlegroupKey(row){return row?String(row.namespace||"")+"/"+String(row.name||""):"";}
 function selectedBattlegroupFromUi(){const key=getValue("settingsBattlegroupSelect");return (battlegroupData.battlegroups||[]).find(row=>battlegroupKey(row)===key)||null;}
@@ -12079,7 +12462,7 @@ function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.ad
 function openSupportDiscord(){window.open("https://discord.gg/tuUv3hYTv","_blank","noopener");playUiSound("click");}
 function openSupportKofi(){window.open("https://ko-fi.com/E1W220NMPA","_blank","noopener");playUiSound("click");}
 async function initSetup(){try{const data=await getJson("/api/setup/status");const config=data.config||{};fillSetup(config);await loadSettings();if(!data.setupComplete)openSetupWizard();if(data.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(data.discovery,null,2);refreshReceiverStatus();}catch(e){addActivity("error","Setup status failed",e.message);}}
-async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.vmIp){setValue("setupVmIp",data.server.vmIp);setValue("setupSshHost",data.server.vmIp);setValue("setupReceiverSshHost",data.server.vmIp);}if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
+async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.vmIp){setValue("setupVmIp",data.server.vmIp);setValue("setupSshHost",data.server.vmIp);setValue("setupReceiverSshHost",data.server.vmIp);}if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}syncConnectionHostLocks("setup");playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}
 async function finishSetup(){try{if(!setupDatabaseTestSignature||setupDatabaseTestSignature!==currentSetupDatabaseSignature())throw new Error("Test the current database settings successfully before finishing setup.");const payload={...configPayload("setup"),setupComplete:true};const checks=await Promise.all([["serverInstallPath","setupServerInstallPathWarning"],["awakeningServerPath","setupAwakeningServerPathWarning"]].map(async([key,warningId])=>{const data=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload[key]||""));setServerInstallPathWarning(warningId,data.serverInstallPath);return data.serverInstallPath;}));if(checks.some(status=>!status?.valid))throw new Error("Both server paths must be valid folders on this machine. Use Browse to select each folder.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified||!data.pathsVerified)throw new Error("Setup path save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified in config.json and managed .env. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);await loadSettings();closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
 function setupTestLine(label,result){return label+": "+(result?.ok?"PASS":"CHECK")+" - "+(result?.message||result?.error||"No result")+(result?.error?" / "+result.error:"");}
@@ -12111,7 +12494,8 @@ async function refreshPlayerFeed(){const stamp=document.getElementById("playerFe
 function vmDisplayStatus(vm){const raw=String(vm?.state||vm?.status||vm?.label||"").trim().toLowerCase();if(["running","started","online","healthy"].includes(raw))return"Running";if(["off","stopped","saved","offline"].includes(raw))return"Offline";if(vm?.errorCode==="vm_not_found")return"VM not found";if(vm?.errorCode==="hyperv_module_unavailable"||vm?.hyperv?.code==="hyperv_module_unavailable")return"Hyper-V module unavailable";if(vm?.errorCode==="access_denied")return vm?.needsAdmin?"Admin required":"Hyper-V blocked";return raw&&raw!=="unknown"?String(vm.state||vm.status||vm.label):"Unknown";}
 function renderVmStatus(vm){const status=vmDisplayStatus(vm);tone("vm",status);tone("dashboardVmStatus",status);setText("vmControlStatus",status);}
 function vmDisplayMessage(data){const vm=data?.vm||data||{};const status=vmDisplayStatus(vm);return vm?.error?status+": "+vm.error:status;}
-async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?((selected.title||"Title not found")+" / "+selected.namespace+" / "+selected.name):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",s.database||"Unknown");tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+(s.database||"Unknown")+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
+function databaseHealthLabel(data){const health=data?.databaseHealth;if(health&&health.ok)return"DB reachable";if(health&&health.status==="unavailable")return"DB unavailable";const summary=data?.status?.summary||{};return summary.database||"Unknown";}
+async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const dbLabel=databaseHealthLabel(data);const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?((selected.title||"Title not found")+" / "+selected.namespace+" / "+selected.name):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",dbLabel);tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));badge("topDb",dbLabel);document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+dbLabel+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");badge("topDb","DB status unknown");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(open){if(open===null||open===undefined)return"Not Configured";return open?"Open":"Closed";}
 function monitorMs(value){return Number.isFinite(Number(value))?Math.round(Number(value))+" ms":"-- ms";}
@@ -12182,16 +12566,16 @@ async function openRestoreLog(){const path=window.lastDatabaseRestoreLogPath||""
 async function pollDatabaseRestoreStatus(jobId){if(window.databaseRestorePolling===jobId)return;window.databaseRestorePolling=jobId;window.activeDatabaseRestoreJobId=jobId;localStorage.setItem("activeDatabaseRestoreJobId",jobId);setDatabaseRestoreRunning(true);let finalJob=null;let pollError=null;try{for(let i=0;i<720;i++){try{const job=await getJson("/api/database/import-status/"+encodeURIComponent(jobId),{timeoutMs:5000});window.lastDatabaseRestoreLogPath=job.logPath||job.result?.logPath||"";renderDatabaseRestoreStatus(job);if(job.status==="success"||job.status==="failed"){finalJob=job;break;}}catch(e){pollError=e;break;}await new Promise(resolve=>setTimeout(resolve,2000));}}finally{window.databaseRestorePolling="";setDatabaseRestoreRunning(false);window.activeDatabaseRestoreJobId="";localStorage.removeItem("activeDatabaseRestoreJobId");await refreshDatabaseImportReadiness().catch(()=>{});}const el=document.getElementById("dbRestoreResult");if(pollError){const msg=betterError(pollError);if(el){el.className="warning mt";el.textContent=/not found|was not found|missing/i.test(msg)?"Import job not found. Cleared stale import state.":msg;}const progress=document.getElementById("dbRestoreProgress");if(progress){progress.className="empty mt";progress.textContent="No import job running.";}addActivity("warn","Import status cleared",msg);return;}if(!finalJob){if(el){el.className="warning mt";el.textContent="Import status polling timed out. Check audit log for details.";}return;}if(el)el.innerHTML=restoreFinalSummaryHtml(finalJob);if(finalJob.status==="success"){document.getElementById("dbRestoreConfirm").value="";addActivity("database","Battlegroup import completed and verified",finalJob.jobId);await refreshDatabaseBackups();playUiSound("success");}else{addActivity("error","Battlegroup import failed",finalJob.error||finalJob.jobId);playUiSound("warning");}}
 async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="IMPORT")throw new Error("Type IMPORT before importing.");await ensureBattlegroupStoppedBeforeImport();if(!(await appConfirm("Import Battlegroup backup","Import Battlegroup backup from this file? Stop the server first. A safety Battlegroup backup will be created first.","Import","Cancel")))return;setDatabaseRestoreRunning(true);el.className="warning mt";el.textContent="Import job starting...";const data=await getJson("/api/database/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:15000});if(!data.jobId)throw new Error(data.error||"Import job was not created.");renderDatabaseRestoreStatus(data);addActivity("database","Battlegroup import started",data.jobId);await pollDatabaseRestoreStatus(data.jobId);}catch(e){setDatabaseRestoreRunning(false);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup import blocked",e.message);playUiSound("warning");}}
 function wireDatabaseImportControls(){const file=document.getElementById("dbRestoreFile");const confirm=document.getElementById("dbRestoreConfirm");if(file){file.addEventListener("input",()=>refreshDatabaseImportReadiness());file.addEventListener("change",()=>refreshDatabaseImportReadiness());}if(confirm){confirm.addEventListener("input",renderDatabaseImportControls);confirm.addEventListener("change",renderDatabaseImportControls);}renderDatabaseImportControls();}
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",probe.ok?"Reachable":"Limited");tone("adminDbMirror",probe.ok?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",probe.ok?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Error");tone("adminDbMirror","Error");badge("topDb","DB error");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,databaseReachable:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);const dbReachable=probe.databaseReachable===true||probe.ok===true;adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",dbReachable?"Reachable":"Limited");tone("adminDbMirror",dbReachable?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",dbReachable?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Unknown");tone("adminDbMirror","Unknown");badge("topDb","DB status unknown");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Template: '+esc(item.id||"--")+'</span>';}
-function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(players[0]&&!selectedPlayerId){selectedPlayerId=players[0].id;select.value=selectedPlayerId;}updateGiveTargetSummary();}
+function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(players[0]&&!selectedPlayerId){selectedPlayerId=players[0].id;select.value=selectedPlayerId;}updateGiveTargetSummary();renderVendorUnlockSelection();}
 async function refreshGivePlayersFast(){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();addActivity("probe","Give Item players loaded",adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
-function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();renderVendorUnlockSelection();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();renderVendorUnlockSelection();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div>'+hydrationDetailRow(p.hydration)+'<div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
 function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
@@ -12232,6 +12616,7 @@ function detailRows(rows){return Object.entries(rows||{}).map(([key,value])=>'<d
 function renderProgressionPlayer(data){
   progressionPlayerState=data?.ok?data:null;
   progressionPreviewState=null;
+  progressionFactionPreviewState=null;
   const status=document.getElementById("progressionPlayerStatus");
   if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Current values loaded into the guarded editor.":(data?.reason||data?.error||"Progression player lookup failed.");}
   const p=data?.player||{};
@@ -12256,8 +12641,18 @@ function renderProgressionPlayer(data){
   const spec=document.getElementById("progressionSpecRows");
   if(spec)spec.innerHTML=data?.ok?((data.specializationTracks||[]).length?(data.specializationTracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this player.</td></tr>'):'<tr><td colspan="3">No player loaded.</td></tr>';
   const factions=document.getElementById("progressionFactionRows");
-  if(factions)factions.innerHTML=data?.ok?((data.factionReputation||[]).length?(data.factionReputation||[]).map(row=>'<tr><td>'+esc(row.faction_id)+'</td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';
+  if(factions){const groups=progressionFactionGroups(data);factions.innerHTML=data?.ok?(groups.length?groups.map(row=>'<tr><td>'+esc(progressionFactionLabel(row))+'<div class="subtle">Targets: '+esc(row.actorIds.join(", "))+'</div></td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';}
+  renderProgressionFactionEditor(data);
 }
+function progressionFactionLabel(faction){return [faction.name||faction.faction_name||"",faction.id||faction.faction_id||""].filter(Boolean).join(" / ")||"Faction";}
+function progressionFactionRows(){return progressionPlayerState?.factionReputation||[];}
+function progressionFactionGroups(data=progressionPlayerState){const rows=data?.factionReputation||[];const groups=new Map();rows.forEach(row=>{const id=String(row.faction_id||"");if(!id)return;const group=groups.get(id)||{id,faction_id:id,name:row.faction_name||"",faction_name:row.faction_name||"",reputation_amount:row.reputation_amount||"0",actorIds:[]};group.actorIds.push(String(row.actor_id||"").trim());if(Number(row.reputation_amount)>Number(group.reputation_amount||0))group.reputation_amount=row.reputation_amount;groups.set(id,group);});return [...groups.values()].map(row=>({...row,actorIds:[...new Set(row.actorIds.filter(Boolean))]}));}
+function progressionFactionOptions(data){const groups=progressionFactionGroups(data);const byId=new Map(groups.map(row=>[String(row.id),row]));return (data?.factions||[]).filter(row=>String(row.name||"").toLowerCase()!=="none").map(row=>{const group=byId.get(String(row.id));return{id:String(row.id||""),name:row.name||"",current:group?.reputation_amount||"0",actorIds:group?.actorIds||[]};}).filter(row=>row.id);}
+function renderProgressionFactionEditor(data){const select=document.getElementById("progressionFactionSelect");const input=document.getElementById("progressionFactionReputation");const log=document.getElementById("progressionFactionPreviewLog");if(!select||!input)return;const current=select.value;const options=data?.ok?progressionFactionOptions(data):[];select.innerHTML=options.length?options.map(row=>'<option value="'+esc(row.id)+'">'+esc(progressionFactionLabel(row))+'</option>').join(""):'<option value="">No faction rows found</option>';if(current&&options.some(row=>String(row.id)===String(current)))select.value=current;else if(options[0])select.value=options[0].id;syncProgressionFactionEditor();if(log)log.textContent="No faction rank preview generated.";}
+function syncProgressionFactionEditor(){const select=document.getElementById("progressionFactionSelect");const input=document.getElementById("progressionFactionReputation");if(!select||!input)return;const row=progressionFactionGroups().find(item=>String(item.faction_id)===String(select.value));input.value=row?String(row.reputation_amount||0):"0";progressionFactionPreviewState=null;updateProgressionFactionPreviewText();}
+function updateProgressionFactionPreviewText(){const log=document.getElementById("progressionFactionPreviewLog");const select=document.getElementById("progressionFactionSelect");const input=document.getElementById("progressionFactionReputation");if(!log||!select||!input)return;const row=progressionFactionGroups().find(item=>String(item.faction_id)===String(select.value));const option=progressionFactionOptions(progressionPlayerState).find(item=>String(item.id)===String(select.value));const value=Number(input.value||0);if(!progressionPlayerState?.ok){log.textContent="Load a player before changing faction rank.";return;}if(!Number.isInteger(value)||value<0||value>12474){log.textContent="Reputation must be a whole number from 0 to 12474.";return;}log.textContent="Ready to preview faction rank unlock.\\nFaction: "+progressionFactionLabel(row||option||{id:select.value})+"\\nTargets: "+((row?.actorIds||option?.actorIds||[]).join(", ")||"detected player targets")+"\\nCurrent reputation: "+(row?.reputation_amount||option?.current||0)+"\\nNew reputation: "+value+"\\nStory gates: Harkonnen/Atreides rank gates will be completed when supported.\\nPlayer must be offline before applying.";}
+async function previewProgressionFactionApply(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup a player before generating a faction rank preview.");const select=document.getElementById("progressionFactionSelect");const input=document.getElementById("progressionFactionReputation");const factionId=select?.value||"";const reputationAmount=Number(input?.value||0);if(!factionId)throw new Error("Choose a faction first.");if(!Number.isInteger(reputationAmount)||reputationAmount<0||reputationAmount>12474)throw new Error("Reputation must be a whole number from 0 to 12474.");const row=progressionFactionGroups().find(item=>String(item.faction_id)===String(factionId));const option=progressionFactionOptions(progressionPlayerState).find(item=>String(item.id)===String(factionId));const label=progressionFactionLabel(row||option||{id:factionId});const confirmed=await appConfirm("Preview Faction Rank Unlock","Create a backup preview for "+(progressionPlayerState.player?.character_name||"this player")+"?\\nFaction: "+label+"\\nTargets: "+((row?.actorIds||option?.actorIds||[]).join(", ")||"detected player targets")+"\\nCurrent reputation: "+(row?.reputation_amount||option?.current||0)+"\\nNew reputation: "+reputationAmount+"\\n\\nThis sets current faction, sets rank reputation, and completes supported faction rank story gates. The player must be offline before applying.","Generate Preview","Cancel");if(!confirmed)return;const lookupId=progressionPlayerState.player?.actor_id||progressionPlayerState.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";const data=await getJson("/api/progression/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"faction_reputation",query:lookupId,playerId:lookupId,factionId,reputationAmount}),timeoutMs:60000});if(!data.ok)throw new Error(data.reason||data.error||"Faction rank preview failed.");progressionFactionPreviewState=data;setText("progressionFactionPreviewLog","Faction rank preview generated. Backup created before any write.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nOperation:\\n"+data.sqlPreview+"\\n\\nType APPLY PROGRESSION before applying.");pushProgressionRecent("Faction rank preview",label,"NOW");addActivity("progression","Faction rank preview created",factionId+" -> "+reputationAmount);playUiSound("success");}catch(e){progressionFactionPreviewState=null;setText("progressionFactionPreviewLog",betterError(e));pushProgressionRecent("Faction rank preview failed",betterError(e),"ERR");addActivity("error","Faction rank preview failed",e.message);playUiSound("warning");}}
+async function applyProgressionFactionLive(){try{if(!progressionFactionPreviewState)throw new Error("Generate Rank Preview + Backup first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionFactionPreviewState.previewId,confirmText:document.getElementById("progressionFactionConfirmText")?.value||""}),timeoutMs:45000});if(!data.ok)throw new Error((data.warning||data.error||"Faction rank apply failed")+"\\n"+JSON.stringify(data.debug||{},null,2));setText("progressionFactionPreviewLog","Faction rank apply succeeded.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nRead-back verification:\\n"+JSON.stringify(data.debug?.readBackValues||{},null,2));pushProgressionRecent("Faction rank changed",data.action||"Faction reputation updated.","NOW");addActivity("progression","Faction rank changed",data.action);progressionFactionPreviewState=null;document.getElementById("progressionFactionConfirmText").value="";await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionFactionPreviewLog",betterError(e));pushProgressionRecent("Faction rank apply failed",betterError(e),"ERR");addActivity("error","Faction rank apply failed",e.message);playUiSound("warning");}}
 function compactProgressionRows(title,rows){return '<div class="detail-row"><span class="subtle">'+esc(title)+'</span><strong></strong></div>'+detailRows(rows);}
 function renderProgressionCharacterDebug(data){const el=document.getElementById("progressionCharacterDebug");if(!el)return;const debug=data?.progressionDebug||{};if(!data?.ok){el.innerHTML='<div class="empty">No progression player lookup debug data.</div>';return;}const p=data.player||{};const f=debug.fLevelTarget||{};const t=debug.techKnowledgeTarget||{};const links=(debug.fglEntityLinks||[]).filter(row=>row.found).map(row=>[row.actor_id,row.entity_id,row.slot_name].filter(Boolean).join(" / ")).join("; ")||"None";const components=(debug.componentNames||[]).slice(0,12).join(", ")||"None";const fieldStatus=debug.fieldStatus||{};const h=data.hydration||{};el.innerHTML=compactProgressionRows("Player",{character:p.character_name||"--",actor_id:p.actor_id||"--",pawn_id:p.player_pawn_id||"--",online_status:p.online_status||"--"})+compactProgressionRows("Targets",{fLevelActor:f.actor_id||"--",fLevelEntity:f.entity_id||"--",fLevelSlot:f.slot_name||"--",techActor:t.actor_id||"--",techPath:t.path||"--",hydrationPath:h.source?.valuePath||"--"})+compactProgressionRows("Components",{checkedActorIds:(debug.checkedActorIds||[]).join(", ")||"--",fglLinks:links,components})+compactProgressionRows("Timings",data.timings||{})+compactProgressionRows("Safety",{readOnly:data.safety?.readOnlyMode?"yes":"no",liveEditing:data.safety?.liveEditingEnabled?"enabled":"disabled",WaterHydration:hydrationValueText(h),TotalXPEarned:fieldStatus.TotalXPEarned||"--",TotalSkillPoints:fieldStatus.TotalSkillPoints||"--",UnspentSkillPoints:fieldStatus.UnspentSkillPoints||"--",TechKnowledgePoints:fieldStatus.m_TechKnowledgePoints||"--"});}
 async function lookupProgressionPlayer(){const query=document.getElementById("progressionPlayerQuery")?.value||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:20000});renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="timeout")addActivity("warn","Progression player lookup timed out",(data.step||"unknown step")+" / "+(data.hint||"Try exact character name."));else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||data.error||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup failed",e.message);}}
@@ -12370,10 +12765,11 @@ async function route(req, res) {
       status = parseStatus(raw);
     }
     const telemetry = await vmResourceTelemetry().catch((error) => ({ source: "remote-vm", ok: false, error: error.message }));
+    const databaseHealth = await databaseHealthSnapshot(7000);
     const runtimeTransport = await updateRuntimeGiveTransport({ vm, status, raw }, "status");
     const serverStatus = mapServerSummaryStatus(status?.summary || status);
     const topServerStatus = topServerStatusDecision({ vm, status, raw, statusResult });
-    await json(res, { vm, status, telemetry, resources: telemetry, serverStatus, topServerStatus, selectedBattlegroup: normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup), onlineDecisionReason: topServerStatus.onlineDecisionReason, hardOfflineReasons: topServerStatus.hardOfflineReasons, confirmationSources: topServerStatus.confirmationSources, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
+    await json(res, { vm, status, databaseHealth, telemetry, resources: telemetry, serverStatus, topServerStatus, selectedBattlegroup: normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup), onlineDecisionReason: topServerStatus.onlineDecisionReason, hardOfflineReasons: topServerStatus.hardOfflineReasons, confirmationSources: topServerStatus.confirmationSources, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
     return;
   }
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {

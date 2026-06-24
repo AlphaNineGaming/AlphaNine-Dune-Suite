@@ -22,15 +22,15 @@
                        },
                        {
                            "name":  "Schematics",
-                           "count":  269
+                           "count":  327
                        },
                        {
                            "name":  "Tools",
-                           "count":  108
+                           "count":  92
                        },
                        {
                            "name":  "Vehicles",
-                           "count":  176
+                           "count":  134
                        },
                        {
                            "name":  "Weapons",
@@ -11777,7 +11777,7 @@
                   {
                       "id":  "HoltzmanShieldActiveDrain_Unique_01_Schematic",
                       "name":  "Adaptive Holtzman Shield Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -11981,7 +11981,7 @@
                   {
                       "id":  "Schematic_UniqueThumper",
                       "name":  "Clapper Mk4 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -12847,7 +12847,7 @@
                   {
                       "id":  "PowerPack_Unique_Regen_01_Schematic",
                       "name":  "Old Sparky Mk1 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "1",
                       "rarity":  "Rare",
@@ -12883,7 +12883,7 @@
                   {
                       "id":  "PowerPack_Unique_Regen_02_Schematic",
                       "name":  "Old Sparky Mk2 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "2",
                       "rarity":  "Rare",
@@ -12919,7 +12919,7 @@
                   {
                       "id":  "PowerPack_Unique_Regen_03_Schematic",
                       "name":  "Old Sparky Mk3 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "3",
                       "rarity":  "Rare",
@@ -12955,7 +12955,7 @@
                   {
                       "id":  "PowerPack_Unique_Regen_04_Schematic",
                       "name":  "Old Sparky Mk4 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -13188,7 +13188,7 @@
                   {
                       "id":  "PowerPack_Unique_PoisRadMitigation_06_Schematic",
                       "name":  "Purifier Power Pack Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -13299,7 +13299,7 @@
                   {
                       "id":  "FullStabilizationBelt_Unique_DmgReduction_Schematic",
                       "name":  "Sentinel Belt Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -13443,7 +13443,7 @@
                   {
                       "id":  "Schematic_UniqueSuspensor",
                       "name":  "The Emperor\u0027s Wings Mk1 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "1",
                       "rarity":  "Rare",
@@ -13479,7 +13479,7 @@
                   {
                       "id":  "GlidePartialStabilizationBelt_02_Schematic",
                       "name":  "The Emperor\u0027s Wings Mk2 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "2",
                       "rarity":  "Rare",
@@ -13515,7 +13515,7 @@
                   {
                       "id":  "GlidePartialStabilizationBelt_03_Schematic",
                       "name":  "The Emperor\u0027s Wings Mk3 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "3",
                       "rarity":  "Rare",
@@ -13551,7 +13551,7 @@
                   {
                       "id":  "GlidePartialStabilizationBelt_04_Schematic",
                       "name":  "The Emperor\u0027s Wings Mk4 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -13587,7 +13587,7 @@
                   {
                       "id":  "GlidePartialStabilizationBelt_05_Schematic",
                       "name":  "The Emperor\u0027s Wings Mk5 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -13623,7 +13623,7 @@
                   {
                       "id":  "GlidePartialStabilizationBelt_06_Schematic",
                       "name":  "The Emperor\u0027s Wings Mk6 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -13718,7 +13718,7 @@
                   {
                       "id":  "PowerPack_Unique_Regen_05_Schematic",
                       "name":  "Young Sparky Mk5 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -13754,7 +13754,7 @@
                   {
                       "id":  "PowerPack_Unique_Regen_06_Schematic",
                       "name":  "Young Sparky Mk6 Schematic",
-                      "category":  "Tools",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -13790,7 +13790,7 @@
                   {
                       "id":  "OrnithopterLightLocomotion_Unique_Speed_4_Schematic",
                       "name":  "Albatross Wing Module Mk4 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -13825,7 +13825,7 @@
                   {
                       "id":  "OrnithopterLightLocomotion_Unique_Speed_5_Schematic",
                       "name":  "Albatross Wing Module Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -13860,7 +13860,7 @@
                   {
                       "id":  "OrnithopterLightLocomotion_Unique_Speed_6_Schematic",
                       "name":  "Albatross Wing Module Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -14036,7 +14036,7 @@
                   {
                       "id":  "BuggyInventory_Unique_Capacity_03_Schematic",
                       "name":  "Bigger Buggy Boot Mk3 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "3",
                       "rarity":  "Rare",
@@ -14073,7 +14073,7 @@
                   {
                       "id":  "BuggyInventory_Unique_Capacity_04_Schematic",
                       "name":  "Bigger Buggy Boot Mk4 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -14110,7 +14110,7 @@
                   {
                       "id":  "BuggyInventory_Unique_Capacity_05_Schematic",
                       "name":  "Bigger Buggy Boot Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -14147,7 +14147,7 @@
                   {
                       "id":  "BuggyInventory_Unique_Capacity_06_Schematic",
                       "name":  "Bigger Buggy Boot Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -14183,7 +14183,7 @@
                   {
                       "id":  "BuggyEngine_Unique_Accelerate_03_Schematic",
                       "name":  "Bluddshot Buggy Engine Mk3 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "3",
                       "rarity":  "Rare",
@@ -14219,7 +14219,7 @@
                   {
                       "id":  "BuggyEngine_Unique_Accelerate_04_Schematic",
                       "name":  "Bluddshot Buggy Engine Mk4 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -14255,7 +14255,7 @@
                   {
                       "id":  "BuggyEngine_Unique_Accelerate_05_Schematic",
                       "name":  "Bluddshot Buggy Engine Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -14291,7 +14291,7 @@
                   {
                       "id":  "BuggyEngine_Unique_Accelerate_06_Schematic",
                       "name":  "Bluddshot Buggy Engine Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -14853,7 +14853,7 @@
                   {
                       "id":  "SandcrawlerLocomotion_Unique_WormThreat_06_Schematic",
                       "name":  "Dampened Sandcrawler Treads Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -14889,7 +14889,7 @@
                   {
                       "id":  "BuggyMining_Unique_YieldIncrease_03_Schematic",
                       "name":  "Focused Buggy Cutteray Mk3 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "3",
                       "rarity":  "Rare",
@@ -14925,7 +14925,7 @@
                   {
                       "id":  "BuggyMining_Unique_YieldIncrease_04_Schematic",
                       "name":  "Focused Buggy Cutteray Mk4 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -14961,7 +14961,7 @@
                   {
                       "id":  "BuggyMining_Unique_YieldIncrease_05_Schematic",
                       "name":  "Focused Buggy Cutteray Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -14997,7 +14997,7 @@
                   {
                       "id":  "BuggyMining_Unique_YieldIncrease_06_Schematic",
                       "name":  "Focused Buggy Cutteray Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -15033,7 +15033,7 @@
                   {
                       "id":  "OrnithopterMediumLocomotion_Unique_Strafe_5_Schematic",
                       "name":  "Hummingbird Wing Module Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -15068,7 +15068,7 @@
                   {
                       "id":  "OrnithopterMediumLocomotion_Unique_Strafe_6_Schematic",
                       "name":  "Hummingbird Wing Module Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -15103,7 +15103,7 @@
                   {
                       "id":  "SandbikeEngine_Unique_Speed_1_Schematic",
                       "name":  "Mohandis Sandbike Engine Mk1 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "1",
                       "rarity":  "Rare",
@@ -15139,7 +15139,7 @@
                   {
                       "id":  "SandbikeEngine_Unique_Speed_2_Schematic",
                       "name":  "Mohandis Sandbike Engine Mk2 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "2",
                       "rarity":  "Rare",
@@ -15175,7 +15175,7 @@
                   {
                       "id":  "SandbikeEngine_Unique_Speed_3_Schematic",
                       "name":  "Mohandis Sandbike Engine Mk3 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "3",
                       "rarity":  "Rare",
@@ -15211,7 +15211,7 @@
                   {
                       "id":  "SandbikeEngine_Unique_Speed_4_Schematic",
                       "name":  "Mohandis Sandbike Engine Mk4 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -15247,7 +15247,7 @@
                   {
                       "id":  "SandbikeEngine_Unique_Speed_5_Schematic",
                       "name":  "Mohandis Sandbike Engine Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -15283,7 +15283,7 @@
                   {
                       "id":  "SandbikeEngine_Unique_Speed_6_Schematic",
                       "name":  "Mohandis Sandbike Engine Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -15319,7 +15319,7 @@
                   {
                       "id":  "Schematic_UniqueBikeBoost",
                       "name":  "Night Rider Sandbike Boost Mk2 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "2",
                       "rarity":  "Rare",
@@ -15355,7 +15355,7 @@
                   {
                       "id":  "SandbikeChoamBoostHeatEfficient2_Schematic",
                       "name":  "Night Rider Sandbike Boost Mk3 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "3",
                       "rarity":  "Rare",
@@ -15391,7 +15391,7 @@
                   {
                       "id":  "SandbikeChoamBoostHeatEfficient3_Schematic",
                       "name":  "Night Rider Sandbike Boost Mk4 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -15427,7 +15427,7 @@
                   {
                       "id":  "SandbikeChoamBoostHeatEfficient4_Schematic",
                       "name":  "Night Rider Sandbike Boost Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -15463,7 +15463,7 @@
                   {
                       "id":  "SandbikeChoamBoostHeatEfficient5_Schematic",
                       "name":  "Night Rider Sandbike Boost Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -15499,7 +15499,7 @@
                   {
                       "id":  "Schematic_UniqueBuggyBoost",
                       "name":  "Rattler Boost Module Mk3 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "3",
                       "rarity":  "Rare",
@@ -15535,7 +15535,7 @@
                   {
                       "id":  "BuggyChoamBoostHeatEfficient2_Schematic",
                       "name":  "Rattler Boost Module Mk4 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -15571,7 +15571,7 @@
                   {
                       "id":  "BuggyChoamBoostHeatEfficient3_Schematic",
                       "name":  "Rattler Boost Module Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -15607,7 +15607,7 @@
                   {
                       "id":  "BuggyChoamBoostHeatEfficient4_Schematic",
                       "name":  "Rattler Boost Module Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -15643,7 +15643,7 @@
                   {
                       "id":  "OrnithopterTransportLocomotion_Unique_Speed_6_Schematic",
                       "name":  "Roc Carrier Wing Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -16860,7 +16860,7 @@
                   {
                       "id":  "OrnithopterMediumBoost_Unique_LessHeat_5_Schematic",
                       "name":  "Steady Assault Boost Module Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -16895,7 +16895,7 @@
                   {
                       "id":  "OrnithopterMediumBoost_Unique_LessHeat_6_Schematic",
                       "name":  "Steady Assault Boost Module Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -16931,7 +16931,7 @@
                   {
                       "id":  "OrnithopterTransportBoost_Unique_LessHeat_06_Schematic",
                       "name":  "Steady Carrier Boost Module Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -16967,7 +16967,7 @@
                   {
                       "id":  "Schematic_UniqueThopterBoost",
                       "name":  "Stormrider Boost Module Mk4 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "4",
                       "rarity":  "Rare",
@@ -17003,7 +17003,7 @@
                   {
                       "id":  "LightOrnithopterChoamBoostHeatEfficient2_Schematic",
                       "name":  "Stormrider Boost Module Mk5 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "5",
                       "rarity":  "Rare",
@@ -17039,7 +17039,7 @@
                   {
                       "id":  "LightOrnithopterChoamBoostHeatEfficient3_Schematic",
                       "name":  "Stormrider Boost Module Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -17075,7 +17075,7 @@
                   {
                       "id":  "SandcrawlerSpiceContainer_Unique_Capacity_6_Schematic",
                       "name":  "Upgraded Regis Spice Container Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",
@@ -17111,7 +17111,7 @@
                   {
                       "id":  "SandcrawlerEngine_Unique_Speed_06_Schematic",
                       "name":  "Walker Sandcrawler Engine Mk6 Schematic",
-                      "category":  "Vehicles",
+                      "category":  "Schematics",
                       "detail":  "",
                       "tier":  "6",
                       "rarity":  "Rare",

@@ -13,6 +13,8 @@ const START_TIMEOUT_MS = 45000;
 
 app.setName("AlphaNine Dune Suite");
 app.setAppUserModelId("com.alphanine.dunesuite");
+app.commandLine.appendSwitch("no-sandbox");
+app.commandLine.appendSwitch("disable-gpu-sandbox");
 
 let mainWindow = null;
 let serverProcess = null;

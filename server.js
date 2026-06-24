@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.4.5";
+const APP_VERSION = "0.4.4";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -11655,7 +11655,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
                       <thead><tr><th>Faction ID</th><th>Reputation</th></tr></thead>
                       <tbody id="progressionFactionRows"><tr><td colspan="2">No player loaded.</td></tr></tbody>
                     </table>
-                    <div class="empty mt">Faction reputation and rank data are read-only in 0.4.5.</div>
+                    <div class="empty mt">Faction reputation and rank data are read-only in 0.4.4.</div>
                   </div>
                 </div>
               </div>

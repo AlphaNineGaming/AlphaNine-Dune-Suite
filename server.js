@@ -1676,9 +1676,18 @@ function run(command, args, options = {}) {
 
 async function listeningPidOnPort(port) {
   if (process.platform !== "win32") return "";
+  const localPort = Number(port);
+  const ps = await run("powershell.exe", [
+    "-NoProfile",
+    "-Command",
+    `Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ${localPort} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess`
+  ], { timeout: 10000, maxBuffer: 1024 * 128 });
+  const psPid = String(ps.stdout || "").trim().match(/\d+/)?.[0] || "";
+  if (ps.ok && psPid) return psPid;
+
   const result = await run("netstat", ["-ano", "-p", "tcp"], { timeout: 10000, maxBuffer: 1024 * 512 });
   if (!result.ok) return "";
-  const pattern = new RegExp(`^\\s*TCP\\s+127\\.0\\.0\\.1:${Number(port)}\\s+\\S+\\s+LISTENING\\s+(\\d+)`, "i");
+  const pattern = new RegExp(`^\\s*TCP\\s+127\\.0\\.0\\.1:${localPort}\\s+0\\.0\\.0\\.0:0\\s+\\S+\\s+(\\d+)`, "i");
   for (const line of String(result.stdout || "").split(/\r?\n/)) {
     const match = line.match(pattern);
     if (match) return match[1];
@@ -5010,7 +5019,14 @@ async function checkVmBackupAvailable(source = {}) {
   }
 }
 
-async function copyBattlegroupImportFileToVm(localPath) {
+async function selectedBattlegroupDumpDir() {
+  const item = await battlegroupResource();
+  const name = String(item?.metadata?.name || "").trim();
+  if (!name) throw new Error("Selected Battlegroup name was not detected.");
+  return `/funcom/artifacts/database-dumps/${name}`;
+}
+
+async function copyBattlegroupImportFileToVm(localPath, options = {}) {
   const started = Date.now();
   const info = await vmInfo();
   const ip = info.ip || VM_IP;
@@ -5019,13 +5035,16 @@ async function copyBattlegroupImportFileToVm(localPath) {
   if (!ip) throw new Error("VM IP address was not found.");
   const key = sshKeyStatus(SSH_KEY);
   if (!key.exists) throw new Error(key.message);
-  const remotePath = `/tmp/alphanine-import-${Date.now()}-${path.basename(localPath).replace(/[^a-zA-Z0-9_.-]/g, "_")}`;
+  const remoteDir = String(options.remoteDir || "").trim() || "/tmp";
+  const remotePath = path.posix.join(remoteDir, `alphanine-import-${Date.now()}-${path.basename(localPath).replace(/[^a-zA-Z0-9_.-]/g, "_")}`);
+  const tempPath = `/tmp/${path.posix.basename(remotePath)}.uploading`;
   const size = fs.statSync(localPath).size;
   databaseBackupAudit("battlegroup_import_transfer_started", {
     ok: true,
     method: "ssh-stream",
-    reason: "Streaming Battlegroup backup over SSH stdin; no SFTP subsystem required.",
+    reason: "Streaming Battlegroup backup over SSH stdin into the Battlegroup dump folder; no SFTP subsystem required.",
     source: localPath,
+    remoteDir,
     remotePath,
     size
   });
@@ -5034,17 +5053,35 @@ async function copyBattlegroupImportFileToVm(localPath) {
     "-o", "LogLevel=QUIET",
     "-i", key.path,
     `${SSH_USER}@${ip}`,
-    `umask 077; cat > ${shQuote(remotePath)}`
+    `umask 077; cat > ${shQuote(tempPath)} && sudo mkdir -p ${shQuote(remoteDir)} && sudo mv ${shQuote(tempPath)} ${shQuote(remotePath)} && (sudo chown ${shQuote(`${SSH_USER}:${SSH_USER}`)} ${shQuote(remotePath)} 2>/dev/null || true) && sudo chmod 600 ${shQuote(remotePath)}`
   ], localPath, { timeout: 600000, maxBuffer: 1024 * 1024 * 32 });
   if (!result.ok) {
     const detail = result.stderr || result.error || "Could not stream Battlegroup backup file to VM.";
     const sftpHint = /sftp-server|subsystem request failed|scp: connection closed/i.test(detail)
-      ? "SFTP is not available on this Dune Self-Hosting VM. Import uses SSH streaming; verify SSH shell access and file write permission to /tmp."
+      ? `SFTP is not available on this Dune Self-Hosting VM. Import uses SSH streaming; verify SSH shell access and file write permission to ${remoteDir}.`
       : detail;
-    databaseBackupAudit("battlegroup_import_transfer_failed", { ok: false, method: "ssh-stream", durationMs: Date.now() - started, remotePath, error: sftpHint, details: detail.slice(0, 2000) });
+    databaseBackupAudit("battlegroup_import_transfer_failed", { ok: false, method: "ssh-stream", durationMs: Date.now() - started, remoteDir, remotePath, error: sftpHint, details: detail.slice(0, 2000) });
     throw new Error(sftpHint);
   }
-  databaseBackupAudit("battlegroup_import_transfer_completed", { ok: true, method: "ssh-stream", durationMs: Date.now() - started, remotePath, size, stdout: result.stdout.slice(-1000), stderr: result.stderr.slice(-1000) });
+  const yamlPath = `${localPath}.yaml`;
+  if (fs.existsSync(yamlPath)) {
+    const remoteYamlPath = `${remotePath}.yaml`;
+    const tempYamlPath = `${tempPath}.yaml`;
+    const yamlResult = await runWithStdin("ssh", [
+      "-o", "StrictHostKeyChecking=no",
+      "-o", "LogLevel=QUIET",
+      "-i", key.path,
+      `${SSH_USER}@${ip}`,
+      `umask 077; cat > ${shQuote(tempYamlPath)} && sudo mv ${shQuote(tempYamlPath)} ${shQuote(remoteYamlPath)} && (sudo chown ${shQuote(`${SSH_USER}:${SSH_USER}`)} ${shQuote(remoteYamlPath)} 2>/dev/null || true) && sudo chmod 600 ${shQuote(remoteYamlPath)}`
+    ], yamlPath, { timeout: 120000, maxBuffer: 1024 * 1024 });
+    if (!yamlResult.ok) {
+      const detail = yamlResult.stderr || yamlResult.error || "Could not stream Battlegroup backup sidecar YAML to VM.";
+      databaseBackupAudit("battlegroup_import_yaml_transfer_failed", { ok: false, method: "ssh-stream", durationMs: Date.now() - started, remotePath: remoteYamlPath, error: detail.slice(0, 2000) });
+      throw new Error(detail);
+    }
+    databaseBackupAudit("battlegroup_import_yaml_transfer_completed", { ok: true, method: "ssh-stream", remotePath: remoteYamlPath, stdout: yamlResult.stdout.slice(-1000), stderr: yamlResult.stderr.slice(-1000) });
+  }
+  databaseBackupAudit("battlegroup_import_transfer_completed", { ok: true, method: "ssh-stream", durationMs: Date.now() - started, remoteDir, remotePath, size, stdout: result.stdout.slice(-1000), stderr: result.stderr.slice(-1000) });
   return remotePath;
 }
 
@@ -5278,9 +5315,10 @@ async function runDatabaseRestoreJob(job) {
       importArg = importSource.vmBackupFilename || path.posix.basename(remotePath);
       restoreJobStep(job, "Uploading backup if needed", { skipped: true, reason: "Using Battlegroup backup already stored on VM.", remotePath });
     } else {
-      restoreJobStep(job, "Uploading backup if needed", { filePath, size: importSource.size });
-      remotePath = await copyBattlegroupImportFileToVm(importSource.path);
-      importArg = remotePath;
+      const remoteDir = await selectedBattlegroupDumpDir();
+      restoreJobStep(job, "Uploading backup if needed", { filePath, size: importSource.size, remoteDir });
+      remotePath = await copyBattlegroupImportFileToVm(importSource.path, { remoteDir });
+      importArg = path.posix.basename(remotePath);
       uploaded = true;
     }
     restoreJobStep(job, "Backup source ready", { remotePath, importArg, sourceType: importSource.sourceType });
@@ -12558,7 +12596,7 @@ function importSourceHtml(source){if(!source)return "";const rows=[];if(source.m
 function renderDatabaseImportControls(){const filePath=getValue("dbRestoreFile");const confirmText=getValue("dbRestoreConfirm");const readiness=databaseImportReadiness||{conditions:{},message:"Checking import readiness.",reasonCode:"checking"};const c=readiness.conditions||{};const canType=Boolean(!databaseImportRunning&&readiness.canTypeConfirmation);const confirmationOk=confirmText==="IMPORT";const canImport=Boolean(canType&&confirmationOk);const file=document.getElementById("dbRestoreFile");const choose=document.getElementById("dbChooseRestoreFileButton");const confirm=document.getElementById("dbRestoreConfirm");const button=document.getElementById("dbRestoreButton");if(file)file.disabled=databaseImportRunning;if(choose)choose.disabled=databaseImportRunning;if(confirm)confirm.disabled=!canType;if(button)button.disabled=!canImport;const panel=document.getElementById("dbImportReadiness");if(panel){panel.className=canImport?"empty mt":"warning mt";const backupDetail=readiness.importSource?.remotePath?("Resolved to VM backup: "+readiness.importSource.remotePath):(filePath||"No backup selected.");const backupOk=Boolean(filePath&&c.backupSelected&&c.backupValid&&c.backupResolved);const runningOk=Boolean(c.noImportRunning&&!databaseImportRunning);const runningDetail=runningOk?"No import job running.":"Another import is currently running.";const confirmDetail=confirmationOk?"IMPORT entered.":(canType?"Type IMPORT to enable the import button.":"Confirmation is locked until backup, server, and job checks pass.");panel.innerHTML='<div class="label">Import Readiness</div><div class="detail-list mt">'+importReadinessRow(backupOk,"Backup selected",backupDetail)+importReadinessRow(Boolean(c.statusKnown&&c.serverOffline),"Server offline",c.statusKnown?(c.serverOffline?"Server is stopped.":"Server is still running."):"Unable to determine server status.")+importReadinessRow(runningOk,"No import running",runningDetail)+importReadinessRow(confirmationOk,confirmationOk?"Confirmation entered":"Confirmation missing",confirmDetail)+'</div>'+importSourceHtml(readiness.importSource)+'<div class="subtle mt">'+esc(readiness.message||"")+'</div>';}}
 function setDatabaseRestoreRunning(running){databaseImportRunning=Boolean(running);renderDatabaseImportControls();}
 async function refreshDatabaseImportReadiness(){const filePath=getValue("dbRestoreFile");try{databaseImportReadiness=await getJson("/api/database/import-readiness",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath}),timeoutMs:8000});}catch(e){databaseImportReadiness={ok:false,canTypeConfirmation:false,canImport:false,reasonCode:"server_status_unknown",message:betterError(e),conditions:{backupSelected:Boolean(filePath),backupValid:Boolean(filePath),serverOffline:false,noImportRunning:!databaseImportRunning,statusKnown:false}};}const selected=(window.databaseBackupRows||[]).find(row=>row.path===filePath);if(selected&&databaseImportReadiness?.importSource){selected.availabilityStatus=importAvailabilityLabel(databaseImportReadiness.importSource);renderDatabaseBackups({backups:window.databaseBackupRows});}renderDatabaseImportControls();return databaseImportReadiness;}
-async function ensureBattlegroupStoppedBeforeImport(){const data=await getJson("/api/status",{timeoutMs:5000});const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);if(mapped?.online)throw new Error("Server is online. Stop the server before importing a backup.");return data;}
+async function ensureBattlegroupStoppedBeforeImport(){const data=await getJson("/api/status",{timeoutMs:30000});const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);if(mapped?.online)throw new Error("Server is online. Stop the server before importing a backup.");return data;}
 function restoreElapsed(job){if(job?.elapsed)return job.elapsed;const ms=Number(job?.durationMs||0);const total=Math.max(0,Math.floor(ms/1000));const h=Math.floor(total/3600);const m=Math.floor((total%3600)/60);const s=total%60;return h?(h+" hr "+m+" min "+s+" sec"):(m?(m+" min "+s+" sec"):(s+" sec"));}
 function restoreStatusBadge(job){const resultStatus=job?.result?.status||"";if(job?.status==="success")return '<span class="status-pill ok">Completed</span>';if(resultStatus==="verification_failed")return '<span class="status-pill warn">Verification Failed</span>';if(job?.status==="failed")return '<span class="status-pill bad">Failed</span>';return '<span class="status-pill warn">Running</span>';}
 function restoreTimelineHtml(job){const timeline=job?.timeline||["Preparing import","Checking Battlegroup offline","Preparing backup source","Uploading backup if needed","Backup source ready","Creating safety backup","Safety backup complete","Safety backup verified","Importing Battlegroup backup","Verifying imported database","Completed"];const history=(job?.history||[]).map(row=>row.step);const current=job?.step||"";const currentIndex=timeline.indexOf(current);const failed=job?.status==="failed";return '<div class="restore-timeline">'+timeline.map((step,index)=>{const done=history.includes(step)||job?.status==="success"||(currentIndex>-1&&index<currentIndex);const active=step===current&&job?.status!=="success"&&!failed;const icon=done?"&#10003;":(active?"&#9203;":"&#9633;");const cls=done?"ok":(active?"warn":"");return '<div class="restore-step '+cls+'"><span>'+icon+'</span><strong>'+esc(step)+'</strong></div>';}).join("")+(failed?'<div class="restore-step bad"><span>&#9888;</span><strong>'+esc(current||"Failed")+'</strong></div>':"")+'</div>';}
@@ -13419,7 +13457,10 @@ server.listen(PORT, HOST, async () => {
     runtimeGiveTransport.initialized = true;
     appendAdminAudit("startup_transport_dry_run", { source: "startup", transport: "dry-run", serverOnline: false, reason: runtimeGiveTransport.reason });
   }
-  setTimeout(() => attemptConfiguredServerStart("startup"), 1000);
+  appendAdminAudit("server_start_skipped", {
+    source: "startup",
+    reason: "Automatic server start on Suite startup is disabled. Use Start Server manually."
+  });
   setTimeout(() => {
     startManagedReceiver().then((result) => {
       appendAdminAudit(result?.ok ? "receiver_startup_ready" : "receiver_startup_degraded", {

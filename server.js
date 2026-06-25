@@ -5830,8 +5830,11 @@ async function progressionPlayerLookup(queryValue) {
   }));
   const isProgressionNameMatch = (player) => {
     const characterName = String(player.character_name || "");
+    const accountUser = String(player.account_user || "");
+    const rowName = String(player.name || "");
     const matchedColumn = String(player.matched_column || "");
-    const nameMatches = characterName.toLowerCase().includes(query.toLowerCase());
+    const q = query.toLowerCase();
+    const nameMatches = [characterName, accountUser, rowName].some((value) => value.toLowerCase().includes(q));
     const idOnlyMatch = /(^|_)(id|account_id|player_controller_id|player_pawn_id|player_state_id)$/i.test(matchedColumn);
     return nameMatches && !idOnlyMatch;
   };
@@ -5866,12 +5869,14 @@ async function progressionPlayerLookup(queryValue) {
   const player = nonNumericQuery ? (players.find(isProgressionNameMatch) || players[0]) : players[0];
   if (nonNumericQuery) {
     const characterName = String(player.character_name || "");
+    const accountUser = String(player.account_user || "");
     const matchedColumn = String(player.matched_column || "");
     if (!isProgressionNameMatch(player)) {
       timer.finish({ status: "not-found" });
       console.warn("[progression/player] rejected non-name player match", {
         query,
         character_name: characterName,
+        account_user: accountUser,
         matched_column: matchedColumn,
         account_id: player.account_id,
         actor_id: player.actor_id,

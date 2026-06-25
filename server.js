@@ -5803,7 +5803,8 @@ function progressionPhaseTimer(scope = "progression") {
 }
 
 async function progressionPlayerLookup(queryValue) {
-  const query = String(queryValue || "").trim();
+  const selectedInput = queryValue && typeof queryValue === "object" ? queryValue : null;
+  const query = String(selectedInput?.query || queryValue || "").trim();
   if (!query) return { ok: false, status: "not-found", reason: "Enter a character name, player name, actor id, or player id." };
   const timer = progressionLookupTimer(query);
   try {
@@ -5814,6 +5815,7 @@ async function progressionPlayerLookup(queryValue) {
     rawSqlInputEnabled: false
   };
   const nonNumericQuery = !/^\d+$/.test(query);
+  const hasSelectedPlayer = Boolean(selectedInput?.selectedPlayer);
   let adminPlayerData = { players: [], source: "", error: "" };
   const mapProgressionPlayers = (rows, source = adminPlayerData.source || "adminPlayers") => rows.map((row) => ({
     actor_id: row.player_controller_id || row.character_id || row.player_pawn_id || row.id || "",
@@ -5837,17 +5839,32 @@ async function progressionPlayerLookup(queryValue) {
     const q = query.toLowerCase();
     return [characterName, accountUser, funcomId, rowName].some((value) => value.toLowerCase().includes(q));
   };
-  console.info("[progression/player] query input", { query, helper: "adminPlayers", mode: "queried", limit: 5 });
-  adminPlayerData = await timer.step("lookup", () => withProgressionStepTimeout(adminPlayers({ query, limit: 5 }), 8000, "lookup"));
-  console.info("[progression/player] adminPlayers result", {
-    query,
-    source: adminPlayerData.source || "",
-    playersReturned: (adminPlayerData.players || []).length,
-    durationMs: timer.timings.lookup
-  });
-  let rawPlayers = (adminPlayerData.players || []).slice(0, 5);
-  let players = mapProgressionPlayers(rawPlayers);
-  if (nonNumericQuery && !players.some(isProgressionNameMatch)) {
+  let rawPlayers = [];
+  let players = [];
+  if (hasSelectedPlayer) {
+    console.info("[progression/player] selected player supplied by Players list", {
+      query,
+      account_id: selectedInput.account_id || selectedInput.id || "",
+      character_name: selectedInput.character_name || selectedInput.name || "",
+      player_controller_id: selectedInput.player_controller_id || "",
+      character_id: selectedInput.character_id || ""
+    });
+    timer.timings.lookup = 0;
+    rawPlayers = [selectedInput];
+    players = mapProgressionPlayers(rawPlayers, "selected-player");
+  } else {
+    console.info("[progression/player] query input", { query, helper: "adminPlayers", mode: "queried", limit: 5 });
+    adminPlayerData = await timer.step("lookup", () => withProgressionStepTimeout(adminPlayers({ query, limit: 5 }), 8000, "lookup"));
+    console.info("[progression/player] adminPlayers result", {
+      query,
+      source: adminPlayerData.source || "",
+      playersReturned: (adminPlayerData.players || []).length,
+      durationMs: timer.timings.lookup
+    });
+    rawPlayers = (adminPlayerData.players || []).slice(0, 5);
+    players = mapProgressionPlayers(rawPlayers);
+  }
+  if (!hasSelectedPlayer && nonNumericQuery && !players.some(isProgressionNameMatch)) {
     console.info("[progression/player] Players list returned no valid name match; trying player_state character_name fallback", { query });
     rawPlayers = await timer.step("player_state_name_fallback", () => withProgressionStepTimeout(progressionPlayerStateNameLookup(query, 5), 8000, "player_state_name_fallback"));
     if (rawPlayers.length) players = mapProgressionPlayers(rawPlayers, "dune.player_state.character_name");
@@ -5857,7 +5874,7 @@ async function progressionPlayerLookup(queryValue) {
     return { ok: false, status: "not-found", query, players: [], reason: adminPlayerData.error || "No matching character name was found in player lookup sources.", safety, timings: timer.timings };
   }
   const player = nonNumericQuery ? (players.find(isProgressionNameMatch) || players[0]) : players[0];
-  if (nonNumericQuery) {
+  if (!hasSelectedPlayer && nonNumericQuery) {
     const characterName = String(player.character_name || "");
     const accountUser = String(player.account_user || "");
     const funcomId = String(player.funcom_id || "");
@@ -12688,6 +12705,7 @@ function renderPlayerSelect(){const select=document.getElementById("adminPlayer"
 function renderProgressionPlayerSelect(){const select=document.getElementById("progressionPlayerSelect");if(!select)return;const previous=select.value;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&adminPlayers.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(previous&&adminPlayers.some(player=>player.id===previous))select.value=previous;const p=adminPlayers.find(row=>row.id===select.value)||selectedPlayer();const input=document.getElementById("progressionPlayerQuery");if(input&&p&&!input.value)input.value=progressionPlayerLookupValue(p);}
 function syncProgressionPlayerFromSelect(){const select=document.getElementById("progressionPlayerSelect");selectedPlayerId=String(select?.value||"");const adminSelect=document.getElementById("adminPlayer");if(adminSelect)adminSelect.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;const p=selectedPlayer();const input=document.getElementById("progressionPlayerQuery");if(input)input.value=progressionPlayerLookupValue(p);renderPlayerSelect();renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();lookupProgressionPlayer();}
 function progressionLookupQuery(){const selectedId=document.getElementById("progressionPlayerSelect")?.value||"";const p=adminPlayers.find(row=>row.id===selectedId)||selectedPlayer();const selectedQuery=progressionPlayerLookupValue(p);const input=document.getElementById("progressionPlayerQuery");if(selectedQuery&&input)input.value=selectedQuery;return selectedQuery||(input?.value||"");}
+function progressionPlayerParams(){const selectedId=document.getElementById("progressionPlayerSelect")?.value||"";const p=adminPlayers.find(row=>row.id===selectedId)||selectedPlayer();const params=new URLSearchParams();const query=progressionLookupQuery();params.set("query",query);if(p){params.set("selectedPlayer","1");params.set("id",p.id||"");params.set("account_id",p.account_id||p.id||"");params.set("fls_id",p.fls_id||"");params.set("funcom_id",p.funcom_id||"");params.set("player_controller_id",p.player_controller_id||"");params.set("character_id",p.character_id||"");params.set("player_pawn_id",p.player_pawn_id||"");params.set("character_name",p.character_name||p.name||"");params.set("name",p.name||p.character_name||"");params.set("online_status",p.online_status||"unknown");params.set("map",p.map||"");}return params;}
 async function refreshGivePlayersFast(){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderProgressionPlayerSelect();renderPlayers();addActivity("probe","Give Item players loaded",adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
@@ -12772,7 +12790,7 @@ async function previewProgressionFactionApply(){try{if(!progressionPlayerState?.
 async function applyProgressionFactionLive(){try{if(!progressionFactionPreviewState)throw new Error("Generate Rank Preview + Backup first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionFactionPreviewState.previewId,confirmText:document.getElementById("progressionFactionConfirmText")?.value||""}),timeoutMs:45000});if(!data.ok)throw new Error((data.warning||data.error||"Faction rank apply failed")+"\\n"+JSON.stringify(data.debug||{},null,2));setText("progressionFactionPreviewLog","Faction rank apply succeeded.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nRead-back verification:\\n"+JSON.stringify(data.debug?.readBackValues||{},null,2));pushProgressionRecent("Faction rank changed",data.action||"Faction reputation updated.","NOW");addActivity("progression","Faction rank changed",data.action);progressionFactionPreviewState=null;document.getElementById("progressionFactionConfirmText").value="";await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionFactionPreviewLog",betterError(e));pushProgressionRecent("Faction rank apply failed",betterError(e),"ERR");addActivity("error","Faction rank apply failed",e.message);playUiSound("warning");}}
 function compactProgressionRows(title,rows){return '<div class="detail-row"><span class="subtle">'+esc(title)+'</span><strong></strong></div>'+detailRows(rows);}
 function renderProgressionCharacterDebug(data){const el=document.getElementById("progressionCharacterDebug");if(!el)return;const debug=data?.progressionDebug||{};if(!data?.ok){el.innerHTML='<div class="empty">No progression player lookup debug data.</div>';return;}const p=data.player||{};const f=debug.fLevelTarget||{};const t=debug.techKnowledgeTarget||{};const links=(debug.fglEntityLinks||[]).filter(row=>row.found).map(row=>[row.actor_id,row.entity_id,row.slot_name].filter(Boolean).join(" / ")).join("; ")||"None";const components=(debug.componentNames||[]).slice(0,12).join(", ")||"None";const fieldStatus=debug.fieldStatus||{};const h=data.hydration||{};el.innerHTML=compactProgressionRows("Player",{character:p.character_name||"--",actor_id:p.actor_id||"--",pawn_id:p.player_pawn_id||"--",online_status:p.online_status||"--"})+compactProgressionRows("Targets",{fLevelActor:f.actor_id||"--",fLevelEntity:f.entity_id||"--",fLevelSlot:f.slot_name||"--",techActor:t.actor_id||"--",techPath:t.path||"--",hydrationPath:h.source?.valuePath||"--"})+compactProgressionRows("Components",{checkedActorIds:(debug.checkedActorIds||[]).join(", ")||"--",fglLinks:links,components})+compactProgressionRows("Timings",data.timings||{})+compactProgressionRows("Safety",{readOnly:data.safety?.readOnlyMode?"yes":"no",liveEditing:data.safety?.liveEditingEnabled?"enabled":"disabled",WaterHydration:hydrationValueText(h),TotalXPEarned:fieldStatus.TotalXPEarned||"--",TotalSkillPoints:fieldStatus.TotalSkillPoints||"--",UnspentSkillPoints:fieldStatus.UnspentSkillPoints||"--",TechKnowledgePoints:fieldStatus.m_TechKnowledgePoints||"--"});}
-async function lookupProgressionPlayer(){const query=progressionLookupQuery();addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:20000});renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="timeout")addActivity("warn","Progression player lookup timed out",(data.step||"unknown step")+" / "+(data.hint||"Try exact character name."));else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||data.error||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup failed",e.message);}}
+async function lookupProgressionPlayer(){const params=progressionPlayerParams();const query=params.get("query")||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?"+params.toString(),{timeoutMs:20000});renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="timeout")addActivity("warn","Progression player lookup timed out",(data.step||"unknown step")+" / "+(data.hint||"Try exact character name."));else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||data.error||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup failed",e.message);}}
 setTimeout(()=>{const input=document.getElementById("progressionPlayerQuery");if(input)input.addEventListener("keydown",event=>{if(event.key==="Enter")lookupProgressionPlayer();});},0);
 function syncProgressionActionFields(){const actionEl=document.getElementById("progressionAction");if(actionEl)actionEl.value="character_xp_skill_points";document.querySelectorAll(".progression-character").forEach(el=>el.classList.remove("hidden"));progressionPreviewState=null;setText("progressionPreviewLog","No live progression preview generated.");}
 function progressionPayload(){const selected=progressionPlayerState?{player:progressionPlayerState.player||null,characterXp:progressionPlayerState.characterXp||null,techKnowledge:progressionPlayerState.techKnowledge||null,fLevelTarget:progressionPlayerState.progressionDebug?.fLevelTarget||null,techKnowledgeTarget:progressionPlayerState.progressionDebug?.techKnowledgeTarget||null,fieldStatus:progressionPlayerState.progressionDebug?.fieldStatus||{}}:null;return{action:"character_xp_skill_points",query:progressionLookupQuery(),selectedPlayer:selected,totalXpEarned:document.getElementById("progressionTotalXp")?.value||0,totalSkillPoints:document.getElementById("progressionTotalSkillPoints")?.value||0,unspentSkillPoints:document.getElementById("progressionUnspentSkillPoints")?.value||0,techKnowledgePoints:document.getElementById("progressionTechKnowledgePoints")?.value||0,advancedOverride:document.getElementById("progressionAdvancedOverride")?.checked===true};}
@@ -13345,7 +13363,22 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/progression/player" && req.method === "GET") {
-    const result = await progressionPlayerLookup(url.searchParams.get("query"));
+    const selectedPlayer = url.searchParams.get("selectedPlayer") === "1" ? {
+      selectedPlayer: true,
+      query: url.searchParams.get("query") || "",
+      id: url.searchParams.get("id") || "",
+      account_id: url.searchParams.get("account_id") || "",
+      fls_id: url.searchParams.get("fls_id") || "",
+      funcom_id: url.searchParams.get("funcom_id") || "",
+      player_controller_id: url.searchParams.get("player_controller_id") || "",
+      character_id: url.searchParams.get("character_id") || "",
+      player_pawn_id: url.searchParams.get("player_pawn_id") || "",
+      character_name: url.searchParams.get("character_name") || "",
+      name: url.searchParams.get("name") || "",
+      online_status: url.searchParams.get("online_status") || "unknown",
+      map: url.searchParams.get("map") || ""
+    } : null;
+    const result = await progressionPlayerLookup(selectedPlayer || url.searchParams.get("query"));
     await json(res, result, result?.status === "timeout" ? 504 : 200);
     return;
   }

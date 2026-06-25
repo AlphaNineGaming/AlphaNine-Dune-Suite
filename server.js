@@ -5813,15 +5813,8 @@ async function progressionPlayerLookup(queryValue) {
     liveEditingEnabled: Boolean(configValue.progressionEditingEnabled),
     rawSqlInputEnabled: false
   };
-  console.info("[progression/player] query input", { query, helper: "adminPlayers", mode: "queried", limit: 5 });
-  const adminPlayerData = await timer.step("lookup", () => withProgressionStepTimeout(adminPlayers({ query, limit: 5 }), 8000, "lookup"));
-  console.info("[progression/player] adminPlayers result", {
-    query,
-    source: adminPlayerData.source || "",
-    playersReturned: (adminPlayerData.players || []).length,
-    durationMs: timer.timings.lookup
-  });
   const nonNumericQuery = !/^\d+$/.test(query);
+  let adminPlayerData = { players: [], source: "", error: "" };
   const mapProgressionPlayers = (rows, source = adminPlayerData.source || "adminPlayers") => rows.map((row) => ({
     actor_id: row.player_controller_id || row.character_id || row.player_pawn_id || row.id || "",
     account_id: row.account_id || row.id || "",
@@ -5842,10 +5835,27 @@ async function progressionPlayerLookup(queryValue) {
     const idOnlyMatch = /(^|_)(id|account_id|player_controller_id|player_pawn_id|player_state_id)$/i.test(matchedColumn);
     return nameMatches && !idOnlyMatch;
   };
-  let rawPlayers = (adminPlayerData.players || []).slice(0, 5);
-  let players = mapProgressionPlayers(rawPlayers);
+  let rawPlayers = [];
+  let players = [];
+  if (nonNumericQuery) {
+    console.info("[progression/player] trying player_state character_name lookup first", { query });
+    rawPlayers = await timer.step("player_state_name_lookup", () => withProgressionStepTimeout(progressionPlayerStateNameLookup(query, 5), 8000, "player_state_name_lookup"));
+    players = mapProgressionPlayers(rawPlayers, "dune.player_state.character_name");
+  }
+  if (!players.some(isProgressionNameMatch)) {
+    console.info("[progression/player] query input", { query, helper: "adminPlayers", mode: "queried", limit: 5 });
+    adminPlayerData = await timer.step("lookup", () => withProgressionStepTimeout(adminPlayers({ query, limit: 5 }), 8000, "lookup"));
+    console.info("[progression/player] adminPlayers result", {
+      query,
+      source: adminPlayerData.source || "",
+      playersReturned: (adminPlayerData.players || []).length,
+      durationMs: timer.timings.lookup
+    });
+    rawPlayers = (adminPlayerData.players || []).slice(0, 5);
+    players = mapProgressionPlayers(rawPlayers);
+  }
   if (nonNumericQuery && !players.some(isProgressionNameMatch)) {
-    console.info("[progression/player] adminPlayers returned no name rows; trying player_state character_name fallback", { query });
+    console.info("[progression/player] adminPlayers returned no valid name match; retrying player_state character_name fallback", { query });
     rawPlayers = await timer.step("player_state_name_fallback", () => withProgressionStepTimeout(progressionPlayerStateNameLookup(query, 5), 8000, "player_state_name_fallback"));
     if (rawPlayers.length) players = mapProgressionPlayers(rawPlayers, "dune.player_state.character_name");
   }

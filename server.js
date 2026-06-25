@@ -5736,6 +5736,43 @@ function withProgressionStepTimeout(promise, timeoutMs, step) {
   ]);
 }
 
+function progressionPlayerFromAdminRow(row, source = "adminPlayers") {
+  return {
+    actor_id: row.player_controller_id || row.character_id || row.player_pawn_id || row.id || "",
+    account_id: row.account_id || row.id || "",
+    account_user: row.fls_id || "",
+    character_name: row.character_name || row.name || row.fls_id || row.id || "Unknown",
+    player_controller_id: row.player_controller_id || "",
+    player_pawn_id: row.player_pawn_id || "",
+    character_id: row.character_id || "",
+    online_status: row.online_status || row.status || "unknown",
+    map: row.map || "",
+    matched_column: row.matched_column || "",
+    source
+  };
+}
+
+function progressionPlayerSearchText(player) {
+  return [
+    player.character_name,
+    player.name,
+    player.account_user,
+    player.fls_id,
+    player.funcom_id,
+    player.account_id,
+    player.player_controller_id,
+    player.character_id,
+    player.player_pawn_id,
+    player.id
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function progressionPlayerMatchesQuery(player, query) {
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) return false;
+  return progressionPlayerSearchText(player).includes(needle);
+}
+
 function progressionPhaseTimer(scope = "progression") {
   const started = Date.now();
   const timings = {};
@@ -5771,6 +5808,7 @@ async function progressionPlayerLookup(queryValue) {
     liveEditingEnabled: Boolean(configValue.progressionEditingEnabled),
     rawSqlInputEnabled: false
   };
+  const nonNumericQuery = !/^\d+$/.test(query);
   console.info("[progression/player] query input", { query, helper: "adminPlayers", mode: "queried", limit: 5 });
   const adminPlayerData = await timer.step("lookup", () => withProgressionStepTimeout(adminPlayers({ query, limit: 5 }), 8000, "lookup"));
   console.info("[progression/player] adminPlayers result", {
@@ -5779,25 +5817,25 @@ async function progressionPlayerLookup(queryValue) {
     playersReturned: (adminPlayerData.players || []).length,
     durationMs: timer.timings.lookup
   });
-  let players = (adminPlayerData.players || []).slice(0, 5).map((row) => ({
-    actor_id: row.player_controller_id || row.character_id || row.player_pawn_id || row.id || "",
-    account_id: row.account_id || row.id || "",
-    account_user: row.fls_id || "",
-    character_name: row.character_name || row.name || row.fls_id || row.id || "Unknown",
-    player_controller_id: row.player_controller_id || "",
-    player_pawn_id: row.player_pawn_id || "",
-    character_id: row.character_id || "",
-    online_status: row.online_status || row.status || "unknown",
-    map: row.map || "",
-    matched_column: row.matched_column || "",
-    source: adminPlayerData.source || "adminPlayers"
-  }));
+  let players = (adminPlayerData.players || []).slice(0, 5).map((row) => progressionPlayerFromAdminRow(row, adminPlayerData.source || "adminPlayers"));
+  if (!players.length && nonNumericQuery) {
+    console.info("[progression/player] direct name lookup returned no rows; trying full-list local match", { query, helper: "adminPlayers", mode: "full-list-local-match", limit: 200 });
+    const listData = await timer.step("full_list_local_match", () => withProgressionStepTimeout(adminPlayers({ limit: 200, hydration: false }), 16000, "full_list_local_match"));
+    const fallbackRows = (listData.players || []).filter((row) => progressionPlayerMatchesQuery(row, query)).slice(0, 5);
+    players = fallbackRows.map((row) => progressionPlayerFromAdminRow({ ...row, matched_column: row.matched_column || "local_player_list_match" }, listData.source || "adminPlayers-full-list"));
+    console.info("[progression/player] full-list local match result", {
+      query,
+      source: listData.source || "",
+      playersScanned: (listData.players || []).length,
+      playersReturned: players.length,
+      durationMs: timer.timings.full_list_local_match
+    });
+  }
   if (!players.length) {
     timer.finish({ status: "not-found" });
     return { ok: false, status: "not-found", query, players: [], reason: adminPlayerData.error || "adminPlayers returned no matching player.", safety, timings: timer.timings };
   }
   const player = players[0];
-  const nonNumericQuery = !/^\d+$/.test(query);
   if (nonNumericQuery) {
     const characterName = String(player.character_name || "");
     const matchedColumn = String(player.matched_column || "");
@@ -7515,9 +7553,29 @@ async function adminPlayers(options = {}) {
     reason: "",
     errors: []
   };
+  const columnOutput = await dbQuery(`
+    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
+    from information_schema.columns
+    where table_schema = 'dune'
+      and table_name in ('player_state', 'communinet_player', 'accounts')
+    group by table_name
+  `, 5000).catch((error) => {
+    diagnostics.errors.push(`dune metadata lookup: ${error.message}`);
+    return "";
+  });
+  const tableColumns = new Map(columnOutput.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [table = "", columnsRaw = ""] = line.split("\t");
+    return [table, new Set(columnsRaw.split(",").filter(Boolean).map((column) => column.toLowerCase()))];
+  }));
+  const communinetColumns = tableColumns.get("communinet_player") || new Set();
+  const hasCommuninetAccountId = communinetColumns.has("account_id");
+  const communinetSourceLabel = hasCommuninetAccountId ? "dune.communinet_player + dune.player_state" : "dune.player_state";
+  const communinetJoinPath = hasCommuninetAccountId
+    ? "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id"
+    : "dune.player_state.account_id -> dune.accounts.id";
   const selectPlayerColumns = `
       a.account_id::text,
-      coalesce(ac.user, '') as fls_id,
+      coalesce(ac."user", '') as fls_id,
       coalesce(ac.funcom_id, '') as funcom_id,
       coalesce(ps.player_controller_id::text, '') as player_controller_id,
       coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
@@ -7568,9 +7626,9 @@ async function adminPlayers(options = {}) {
           ${numericQuery ? `
           or id::text = ${sqlString(query)}
           or ${partial ? "funcom_id ilike " + value : "lower(funcom_id) = lower(" + value + ")"}` : ""}
-        union
+        ${hasCommuninetAccountId ? `union
         select account_id from dune.communinet_player
-        where ${numericQuery ? `account_id::text = ${sqlString(query)}` : "false"}
+        where ${numericQuery ? `account_id::text = ${sqlString(query)}` : "false"}` : ""}
       ) a
       left join dune.player_state ps on ps.account_id = a.account_id
       left join dune.accounts ac on ac.id = a.account_id
@@ -7635,18 +7693,18 @@ async function adminPlayers(options = {}) {
     const resolvedCount = players.filter((player) => player.characterNameResolved).length;
     diagnostics.sourcesChecked.push({
       type: "database",
-      source: query ? "dune.communinet_player + dune.player_state" : "dune.player_state",
-      idColumn: query ? "communinet_player.account_id / player_state.account_id" : "player_state.account_id",
+      source: query ? communinetSourceLabel : "dune.player_state",
+      idColumn: query && hasCommuninetAccountId ? "communinet_player.account_id / player_state.account_id" : "player_state.account_id",
       nameColumn: "player_state.character_name",
       rows: players.length,
       resolvedNames: resolvedCount,
       ok: true,
-      joinPath: query ? "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id" : "dune.player_state.account_id -> dune.accounts.id",
+      joinPath: query ? communinetJoinPath : "dune.player_state.account_id -> dune.accounts.id",
       query: query || "",
       durationMs: Date.now() - started
     });
     diagnostics.sourceTableUsed = "dune.player_state";
-    diagnostics.joinPathUsed = query ? "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id" : "dune.player_state.account_id -> dune.accounts.id";
+    diagnostics.joinPathUsed = query ? communinetJoinPath : "dune.player_state.account_id -> dune.accounts.id";
     diagnostics.characterNamesResolved = resolvedCount;
     diagnostics.playersFound = players.length;
     if (includeHydration) await attachHydrationToPlayers(players);
@@ -7664,7 +7722,7 @@ async function adminPlayers(options = {}) {
         details: playerDiagnosticLines(diagnostics)
       };
     }
-    diagnostics.reason = query ? "No account/player rows were found in dune.communinet_player or dune.player_state." : "No account/player rows were found in dune.player_state.";
+    diagnostics.reason = query && hasCommuninetAccountId ? "No account/player rows were found in dune.communinet_player or dune.player_state." : "No account/player rows were found in dune.player_state.";
     if (query && !numericQuery) {
       return {
         ok: true,
@@ -7681,13 +7739,13 @@ async function adminPlayers(options = {}) {
   } catch (error) {
     diagnostics.sourcesChecked.push({
       type: "database",
-      source: "dune.communinet_player + dune.player_state",
-      idColumn: "communinet_player.account_id / player_state.account_id",
+      source: communinetSourceLabel,
+      idColumn: hasCommuninetAccountId ? "communinet_player.account_id / player_state.account_id" : "player_state.account_id",
       nameColumn: "player_state.character_name",
       rows: 0,
       resolvedNames: 0,
       ok: false,
-      joinPath: "dune.communinet_player.account_id -> dune.player_state.account_id -> dune.accounts.id",
+      joinPath: communinetJoinPath,
       error: error.message
     });
     diagnostics.errors.push(`dune.player_state character query: ${error.message}`);
@@ -7828,6 +7886,8 @@ async function playersFeed() {
     return [table, new Set(columnsRaw.split(",").filter(Boolean).map((column) => column.toLowerCase()))];
   }));
   const psColumns = tableColumns.get("player_state") || new Set();
+  const communinetColumns = tableColumns.get("communinet_player") || new Set();
+  const hasCommuninetAccountId = communinetColumns.has("account_id");
   const hasPs = (column) => psColumns.has(column.toLowerCase());
   const firstPsColumn = (columns) => columns.find((column) => hasPs(column));
   const levelColumn = firstPsColumn(["level", "character_level", "player_level", "current_level"]);
@@ -7846,15 +7906,17 @@ async function playersFeed() {
   const statusExpr = statusColumn ? `coalesce(ps.${quoteIdent(statusColumn)}::text, '')` : `''`;
   const lastSeenExpr = lastSeenColumn ? `coalesce(ps.${quoteIdent(lastSeenColumn)}::text, '')` : `''`;
   const playerStateOrder = lastSeenColumn ? `ps.${quoteIdent(lastSeenColumn)} desc nulls last,` : "";
+  const communinetAccountSource = hasCommuninetAccountId
+    ? "select account_id from dune.communinet_player where account_id is not null union"
+    : "";
   const feedQuery = `
     with account_ids as (
-      select account_id from dune.communinet_player where account_id is not null
-      union
+      ${communinetAccountSource}
       select account_id from dune.player_state where account_id is not null
     )
     select
       a.account_id::text,
-      coalesce(ac.user, '') as fls_id,
+      coalesce(ac."user", '') as fls_id,
       coalesce(ac.funcom_id, '') as funcom_id,
       coalesce(ps.player_controller_id::text, '') as player_controller_id,
       coalesce(ps.player_state_id::text, ps.player_pawn_id::text, ps.player_controller_id::text, '') as character_id,
@@ -9247,7 +9309,7 @@ async function adminPermissions(playerControllerIdValue) {
       gm.role_id::text,
       coalesce(ps.account_id::text, ''),
       coalesce(ps.character_name, ''),
-      coalesce(ac.funcom_id, ac.user, ''),
+      coalesce(ac.funcom_id, ac."user", ''),
       case when gm.role_id = 100 then 'true' else 'false' end
     from dune.guild_members gm
     left join dune.player_state ps on ps.player_controller_id = gm.player_id

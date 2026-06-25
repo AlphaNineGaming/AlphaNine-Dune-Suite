@@ -1,0 +1,2157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dune Awakening Manager</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #050603;
+      --bg-2: #090b07;
+      --panel: rgba(15, 17, 11, 0.94);
+      --panel-solid: #10110d;
+      --panel-2: #17150f;
+      --line: rgba(212, 165, 74, 0.42);
+      --line-soft: rgba(212, 165, 74, 0.18);
+      --line-strong: rgba(240, 201, 106, 0.72);
+      --text: #e8e3d9;
+      --muted: #9f9276;
+      --accent: #d4a54a;
+      --accent-bright: #f0c96a;
+      --danger: #ff5c5c;
+      --ok: #62d26f;
+      --warning: #ffb84d;
+      --shadow: 0 28px 90px rgba(0, 0, 0, 0.62);
+      --manager-bg:
+        radial-gradient(circle at 76% 0%, rgba(212, 165, 74, 0.18), transparent 28%),
+        radial-gradient(circle at 18% 2%, rgba(111, 80, 30, 0.2), transparent 30%),
+        linear-gradient(160deg, #050603 0%, #0d0f08 48%, #060704 100%);
+      --manager-grid:
+        linear-gradient(rgba(212, 165, 74, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(212, 165, 74, 0.03) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(9, 11, 10, 0.86), rgba(9, 11, 10, 0.44) 56%, rgba(9, 11, 10, 0.74)),
+        linear-gradient(180deg, transparent 62%, #050603),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(19, 19, 12, 0.94), rgba(5, 7, 5, 0.88));
+      --manager-surface-strong: linear-gradient(180deg, rgba(18, 18, 12, 0.96), rgba(9, 10, 6, 0.96));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(18, 18, 12, 0.95), rgba(6, 8, 5, 0.9));
+      --manager-control-bg: rgba(6, 8, 5, 0.9);
+      --manager-control-soft: rgba(6, 8, 5, 0.88);
+      --manager-chip-bg: rgba(212, 165, 74, 0.08);
+      --manager-chip-hover: rgba(212, 165, 74, 0.14);
+      --manager-active-bg: rgba(212, 165, 74, 0.1);
+      --manager-button-bg: linear-gradient(180deg, rgba(30, 29, 18, 0.95), rgba(10, 12, 8, 0.95));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(51, 43, 22, 0.96), rgba(14, 13, 8, 0.96));
+      --manager-primary-bg: linear-gradient(180deg, rgba(159, 111, 38, 0.98), rgba(78, 55, 22, 0.98));
+      --manager-primary-text: #fff1c8;
+      --manager-badge-text: #1a1208;
+      --manager-ring-text: #17110b;
+      --manager-ring-inner: #23190b;
+      --server-profile-bg: linear-gradient(135deg, rgba(51, 36, 13, 0.9), rgba(8, 10, 6, 0.94));
+      --server-profile-line: rgba(240, 201, 106, 0.82);
+      --server-profile-glow: rgba(212, 165, 74, 0.18);
+      --server-profile-mark: linear-gradient(180deg, rgba(240, 201, 106, 0.96), rgba(148, 101, 32, 0.72));
+      --server-profile-code-bg: rgba(6, 8, 5, 0.92);
+      --server-profile-text: #f3ead6;
+      --server-profile-muted: #c1a36e;
+      --server-profile-input-bg: rgba(5, 7, 4, 0.92);
+      --server-profile-input-line: rgba(212, 165, 74, 0.38);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(40, 31, 14, 0.96), rgba(11, 12, 7, 0.96));
+      --server-profile-button-text: #f0c96a;
+      --server-profile-primary-bg: linear-gradient(180deg, rgba(184, 130, 40, 0.98), rgba(86, 59, 20, 0.98));
+      --server-profile-primary-text: #fff4cc;
+      font-family: "Rajdhani", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    }
+
+    body.theme-command {
+      --bg: #010101;
+      --bg-2: #050403;
+      --panel: rgba(3, 3, 3, 0.96);
+      --panel-solid: #050403;
+      --panel-2: #0c0905;
+      --line: rgba(188, 132, 45, 0.42);
+      --line-soft: rgba(188, 132, 45, 0.16);
+      --line-strong: rgba(219, 164, 67, 0.76);
+      --text: #f0e4d0;
+      --muted: #aa9168;
+      --accent: #c98e32;
+      --accent-bright: #dba443;
+      --manager-bg:
+        radial-gradient(circle at 80% 0%, rgba(219, 164, 67, 0.14), transparent 26%),
+        linear-gradient(160deg, #010101 0%, #060402 52%, #000 100%);
+      --manager-grid:
+        linear-gradient(rgba(219, 164, 67, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(219, 164, 67, 0.026) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(0, 0, 0, 0.9), rgba(10, 6, 2, 0.52) 56%, rgba(0, 0, 0, 0.82)),
+        linear-gradient(180deg, transparent 62%, #010101),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(8, 6, 3, 0.97), rgba(0, 0, 0, 0.92));
+      --manager-surface-strong: linear-gradient(180deg, rgba(12, 8, 3, 0.98), rgba(0, 0, 0, 0.96));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(8, 6, 3, 0.98), rgba(0, 0, 0, 0.94));
+      --manager-control-bg: rgba(0, 0, 0, 0.92);
+      --manager-control-soft: rgba(0, 0, 0, 0.86);
+      --manager-chip-bg: rgba(219, 164, 67, 0.08);
+      --manager-chip-hover: rgba(219, 164, 67, 0.16);
+      --manager-active-bg: rgba(219, 164, 67, 0.1);
+      --manager-button-bg: linear-gradient(180deg, rgba(26, 16, 5, 0.98), rgba(0, 0, 0, 0.96));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(48, 30, 8, 0.98), rgba(0, 0, 0, 0.96));
+      --manager-primary-bg: linear-gradient(180deg, #dba443, #724a12);
+      --manager-primary-text: #050403;
+      --manager-badge-text: #050403;
+      --manager-ring-text: #050403;
+      --manager-ring-inner: #050403;
+      --server-profile-bg:
+        linear-gradient(135deg, rgba(26, 17, 6, 0.98), rgba(0, 0, 0, 0.96)),
+        repeating-linear-gradient(90deg, rgba(219, 164, 67, 0.08) 0 1px, transparent 1px 18px);
+      --server-profile-line: rgba(219, 164, 67, 0.86);
+      --server-profile-glow: rgba(114, 74, 18, 0.25);
+      --server-profile-mark: linear-gradient(180deg, #dba443, #724a12);
+      --server-profile-code-bg: rgba(0, 0, 0, 0.94);
+      --server-profile-text: #f2dec0;
+      --server-profile-muted: #b9863d;
+      --server-profile-input-bg: rgba(0, 0, 0, 0.9);
+      --server-profile-input-line: rgba(219, 164, 67, 0.42);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(24, 14, 4, 0.98), rgba(0, 0, 0, 0.96));
+      --server-profile-button-text: #dba443;
+      --server-profile-primary-bg: linear-gradient(180deg, #dba443, #724a12);
+      --server-profile-primary-text: #050403;
+    }
+
+    body.theme-purple {
+      --bg: #100613;
+      --bg-2: #2b1231;
+      --panel: rgba(28, 12, 34, 0.9);
+      --panel-solid: #1f0e26;
+      --panel-2: #301437;
+      --line: rgba(180, 94, 203, 0.46);
+      --line-soft: rgba(180, 94, 203, 0.18);
+      --line-strong: rgba(229, 139, 255, 0.76);
+      --text: #f7eafd;
+      --muted: #c7a3d0;
+      --accent: #c982ff;
+      --accent-bright: #e58bff;
+      --manager-bg:
+        radial-gradient(circle at 82% 0%, rgba(229, 139, 255, 0.2), transparent 28%),
+        radial-gradient(circle at 18% 5%, rgba(255, 159, 202, 0.12), transparent 30%),
+        linear-gradient(160deg, #100613 0%, #2b1231 52%, #07030c 100%);
+      --manager-grid:
+        linear-gradient(rgba(229, 139, 255, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(229, 139, 255, 0.03) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(16, 6, 19, 0.88), rgba(43, 18, 49, 0.48) 56%, rgba(16, 6, 19, 0.78)),
+        linear-gradient(180deg, transparent 62%, #100613),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(31, 11, 38, 0.94), rgba(12, 5, 17, 0.9));
+      --manager-surface-strong: linear-gradient(180deg, rgba(38, 13, 47, 0.96), rgba(15, 6, 20, 0.96));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(35, 12, 43, 0.94), rgba(14, 5, 18, 0.9));
+      --manager-control-bg: rgba(14, 5, 19, 0.9);
+      --manager-control-soft: rgba(16, 6, 22, 0.88);
+      --manager-chip-bg: rgba(201, 130, 255, 0.1);
+      --manager-chip-hover: rgba(201, 130, 255, 0.18);
+      --manager-active-bg: rgba(201, 130, 255, 0.12);
+      --manager-button-bg: linear-gradient(180deg, rgba(45, 15, 56, 0.96), rgba(15, 6, 21, 0.95));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(70, 22, 88, 0.96), rgba(23, 8, 31, 0.95));
+      --manager-primary-bg: linear-gradient(180deg, #ff9fca, #8f4ec0);
+      --manager-primary-text: #210b2a;
+      --manager-badge-text: #210b2a;
+      --manager-ring-text: #210b2a;
+      --manager-ring-inner: #16071d;
+      --server-profile-bg:
+        radial-gradient(circle at 92% 6%, rgba(255, 159, 202, 0.2), transparent 34%),
+        linear-gradient(135deg, rgba(62, 22, 72, 0.95), rgba(18, 8, 24, 0.95));
+      --server-profile-line: rgba(229, 139, 255, 0.84);
+      --server-profile-glow: rgba(201, 130, 255, 0.3);
+      --server-profile-mark: linear-gradient(180deg, #ff9fca, #c982ff);
+      --server-profile-code-bg: rgba(18, 8, 24, 0.94);
+      --server-profile-text: #fdeaff;
+      --server-profile-muted: #d8a9e4;
+      --server-profile-input-bg: rgba(20, 7, 27, 0.92);
+      --server-profile-input-line: rgba(229, 139, 255, 0.38);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(55, 19, 68, 0.96), rgba(22, 8, 29, 0.96));
+      --server-profile-button-text: #f1a4ff;
+      --server-profile-primary-bg: linear-gradient(180deg, #ff9fca, #8f4ec0);
+      --server-profile-primary-text: #210b2a;
+    }
+
+    body.theme-contrast {
+      --bg: #070503;
+      --bg-2: #20140b;
+      --panel: rgba(24, 16, 10, 0.92);
+      --panel-solid: #18100a;
+      --panel-2: #2b1c10;
+      --line: rgba(166, 113, 55, 0.48);
+      --line-soft: rgba(166, 113, 55, 0.18);
+      --line-strong: rgba(214, 159, 83, 0.82);
+      --text: #f2e7d7;
+      --muted: #b69a78;
+      --accent: #c89446;
+      --accent-bright: #d69f53;
+      --manager-bg:
+        radial-gradient(circle at 78% 0%, rgba(214, 159, 83, 0.18), transparent 28%),
+        radial-gradient(circle at 18% 4%, rgba(126, 78, 30, 0.16), transparent 30%),
+        linear-gradient(160deg, #070503 0%, #20140b 52%, #080503 100%);
+      --manager-grid:
+        linear-gradient(rgba(214, 159, 83, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(214, 159, 83, 0.03) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(10, 7, 5, 0.88), rgba(50, 29, 12, 0.5) 56%, rgba(10, 7, 5, 0.8)),
+        linear-gradient(180deg, transparent 62%, #070503),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(30, 19, 10, 0.96), rgba(10, 7, 5, 0.92));
+      --manager-surface-strong: linear-gradient(180deg, rgba(42, 25, 12, 0.98), rgba(13, 8, 5, 0.96));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(34, 21, 11, 0.96), rgba(9, 6, 4, 0.92));
+      --manager-control-bg: rgba(10, 7, 5, 0.9);
+      --manager-control-soft: rgba(12, 8, 5, 0.88);
+      --manager-chip-bg: rgba(214, 159, 83, 0.09);
+      --manager-chip-hover: rgba(214, 159, 83, 0.17);
+      --manager-active-bg: rgba(214, 159, 83, 0.11);
+      --manager-button-bg: linear-gradient(180deg, rgba(54, 33, 15, 0.98), rgba(12, 8, 5, 0.96));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(79, 49, 20, 0.98), rgba(18, 11, 6, 0.96));
+      --manager-primary-bg: linear-gradient(180deg, #d69f53, #7d4e1e);
+      --manager-primary-text: #fff7e8;
+      --manager-badge-text: #211306;
+      --manager-ring-text: #211306;
+      --manager-ring-inner: #140c06;
+      --server-profile-bg:
+        linear-gradient(135deg, rgba(52, 32, 14, 0.96), rgba(10, 7, 5, 0.96)),
+        repeating-linear-gradient(-45deg, rgba(214, 159, 83, 0.07) 0 2px, transparent 2px 16px);
+      --server-profile-line: rgba(214, 159, 83, 0.86);
+      --server-profile-glow: rgba(202, 138, 64, 0.25);
+      --server-profile-mark: linear-gradient(180deg, #d69f53, #7d4e1e);
+      --server-profile-code-bg: rgba(10, 7, 5, 0.94);
+      --server-profile-text: #fff0dc;
+      --server-profile-muted: #d0a273;
+      --server-profile-input-bg: rgba(10, 7, 5, 0.92);
+      --server-profile-input-line: rgba(214, 159, 83, 0.46);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(57, 35, 15, 0.98), rgba(12, 8, 5, 0.96));
+      --server-profile-button-text: #e8b466;
+      --server-profile-primary-bg: linear-gradient(180deg, #d69f53, #7d4e1e);
+      --server-profile-primary-text: #fff7e8;
+    }
+
+    body.theme-royal {
+      color-scheme: light;
+      --bg: #efe5d4;
+      --bg-2: #d7b77f;
+      --panel: rgba(255, 250, 238, 0.9);
+      --panel-solid: #fff8ea;
+      --panel-2: #f2deb8;
+      --line: rgba(175, 119, 35, 0.36);
+      --line-soft: rgba(105, 73, 32, 0.18);
+      --line-strong: rgba(199, 139, 43, 0.72);
+      --text: #221914;
+      --muted: #756048;
+      --accent: #b77a22;
+      --accent-bright: #8f5d1f;
+      --danger: #b43b2c;
+      --ok: #2f8143;
+      --warning: #aa671b;
+      --shadow: 0 22px 70px rgba(98, 58, 18, 0.22);
+      --manager-bg:
+        radial-gradient(circle at 74% 0%, rgba(255, 241, 199, 0.72), transparent 30%),
+        radial-gradient(circle at 18% 6%, rgba(183, 122, 34, 0.2), transparent 32%),
+        linear-gradient(160deg, #fff8ea 0%, #efd8ab 50%, #d7b77f 100%);
+      --manager-grid:
+        linear-gradient(rgba(105, 73, 32, 0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(105, 73, 32, 0.045) 1px, transparent 1px);
+      --manager-hero-bg:
+        linear-gradient(90deg, rgba(60, 38, 15, 0.46), rgba(255, 248, 234, 0.22) 58%, rgba(119, 76, 24, 0.36)),
+        linear-gradient(180deg, transparent 62%, rgba(239, 229, 212, 0.96)),
+        url("assets/desert-command.png") center / cover;
+      --manager-surface: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(242, 222, 184, 0.88));
+      --manager-surface-strong: linear-gradient(180deg, rgba(255, 253, 247, 0.98), rgba(239, 216, 171, 0.92));
+      --manager-toolbar-bg: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(242, 222, 184, 0.88));
+      --manager-control-bg: rgba(255, 253, 247, 0.88);
+      --manager-control-soft: rgba(255, 250, 238, 0.84);
+      --manager-chip-bg: rgba(183, 122, 34, 0.1);
+      --manager-chip-hover: rgba(183, 122, 34, 0.18);
+      --manager-active-bg: rgba(183, 122, 34, 0.12);
+      --manager-button-bg: linear-gradient(180deg, rgba(255, 250, 238, 0.96), rgba(232, 198, 130, 0.84));
+      --manager-button-hover-bg: linear-gradient(180deg, rgba(255, 253, 247, 0.98), rgba(221, 179, 96, 0.9));
+      --manager-primary-bg: linear-gradient(180deg, #b77a22, #6d4518);
+      --manager-primary-text: #fff8ea;
+      --manager-badge-text: #221914;
+      --manager-ring-text: #221914;
+      --manager-ring-inner: #fff8ea;
+      --server-profile-bg:
+        linear-gradient(135deg, rgba(255, 253, 247, 0.98), rgba(239, 216, 171, 0.94)),
+        repeating-linear-gradient(90deg, rgba(105, 73, 32, 0.06) 0 1px, transparent 1px 22px);
+      --server-profile-line: rgba(145, 94, 30, 0.72);
+      --server-profile-glow: rgba(183, 122, 34, 0.2);
+      --server-profile-mark: linear-gradient(180deg, #b77a22, #6d4518);
+      --server-profile-code-bg: rgba(255, 253, 247, 0.88);
+      --server-profile-text: #221914;
+      --server-profile-muted: #6c5438;
+      --server-profile-input-bg: rgba(255, 253, 247, 0.9);
+      --server-profile-input-line: rgba(145, 94, 30, 0.34);
+      --server-profile-button-bg: linear-gradient(180deg, rgba(255, 250, 238, 0.96), rgba(232, 198, 130, 0.84));
+      --server-profile-button-text: #5b3712;
+      --server-profile-primary-bg: linear-gradient(180deg, #b77a22, #6d4518);
+      --server-profile-primary-text: #fff8ea;
+    }
+
+    body.theme-royal {
+      background:
+        radial-gradient(circle at 74% 0%, rgba(255, 241, 199, 0.72), transparent 30%),
+        radial-gradient(circle at 18% 6%, rgba(183, 122, 34, 0.2), transparent 32%),
+        linear-gradient(160deg, #fff8ea 0%, #efd8ab 50%, #d7b77f 100%);
+    }
+
+    body.theme-royal::before {
+      opacity: 0.2;
+      background:
+        linear-gradient(rgba(105, 73, 32, 0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(105, 73, 32, 0.045) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+
+    body.theme-royal .hero {
+      background:
+        linear-gradient(90deg, rgba(60, 38, 15, 0.46), rgba(255, 248, 234, 0.22) 58%, rgba(119, 76, 24, 0.36)),
+        linear-gradient(180deg, transparent 62%, rgba(239, 229, 212, 0.96)),
+        url("assets/desert-command.png") center / cover;
+    }
+
+    body.theme-royal .management-toolbar,
+    body.theme-royal .status-strip,
+    body.theme-royal .panel,
+    body.theme-royal .summary,
+    body.theme-royal .rail,
+    body.theme-royal .group,
+    body.theme-royal .reward-panel {
+      color: var(--text);
+      background: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(242, 222, 184, 0.88));
+      border-color: rgba(145, 94, 30, 0.34);
+      box-shadow: 0 18px 46px rgba(98, 58, 18, 0.16), inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+    }
+
+    body.theme-royal .btn {
+      color: #5b3712;
+      border-color: rgba(145, 94, 30, 0.34);
+      background: linear-gradient(180deg, rgba(255, 250, 238, 0.96), rgba(232, 198, 130, 0.84));
+      box-shadow: none;
+    }
+
+    body.theme-royal .btn:hover {
+      color: #221914;
+      border-color: rgba(145, 94, 30, 0.58);
+      background: linear-gradient(180deg, rgba(255, 253, 247, 0.98), rgba(221, 179, 96, 0.9));
+    }
+
+    body.theme-royal .btn.primary,
+    body.theme-royal .btn.set-server {
+      color: #fff8ea;
+      border-color: rgba(109, 69, 24, 0.48);
+      background: linear-gradient(180deg, #b77a22, #6d4518);
+      text-shadow: 0 1px 0 rgba(0, 0, 0, 0.28);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--manager-bg);
+      color: var(--text);
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.35;
+      background: var(--manager-grid);
+      background-size: 48px 48px;
+      mask-image: linear-gradient(180deg, black, transparent 86%);
+    }
+
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-track { background: var(--manager-control-bg); }
+    *::-webkit-scrollbar-thumb {
+      background: var(--line);
+      border: 2px solid var(--manager-control-bg);
+    }
+    *::-webkit-scrollbar-thumb:hover { background: var(--line-strong); }
+
+    button, input, select, textarea { font: inherit; }
+
+    .hero {
+      min-height: 330px;
+      background: var(--manager-hero-bg);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .wrap {
+      width: min(1320px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 72px;
+      gap: 18px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .mark {
+      width: 42px;
+      height: 42px;
+      border: 1px solid var(--line-strong);
+      background: linear-gradient(135deg, var(--manager-chip-hover), var(--manager-active-bg));
+      display: grid;
+      place-items: center;
+      box-shadow: inset 0 0 0 1px var(--line-soft), 0 0 24px var(--line-soft);
+    }
+
+    .mark svg { width: 25px; height: 25px; }
+
+    .brand-logo {
+      width: 48px;
+      height: 48px;
+      object-fit: cover;
+      border: 1px solid var(--line);
+      background: var(--manager-control-bg);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(29px, 4.4vw, 58px);
+      line-height: 1.02;
+      letter-spacing: 0;
+      max-width: 760px;
+    }
+
+    .brand-title {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 26px;
+      align-items: end;
+      padding: 34px 0 50px;
+    }
+
+    .hero p {
+      margin: 18px 0 0;
+      color: #d7cbb5;
+      max-width: 690px;
+      font-size: 17px;
+      line-height: 1.55;
+    }
+
+    .status-strip {
+      background: var(--manager-toolbar-bg);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status-row strong { color: var(--text); font-size: 15px; }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: var(--manager-button-bg);
+      color: var(--accent-bright);
+      min-height: 40px;
+      padding: 0 13px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 800;
+    }
+
+    .btn:hover {
+      border-color: var(--line-strong);
+      background: var(--manager-button-hover-bg);
+      box-shadow: 0 0 18px var(--line-soft);
+    }
+    .btn.primary, .btn.set-server {
+      background: var(--manager-primary-bg);
+      color: var(--manager-primary-text);
+      border-color: var(--line-strong);
+      font-weight: 900;
+    }
+    .btn.icon { width: 40px; padding: 0; }
+    .btn svg { width: 17px; height: 17px; }
+
+    main {
+      margin-top: 0;
+      padding-top: 16px;
+      padding-bottom: 42px;
+    }
+
+    .management-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 14px;
+      padding: 14px;
+      background: var(--manager-toolbar-bg);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    .management-title {
+      min-width: 220px;
+    }
+
+    .management-title strong {
+      display: block;
+      font-size: 18px;
+      color: var(--text);
+    }
+
+    .management-title span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .workspace-status {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin-bottom: 14px;
+      box-shadow: 0 12px 38px rgba(0, 0, 0, 0.24);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr) minmax(430px, 470px);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .rail, .panel, .summary {
+      background: var(--manager-surface);
+      border: 1px solid var(--line);
+      box-shadow:
+        inset 0 0 0 1px var(--line-soft),
+        inset 0 -42px 70px rgba(0, 0, 0, 0.34),
+        var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    .rail, .summary { position: sticky; top: 14px; }
+
+    .rail { padding: 14px; }
+
+    .search {
+      width: 100%;
+      height: 42px;
+      color: var(--text);
+      border: 1px solid var(--line);
+      background: var(--manager-control-bg);
+      padding: 0 12px;
+      outline: none;
+    }
+
+    .nav {
+      display: grid;
+      gap: 7px;
+      margin-top: 12px;
+    }
+
+    .nav button {
+      width: 100%;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 11px;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .nav button.active, .nav button:hover {
+      color: var(--text);
+      background: var(--manager-active-bg);
+      border-color: var(--line);
+    }
+
+    .badge {
+      min-width: 28px;
+      text-align: center;
+      color: var(--manager-badge-text);
+      background: linear-gradient(180deg, var(--accent-bright), var(--accent));
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .panel { min-width: 0; }
+
+    .panel-head {
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .panel-head h2, .summary h2 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    .panel-head p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 14px;
+    }
+
+    .preset-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .chip {
+      border: 1px solid var(--line);
+      background: var(--manager-chip-bg);
+      color: var(--accent-bright);
+      min-height: 34px;
+      padding: 0 10px;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 800;
+    }
+
+    .chip:hover {
+      border-color: var(--line-strong);
+      background: var(--manager-chip-hover);
+    }
+
+    .groups {
+      display: grid;
+      gap: 1px;
+      background: var(--line-soft);
+    }
+
+    .group {
+      background: var(--manager-surface-strong);
+      padding: 18px 20px 20px;
+    }
+
+    .group-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .group-title h3 {
+      margin: 0;
+      font-size: 16px;
+    }
+
+    .setting {
+      display: grid;
+      grid-template-columns: minmax(150px, 1fr) minmax(160px, 240px) 78px 82px;
+      gap: 18px;
+      align-items: center;
+      padding: 13px 0;
+      border-top: 1px solid var(--line-soft);
+    }
+
+    .setting:first-of-type { border-top: 0; }
+
+    .label strong { display: block; font-size: 14px; }
+    .label span { display: block; color: var(--muted); font-size: 12px; line-height: 1.45; margin-top: 3px; }
+    .label .unsupported { color: var(--danger); }
+
+    .setting-head {
+      display: grid;
+      grid-template-columns: minmax(150px, 1fr) minmax(160px, 240px) 78px 82px;
+      gap: 18px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding-bottom: 9px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .value, .select, .number {
+      height: 38px;
+      color: var(--text);
+      border: 1px solid var(--line);
+      background: var(--manager-control-soft);
+      padding: 0 10px;
+    }
+
+    .value {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-variant-numeric: tabular-nums;
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .value.current {
+      color: var(--accent-bright);
+      background: var(--manager-active-bg);
+    }
+
+    .value.modified {
+      border-color: var(--line-strong);
+    }
+
+    .value.changed::after {
+      content: "*";
+      margin-left: 3px;
+      color: var(--danger);
+    }
+
+    .unsupported-row {
+      opacity: 0.62;
+    }
+
+    .unsupported-row input,
+    .unsupported-row select {
+      pointer-events: none;
+      opacity: 0.65;
+    }
+
+    .switch {
+      display: inline-grid;
+      grid-template-columns: 44px 1fr;
+      gap: 10px;
+      align-items: center;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .switch input { position: absolute; opacity: 0; pointer-events: none; }
+    .track {
+      width: 44px;
+      height: 24px;
+      border: 1px solid var(--line);
+      background: var(--manager-control-soft);
+      position: relative;
+    }
+    .track::after {
+      content: "";
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      top: 3px;
+      left: 4px;
+      background: var(--muted);
+      transition: transform 160ms ease, background 160ms ease;
+    }
+    .switch input:checked + .track::after { transform: translateX(18px); background: var(--accent-bright); }
+    .switch input:checked + .track { border-color: var(--line-strong); box-shadow: 0 0 14px var(--line-soft); }
+
+    .summary { padding: 18px; }
+
+    .summary-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .profile-name {
+      width: 100%;
+      height: 42px;
+      margin: 12px 0;
+      border: 1px solid var(--server-profile-input-line);
+      background: var(--server-profile-input-bg);
+      color: var(--server-profile-text);
+      padding: 0 12px;
+    }
+
+    .server-panel {
+      position: relative;
+      overflow: hidden;
+      display: grid;
+      gap: 12px;
+      margin: 12px 0 16px;
+      padding: 14px;
+      border: 1px solid var(--server-profile-line);
+      background: var(--server-profile-bg);
+      box-shadow:
+        inset 0 0 42px var(--server-profile-glow),
+        0 20px 46px rgba(0, 0, 0, 0.18);
+    }
+
+    .server-panel::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 5px;
+      background: var(--server-profile-mark);
+      box-shadow: 0 0 24px var(--server-profile-glow);
+      pointer-events: none;
+    }
+
+    .server-panel::after {
+      content: "";
+      position: absolute;
+      right: 12px;
+      top: 12px;
+      width: 42px;
+      height: 42px;
+      border: 1px solid var(--server-profile-line);
+      background:
+        linear-gradient(90deg, transparent 47%, var(--server-profile-line) 47% 53%, transparent 53%),
+        linear-gradient(transparent 47%, var(--server-profile-line) 47% 53%, transparent 53%);
+      opacity: 0.28;
+      pointer-events: none;
+    }
+
+    .server-panel label {
+      color: var(--server-profile-text);
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1.4;
+    }
+
+    .server-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 8px;
+    }
+
+    .endpoint-row {
+      grid-template-columns: 1fr;
+    }
+
+    .server-action-row {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .server-endpoint {
+      min-width: 0;
+      width: 100%;
+      min-height: 132px;
+      color: var(--server-profile-text);
+      border: 1px solid var(--server-profile-input-line);
+      background: var(--server-profile-code-bg);
+      padding: 14px;
+      font-size: 15px;
+      line-height: 1.45;
+      font-family: "Cascadia Code", Consolas, monospace;
+      resize: vertical;
+      overflow-wrap: anywhere;
+    }
+
+    .endpoint-help {
+      color: var(--server-profile-muted);
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 700;
+    }
+
+    .setup-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .setup-grid label,
+    .setup-wide {
+      display: grid;
+      gap: 5px;
+    }
+
+    .setup-input {
+      width: 100%;
+      min-width: 0;
+      height: 38px;
+      color: var(--server-profile-text);
+      border: 1px solid var(--server-profile-input-line);
+      background: var(--server-profile-input-bg);
+      padding: 0 10px;
+    }
+
+    .setup-input {
+      color: var(--server-profile-text);
+      border-color: var(--server-profile-input-line);
+      background: var(--server-profile-input-bg);
+    }
+
+    .server-panel .btn {
+      color: var(--server-profile-button-text);
+      border-color: var(--server-profile-input-line);
+      background: var(--server-profile-button-bg);
+      box-shadow: none;
+    }
+
+    .server-panel .btn:hover {
+      color: var(--server-profile-text);
+      border-color: var(--server-profile-line);
+      box-shadow: 0 0 18px var(--server-profile-glow);
+    }
+
+    .server-panel .btn.primary,
+    .server-panel .btn.set-server {
+      color: var(--server-profile-primary-text);
+      border-color: var(--server-profile-line);
+      background: var(--server-profile-primary-bg);
+    }
+
+    body.theme-royal .profile-name,
+    body.theme-royal .setup-input,
+    body.theme-royal input,
+    body.theme-royal select,
+    body.theme-royal textarea {
+      color: #221914;
+      border-color: rgba(145, 94, 30, 0.34);
+      background: rgba(255, 253, 247, 0.88);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62);
+    }
+
+    body.theme-royal .server-panel {
+      color: #221914;
+      border-color: rgba(145, 94, 30, 0.46);
+      background:
+        radial-gradient(circle at 92% 10%, rgba(255, 241, 199, 0.9), transparent 26%),
+        linear-gradient(135deg, rgba(255, 253, 247, 0.98), rgba(239, 216, 171, 0.94)),
+        repeating-linear-gradient(90deg, rgba(105, 73, 32, 0.06) 0 1px, transparent 1px 22px);
+      box-shadow: 0 20px 48px rgba(98, 58, 18, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.58);
+    }
+
+    body.theme-royal .server-panel label,
+    body.theme-royal .setting strong,
+    body.theme-royal .label strong,
+    body.theme-royal .management-title strong,
+    body.theme-royal .status-row strong {
+      color: #221914;
+    }
+
+    body.theme-royal .server-endpoint {
+      color: #221914;
+      border-color: rgba(145, 94, 30, 0.4);
+      background: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(247, 236, 214, 0.92));
+    }
+
+    body.theme-royal .endpoint-help,
+    body.theme-royal .brand-title,
+    body.theme-royal .status-row,
+    body.theme-royal .setting small,
+    body.theme-royal .muted {
+      color: #6c5438;
+    }
+
+    .setup-actions {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .server-status {
+      color: var(--server-profile-muted);
+      font-size: 12px;
+      line-height: 1.45;
+      min-height: 18px;
+    }
+
+    .server-status.ok { color: var(--ok); }
+    .server-status.error { color: var(--danger); }
+
+    .reward-panel {
+      display: grid;
+      gap: 12px;
+      margin: 14px 0 16px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      background: var(--manager-surface-strong);
+      box-shadow: inset 0 0 36px var(--line-soft);
+    }
+
+    .reward-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .reward-head h3 {
+      margin: 0;
+      font-size: 15px;
+    }
+
+    .reward-head span,
+    .reward-panel label,
+    .reward-status,
+    .reward-log {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .reward-grid {
+      display: grid;
+      grid-template-columns: 1fr 100px;
+      gap: 8px;
+    }
+
+    .reward-input,
+    .reward-textarea,
+    .reward-select {
+      width: 100%;
+      color: var(--text);
+      border: 1px solid var(--line);
+      background: rgba(6, 8, 5, 0.9);
+      padding: 0 10px;
+      outline: none;
+    }
+
+    .reward-input,
+    .reward-select { height: 38px; }
+
+    .reward-textarea {
+      min-height: 66px;
+      padding-top: 9px;
+      resize: vertical;
+    }
+
+    .reward-items {
+      display: grid;
+      gap: 8px;
+    }
+
+    .reward-item-row {
+      display: grid;
+      grid-template-columns: 116px 1fr 72px 40px;
+      gap: 8px;
+    }
+
+    .reward-status.ok { color: var(--ok); }
+    .reward-status.error { color: var(--danger); }
+
+    .reward-log {
+      display: grid;
+      gap: 7px;
+      max-height: 132px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .reward-log div {
+      border-top: 1px solid var(--line-soft);
+      padding-top: 7px;
+    }
+
+    .reward-log strong {
+      display: block;
+      color: var(--text);
+      font-size: 12px;
+    }
+
+    .reward-source {
+      color: var(--accent-bright);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .score {
+      display: grid;
+      grid-template-columns: 82px 1fr;
+      gap: 14px;
+      align-items: center;
+      margin: 18px 0;
+    }
+
+    .ring {
+      width: 82px;
+      height: 82px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: conic-gradient(var(--accent-bright) calc(var(--risk) * 1%), var(--line-soft) 0);
+      position: relative;
+      font-weight: 800;
+      color: var(--manager-ring-text);
+    }
+
+    .ring::before {
+      content: "";
+      position: absolute;
+      inset: 9px;
+      border-radius: 50%;
+      background: var(--manager-ring-inner);
+      border: 1px solid var(--line-soft);
+    }
+
+    .ring span { position: relative; }
+
+    .meter-copy strong { display: block; }
+    .meter-copy span { color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+    .summary-list {
+      display: grid;
+      gap: 10px;
+      margin: 16px 0;
+    }
+
+    .summary-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 0;
+      border-top: 1px solid var(--line-soft);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .summary-item strong { color: var(--text); text-align: right; }
+
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      background: rgba(6, 8, 5, 0.92);
+      color: var(--text);
+      padding: 12px;
+      line-height: 1.45;
+      font-family: "Cascadia Code", Consolas, monospace;
+      font-size: 12px;
+    }
+
+    textarea.server-endpoint {
+      min-height: 132px;
+      color: var(--text);
+      background: rgba(6, 8, 5, 0.92);
+      font-size: 15px;
+    }
+
+    .hidden-file { display: none; }
+
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      max-width: 360px;
+      padding: 13px 15px;
+      background: linear-gradient(180deg, var(--accent-bright), var(--accent));
+      color: #15100a;
+      font-weight: 750;
+      box-shadow: var(--shadow);
+      transform: translateY(90px);
+      opacity: 0;
+      transition: 180ms ease;
+      z-index: 5;
+    }
+
+    .toast.show { transform: translateY(0); opacity: 1; }
+
+    @media (max-width: 1240px) {
+      .layout { grid-template-columns: 240px minmax(0, 1fr); }
+      .summary { grid-column: 1 / -1; position: static; }
+      .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+      textarea { min-height: 190px; }
+    }
+
+    @media (max-width: 820px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding-top: 18px; }
+      .actions { justify-content: flex-start; }
+      main { padding-top: 12px; }
+      .management-toolbar { align-items: flex-start; flex-direction: column; }
+      .workspace-status { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .layout { grid-template-columns: 1fr; }
+      .rail { position: static; }
+      .nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .setting { grid-template-columns: 1fr; gap: 9px; }
+      .setting-head { display: none; }
+      .value { justify-content: flex-start; width: 92px; }
+      .summary-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 520px) {
+      .wrap { width: min(100% - 22px, 1320px); }
+      .nav { grid-template-columns: 1fr; }
+      .panel-head { align-items: flex-start; flex-direction: column; }
+      .preset-row { justify-content: flex-start; }
+      .workspace-status { grid-template-columns: 1fr; }
+      .server-row { grid-template-columns: 1fr; }
+      .server-action-row { grid-template-columns: 1fr; }
+      .setup-grid { grid-template-columns: 1fr; }
+      .setup-actions { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="management-toolbar">
+      <div class="management-title">
+        <strong>Dune Awakening Manager</strong>
+        <span>Local server profile tool</span>
+      </div>
+      <div class="actions">
+        <button class="btn" id="importBtn" title="Import profile">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Import
+        </button>
+        <button class="btn" id="copyBtn" title="Copy JSON profile">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M8 8h11v13H8zM5 16H4V3h12v1" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+          Copy
+        </button>
+        <button class="btn set-server" id="setServerBtn" title="Send settings to server">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M5 12h9m0 0-4-4m4 4-4 4M16 5h3v14h-3" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Set Server
+        </button>
+        <button class="btn primary" id="downloadBtn" title="Download JSON profile">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 20h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Export
+        </button>
+      </div>
+    </div>
+    <aside class="status-strip workspace-status" aria-label="Current profile status">
+      <div class="status-row"><span>Mode</span><strong id="statusMode">Balanced</strong></div>
+      <div class="status-row"><span>Harvest Pace</span><strong id="statusHarvest">1.00x</strong></div>
+      <div class="status-row"><span>PvP Window</span><strong id="statusPvp">Frontier zones</strong></div>
+      <div class="status-row"><span>Environment</span><strong id="statusEnv">Standard</strong></div>
+    </aside>
+    <div class="layout">
+      <aside class="rail">
+        <input class="search" id="search" type="search" placeholder="Filter settings">
+        <nav class="nav" id="nav" aria-label="Settings sections"></nav>
+      </aside>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 id="sectionTitle">Resource Multipliers</h2>
+            <p id="sectionDescription">Tune gathering, refining, drops, decay, and progression pace.</p>
+          </div>
+          <div class="preset-row">
+            <button class="chip" data-preset="balanced">Balanced</button>
+            <button class="chip" data-preset="hardcore">Hardcore</button>
+            <button class="chip" data-preset="builder">Builder</button>
+          </div>
+        </div>
+        <div class="groups" id="settings"></div>
+      </section>
+
+      <aside class="summary">
+        <div class="summary-head">
+          <h2>Profile Output</h2>
+        </div>
+        <input class="profile-name" id="profileName" value="Arrakis Balanced Profile" aria-label="Profile name">
+        <div class="server-panel">
+          <label for="serverEndpoint">Server apply endpoint</label>
+          <div class="server-row endpoint-row">
+            <textarea class="server-endpoint" id="serverEndpoint" spellcheck="false" aria-label="Server apply endpoint">/manager-api/api/server/settings</textarea>
+          </div>
+          <div class="endpoint-help">Keep this local endpoint as 127.0.0.1. Put the server VM IP in the VM IP box below.</div>
+          <div class="server-row server-action-row">
+            <button class="btn" id="refreshServerBtn" title="Refresh current server values">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M20 12a8 8 0 0 1-14 5m-2-5a8 8 0 0 1 14-5M18 3v4h-4M6 21v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Refresh
+            </button>
+            <button class="btn set-server" id="setServerSideBtn" title="Send settings to server">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M5 12h9m0 0-4-4m4 4-4 4M16 5h3v14h-3" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Apply
+            </button>
+          </div>
+          <div class="setup-grid">
+            <label>VM IP<input class="setup-input" id="setupVmIp" placeholder="192.168.1.11" aria-label="Dune server VM IP"></label>
+            <label>Battlegroup<input class="setup-input" id="setupBattlegroup" placeholder="sh-..." aria-label="Dune battlegroup ID"></label>
+          </div>
+          <label class="setup-wide">SSH key path<input class="setup-input" id="setupSshKeyPath" placeholder="C:\Users\...\DuneAwakeningServer\sshKey" aria-label="SSH key path"></label>
+          <div class="server-row setup-actions">
+            <button class="btn" id="saveSetupBtn" title="Save server setup">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M5 4h12l2 2v16H5zM8 4v7h9M8 18h8" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+              Save Setup
+            </button>
+            <button class="btn" id="detectBattlegroupBtn" title="Detect battlegroups from the server">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M4 12h4l2-6 4 12 2-6h4M12 3v2m0 14v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Detect
+            </button>
+          </div>
+          <div class="server-status" id="serverStatus">Ready to apply real self-hosted UserSettings. Applying restarts the battlegroup.</div>
+        </div>
+        <div class="reward-panel">
+          <div class="reward-head">
+            <div>
+              <h3>Character Rewards</h3>
+              <span>Send item grants directly to a specific character.</span>
+            </div>
+            <button class="btn icon" id="refreshRewardsBtn" title="Refresh reward requests">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M20 12a8 8 0 0 1-14 5m-2-5a8 8 0 0 1 14-5M18 3v4h-4M6 21v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <div class="reward-source" id="rewardCatalogStatus">Loading item catalog...</div>
+          <div class="reward-grid">
+            <label>Character<input class="reward-input" id="rewardCharacter" placeholder="Name or player ID"></label>
+            <label>XP not wired<input class="reward-input" id="rewardXp" type="number" min="0" step="100" value="0"></label>
+          </div>
+          <label>Preset bundle
+            <select class="reward-select" id="rewardBundle">
+              <option value="">No preset</option>
+              <option value="starter">Starter kit</option>
+              <option value="builder">Builder kit</option>
+              <option value="spice">Spice run</option>
+            </select>
+          </label>
+          <div class="reward-items" id="rewardItems"></div>
+          <button class="btn" id="addRewardItemBtn" title="Add an item row">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+            Add Item
+          </button>
+          <textarea class="reward-textarea" id="rewardReason" placeholder="Reason or event note" aria-label="Reward reason"></textarea>
+          <button class="btn set-server" id="queueRewardBtn" title="Send character reward">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M4 12.5 9 17 20 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Send Reward
+          </button>
+          <div class="reward-status" id="rewardStatus">Sent reward history appears below.</div>
+          <div class="reward-log" id="rewardLog"></div>
+        </div>
+        <div class="summary-grid">
+          <div>
+            <div class="score">
+              <div class="ring" id="riskRing" style="--risk: 46"><span id="riskScore">46</span></div>
+              <div class="meter-copy">
+                <strong id="riskLabel">Moderate pressure</strong>
+                <span id="riskText">Players get meaningful survival risk without turning every session into maintenance.</span>
+              </div>
+            </div>
+            <div class="summary-list" id="summaryList"></div>
+          </div>
+          <div>
+            <textarea id="jsonOut" spellcheck="false" aria-label="Generated JSON profile"></textarea>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <input class="hidden-file" id="fileInput" type="file" accept="application/json,.json">
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const sections = [
+      {
+        id: "resources",
+        title: "Resource Multipliers",
+        description: "Tune gathering, refining, drops, decay, and progression pace.",
+        settings: [
+          { key: "harvestMultiplier", label: "Harvest yield", help: "Raw materials gathered per node.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
+          { key: "spiceYieldMultiplier", label: "Spice yield", help: "Spice bloom and spice sand returns.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
+          { key: "refiningSpeedMultiplier", label: "Refining speed", help: "Processing speed for ore, water, spice, and crafted inputs.", type: "range", min: 0.5, max: 6, step: 0.25, value: 1, unit: "x" },
+          { key: "craftingSpeedMultiplier", label: "Crafting speed", help: "Workbench and fabrication completion speed.", type: "range", min: 0.5, max: 8, step: 0.25, value: 1, unit: "x" },
+          { key: "lootQualityMultiplier", label: "Loot quality", help: "General quality bias for drops and caches.", type: "range", min: 0.5, max: 3, step: 0.1, value: 1, unit: "x" },
+          { key: "structureDecayMultiplier", label: "Structure decay", help: "Base upkeep and abandoned structure decay pressure.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" }
+        ]
+      },
+      {
+        id: "pvp",
+        title: "PvP Settings",
+        description: "Shape conflict rules, raiding windows, penalties, and protected spaces.",
+        settings: [
+          { key: "pvpMode", label: "PvP mode", help: "Where player combat is allowed.", type: "select", value: "frontier_zones", options: [["off", "Off"], ["frontier_zones", "Frontier zones"], ["scheduled", "Scheduled"], ["always_on", "Always on"]] },
+          { key: "raidWindowHours", label: "Raid window", help: "Daily hours when bases can be raided.", type: "range", min: 0, max: 24, step: 1, value: 4, unit: "h" },
+          { key: "friendlyFire", label: "Friendly fire", help: "Allow damage between clan or party members.", type: "toggle", value: false },
+          { key: "deathDropMode", label: "Death drops", help: "How much carried inventory drops on death.", type: "select", value: "partial", options: [["none", "None"], ["partial", "Partial"], ["full_inventory", "Full inventory"], ["full_with_equipment", "Full with equipment"]] },
+          { key: "newPlayerGraceHours", label: "New player grace", help: "Temporary PvP protection for new arrivals.", type: "range", min: 0, max: 72, step: 1, value: 12, unit: "h" },
+          { key: "offlineRaidProtection", label: "Offline raid protection", help: "Reduce base damage when owners are offline.", type: "toggle", value: true }
+        ]
+      },
+      {
+        id: "environment",
+        title: "Environmental Rules",
+        description: "Control storms, heat, water pressure, worms, and world resets.",
+        settings: [
+          { key: "stormFrequency", label: "Storm frequency", help: "How often major sandstorms roll through.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
+          { key: "stormSeverity", label: "Storm severity", help: "Damage, visibility loss, and travel disruption.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
+          { key: "heatDrainMultiplier", label: "Heat drain", help: "Thirst and exposure pressure during daytime.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x" },
+          { key: "waterRetentionMultiplier", label: "Water retention", help: "How long stored water lasts before pressure builds.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x" },
+          { key: "wormAggression", label: "Worm aggression", help: "How quickly large threats respond to vibration and travel.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
+          { key: "deepDesertResetDays", label: "Deep desert reset", help: "Days between high-risk region refreshes.", type: "range", min: 1, max: 14, step: 1, value: 7, unit: "d" }
+        ]
+      },
+      {
+        id: "progression",
+        title: "Progression",
+        description: "Visible for planning only. No confirmed self-hosted INI keys for XP, research, reputation, or vendor pricing were found.",
+        settings: [
+          { key: "xpMultiplier", label: "XP gain", help: "No confirmed self-hosted config key found; does not affect in-game XP.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x", supported: false },
+          { key: "researchCostMultiplier", label: "Research cost", help: "No confirmed self-hosted config key found; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
+          { key: "vendorPriceMultiplier", label: "Vendor prices", help: "No confirmed self-hosted config key found; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
+          { key: "reputationMultiplier", label: "Reputation gain", help: "No confirmed self-hosted config key found; planning only.", type: "range", min: 0.25, max: 4, step: 0.25, value: 1, unit: "x", supported: false },
+          { key: "fastTravelCostMultiplier", label: "Travel costs", help: "No confirmed self-hosted config key found; planning only.", type: "range", min: 0, max: 3, step: 0.05, value: 1, unit: "x", supported: false }
+        ]
+      },
+      {
+        id: "clans",
+        title: "Clans and Bases",
+        description: "Set community scale, build limits, alliances, and claim rules.",
+        settings: [
+          { key: "maxClanSize", label: "Max clan size", help: "Maximum players in one clan.", type: "range", min: 1, max: 100, step: 1, value: 20, unit: "" },
+          { key: "allianceLimit", label: "Alliance limit", help: "Maximum formal allied clans.", type: "range", min: 0, max: 10, step: 1, value: 2, unit: "" },
+          { key: "baseClaimLimit", label: "Base claims", help: "Number of base claims per clan.", type: "range", min: 1, max: 20, step: 1, value: 4, unit: "" },
+          { key: "buildHeightLimit", label: "Build height", help: "Maximum vertical build levels.", type: "range", min: 1, max: 12, step: 1, value: 5, unit: "" },
+          { key: "publicBuildDamage", label: "Public build damage", help: "Allow world structures to take non-raid damage.", type: "toggle", value: false }
+        ]
+      },
+      {
+        id: "admin",
+        title: "Admin Rules",
+        description: "Configure moderation helpers, backups, restarts, and visibility.",
+        settings: [
+          { key: "serverVisibility", label: "Server visibility", help: "Whether the server is discoverable or invite only.", type: "select", value: "public", options: [["public", "Public"], ["listed_password", "Listed with password"], ["private", "Private"]] },
+          { key: "backupIntervalMinutes", label: "Backup interval", help: "Minutes between automatic profile-safe backups.", type: "range", min: 15, max: 360, step: 15, value: 60, unit: "m" },
+          { key: "restartHour", label: "Daily restart hour", help: "Local server restart hour, 24-hour clock.", type: "range", min: 0, max: 23, step: 1, value: 5, unit: ":00" },
+          { key: "adminAuditLog", label: "Admin audit log", help: "Record admin actions into the exported policy.", type: "toggle", value: true },
+          { key: "allowWhitelist", label: "Whitelist", help: "Reserve access for approved player IDs.", type: "toggle", value: false }
+        ]
+      }
+    ];
+
+    const presets = {
+      balanced: {},
+      hardcore: {
+        harvestMultiplier: 0.75, spiceYieldMultiplier: 0.75, refiningSpeedMultiplier: 0.8, craftingSpeedMultiplier: 0.85,
+        lootQualityMultiplier: 0.85, structureDecayMultiplier: 1.4, pvpMode: "scheduled", raidWindowHours: 6,
+        friendlyFire: true, deathDropMode: "full_inventory", newPlayerGraceHours: 4, offlineRaidProtection: false,
+        stormFrequency: 1.6, stormSeverity: 1.5, heatDrainMultiplier: 1.45, waterRetentionMultiplier: 0.75,
+        wormAggression: 1.7, deepDesertResetDays: 5, xpMultiplier: 0.75, researchCostMultiplier: 1.35,
+        vendorPriceMultiplier: 1.25, reputationMultiplier: 0.8, fastTravelCostMultiplier: 1.4, maxClanSize: 12,
+        allianceLimit: 1, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
+      },
+      builder: {
+        harvestMultiplier: 2.5, spiceYieldMultiplier: 1.8, refiningSpeedMultiplier: 3, craftingSpeedMultiplier: 4,
+        lootQualityMultiplier: 1.4, structureDecayMultiplier: 0.25, pvpMode: "off", raidWindowHours: 0,
+        friendlyFire: false, deathDropMode: "none", newPlayerGraceHours: 72, offlineRaidProtection: true,
+        stormFrequency: 0.55, stormSeverity: 0.6, heatDrainMultiplier: 0.65, waterRetentionMultiplier: 1.7,
+        wormAggression: 0.5, deepDesertResetDays: 10, xpMultiplier: 2, researchCostMultiplier: 0.7,
+        vendorPriceMultiplier: 0.75, reputationMultiplier: 1.6, fastTravelCostMultiplier: 0.4, maxClanSize: 40,
+        allianceLimit: 5, baseClaimLimit: 8, buildHeightLimit: 8, publicBuildDamage: false
+      }
+    };
+
+    const defaults = Object.fromEntries(sections.flatMap(section => section.settings.map(setting => [setting.key, setting.value])));
+    let state = { ...defaults };
+    let currentValues = { ...defaults };
+    let currentSection = "resources";
+
+    const nav = document.querySelector("#nav");
+    const settingsEl = document.querySelector("#settings");
+    const search = document.querySelector("#search");
+    const jsonOut = document.querySelector("#jsonOut");
+    const profileName = document.querySelector("#profileName");
+    const serverEndpoint = document.querySelector("#serverEndpoint");
+    const serverStatus = document.querySelector("#serverStatus");
+    const setupVmIp = document.querySelector("#setupVmIp");
+    const setupBattlegroup = document.querySelector("#setupBattlegroup");
+    const setupSshKeyPath = document.querySelector("#setupSshKeyPath");
+    const toast = document.querySelector("#toast");
+    const rewardCharacter = document.querySelector("#rewardCharacter");
+    const rewardXp = document.querySelector("#rewardXp");
+    const rewardBundle = document.querySelector("#rewardBundle");
+    const rewardItems = document.querySelector("#rewardItems");
+    const rewardReason = document.querySelector("#rewardReason");
+    const rewardStatus = document.querySelector("#rewardStatus");
+    const rewardLog = document.querySelector("#rewardLog");
+    const rewardCatalogStatus = document.querySelector("#rewardCatalogStatus");
+
+    const rewardBundles = {
+      starter: [
+        { id: "WaterPack_Consumable", label: "Cup of Water", quantity: 5, category: "Tools" },
+        { id: "ScrapMetalKnife", label: "Scrap Metal Knife", quantity: 1, category: "Weapons" },
+        { id: "ScrapMetal", label: "Salvaged Metal", quantity: 50, category: "Resources" }
+      ],
+      builder: [
+        { id: "ScrapMetal", label: "Salvaged Metal", quantity: 250, category: "Resources" },
+        { id: "T2UniqueComponent", label: "Spice-infused Iron Dust", quantity: 12, category: "Resources" },
+        { id: "SurveyProbe_1", label: "Survey Probe", quantity: 4, category: "Other" }
+      ],
+      spice: [
+        { id: "SpiceResidue", label: "Spice Residue", quantity: 100, category: "Resources" },
+        { id: "SurveyProbe_1", label: "Survey Probe", quantity: 2, category: "Other" },
+        { id: "WaterPack_Consumable", label: "Cup of Water", quantity: 8, category: "Tools" }
+      ]
+    };
+    const rewardCategoryOrder = ["Weapons", "Armor", "Tools", "Consumables", "Resources", "Schematics", "Vehicles", "Other"];
+    let itemCatalog = [];
+
+    function fmt(setting, value) {
+      if (setting.type === "toggle") return value ? "On" : "Off";
+      if (setting.type === "select") return setting.options.find(([key]) => key === value)?.[1] ?? value;
+      const decimals = Number.isInteger(Number(value)) ? 0 : 2;
+      return `${Number(value).toFixed(decimals).replace(/\.00$/, "")}${setting.unit}`;
+    }
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add("show");
+      setTimeout(() => toast.classList.remove("show"), 1900);
+    }
+
+    function setServerStatus(message, tone = "") {
+      serverStatus.textContent = message;
+      serverStatus.className = `server-status ${tone}`.trim();
+    }
+
+    function localReceiverBase() {
+      if (location.protocol === "http:" || location.protocol === "https:") {
+        return location.origin;
+      }
+      return window.location.origin;
+    }
+
+    function endpointFor(path) {
+      return `${localReceiverBase()}/manager-api${path}`;
+    }
+
+    function settingsEndpoint() {
+      return endpointFor("/api/server/settings");
+    }
+
+    function configEndpoint() {
+      return endpointFor("/api/server/config");
+    }
+
+    function discoverEndpoint() {
+      return endpointFor("/api/server/discover");
+    }
+
+    function rewardEndpoint() {
+      return endpointFor("/api/server/rewards");
+    }
+
+    function setRewardStatus(message, tone = "") {
+      rewardStatus.textContent = message;
+      rewardStatus.className = `reward-status ${tone}`.trim();
+    }
+
+    function readableError(text, fallback = "Server request failed") {
+      if (!text) return fallback;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed.error) return parsed.error;
+        if (parsed.message) return parsed.message;
+      } catch {}
+      const messageMatch = text.match(/<p>Message:\s*([^<]+)<\/p>/i);
+      if (messageMatch) return messageMatch[1].replace(/\.\.$/, ".");
+      return text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim() || fallback;
+    }
+
+    function rewardFailureMessage(error) {
+      if (error instanceof TypeError && /fetch/i.test(error.message || "")) {
+        return "Local receiver is not running or was blocked by security software. Open AlphaNine Dune Control again and allow DuneAwakeningManager.exe in Kaspersky.";
+      }
+      return error.message || "Reward request failed.";
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char]));
+    }
+
+    function itemMeta(item) {
+      return [item.detail, item.tier ? `T${item.tier}` : "", item.rarity].filter(Boolean).join(" - ");
+    }
+
+    function itemLabel(item) {
+      const meta = itemMeta(item);
+      return meta ? `${item.name} (${meta})` : item.name;
+    }
+
+    function categoryOptions(selected = "Weapons") {
+      return rewardCategoryOrder.map(category => `<option value="${category}" ${category === selected ? "selected" : ""}>${category}</option>`).join("");
+    }
+
+    function itemOptions(category = "Weapons", selectedId = "") {
+      const scoped = itemCatalog.filter(item => item.category === category);
+      const options = scoped.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selectedId ? "selected" : ""}>${escapeHtml(itemLabel(item))}</option>`).join("");
+      const custom = selectedId && !scoped.some(item => item.id === selectedId)
+        ? `<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedId)} (custom ID)</option>`
+        : "";
+      return `<option value="">Select item</option>${custom}${options}`;
+    }
+
+    function findCatalogItem(id) {
+      return itemCatalog.find(item => item.id === id);
+    }
+
+    function renderRewardItems(items = [{ id: "", label: "", quantity: 1, category: "Weapons" }]) {
+      rewardItems.innerHTML = items.map(item => `
+        <div class="reward-item-row">
+          <select class="reward-select" data-reward-category aria-label="Item category">${categoryOptions(item.category || findCatalogItem(item.id)?.category || "Weapons")}</select>
+          <select class="reward-select" data-reward-id aria-label="Reward item">${itemOptions(item.category || findCatalogItem(item.id)?.category || "Weapons", item.id || "")}</select>
+          <input class="reward-input" data-reward-quantity type="number" min="1" step="1" value="${item.quantity || 1}" aria-label="Item quantity">
+          <button class="btn icon" data-remove-reward-item title="Remove item">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M6 12h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      `).join("");
+    }
+
+    function readRewardItems() {
+      return Array.from(rewardItems.querySelectorAll(".reward-item-row")).map(row => {
+        const id = row.querySelector("[data-reward-id]").value;
+        const catalogItem = findCatalogItem(id);
+        return {
+          id,
+          label: catalogItem?.name || id,
+          category: catalogItem?.category || row.querySelector("[data-reward-category]").value,
+          quantity: Number(row.querySelector("[data-reward-quantity]").value || 1)
+        };
+      }).filter(item => item.id);
+    }
+
+    async function loadItemCatalog() {
+      try {
+        const response = await fetch("dune-item-catalog.json");
+        if (!response.ok) throw new Error(`Catalog returned ${response.status}`);
+        const catalog = await response.json();
+        itemCatalog = (catalog.items || []).filter(item => item.id && item.name);
+        rewardCatalogStatus.textContent = `Item lists loaded: ${itemCatalog.length.toLocaleString()} items from the public wiki API.`;
+        renderRewardItems([{ id: "", label: "", quantity: 1, category: "Weapons" }]);
+      } catch (error) {
+        rewardCatalogStatus.textContent = "Item catalog could not load. Restart the manager or keep using manual queued bundles.";
+      }
+    }
+
+    async function refreshRewards() {
+      const endpoint = rewardEndpoint();
+      if (!endpoint) return;
+
+      try {
+        const response = await fetch(endpoint);
+        if (!response.ok) throw new Error(`Server returned ${response.status}`);
+        const data = await response.json();
+        const requests = data.requests || [];
+        rewardLog.innerHTML = requests.slice(0, 5).map(request => {
+          const itemText = request.items?.length ? request.items.map(item => `${item.quantity} ${item.label}`).join(", ") : "No items";
+          const xpText = request.xp ? `${request.xp.toLocaleString()} XP` : "No XP";
+          return `<div><strong>${request.character} - ${request.status}</strong><span>${xpText}; ${itemText}</span></div>`;
+        }).join("") || `<div><span>No reward requests yet.</span></div>`;
+      } catch (error) {
+        rewardLog.innerHTML = `<div><span>Could not load reward requests.</span></div>`;
+      }
+    }
+
+    async function queueReward() {
+      const payload = {
+        character: rewardCharacter.value.trim(),
+        xp: Number(rewardXp.value || 0),
+        items: readRewardItems(),
+        reason: rewardReason.value.trim(),
+        createdAt: new Date().toISOString()
+      };
+
+      if (!payload.character) {
+        setRewardStatus("Add a character name or player ID.", "error");
+        return;
+      }
+
+      setRewardStatus("Saving reward request...");
+      try {
+        const response = await fetch(rewardEndpoint(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          throw new Error(readableError(detail, `Server returned ${response.status}`));
+        }
+        const result = await response.json();
+        rewardXp.value = 0;
+        rewardReason.value = "";
+        rewardBundle.value = "";
+        renderRewardItems();
+        await refreshRewards();
+        const warnings = result.request?.applied?.warnings || [];
+        setRewardStatus(warnings.length ? `Reward sent. ${warnings.join(" ")}` : "Reward sent.", "ok");
+        showToast("Reward sent");
+      } catch (error) {
+        setRewardStatus(`Could not send reward: ${rewardFailureMessage(error)}`, "error");
+      }
+    }
+
+    function flattenSettings(settings) {
+      if (!settings) return {};
+      if (!Object.values(settings).some(value => value && typeof value === "object" && !Array.isArray(value))) return settings;
+      return Object.assign({}, ...Object.values(settings).filter(value => value && typeof value === "object"));
+    }
+
+    function renderNav() {
+      nav.innerHTML = sections.map(section => `
+        <button class="${section.id === currentSection ? "active" : ""}" data-section="${section.id}">
+          <span>${section.title}</span>
+          <span class="badge">${section.settings.length}</span>
+        </button>
+      `).join("");
+    }
+
+    function renderSettings() {
+      const section = sections.find(item => item.id === currentSection);
+      const query = search.value.trim().toLowerCase();
+      document.querySelector("#sectionTitle").textContent = section.title;
+      document.querySelector("#sectionDescription").textContent = section.description;
+
+      const visible = section.settings.filter(setting => {
+        const haystack = `${setting.label} ${setting.help} ${setting.key}`.toLowerCase();
+        return !query || haystack.includes(query);
+      });
+
+      settingsEl.innerHTML = `
+        <div class="group">
+          <div class="group-title">
+            <h3>${section.title}</h3>
+            <span class="badge">${visible.length}</span>
+          </div>
+          <div class="setting-head"><span>Setting</span><span>Edit</span><span>Current</span><span>Modified</span></div>
+          ${visible.map(settingMarkup).join("") || `<p class="label"><span>No settings match that filter.</span></p>`}
+        </div>
+      `;
+    }
+
+    function settingMarkup(setting) {
+      const value = state[setting.key];
+      const current = currentValues[setting.key] ?? setting.value;
+      const changed = JSON.stringify(value) !== JSON.stringify(current);
+      let control = "";
+      if (setting.type === "range") {
+        control = `<input type="range" min="${setting.min}" max="${setting.max}" step="${setting.step}" value="${value}" data-key="${setting.key}" aria-label="${setting.label}">`;
+      } else if (setting.type === "toggle") {
+        control = `<label class="switch"><input type="checkbox" data-key="${setting.key}" ${value ? "checked" : ""}><span class="track"></span><span>${value ? "Enabled" : "Disabled"}</span></label>`;
+      } else {
+        control = `<select class="select" data-key="${setting.key}" aria-label="${setting.label}">${setting.options.map(([key, label]) => `<option value="${key}" ${key === value ? "selected" : ""}>${label}</option>`).join("")}</select>`;
+      }
+
+      return `
+        <div class="setting ${setting.supported === false ? "unsupported-row" : ""}">
+          <div class="label"><strong>${setting.label}</strong><span class="${setting.supported === false ? "unsupported" : ""}">${setting.help}</span></div>
+          <div>${control}</div>
+          <div class="value current" data-current="${setting.key}">${fmt(setting, current)}</div>
+          <div class="value modified ${changed ? "changed" : ""}" data-value="${setting.key}">${fmt(setting, value)}</div>
+        </div>
+      `;
+    }
+
+    function buildProfile() {
+      const grouped = {};
+      for (const section of sections) {
+        grouped[section.id] = {};
+        for (const setting of section.settings) grouped[section.id][setting.key] = state[setting.key];
+      }
+      return {
+        profileName: profileName.value.trim() || "Arrakis Server Profile",
+        generatedAt: new Date().toISOString(),
+        applyEndpoint: serverEndpoint.value.trim(),
+        note: "Manager profile. Map these values to official server config keys once your host exposes them.",
+        settings: grouped
+      };
+    }
+
+    function readSetup() {
+      return {
+        vmIp: setupVmIp.value.trim(),
+        sshKeyPath: setupSshKeyPath.value.trim(),
+        battlegroup: setupBattlegroup.value.trim()
+      };
+    }
+
+    function writeSetup(config = {}) {
+      setupVmIp.value = config.vmIp || "";
+      setupSshKeyPath.value = config.sshKeyPath || "";
+      setupBattlegroup.value = config.battlegroup || "";
+    }
+
+    async function loadServerSetup() {
+      try {
+        const response = await fetch(configEndpoint());
+        if (!response.ok) throw new Error(`Server returned ${response.status}`);
+        const data = await response.json();
+        writeSetup(data.config || {});
+        if (data.warning) {
+          setServerStatus(`Manager service warning: ${data.warning}`, "warn");
+          return;
+        }
+        if (!(data.config?.vmIp && data.config?.battlegroup)) {
+          setServerStatus("Add your VM IP, SSH key, and battlegroup, then save setup.");
+        }
+      } catch (error) {
+        setServerStatus("Could not reach the suite manager service. Restart AlphaNine Dune Suite and try again.", "error");
+      }
+    }
+
+    async function saveServerSetup(showSaved = true, allowMissingBattlegroup = false) {
+      const payload = readSetup();
+      if (!payload.vmIp || !payload.sshKeyPath) {
+        const message = "Fill VM IP and SSH key path before detecting battlegroup.";
+        setServerStatus(message, "error");
+        throw new Error(message);
+      }
+      if (!allowMissingBattlegroup && !payload.battlegroup) {
+        const message = "Fill battlegroup before saving setup, or click Detect Battlegroup after entering VM IP and SSH key.";
+        setServerStatus(message, "error");
+        throw new Error(message);
+      }
+
+      const response = await fetch(configEndpoint(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(readableError(detail, `Server returned ${response.status}`));
+      }
+      const data = await response.json();
+      writeSetup(data.config || payload);
+      if (showSaved) {
+        setServerStatus(data.warning ? `Server setup saved. ${data.warning}` : "Server setup saved.", data.warning ? "warn" : "ok");
+        showToast(data.warning ? "Server setup saved with warning" : "Server setup saved");
+      }
+      return data.config || payload;
+    }
+
+    async function handleSaveSetup() {
+      try {
+        await saveServerSetup(true);
+      } catch (error) {
+        setServerStatus(`Could not save setup: ${error.message}`, "error");
+      }
+    }
+
+    async function detectBattlegroup() {
+      try {
+        await saveServerSetup(false, true);
+        setServerStatus("Detecting battlegroups...");
+        const response = await fetch(discoverEndpoint());
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          throw new Error(readableError(detail, `Server returned ${response.status}`));
+        }
+        const data = await response.json();
+        const battlegroups = data.battlegroups || [];
+        if (!battlegroups.length) {
+          setServerStatus("No battlegroups were found on that VM.", "error");
+          return;
+        }
+        setupBattlegroup.value = battlegroups[0];
+        await saveServerSetup(false);
+        setServerStatus(`Detected battlegroup ${battlegroups[0]}.`, "ok");
+        showToast("Battlegroup detected");
+      } catch (error) {
+        if (error.name === "TypeError") {
+          setServerStatus("Could not reach the suite manager service. Restart AlphaNine Dune Suite and try again.", "error");
+        } else {
+          setServerStatus(`Could not detect battlegroup: ${error.message}`, "error");
+        }
+      }
+    }
+
+    async function setServerSettings() {
+      const endpoint = settingsEndpoint();
+      serverEndpoint.value = "/manager-api/api/server/settings";
+      if (!endpoint) {
+        setServerStatus("Add a server endpoint before applying settings.", "error");
+        showToast("Server endpoint required");
+        return;
+      }
+
+      localStorage.setItem("arrakisServerEndpoint", endpoint);
+      try {
+        await saveServerSetup(false);
+      } catch (error) {
+        setServerStatus(`Could not save setup before apply: ${error.message}`, "error");
+        return;
+      }
+
+      setServerStatus("Sending current profile to server...");
+      const payload = buildProfile();
+
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          throw new Error(detail || `Server returned ${response.status}`);
+        }
+
+        const data = await response.json().catch(() => ({}));
+        const appliedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        currentValues = { ...state };
+        renderSettings();
+        updateSummary();
+        setServerStatus(data.warning ? `Settings saved locally at ${appliedAt}. ${data.warning}` : `Settings applied at ${appliedAt}.`, data.warning ? "warn" : "ok");
+        showToast(data.warning ? "Server settings saved locally" : "Server settings applied");
+      } catch (error) {
+        setServerStatus(`Could not apply settings: ${error.message}`, "error");
+        showToast("Server apply failed");
+      }
+    }
+
+    async function refreshServerSettings() {
+      const endpoint = settingsEndpoint();
+      serverEndpoint.value = "/manager-api/api/server/settings";
+      if (!endpoint) {
+        setServerStatus("Add a server endpoint before refreshing current values.", "error");
+        return;
+      }
+
+      localStorage.setItem("arrakisServerEndpoint", endpoint);
+      setServerStatus("Refreshing current values...");
+      try {
+        const response = await fetch(endpoint);
+        if (!response.ok) throw new Error(`Server returned ${response.status}`);
+        const profile = await response.json();
+        const refreshed = flattenSettings(profile.settings);
+        currentValues = { ...defaults, ...refreshed };
+        renderSettings();
+        updateSummary();
+        setServerStatus(profile.warning ? `Current values refreshed from local cache. ${profile.warning}` : "Current values refreshed.", profile.warning ? "warn" : "ok");
+      } catch (error) {
+        setServerStatus(`Could not refresh current values: ${error.message}`, "error");
+      }
+    }
+
+    function pressureScore() {
+      let score = 38;
+      score += (state.stormFrequency - 1) * 9;
+      score += (state.stormSeverity - 1) * 9;
+      score += (state.heatDrainMultiplier - 1) * 11;
+      score += (state.wormAggression - 1) * 10;
+      score += state.pvpMode === "always_on" ? 19 : state.pvpMode === "scheduled" ? 11 : state.pvpMode === "off" ? -12 : 5;
+      score += state.deathDropMode === "full_with_equipment" ? 14 : state.deathDropMode === "full_inventory" ? 10 : state.deathDropMode === "none" ? -8 : 2;
+      score += state.offlineRaidProtection ? -7 : 6;
+      score += (1 - state.harvestMultiplier) * 5;
+      return Math.max(0, Math.min(100, Math.round(score)));
+    }
+
+    function updateSummary() {
+      const profile = buildProfile();
+      const risk = pressureScore();
+      document.querySelector("#riskRing").style.setProperty("--risk", risk);
+      document.querySelector("#riskScore").textContent = risk;
+      document.querySelector("#riskLabel").textContent = risk > 72 ? "Severe pressure" : risk > 48 ? "High pressure" : risk > 28 ? "Moderate pressure" : "Relaxed pressure";
+      document.querySelector("#riskText").textContent = risk > 72
+        ? "Conflict, environment, and loss rules will define the server identity."
+        : risk > 48
+          ? "Players face regular danger while still having room to recover."
+          : risk > 28
+            ? "Players get meaningful survival risk without turning every session into maintenance."
+            : "The profile favors building, travel, and social play over punishment.";
+
+      const find = key => sections.flatMap(section => section.settings).find(setting => setting.key === key);
+      document.querySelector("#statusMode").textContent = profileName.value.replace("Arrakis ", "").replace(" Profile", "") || "Custom";
+      document.querySelector("#statusHarvest").textContent = fmt(find("harvestMultiplier"), state.harvestMultiplier);
+      document.querySelector("#statusPvp").textContent = fmt(find("pvpMode"), state.pvpMode);
+      document.querySelector("#statusEnv").textContent = state.stormFrequency > 1.2 || state.stormSeverity > 1.2 ? "Punishing" : state.stormFrequency < 0.8 ? "Calm" : "Standard";
+
+      document.querySelector("#summaryList").innerHTML = [
+        ["Harvest", fmt(find("harvestMultiplier"), state.harvestMultiplier)],
+        ["PvP", fmt(find("pvpMode"), state.pvpMode)],
+        ["Raid Window", fmt(find("raidWindowHours"), state.raidWindowHours)],
+        ["Storms", `${fmt(find("stormFrequency"), state.stormFrequency)} / ${fmt(find("stormSeverity"), state.stormSeverity)}`],
+        ["Clan Size", fmt(find("maxClanSize"), state.maxClanSize)],
+        ["Backups", fmt(find("backupIntervalMinutes"), state.backupIntervalMinutes)]
+      ].map(([label, value]) => `<div class="summary-item"><span>${label}</span><strong>${value}</strong></div>`).join("");
+
+      jsonOut.value = JSON.stringify(profile, null, 2);
+    }
+
+    function updateValue(key) {
+      const setting = sections.flatMap(section => section.settings).find(item => item.key === key);
+      const valueEl = document.querySelector(`[data-value="${key}"]`);
+      if (valueEl) valueEl.textContent = fmt(setting, state[key]);
+    }
+
+    nav.addEventListener("click", event => {
+      const button = event.target.closest("button[data-section]");
+      if (!button) return;
+      currentSection = button.dataset.section;
+      renderNav();
+      renderSettings();
+    });
+
+    settingsEl.addEventListener("input", event => {
+      const input = event.target.closest("[data-key]");
+      if (!input) return;
+      const key = input.dataset.key;
+      const setting = sections.flatMap(section => section.settings).find(item => item.key === key);
+      state[key] = setting.type === "toggle" ? input.checked : setting.type === "range" ? Number(input.value) : input.value;
+      if (setting.type === "toggle") renderSettings();
+      else updateValue(key);
+      updateSummary();
+    });
+
+    settingsEl.addEventListener("change", event => {
+      const input = event.target.closest("[data-key]");
+      if (!input) return;
+      const key = input.dataset.key;
+      const setting = sections.flatMap(section => section.settings).find(item => item.key === key);
+      state[key] = setting.type === "toggle" ? input.checked : setting.type === "range" ? Number(input.value) : input.value;
+      renderSettings();
+      updateSummary();
+    });
+
+    document.querySelectorAll("[data-preset]").forEach(button => {
+      button.addEventListener("click", () => {
+        const preset = button.dataset.preset;
+        state = { ...defaults, ...(presets[preset] || {}) };
+        profileName.value = preset === "hardcore" ? "Arrakis Hardcore Profile" : preset === "builder" ? "Arrakis Builder Profile" : "Arrakis Balanced Profile";
+        renderSettings();
+        updateSummary();
+        showToast(`${button.textContent} preset loaded`);
+      });
+    });
+
+    search.addEventListener("input", renderSettings);
+    profileName.addEventListener("input", updateSummary);
+    serverEndpoint.addEventListener("input", () => {
+      localStorage.setItem("arrakisServerEndpoint", serverEndpoint.value.trim());
+      updateSummary();
+    });
+
+    document.querySelector("#copyBtn").addEventListener("click", async () => {
+      await navigator.clipboard.writeText(jsonOut.value);
+      showToast("Profile JSON copied");
+    });
+
+    document.querySelector("#downloadBtn").addEventListener("click", () => {
+      const blob = new Blob([jsonOut.value], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${(profileName.value || "arrakis-profile").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("Profile exported");
+    });
+
+    document.querySelector("#setServerBtn").addEventListener("click", setServerSettings);
+    document.querySelector("#setServerSideBtn").addEventListener("click", setServerSettings);
+    document.querySelector("#refreshServerBtn").addEventListener("click", refreshServerSettings);
+    document.querySelector("#saveSetupBtn").addEventListener("click", handleSaveSetup);
+    document.querySelector("#detectBattlegroupBtn").addEventListener("click", detectBattlegroup);
+    document.querySelector("#queueRewardBtn").addEventListener("click", queueReward);
+    document.querySelector("#refreshRewardsBtn").addEventListener("click", refreshRewards);
+    document.querySelector("#addRewardItemBtn").addEventListener("click", () => {
+      rewardItems.insertAdjacentHTML("beforeend", `
+        <div class="reward-item-row">
+          <select class="reward-select" data-reward-category aria-label="Item category">${categoryOptions("Weapons")}</select>
+          <select class="reward-select" data-reward-id aria-label="Reward item">${itemOptions("Weapons")}</select>
+          <input class="reward-input" data-reward-quantity type="number" min="1" step="1" value="1" aria-label="Item quantity">
+          <button class="btn icon" data-remove-reward-item title="Remove item">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M6 12h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      `);
+    });
+    rewardItems.addEventListener("click", event => {
+      const button = event.target.closest("[data-remove-reward-item]");
+      if (!button) return;
+      button.closest(".reward-item-row").remove();
+      if (!rewardItems.children.length) renderRewardItems();
+    });
+    rewardItems.addEventListener("change", event => {
+      const category = event.target.closest("[data-reward-category]");
+      if (!category) return;
+      const row = category.closest(".reward-item-row");
+      row.querySelector("[data-reward-id]").innerHTML = itemOptions(category.value);
+    });
+    rewardBundle.addEventListener("change", () => {
+      const bundle = rewardBundles[rewardBundle.value];
+      if (bundle) renderRewardItems(bundle);
+    });
+
+    document.querySelector("#importBtn").addEventListener("click", () => document.querySelector("#fileInput").click());
+    document.querySelector("#fileInput").addEventListener("change", async event => {
+      const file = event.target.files[0];
+      if (!file) return;
+      try {
+        const profile = JSON.parse(await file.text());
+        const imported = profile.settings ? flattenSettings(profile.settings) : profile;
+        state = { ...defaults, ...imported };
+        profileName.value = profile.profileName || "Imported Arrakis Profile";
+        if (profile.applyEndpoint) serverEndpoint.value = profile.applyEndpoint;
+        renderSettings();
+        updateSummary();
+        showToast("Profile imported");
+      } catch {
+        showToast("That profile could not be imported");
+      } finally {
+        event.target.value = "";
+      }
+    });
+
+    const previousEndpoint = "http://127.0.0.1:8787/api/server/settings";
+    const savedEndpoint = localStorage.getItem("arrakisServerEndpoint");
+    const defaultEndpoint = "/manager-api/api/server/settings";
+    serverEndpoint.value = savedEndpoint && savedEndpoint !== previousEndpoint && savedEndpoint.startsWith("/manager-api/")
+      ? savedEndpoint
+      : defaultEndpoint;
+    renderNav();
+    renderSettings();
+    renderRewardItems();
+    updateSummary();
+    loadServerSetup();
+    refreshServerSettings();
+    refreshRewards();
+    loadItemCatalog();
+  </script>
+</body>
+</html>

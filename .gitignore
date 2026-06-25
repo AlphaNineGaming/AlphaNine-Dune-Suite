@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+out/
+release/
+*.log
+config.json
+.env
+.env.local
+data/*.db
+data/*.sqlite
+admin-audit.log

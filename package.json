@@ -1,0 +1,11 @@
+{
+  "name": "alphanine-dune-suite",
+  "version": "0.4.5",
+  "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
+  "author": "AlphaNineGaming",
+  "main": "electron/main.js",
+  "dependencies": {
+    "express": "^5.2.1",
+    "leaflet": "^1.9.4"
+  }
+}

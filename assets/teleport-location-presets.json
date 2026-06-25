@@ -1,0 +1,11 @@
+[
+  {
+    "enabled": false,
+    "name": "Example - replace with a verified safe location",
+    "map": "HaggaBasin",
+    "x": 0,
+    "y": 0,
+    "z": 1000,
+    "partition_id": 0
+  }
+]

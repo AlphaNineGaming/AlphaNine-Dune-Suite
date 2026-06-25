@@ -5821,12 +5821,8 @@ async function progressionPlayerLookup(queryValue) {
     playersReturned: (adminPlayerData.players || []).length,
     durationMs: timer.timings.lookup
   });
-  let rawPlayers = (adminPlayerData.players || []).slice(0, 5);
-  if (!rawPlayers.length && !/^\d+$/.test(query)) {
-    console.info("[progression/player] adminPlayers returned no name rows; trying player_state character_name fallback", { query });
-    rawPlayers = await timer.step("player_state_name_fallback", () => withProgressionStepTimeout(progressionPlayerStateNameLookup(query, 5), 8000, "player_state_name_fallback"));
-  }
-  let players = rawPlayers.map((row) => ({
+  const nonNumericQuery = !/^\d+$/.test(query);
+  const mapProgressionPlayers = (rows, source = adminPlayerData.source || "adminPlayers") => rows.map((row) => ({
     actor_id: row.player_controller_id || row.character_id || row.player_pawn_id || row.id || "",
     account_id: row.account_id || row.id || "",
     account_user: row.fls_id || "",
@@ -5837,20 +5833,31 @@ async function progressionPlayerLookup(queryValue) {
     online_status: row.online_status || row.status || "unknown",
     map: row.map || "",
     matched_column: row.matched_column || "",
-    source: adminPlayerData.source || "adminPlayers"
+    source
   }));
-  if (!players.length) {
-    timer.finish({ status: "not-found" });
-    return { ok: false, status: "not-found", query, players: [], reason: adminPlayerData.error || "No matching character name was found in player lookup sources.", safety, timings: timer.timings };
-  }
-  const player = players[0];
-  const nonNumericQuery = !/^\d+$/.test(query);
-  if (nonNumericQuery) {
+  const isProgressionNameMatch = (player) => {
     const characterName = String(player.character_name || "");
     const matchedColumn = String(player.matched_column || "");
     const nameMatches = characterName.toLowerCase().includes(query.toLowerCase());
     const idOnlyMatch = /(^|_)(id|account_id|player_controller_id|player_pawn_id|player_state_id)$/i.test(matchedColumn);
-    if (!nameMatches || idOnlyMatch) {
+    return nameMatches && !idOnlyMatch;
+  };
+  let rawPlayers = (adminPlayerData.players || []).slice(0, 5);
+  let players = mapProgressionPlayers(rawPlayers);
+  if (nonNumericQuery && !players.some(isProgressionNameMatch)) {
+    console.info("[progression/player] adminPlayers returned no name rows; trying player_state character_name fallback", { query });
+    rawPlayers = await timer.step("player_state_name_fallback", () => withProgressionStepTimeout(progressionPlayerStateNameLookup(query, 5), 8000, "player_state_name_fallback"));
+    if (rawPlayers.length) players = mapProgressionPlayers(rawPlayers, "dune.player_state.character_name");
+  }
+  if (!players.length) {
+    timer.finish({ status: "not-found" });
+    return { ok: false, status: "not-found", query, players: [], reason: adminPlayerData.error || "No matching character name was found in player lookup sources.", safety, timings: timer.timings };
+  }
+  const player = nonNumericQuery ? (players.find(isProgressionNameMatch) || players[0]) : players[0];
+  if (nonNumericQuery) {
+    const characterName = String(player.character_name || "");
+    const matchedColumn = String(player.matched_column || "");
+    if (!isProgressionNameMatch(player)) {
       timer.finish({ status: "not-found" });
       console.warn("[progression/player] rejected non-name player match", {
         query,

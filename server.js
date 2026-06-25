@@ -5728,6 +5728,56 @@ function withProgressionStepTimeout(promise, timeoutMs, step) {
   ]);
 }
 
+async function progressionPlayerStateNameLookup(query, limit = 5) {
+  const columnOutput = await dbQuery(`
+    select string_agg(column_name, ',' order by ordinal_position)
+    from information_schema.columns
+    where table_schema = 'dune'
+      and table_name = 'player_state'
+  `, 7000);
+  const columns = new Set(String(columnOutput || "").split(",").filter(Boolean).map((column) => column.toLowerCase()));
+  const has = (column) => columns.has(String(column).toLowerCase());
+  if (!has("character_name")) return [];
+  const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  const expr = (column, fallback = "''") => has(column) ? `coalesce(ps.${quoteIdent(column)}::text, '')` : fallback;
+  const lastActivityOrder = has("last_avatar_activity") ? `ps.${quoteIdent("last_avatar_activity")} desc nulls last,` : "";
+  const stateOrder = has("player_state_id") ? `ps.${quoteIdent("player_state_id")}` : "1";
+  const runLookup = async (partial = false) => {
+    const value = partial ? sqlString(`%${query}%`) : sqlString(query);
+    const predicate = partial
+      ? `ps.${quoteIdent("character_name")} ilike ${value}`
+      : `lower(ps.${quoteIdent("character_name")}) = lower(${value})`;
+    const sql = `
+      select
+        '' as account_id,
+        '' as fls_id,
+        '' as funcom_id,
+        ${expr("player_controller_id")} as player_controller_id,
+        ${has("player_state_id") || has("player_pawn_id") || has("player_controller_id")
+          ? `coalesce(${[
+              has("player_state_id") ? `ps.${quoteIdent("player_state_id")}::text` : "",
+              has("player_pawn_id") ? `ps.${quoteIdent("player_pawn_id")}::text` : "",
+              has("player_controller_id") ? `ps.${quoteIdent("player_controller_id")}::text` : ""
+            ].filter(Boolean).join(", ")}, '')`
+          : "''"} as character_id,
+        ${expr("player_pawn_id")} as player_pawn_id,
+        ${expr("online_status", "'unknown'")} as online_status,
+        '' as map,
+        coalesce(nullif(ps.${quoteIdent("character_name")}, ''), 'Unknown') as character_name,
+        'true' as resolved,
+        'player_state.character_name' as matched_column
+      from dune.player_state ps
+      where ${predicate}
+      order by ${lastActivityOrder} ${stateOrder}
+      limit ${Math.max(1, Math.min(Number(limit) || 5, 20))}
+    `;
+    const output = await dbQuery(sql, 7000);
+    return output ? output.split(/\r?\n/).filter(Boolean).map(normalizeAdminPlayerRow).filter((player) => player.player_controller_id || player.character_id || player.player_pawn_id) : [];
+  };
+  const exact = await runLookup(false);
+  return exact.length ? exact : await runLookup(true);
+}
+
 function progressionPhaseTimer(scope = "progression") {
   const started = Date.now();
   const timings = {};
@@ -5771,7 +5821,12 @@ async function progressionPlayerLookup(queryValue) {
     playersReturned: (adminPlayerData.players || []).length,
     durationMs: timer.timings.lookup
   });
-  let players = (adminPlayerData.players || []).slice(0, 5).map((row) => ({
+  let rawPlayers = (adminPlayerData.players || []).slice(0, 5);
+  if (!rawPlayers.length && !/^\d+$/.test(query)) {
+    console.info("[progression/player] adminPlayers returned no name rows; trying player_state character_name fallback", { query });
+    rawPlayers = await timer.step("player_state_name_fallback", () => withProgressionStepTimeout(progressionPlayerStateNameLookup(query, 5), 8000, "player_state_name_fallback"));
+  }
+  let players = rawPlayers.map((row) => ({
     actor_id: row.player_controller_id || row.character_id || row.player_pawn_id || row.id || "",
     account_id: row.account_id || row.id || "",
     account_user: row.fls_id || "",
@@ -5786,7 +5841,7 @@ async function progressionPlayerLookup(queryValue) {
   }));
   if (!players.length) {
     timer.finish({ status: "not-found" });
-    return { ok: false, status: "not-found", query, players: [], reason: adminPlayerData.error || "adminPlayers returned no matching player.", safety, timings: timer.timings };
+    return { ok: false, status: "not-found", query, players: [], reason: adminPlayerData.error || "No matching character name was found in player lookup sources.", safety, timings: timer.timings };
   }
   const player = players[0];
   const nonNumericQuery = !/^\d+$/.test(query);

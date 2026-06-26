@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
+const https = require("https");
 const http = require("http");
 const os = require("os");
 const path = require("path");
@@ -54,6 +55,80 @@ function appendLog(label, message) {
   } catch {
     // Logging must never be the reason startup fails.
   }
+}
+
+function safeUpdateFilename(name, version) {
+  const base = String(name || `AlphaNine Dune Suite Setup ${version || "latest"}.exe`)
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+  return /\.exe$/i.test(base) ? base : `${base}.exe`;
+}
+
+function isTrustedUpdateUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    if (parsed.protocol !== "https:") return false;
+    return parsed.hostname === "github.com"
+      || parsed.hostname === "objects.githubusercontent.com"
+      || parsed.hostname.endsWith(".githubusercontent.com");
+  } catch {
+    return false;
+  }
+}
+
+function sendUpdateProgress(payload) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("self-update-progress", payload);
+    }
+  } catch {
+    // Progress updates are best-effort only.
+  }
+}
+
+function downloadUpdateFile(downloadUrl, destination, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) {
+      reject(new Error("Update download redirected too many times."));
+      return;
+    }
+    const req = https.get(downloadUrl, {
+      headers: { "User-Agent": "AlphaNine-Dune-Suite" },
+      timeout: 30000
+    }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        const nextUrl = new URL(res.headers.location, downloadUrl).toString();
+        if (!isTrustedUpdateUrl(nextUrl)) {
+          reject(new Error("Update download redirected to an untrusted host."));
+          return;
+        }
+        downloadUpdateFile(nextUrl, destination, redirects + 1).then(resolve, reject);
+        return;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume();
+        reject(new Error(`Update download failed with HTTP ${res.statusCode}.`));
+        return;
+      }
+      ensureDir(path.dirname(destination));
+      const total = Number(res.headers["content-length"] || 0);
+      let downloaded = 0;
+      const file = fs.createWriteStream(destination);
+      res.on("data", (chunk) => {
+        downloaded += chunk.length;
+        sendUpdateProgress({ state: "downloading", downloaded, total });
+      });
+      res.pipe(file);
+      file.on("finish", () => file.close(() => resolve({ path: destination, downloaded, total })));
+      file.on("error", reject);
+    });
+    req.on("timeout", () => {
+      req.destroy(new Error("Update download timed out."));
+    });
+    req.on("error", reject);
+  });
 }
 
 function startupErrorMessage(error) {
@@ -641,6 +716,43 @@ ipcMain.handle("open-path", async (_event, targetPath) => {
   if (!value) return { ok: false, error: "Path is empty." };
   const error = await shell.openPath(value);
   return { ok: !error, error };
+});
+
+ipcMain.handle("self-update-install", async (_event, update) => {
+  try {
+    if (!app.isPackaged) {
+      throw new Error("Self update is only available in the installed desktop app.");
+    }
+    const downloadUrl = String(update?.downloadUrl || "").trim();
+    if (!isTrustedUpdateUrl(downloadUrl)) {
+      throw new Error("Update download URL is not a trusted GitHub release asset.");
+    }
+    const fileName = safeUpdateFilename(update?.fileName || update?.name, update?.version);
+    if (!/setup.*\.exe$/i.test(fileName) && !/\.exe$/i.test(fileName)) {
+      throw new Error("The selected update asset is not a Windows installer.");
+    }
+    const destination = userPath("updates", fileName);
+    appendLog("desktop", `Downloading self update ${update?.version || ""} from ${downloadUrl}`);
+    sendUpdateProgress({ state: "starting", downloaded: 0, total: 0 });
+    const downloaded = await downloadUpdateFile(downloadUrl, destination);
+    appendLog("desktop", `Self update downloaded to ${downloaded.path} (${downloaded.downloaded} bytes). Launching installer.`);
+    sendUpdateProgress({ state: "launching", downloaded: downloaded.downloaded, total: downloaded.total, path: downloaded.path });
+    const child = spawn(downloaded.path, [], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false
+    });
+    child.unref();
+    setTimeout(() => {
+      cleanupChildren();
+      app.quit();
+    }, 1200);
+    return { ok: true, installerPath: downloaded.path, message: "Installer launched. AlphaNine Dune Suite will close so the update can continue." };
+  } catch (error) {
+    appendLog("desktop", `Self update failed: ${error.stack || error.message}`);
+    sendUpdateProgress({ state: "failed", error: error.message });
+    return { ok: false, error: error.message };
+  }
 });
 
 function createWindow() {

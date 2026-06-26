@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.4.7";
+const APP_VERSION = "0.4.8";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -1651,12 +1651,23 @@ function checkGitHubUpdates(repo) {
         try {
           const data = JSON.parse(body || "{}");
           if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(data.message || `GitHub returned ${res.statusCode}`);
+          const assets = Array.isArray(data.assets) ? data.assets : [];
+          const installerAsset = assets.find((asset) => /setup.*\.exe$/i.test(String(asset.name || "")))
+            || assets.find((asset) => /\.exe$/i.test(String(asset.name || "")))
+            || null;
           resolve({
             ok: true,
             currentVersion: APP_VERSION,
             latestVersion: String(data.tag_name || data.name || ""),
             releaseName: data.name || "",
-            url: data.html_url || `https://github.com/${targetRepo}/releases/latest`
+            url: data.html_url || `https://github.com/${targetRepo}/releases/latest`,
+            publishedAt: data.published_at || "",
+            installerAsset: installerAsset ? {
+              name: String(installerAsset.name || ""),
+              size: Number(installerAsset.size || 0),
+              downloadUrl: String(installerAsset.browser_download_url || ""),
+              contentType: String(installerAsset.content_type || "")
+            } : null
           });
         } catch (error) {
           resolve({ ok: false, currentVersion: APP_VERSION, error: error.message });
@@ -10557,6 +10568,10 @@ function appPage() {
     .brand p { margin:9px 0 0; color:var(--sand); font-size:14px; text-transform:uppercase; letter-spacing:.18em; }
     .build-info { display:grid; gap:3px; margin-top:14px; padding-top:12px; border-top:1px solid rgba(214,166,69,.18); color:rgba(240,201,106,.78); font-size:11px; line-height:1.25; letter-spacing:.08em; text-transform:uppercase; }
     .build-info span { display:block; }
+    .sidebar-update { display:grid; gap:7px; margin-top:10px; }
+    .sidebar-update button { width:100%; min-height:32px; justify-content:center; border:1px solid rgba(214,166,69,.28); background:rgba(255,255,255,.018); color:var(--gold-bright); font-size:10px; line-height:1; font-weight:850; letter-spacing:.08em; text-transform:uppercase; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .sidebar-update button:hover { border-color:var(--line-strong); background:rgba(214,166,69,.1); box-shadow:0 0 18px rgba(214,166,69,.11); }
+    .sidebar-update-status { min-height:28px; color:rgba(214,196,151,.78); font-size:10.5px; line-height:1.35; letter-spacing:.04em; text-transform:none; }
     .nav { flex:1 1 auto; min-height:0; display:grid; align-content:start; gap:5px; margin-top:18px; padding-right:7px; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-color:rgba(240,201,106,.58) rgba(5,7,5,.68); scrollbar-width:thin; }
     .nav::-webkit-scrollbar { width:9px; }
     .nav::-webkit-scrollbar-track { background:rgba(5,7,5,.68); border:1px solid rgba(214,166,69,.1); }
@@ -10577,6 +10592,7 @@ function appPage() {
     .legal-notice { margin-top:12px; padding-top:10px; border-top:1px solid rgba(214,166,69,.16); color:rgba(214,196,151,.68); font-size:10px; line-height:1.35; }
     body.theme-royal .build-info { border-top-color:rgba(105,73,32,.28); color:#3f2d1d; }
     body.theme-royal .build-info span { color:#3f2d1d; }
+    body.theme-royal .sidebar-update-status { color:#4f3b26; }
     body.theme-royal .nav-group-title { color:#4f351b; }
     body.theme-royal .nav-group-title::after { background:linear-gradient(90deg, rgba(105,73,32,.42), transparent); }
     body.theme-royal .nav-group.advanced-nav { border-top-color:rgba(105,73,32,.24); }
@@ -11678,6 +11694,23 @@ function appPage() {
       background:linear-gradient(180deg, var(--glass), var(--panel-2));
       box-shadow:0 10px 28px var(--theme-glow), inset 0 1px 0 rgba(255,255,255,.055);
     }
+    .sidebar-links a.donate-link {
+      min-height:40px;
+      justify-content:center;
+      color:#1b1206;
+      border-color:rgba(255,225,143,.9);
+      background:linear-gradient(180deg, #f0c96a, #b87922);
+      box-shadow:0 0 24px rgba(240,201,106,.24), inset 0 1px 0 rgba(255,255,255,.4);
+      font-size:12px;
+      font-weight:950;
+      letter-spacing:.08em;
+    }
+    .sidebar-links a.donate-link:hover {
+      color:#160e04;
+      border-color:#ffe18f;
+      background:linear-gradient(180deg, #ffe18f, #d49a37);
+      box-shadow:0 0 30px rgba(240,201,106,.38), inset 0 1px 0 rgba(255,255,255,.55);
+    }
     .primary,
     button.primary,
     .action-row .primary,
@@ -11939,6 +11972,11 @@ function appPage() {
         <span>Version ${APP_VERSION}</span>
         <span>Build ${APP_VERSION}</span>
       </div>
+      <div class="sidebar-update" aria-label="Suite update check">
+        <button type="button" onclick="checkUpdates(false)">Check Update</button>
+        <button type="button" id="sidebarInstallUpdateButton" class="hidden" onclick="installSelfUpdate()">Install Update</button>
+        <div id="sidebarUpdateStatus" class="sidebar-update-status">Current version ${APP_VERSION}</div>
+      </div>
     </div>
     <nav class="nav">
       <div class="nav-group">
@@ -11973,7 +12011,7 @@ function appPage() {
       <button type="button" data-feedback-ignore="true" onclick="openAboutDialog()">About</button>
       <div class="sidebar-links" aria-label="Community links">
         <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">Discord Support</a>
-        <a href="https://ko-fi.com/E1W220NMPA" target="_blank" rel="noopener">Support on Ko-fi</a>
+        <a class="donate-link" href="https://ko-fi.com/E1W220NMPA" target="_blank" rel="noopener">Buy Me a Coffee</a>
       </div>
       <div class="legal-notice">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
     </div>
@@ -13040,7 +13078,6 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <label class="advanced-only">GitHub Update Repo<input id="settingsUpdateRepo" placeholder="owner/repo"></label>
           </div>
           <div class="action-row mt">
-            <button type="button" onclick="checkUpdates()">Check Updates</button>
             <button type="button" onclick="saveSettings()">Save Settings</button>
           </div>
           <div id="settingsSaveStatus" class="empty mt">Settings load automatically.</div>
@@ -13448,7 +13485,14 @@ async function refreshReceiverStatus(){try{const data=await getJson("/api/receiv
 async function receiverAction(action){try{if(action==="start")await saveSettings();const data=await getJson("/api/receiver/"+action,{method:"POST"});setText("receiverManagerStatus",data.message||data.status||"Receiver action complete");await refreshReceiverStatus();playUiSound(data.ok?"success":"warning");}catch(e){setText("receiverManagerStatus",betterError(e));playUiSound("warning");}}
 async function exportSettings(){try{const data=await getJson("/api/settings/export");const text=JSON.stringify(data,null,2);document.getElementById("settingsBackupStatus").textContent=text;const blob=new Blob([text],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="alphanine-settings-"+new Date().toISOString().slice(0,10)+".json";a.click();URL.revokeObjectURL(a.href);playUiSound("success");}catch(e){setText("settingsBackupStatus",betterError(e));playUiSound("warning");}}
 async function importSettings(){try{const raw=getValue("settingsImportText");if(!raw.trim())throw new Error("Paste exported settings JSON first.");const data=await getJson("/api/settings/import",{method:"POST",headers:{"Content-Type":"application/json"},body:raw});fillSettings(data.config||{});setText("settingsBackupStatus","Settings imported. Restart the suite if receiver or environment values changed.");playUiSound("success");}catch(e){setText("settingsBackupStatus",betterError(e));playUiSound("warning");}}
-async function checkUpdates(){try{const repo=getValue("settingsUpdateRepo");const data=await getJson("/api/updates/check"+(repo?"?repo="+encodeURIComponent(repo):""));setText("settingsSaveStatus",data.ok?("Current "+data.currentVersion+" / Latest "+data.latestVersion+"\\n"+data.url):("Update check failed: "+data.error));if(data.ok&&data.url)window.open(data.url,"_blank");playUiSound(data.ok?"success":"warning");}catch(e){setText("settingsSaveStatus",betterError(e));playUiSound("warning");}}
+function normalizeVersion(value){const match=String(value||"").trim().match(/\d+(?:\.\d+){0,3}/);return match?match[0]:"";}
+function versionParts(value){return normalizeVersion(value).split(".").map(part=>Number(part)||0);}
+function compareVersions(left,right){const a=versionParts(left),b=versionParts(right);for(let i=0;i<Math.max(a.length,b.length,3);i++){const delta=(a[i]||0)-(b[i]||0);if(delta)return delta;}return 0;}
+function setUpdateStatus(message,available=false){setText("sidebarUpdateStatus",message);const button=document.getElementById("sidebarInstallUpdateButton");if(button)button.classList.toggle("hidden",!available);}
+function updateStatusMessage(data){if(!data?.ok)return{message:"Update check failed.",available:false};const latest=data.latestVersion||data.currentVersion;const current=data.currentVersion||"${APP_VERSION}";const newer=compareVersions(latest,current)>0;return newer?{message:"Update available: "+latest,available:Boolean(data.installerAsset?.downloadUrl)}:{message:"Current version "+current,available:false};}
+async function checkUpdates(openRelease=false,options={}){const silent=Boolean(options.silent);try{if(!silent)setUpdateStatus("Checking for updates...");const repo=getValue("settingsUpdateRepo");const data=await getJson("/api/updates/check"+(repo?"?repo="+encodeURIComponent(repo):""));window.latestSuiteUpdate=data;const status=updateStatusMessage(data);setUpdateStatus(status.message,status.available);if(!status.available&&data.ok&&compareVersions(data.latestVersion,data.currentVersion)>0&&!data.installerAsset?.downloadUrl)setUpdateStatus("Update available, installer missing.",false);if(openRelease&&data.ok&&data.url&&!window.alphaNineSuite?.installSelfUpdate&&status.available)window.open(data.url,"_blank");if(!silent)playUiSound(data.ok?"success":"warning");return data;}catch(e){if(!silent){setUpdateStatus("Update check failed.");playUiSound("warning");}return null;}}
+async function installSelfUpdate(){try{if(!window.alphaNineSuite?.installSelfUpdate)throw new Error("Self update is available only in the installed desktop app.");const data=window.latestSuiteUpdate?.ok?window.latestSuiteUpdate:await checkUpdates(false);if(!data?.ok)throw new Error(data?.error||"Could not check for updates.");const asset=data.installerAsset;if(!asset?.downloadUrl)throw new Error("The latest GitHub release does not include a Windows installer asset.");const confirmed=await appConfirm("Install Suite update","Download and run "+asset.name+" for "+(data.latestVersion||"the latest release")+"?\\n\\nAlphaNine Dune Suite will close after the installer starts.","Install Update","Cancel");if(!confirmed)return;setUpdateStatus("Downloading update...",true);const stopProgress=window.alphaNineSuite.onSelfUpdateProgress?.(payload=>{if(!payload)return;if(payload.state==="downloading"){const total=Number(payload.total||0);const downloaded=Number(payload.downloaded||0);const pct=total?Math.round((downloaded/total)*100):0;setUpdateStatus("Downloading update"+(pct?" "+pct+"%":"..."),true);}else if(payload.state==="launching"){setUpdateStatus("Launching installer...",false);}else if(payload.state==="failed"){setUpdateStatus("Update failed.",true);}});const result=await window.alphaNineSuite.installSelfUpdate({version:data.latestVersion,fileName:asset.name,name:asset.name,downloadUrl:asset.downloadUrl,releaseUrl:data.url});if(stopProgress)stopProgress();if(!result?.ok)throw new Error(result?.error||"Installer did not launch.");setUpdateStatus("Installer launched.",false);playUiSound("success");}catch(e){setUpdateStatus("Update failed.",Boolean(window.latestSuiteUpdate?.installerAsset?.downloadUrl));playUiSound("warning");}}
+async function checkUpdatesOnStartup(){const data=await checkUpdates(false,{silent:true});const status=updateStatusMessage(data);if(!status.available)return;if(!window.alphaNineSuite?.installSelfUpdate)return;const confirmed=await appConfirm("Suite update available","AlphaNine Dune Suite "+(data.latestVersion||"update")+" is available. Update now?","Update Now","Later");if(confirmed)await installSelfUpdate();}
 async function refreshDiagnostics(){try{const data=await getJson("/api/diagnostics");diagnosticsData=data;setText("diagDatabase",data.database?.ok?"Reachable":"Failed");setText("diagReceiver",data.receiver?.ok?"Online":"Offline");setText("diagApi",data.api?.status||"Unknown");setText("diagVersion",data.version||"Unknown");renderWebPortalUrls(data.webPortal?.urls);renderDiagnosticLog();}catch(e){setText("diagnosticLog",betterError(e));}}
 function renderDiagnosticLog(){const key=getValue("diagnosticLogSelect")||"suite";const text=diagnosticsData?.logs?.[key]||"No log data loaded.";setText("diagnosticLog",text);}
 const UI_SOUND_DEFAULTS={enabled:true,volume:100};
@@ -13739,7 +13783,7 @@ const giveAdminItemWithoutSentToast=giveAdminItem;
 giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");if(log&&selectedAdminItem&&isSchematicItem(selectedAdminItem)&&text&&!/research unlocks; check/i.test(text))log.textContent=text+"\\n\\nNote: schematic templates are research unlocks; check the player's research, not inventory.";if(/Live Give (verified|published)/i.test(text))showToast(selectedAdminItem&&isSchematicItem(selectedAdminItem)?"Research schematic sent":"Item sent","success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>

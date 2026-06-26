@@ -146,7 +146,11 @@ def build_ini(profile):
         security_zones = True
 
     storm_switch = bool(setting(profile, "environment", "stormEnabled", True))
-    storm_enabled = storm_switch
+    storm_frequency = max(0, float(setting(profile, "environment", "stormFrequency", 1)))
+    storm_severity = max(0, min(10, float(setting(profile, "environment", "stormSeverity", 1))))
+    storm_enabled = storm_switch and storm_frequency > 0 and storm_severity > 0
+    worm_enabled = float(setting(profile, "environment", "wormAggression", 1)) > 0
+    sandworm_safe_seconds = max(0, float(setting(profile, "environment", "waterRetentionMultiplier", 1)) * 900)
     item_decay = max(0, min(10, float(setting(profile, "resources", "structureDecayMultiplier", 1))))
     mining = max(0, float(setting(profile, "resources", "harvestMultiplier", 1)))
     vehicle_mining = max(0, float(setting(profile, "resources", "spiceYieldMultiplier", mining)))
@@ -201,9 +205,22 @@ Dune.GlobalMiningOutputMultiplier={mining:.2f}
 Dune.GlobalVehicleMiningOutputMultiplier={vehicle_mining:.2f}
 SecurityZones.PvpResourceMultiplier={pvp_resource:.2f}
 
+; Durability damage multiplier for vehicles | (0 to 10)  0=off
+dw.VehicleDurabilityDamageMultiplier={storm_severity:.2f}
+
 ; Sandstorm and sandstorm treasure spawning settings
 Sandstorm.Enabled={bool_int(storm_enabled)}
 Sandstorm.Treasure.Enabled={bool_int(setting(profile, "resources", "lootQualityMultiplier", 1) > 0)}
+
+; Sandworm settings
+sandworm.dune.Enabled={bool_int(worm_enabled)}
+; Sandworm can push/damage vehicles
+Vehicle.SandwormCollisionInteraction={str(worm_enabled).lower()}
+; Enables dangerzones where the sandworm can attack
+Sandworm.SandwormDangerZonesEnabled={str(worm_enabled).lower()}
+; Seconds of invulnerability from sandworm on specific situations
+Vehicle.SandwormInvulnerabilitySecondsOnExit={sandworm_safe_seconds:.1f}
+Vehicle.SandwormInvulnerabilitySecondsOnServerRestart=7200.0
 """
     return user_game, user_engine
 

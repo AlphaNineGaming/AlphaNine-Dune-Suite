@@ -1305,11 +1305,11 @@
         description: "Control storms, heat, water pressure, worms, and world resets.",
         settings: [
           { key: "stormEnabled", label: "Coriolis storm", help: "Allow Coriolis storm and major sandstorm auto-spawn.", type: "toggle", value: true },
-          { key: "stormFrequency", label: "Storm frequency", help: "No confirmed self-hosted config key found for storm frequency; planning only.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x", supported: false },
-          { key: "stormSeverity", label: "Storm severity", help: "No confirmed self-hosted config key found for storm severity; planning only.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x", supported: false },
+          { key: "stormFrequency", label: "Storm availability", help: "0 disables Sandstorm.Enabled; values above 0 allow sandstorm/Coriolis output.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
+          { key: "stormSeverity", label: "Vehicle storm damage", help: "Writes dw.VehicleDurabilityDamageMultiplier and also gates Sandstorm.Enabled when set to 0.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
           { key: "heatDrainMultiplier", label: "Heat drain", help: "No confirmed self-hosted config key found for heat or thirst drain; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
-          { key: "waterRetentionMultiplier", label: "Water retention", help: "No confirmed self-hosted config key found for stored water retention; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
-          { key: "wormAggression", label: "Worm aggression", help: "No confirmed self-hosted config key found for aggression scaling; planning only.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x", supported: false },
+          { key: "waterRetentionMultiplier", label: "Sandworm safe time", help: "Writes Vehicle.SandwormInvulnerabilitySecondsOnExit as multiplier x 900 seconds.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x" },
+          { key: "wormAggression", label: "Sandworm enabled", help: "0 disables sandworm console variables; values above 0 enable sandworm danger zones and vehicle collision.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
           { key: "deepDesertResetDays", label: "Deep desert reset", help: "No confirmed self-hosted config key found for Deep Desert reset cadence; planning only.", type: "range", min: 1, max: 14, step: 1, value: 7, unit: "d", supported: false }
         ]
       },
@@ -1356,12 +1356,14 @@
       hardcore: {
         harvestMultiplier: 0.75, spiceYieldMultiplier: 0.75,
         lootQualityMultiplier: 0.85, structureDecayMultiplier: 1.4, pvpMode: "frontier_zones",
-        stormEnabled: true, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
+        stormEnabled: true, stormFrequency: 1.6, stormSeverity: 1.5, waterRetentionMultiplier: 0.75,
+        wormAggression: 1.7, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
       },
       builder: {
         harvestMultiplier: 2.5, spiceYieldMultiplier: 1.8,
         lootQualityMultiplier: 1.4, structureDecayMultiplier: 0.25, pvpMode: "off",
-        stormEnabled: true, baseClaimLimit: 8, buildHeightLimit: 8, publicBuildDamage: false
+        stormEnabled: true, stormFrequency: 0.55, stormSeverity: 0.6, waterRetentionMultiplier: 1.7,
+        wormAggression: 0.5, baseClaimLimit: 8, buildHeightLimit: 8, publicBuildDamage: false
       }
     };
 
@@ -1511,7 +1513,7 @@
         profileName: profileName.value.trim() || "Arrakis Server Profile",
         generatedAt: new Date().toISOString(),
         applyEndpoint: settingsEndpoint(),
-        note: "Manager profile. Map these values to official server config keys once your host exposes them.",
+        note: "Manager profile. Supported values are written to generated UserGame.ini/UserEngine.ini; disabled planning controls are omitted.",
         settings: grouped
       };
     }
@@ -1671,8 +1673,11 @@
 
     function pressureScore() {
       let score = 38;
-      const stormsActive = Boolean(state.stormEnabled);
+      const stormsActive = state.stormEnabled && state.stormFrequency > 0 && state.stormSeverity > 0;
       score += stormsActive ? 6 : -9;
+      score += stormsActive ? (state.stormFrequency - 1) * 9 : 0;
+      score += stormsActive ? (state.stormSeverity - 1) * 9 : 0;
+      score += (state.wormAggression - 1) * 10;
       score += state.pvpMode === "always_on" ? 19 : state.pvpMode === "off" ? -12 : 5;
       score += state.publicBuildDamage ? 6 : -4;
       score += (1 - state.harvestMultiplier) * 5;
@@ -1695,19 +1700,20 @@
             : "The profile favors building, travel, and social play over punishment.";
 
       const find = key => sections.flatMap(section => section.settings).find(setting => setting.key === key);
-      const stormsActive = Boolean(state.stormEnabled);
+      const stormsActive = state.stormEnabled && state.stormFrequency > 0 && state.stormSeverity > 0;
       serverStormToggle.checked = Boolean(state.stormEnabled);
       serverStormToggleText.textContent = state.stormEnabled ? "Enabled" : "Disabled";
       document.querySelector("#statusMode").textContent = profileName.value.replace("Arrakis ", "").replace(" Profile", "") || "Custom";
       document.querySelector("#statusHarvest").textContent = fmt(find("harvestMultiplier"), state.harvestMultiplier);
       document.querySelector("#statusPvp").textContent = fmt(find("pvpMode"), state.pvpMode);
-      document.querySelector("#statusEnv").textContent = stormsActive ? "Storms On" : "Storms Off";
+      document.querySelector("#statusEnv").textContent = !stormsActive ? "Storms Off" : state.stormFrequency > 1.2 || state.stormSeverity > 1.2 ? "Punishing" : state.stormFrequency < 0.8 ? "Calm" : "Standard";
 
       document.querySelector("#summaryList").innerHTML = [
         ["Harvest", fmt(find("harvestMultiplier"), state.harvestMultiplier)],
         ["Vehicle Mining", fmt(find("spiceYieldMultiplier"), state.spiceYieldMultiplier)],
         ["PvP", fmt(find("pvpMode"), state.pvpMode)],
-        ["Storms", stormsActive ? "Enabled" : "Off"],
+        ["Storms", stormsActive ? `${fmt(find("stormFrequency"), state.stormFrequency)} / ${fmt(find("stormSeverity"), state.stormSeverity)}` : "Off"],
+        ["Sandworm", state.wormAggression > 0 ? "Enabled" : "Off"],
         ["Base Claims", fmt(find("baseClaimLimit"), state.baseClaimLimit)],
         ["Build Height", fmt(find("buildHeightLimit"), state.buildHeightLimit)]
       ].map(([label, value]) => `<div class="summary-item"><span>${label}</span><strong>${value}</strong></div>`).join("");

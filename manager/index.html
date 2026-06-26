@@ -1198,7 +1198,7 @@
         <div class="panel-head">
           <div>
             <h2 id="sectionTitle">Resource Multipliers</h2>
-            <p id="sectionDescription">Tune gathering, refining, drops, decay, and progression pace.</p>
+            <p id="sectionDescription">Tune gathering, PvP resources, and item deterioration.</p>
           </div>
           <div class="preset-row">
             <button class="chip" data-preset="balanced">Balanced</button>
@@ -1276,7 +1276,7 @@
       {
         id: "resources",
         title: "Resource Multipliers",
-        description: "Tune gathering, refining, drops, decay, and progression pace.",
+        description: "Tune gathering, PvP resources, and item deterioration.",
         settings: [
           { key: "harvestMultiplier", label: "Harvest yield", help: "Raw materials gathered per node.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
           { key: "spiceYieldMultiplier", label: "Vehicle mining yield", help: "Writes Dune.GlobalVehicleMiningOutputMultiplier.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
@@ -1289,7 +1289,7 @@
       {
         id: "pvp",
         title: "PvP Settings",
-        description: "Shape conflict rules, raiding windows, penalties, and protected spaces.",
+        description: "Shape where player combat is allowed.",
         settings: [
           { key: "pvpMode", label: "PvP mode", help: "Writes UserGame.ini PVP/security-zone toggles. Scheduled mode is not exposed by self-hosted config.", type: "select", value: "frontier_zones", options: [["off", "Off"], ["frontier_zones", "Frontier/security zones"], ["always_on", "Always on"]] },
           { key: "raidWindowHours", label: "Raid window", help: "No confirmed self-hosted config key found for raid windows; planning only.", type: "range", min: 0, max: 24, step: 1, value: 4, unit: "h", supported: false },
@@ -1302,7 +1302,7 @@
       {
         id: "environment",
         title: "Environmental Rules",
-        description: "Control storms, heat, water pressure, worms, and world resets.",
+        description: "Control storms, sandworm behavior, and storm damage.",
         settings: [
           { key: "stormEnabled", label: "Coriolis storm", help: "Allow Coriolis storm and major sandstorm auto-spawn.", type: "toggle", value: true },
           { key: "stormFrequency", label: "Storm availability", help: "0 disables Sandstorm.Enabled; values above 0 allow sandstorm/Coriolis output.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
@@ -1328,7 +1328,7 @@
       {
         id: "clans",
         title: "Clans and Bases",
-        description: "Set community scale, build limits, alliances, and claim rules.",
+        description: "Set base claim and build limits.",
         settings: [
           { key: "maxClanSize", label: "Max clan size", help: "No confirmed self-hosted config key found for clan size; planning only.", type: "range", min: 1, max: 100, step: 1, value: 20, unit: "", supported: false },
           { key: "allianceLimit", label: "Alliance limit", help: "No confirmed self-hosted config key found for alliance limits; planning only.", type: "range", min: 0, max: 10, step: 1, value: 2, unit: "", supported: false },
@@ -1393,6 +1393,21 @@
       return `${Number(value).toFixed(decimals).replace(/\.00$/, "")}${setting.unit}`;
     }
 
+    function supportedSettings(section) {
+      return section.settings.filter(setting => setting.supported !== false);
+    }
+
+    function visibleSections() {
+      return sections.filter(section => supportedSettings(section).length > 0);
+    }
+
+    function ensureVisibleSection() {
+      const available = visibleSections();
+      if (!available.some(section => section.id === currentSection)) {
+        currentSection = available[0]?.id || "";
+      }
+    }
+
     function showToast(message) {
       toast.textContent = message;
       toast.classList.add("show");
@@ -1446,21 +1461,24 @@
     }
 
     function renderNav() {
-      nav.innerHTML = sections.map(section => `
+      ensureVisibleSection();
+      nav.innerHTML = visibleSections().map(section => `
         <button class="${section.id === currentSection ? "active" : ""}" data-section="${section.id}">
           <span>${section.title}</span>
-          <span class="badge">${section.settings.length}</span>
+          <span class="badge">${supportedSettings(section).length}</span>
         </button>
       `).join("");
     }
 
     function renderSettings() {
+      ensureVisibleSection();
       const section = sections.find(item => item.id === currentSection);
+      if (!section) return;
       const query = search.value.trim().toLowerCase();
       document.querySelector("#sectionTitle").textContent = section.title;
       document.querySelector("#sectionDescription").textContent = section.description;
 
-      const visible = section.settings.filter(setting => {
+      const visible = supportedSettings(section).filter(setting => {
         const haystack = `${setting.label} ${setting.help} ${setting.key}`.toLowerCase();
         return !query || haystack.includes(query);
       });

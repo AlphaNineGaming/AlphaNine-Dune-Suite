@@ -10,11 +10,12 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.4.5";
+const APP_VERSION = "0.4.6";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
-const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || path.join(__dirname, "config.json");
+const APPDATA_DIR = process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "";
+const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || (APPDATA_DIR ? path.join(APPDATA_DIR, "config.json") : path.join(__dirname, "config.json"));
 const BUNDLED_TELEPORT_PRESETS_PATH = path.join(__dirname, "assets", "teleport-location-presets.json");
 const TELEPORT_PRESETS_PATH = process.env.ALPHANINE_TELEPORT_PRESETS_PATH || (process.env.APPDATA
   ? path.join(process.env.APPDATA, "AlphaNine Dune Suite", "teleport-location-presets.json")
@@ -63,10 +64,12 @@ function packagedChildCwd() {
 
 const MANAGER_DIR = packagedUnpackedPath("manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
-const APPDATA_DIR = process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "";
 const DATA_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "data") : path.join(__dirname, "data");
+const UI_OVERRIDE_CSS_PATH = path.join(DATA_DIR, "ui-overrides.css");
 const BUNDLED_DATA_DIR = packagedAssetPath("data");
+const BUNDLED_UI_OVERRIDE_CSS_PATH = path.join(BUNDLED_DATA_DIR, "ui-overrides.css");
 const DUNE_ITEMS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-items-catalog.json");
+const DUNE_SKILLS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-skills-catalog.json");
 const DUNE_ITEMS_CACHE_PATH = path.join(DATA_DIR, "dune-items-cache.json");
 const GEAR_IMAGE_CACHE_DIR = path.join(DATA_DIR, "gear-images");
 const BUNDLED_GEAR_IMAGE_DIR = path.join(BUNDLED_DATA_DIR, "gear-images");
@@ -74,6 +77,7 @@ const GEAR_IMPORT_URL = "https://dune.gaming.tools/items";
 const GEAR_DATA_ENTITIES_URL = "https://cdn-hosted.gaming.tools/dune/data/en/entities.d.json";
 const GEAR_CDN_ASSET_URL = "https://cdn-hosted.gaming.tools/dune";
 const ITEM_GRADES = ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Unique", "Unknown"];
+const CATALOG_MAIN_CATEGORIES = new Set(["items", "buildables", "placeables", "customizations"]);
 const LOCALAPPDATA_DIR = process.env.LOCALAPPDATA || process.env.APPDATA || "";
 const MANAGER_DATA_DIR = LOCALAPPDATA_DIR ? path.join(LOCALAPPDATA_DIR, "AlphaNine Dune Awakening Manager") : MANAGER_DIR;
 const MANAGER_CONFIG_PATH = path.join(MANAGER_DATA_DIR, "manager-config.json");
@@ -3253,9 +3257,39 @@ function itemTierCounts(items = []) {
   return Object.fromEntries(Object.entries(counts).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true })));
 }
 
+function itemClassificationText(item = {}) {
+  return [
+    item.name,
+    item.id,
+    item.category,
+    item.subtype,
+    item.type,
+    item.detail,
+    item.description,
+    item.spawnCode,
+    item.itemCode,
+    item.detailUrl,
+    item.imageUrl,
+    item.imageLocalPath,
+    item.source
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function isSchematicItem(item = {}) {
+  if (String(item.category || "").trim().toLowerCase() === "schematics") return true;
+  const text = itemClassificationText(item);
+  return /\bschematics?\b/.test(text)
+    || /\bblueprints?\b/.test(text)
+    || /\brecipes?\b/.test(text)
+    || /\bplans?\b/.test(text)
+    || /\bschematicfragment\b/.test(text)
+    || /(^|[\/_\-\s])schematic(s)?($|[\/_\-\s])/.test(text);
+}
+
 function filterItemsByQuery(items = [], searchParams = new URLSearchParams()) {
   const query = String(searchParams.get("q") || searchParams.get("search") || "").trim().toLowerCase();
-  const category = String(searchParams.get("category") || "").trim();
+  const rawCategory = String(searchParams.get("category") || "").trim();
+  const category = /^(all|\*)$/i.test(rawCategory) ? "" : rawCategory;
   const rawGrade = String(searchParams.get("grade") || "all").trim().toLowerCase();
   const grade = normalizeItemGrade(searchParams.get("grade") || "all");
   const rawTier = String(searchParams.get("tier") || "all").trim().toLowerCase();
@@ -3264,7 +3298,11 @@ function filterItemsByQuery(items = [], searchParams = new URLSearchParams()) {
   return items.filter((item) => {
     const itemGrade = normalizeItemGrade(item.grade, item.rarity, item.quality, item.tier, item.itemGrade, item.itemRarity);
     const itemTier = normalizeItemTier(item.tier, item.itemTier, item.level, item.itemLevel);
-    if (category && item.category !== category) return false;
+    if (category === "__schematics") {
+      if (!isSchematicItem(item)) return false;
+    } else if (String(category).toLowerCase() === "items" && isSchematicItem(item)) {
+      return false;
+    } else if (category && item.category !== category) return false;
     if (rawGrade && rawGrade !== "all" && itemGrade !== grade) return false;
     if (rawTier && rawTier !== "all" && itemTier !== tier) return false;
     if (spawnable === "true" && item.spawnable === false) return false;
@@ -3285,10 +3323,11 @@ function gearImageUrlFromPath(localPath) {
 function sanitizeGearItemForUi(item = {}) {
   const imageLocalPath = String(item.imageLocalPath || "");
   const icon = gearImageUrlFromPath(imageLocalPath);
+  const category = isSchematicItem(item) ? "Schematics" : String(item.category || "");
   return {
     id: String(item.id || ""),
     name: String(item.name || item.id || ""),
-    category: String(item.category || ""),
+    category,
     type: String(item.type || item.subtype || ""),
     subtype: String(item.subtype || item.type || ""),
     detail: String(item.detail || ""),
@@ -3314,6 +3353,30 @@ function normalizeBundledItemForUserCache(item = {}) {
     imageError: String(item.imageError || ""),
     source: "bundled"
   };
+}
+
+function gearItemDedupeScore(item = {}) {
+  let score = 0;
+  if (item.hasDisplayName) score += 4;
+  if (String(item.imageLocalPath || item.icon || "").trim()) score += 8;
+  if (String(item.imageUrl || "").trim()) score += 4;
+  if (String(item.detail || "").trim()) score += 3;
+  if (String(item.category || "").trim() && String(item.category || "").trim().toLowerCase() !== "unknown") score += 2;
+  if (normalizeItemGrade(item.grade, item.rarity, item.quality, item.tier, item.itemGrade, item.itemRarity) !== "Unknown") score += 2;
+  if (normalizeItemTier(item.tier) !== "Unknown") score += 1;
+  if (item.spawnable !== false) score += 1;
+  return score;
+}
+
+function dedupeGearItemsById(items = []) {
+  const byId = new Map();
+  for (const item of items || []) {
+    const id = String(item?.id || "").trim();
+    if (!id) continue;
+    const existing = byId.get(id);
+    if (!existing || gearItemDedupeScore(item) > gearItemDedupeScore(existing)) byId.set(id, item);
+  }
+  return [...byId.values()];
 }
 
 function copyBundledGearImages() {
@@ -3349,7 +3412,8 @@ function seedDuneItemsCacheFromBundledCatalog({ force = false } = {}) {
   } catch (error) {
     return { seeded: false, reason: `Bundled item catalog could not be read: ${error.message}`, catalogPath: DUNE_ITEMS_CATALOG_PATH };
   }
-  const catalogItems = Array.isArray(catalog.items) ? catalog.items.map(normalizeBundledItemForUserCache).filter((item) => item.id && item.name) : [];
+  const rawCatalogItems = Array.isArray(catalog.items) ? catalog.items.map(normalizeBundledItemForUserCache).filter((item) => item.id && item.name) : [];
+  const catalogItems = dedupeGearItemsById(rawCatalogItems);
   if (!catalogItems.length) {
     return { seeded: false, reason: "Bundled item catalog is empty. Run scripts/build-item-catalog.js during development/build before packaging.", catalogPath: DUNE_ITEMS_CATALOG_PATH };
   }
@@ -3380,6 +3444,7 @@ function seedDuneItemsCacheFromBundledCatalog({ force = false } = {}) {
       imageCacheDir: GEAR_IMAGE_CACHE_DIR,
       bundledImageDir: BUNDLED_GEAR_IMAGE_DIR,
       totalItemsFound: catalogItems.length,
+      duplicateItemsRemoved: Math.max(0, rawCatalogItems.length - catalogItems.length),
       gradeCounts: itemGradeCounts(catalogItems),
       tierCounts: itemTierCounts(catalogItems),
       imageCopy
@@ -3396,10 +3461,71 @@ function loadDuneItemsCache() {
   }
   try {
     const data = JSON.parse(fs.readFileSync(DUNE_ITEMS_CACHE_PATH, "utf8"));
-    const items = (data.items || []).map(sanitizeGearItemForUi).filter((item) => item.id && item.name);
-    return { ok: true, items, report: data.report || {}, generatedAt: data.generatedAt || "", seeded };
+    const rawItems = (data.items || []).map(sanitizeGearItemForUi).filter((item) => item.id && item.name);
+    const items = dedupeGearItemsById(rawItems);
+    return {
+      ok: true,
+      items,
+      report: { ...(data.report || {}), totalItemsFound: items.length, duplicateItemsRemoved: Math.max(0, rawItems.length - items.length) },
+      generatedAt: data.generatedAt || "",
+      seeded
+    };
   } catch (error) {
     return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, error: error.message, totalItemsFound: 0 } };
+  }
+}
+
+function loadDuneSkillsCatalog() {
+  if (!fs.existsSync(DUNE_SKILLS_CATALOG_PATH)) {
+    return {
+      ok: false,
+      skills: [],
+      generatedAt: "",
+      treeCounts: {},
+      typeCounts: {},
+      report: {
+        catalogPath: DUNE_SKILLS_CATALOG_PATH,
+        message: "Bundled skill catalog has not been generated yet. Run npm run build:skill-catalog during development/build."
+      }
+    };
+  }
+  try {
+    const data = JSON.parse(fs.readFileSync(DUNE_SKILLS_CATALOG_PATH, "utf8"));
+    const skills = (Array.isArray(data.skills) ? data.skills : []).map((skill) => ({
+      id: String(skill.id || ""),
+      tag: String(skill.tag || ""),
+      name: String(skill.name || skill.id || ""),
+      tree: String(skill.tree || skill.category || "Unknown"),
+      type: String(skill.type || "Skill"),
+      category: String(skill.category || skill.tree || "Unknown"),
+      categories: Array.isArray(skill.categories) ? skill.categories.map(String) : [],
+      gridX: skill.gridX,
+      gridY: skill.gridY,
+      maxLevel: Math.max(1, Number(skill.maxLevel) || 1),
+      costPerLevel: Array.isArray(skill.costPerLevel) ? skill.costPerLevel.map((value) => Number(value) || 0) : [],
+      prerequisites: Array.isArray(skill.prerequisites) ? skill.prerequisites.map(String).filter(Boolean) : [],
+      description: String(skill.description || ""),
+      stats: Array.isArray(skill.stats) ? skill.stats : [],
+      iconPath: String(skill.iconPath || ""),
+      source: String(skill.source || "bundled")
+    })).filter((skill) => skill.id && skill.name);
+    return {
+      ok: true,
+      skills,
+      generatedAt: data.generatedAt || "",
+      treeCounts: data.treeCounts || {},
+      typeCounts: data.typeCounts || {},
+      report: { catalogPath: DUNE_SKILLS_CATALOG_PATH, totalSkills: skills.length, sourceUrl: data.sourceUrl || "" }
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      skills: [],
+      generatedAt: "",
+      treeCounts: {},
+      typeCounts: {},
+      report: { catalogPath: DUNE_SKILLS_CATALOG_PATH, error: error.message }
+    };
   }
 }
 
@@ -3869,7 +3995,11 @@ function titleCaseGearCategory(value = "") {
 
 function gearItemCategory(entity = {}) {
   const categories = Array.isArray(entity.categories) ? entity.categories : [];
-  const primary = categories.find((entry) => /^items\/[^/]+$/i.test(entry)) || categories[0] || "";
+  const main = String(entity.mainCategoryId || "").toLowerCase();
+  const primary = categories.find((entry) => new RegExp(`^${main || "items"}\\/[^/]+$`, "i").test(entry))
+    || categories.find((entry) => /^items\/[^/]+$/i.test(entry))
+    || categories[0]
+    || "";
   return titleCaseGearCategory(primary || entity.mainCategoryId || "");
 }
 
@@ -3906,7 +4036,7 @@ async function discoverDuneItems() {
   fs.mkdirSync(GEAR_IMAGE_CACHE_DIR, { recursive: true });
   const entityResponse = await httpRequestText(GEAR_DATA_ENTITIES_URL, 45000);
   const entities = parseSvelteDevalueJson(entityResponse);
-  const listItems = (Array.isArray(entities) ? entities : []).filter((entity) => entity && entity.mainCategoryId === "items");
+  const listItems = (Array.isArray(entities) ? entities : []).filter((entity) => entity && CATALOG_MAIN_CATEGORIES.has(String(entity.mainCategoryId || "").toLowerCase()));
   if (!listItems.length) throw new Error("No items were found in the online item entity feed.");
   const normalized = listItems.map((entity) => ({
     id: String(entity.id || ""),
@@ -3919,7 +4049,7 @@ async function discoverDuneItems() {
     rarity: String(entity.rarity || ""),
     grade: normalizeItemGrade(entity.grade, entity.rarity, entity.quality, entity.tier, entity.itemGrade, entity.itemRarity),
     maxStack: String(entity.maxStack || entity.maxStackSize || entity.stackSize || ""),
-    detailUrl: `${GEAR_IMPORT_URL}/${encodeURIComponent(String(entity.id || ""))}`,
+    detailUrl: `${GEAR_IMPORT_URL.replace(/\/items$/i, "")}/${CATALOG_MAIN_CATEGORIES.has(String(entity.mainCategoryId || "").toLowerCase()) ? String(entity.mainCategoryId || "items").toLowerCase() : "items"}/${encodeURIComponent(String(entity.id || ""))}`,
     imageUrl: gearImageUrlFromIconPath(entity.iconPath),
     imageLocalPath: "",
     hasDisplayName: Boolean(entity.name && entity.name !== entity.id),
@@ -5037,6 +5167,44 @@ async function selectedBattlegroupDumpDir() {
   return `/funcom/artifacts/database-dumps/${name}`;
 }
 
+function battlegroupImportUploadPermissionMessage(remoteDir, detail = "") {
+  const base = `The VM user cannot write directly to ${remoteDir}. AlphaNine staged the backup in /tmp, but could not promote it into the Battlegroup dump folder.`;
+  const hint = "Run the Suite as the VM admin path that has sudo access, or grant the dune user write access to the Battlegroup dump folder, then retry the import.";
+  return [base, hint, detail].filter(Boolean).join(" ");
+}
+
+async function promoteStagedImportFile(stagedPath, remotePath, remoteDir, label = "backup") {
+  const command = [
+    "set -e",
+    `remote_dir=${shQuote(remoteDir)}`,
+    `staged=${shQuote(stagedPath)}`,
+    `target=${shQuote(remotePath)}`,
+    "if [ ! -f \"$staged\" ]; then echo \"__ALPHANINE_STAGED_FILE_MISSING__\" >&2; exit 12; fi",
+    "if [ -w \"$remote_dir\" ]; then",
+    "  cp \"$staged\" \"$target\"",
+    "  chmod 600 \"$target\" 2>/dev/null || true",
+    "elif command -v sudo >/dev/null 2>&1; then",
+    "  sudo mkdir -p \"$remote_dir\"",
+    "  sudo install -m 600 \"$staged\" \"$target\"",
+    `  sudo chown ${shQuote(SSH_USER)}:${shQuote(SSH_USER)} "$target" 2>/dev/null || true`,
+    "else",
+    "  echo \"__ALPHANINE_IMPORT_DIR_NOT_WRITABLE__\" >&2",
+    "  exit 13",
+    "fi",
+    "rm -f \"$staged\""
+  ].join("; ");
+  const result = await sshCommand(command, 120000, { maxBuffer: 1024 * 256 });
+  if (!result.ok) {
+    const detail = result.stderr || result.stdout || result.error || `Could not move staged ${label} into the Battlegroup dump folder.`;
+    const message = /__ALPHANINE_IMPORT_DIR_NOT_WRITABLE__|permission denied/i.test(detail)
+      ? battlegroupImportUploadPermissionMessage(remoteDir, detail)
+      : detail;
+    databaseBackupAudit("battlegroup_import_promote_failed", { ok: false, label, stagedPath, remotePath, remoteDir, error: message, details: detail.slice(0, 2000) });
+    throw new Error(message);
+  }
+  databaseBackupAudit("battlegroup_import_promote_completed", { ok: true, label, stagedPath, remotePath, remoteDir, stdout: result.stdout.slice(-1000), stderr: result.stderr.slice(-1000) });
+}
+
 async function copyBattlegroupImportFileToVm(localPath, options = {}) {
   const started = Date.now();
   const info = await vmInfo();
@@ -5047,15 +5215,19 @@ async function copyBattlegroupImportFileToVm(localPath, options = {}) {
   const key = sshKeyStatus(SSH_KEY);
   if (!key.exists) throw new Error(key.message);
   const remoteDir = String(options.remoteDir || "").trim() || "/tmp";
+  const stageDir = "/tmp/alphanine-dune-suite-imports";
   const remotePath = path.posix.join(remoteDir, `alphanine-import-${Date.now()}-${path.basename(localPath).replace(/[^a-zA-Z0-9_.-]/g, "_")}`);
+  const stagedPath = path.posix.join(stageDir, path.posix.basename(remotePath));
   const size = fs.statSync(localPath).size;
   databaseBackupAudit("battlegroup_import_transfer_started", {
     ok: true,
     method: "ssh-stream",
-    reason: "Streaming Battlegroup backup over SSH stdin into the Battlegroup dump folder; no SFTP subsystem required.",
+    reason: "Streaming Battlegroup backup over SSH stdin into a writable staging folder, then promoting it into the Battlegroup dump folder; no SFTP subsystem required.",
     source: localPath,
     remoteDir,
     remotePath,
+    stageDir,
+    stagedPath,
     size
   });
   const result = await runWithStdin("ssh", [
@@ -5063,33 +5235,36 @@ async function copyBattlegroupImportFileToVm(localPath, options = {}) {
     "-o", "LogLevel=QUIET",
     "-i", key.path,
     `${SSH_USER}@${ip}`,
-    `umask 077; mkdir -p ${shQuote(remoteDir)} && cat > ${shQuote(remotePath)}`
+    `umask 077; mkdir -p ${shQuote(stageDir)} && cat > ${shQuote(stagedPath)}`
   ], localPath, { timeout: 600000, maxBuffer: 1024 * 1024 * 32 });
   if (!result.ok) {
     const detail = result.stderr || result.error || "Could not stream Battlegroup backup file to VM.";
     const sftpHint = /sftp-server|subsystem request failed|scp: connection closed/i.test(detail)
-      ? `SFTP is not available on this Dune Self-Hosting VM. Import uses SSH streaming; verify SSH shell access and file write permission to ${remoteDir}.`
+      ? `SFTP is not available on this Dune Self-Hosting VM. Import uses SSH streaming; verify SSH shell access and file write permission to ${stageDir}.`
       : detail;
-    databaseBackupAudit("battlegroup_import_transfer_failed", { ok: false, method: "ssh-stream", durationMs: Date.now() - started, remoteDir, remotePath, error: sftpHint, details: detail.slice(0, 2000) });
+    databaseBackupAudit("battlegroup_import_transfer_failed", { ok: false, method: "ssh-stream", durationMs: Date.now() - started, remoteDir, remotePath, stageDir, stagedPath, error: sftpHint, details: detail.slice(0, 2000) });
     throw new Error(sftpHint);
   }
+  await promoteStagedImportFile(stagedPath, remotePath, remoteDir, "backup");
   const yamlPath = `${localPath}.yaml`;
   if (fs.existsSync(yamlPath)) {
+    const stagedYamlPath = `${stagedPath}.yaml`;
     const yamlResult = await runWithStdin("ssh", [
       "-o", "StrictHostKeyChecking=no",
       "-o", "LogLevel=QUIET",
       "-i", key.path,
       `${SSH_USER}@${ip}`,
-      `umask 077; cat > ${shQuote(`${remotePath}.yaml`)}`
+      `umask 077; mkdir -p ${shQuote(stageDir)} && cat > ${shQuote(stagedYamlPath)}`
     ], yamlPath, { timeout: 120000, maxBuffer: 1024 * 1024 });
     if (!yamlResult.ok) {
       const detail = yamlResult.stderr || yamlResult.error || "Could not stream Battlegroup backup sidecar YAML to VM.";
-      databaseBackupAudit("battlegroup_import_yaml_transfer_failed", { ok: false, method: "ssh-stream", durationMs: Date.now() - started, remotePath: `${remotePath}.yaml`, error: detail.slice(0, 2000) });
+      databaseBackupAudit("battlegroup_import_yaml_transfer_failed", { ok: false, method: "ssh-stream", durationMs: Date.now() - started, remotePath: `${remotePath}.yaml`, stagedPath: stagedYamlPath, error: detail.slice(0, 2000) });
       throw new Error(detail);
     }
+    await promoteStagedImportFile(stagedYamlPath, `${remotePath}.yaml`, remoteDir, "sidecar-yaml");
     databaseBackupAudit("battlegroup_import_yaml_transfer_completed", { ok: true, method: "ssh-stream", remotePath: `${remotePath}.yaml`, stdout: yamlResult.stdout.slice(-1000), stderr: yamlResult.stderr.slice(-1000) });
   }
-  databaseBackupAudit("battlegroup_import_transfer_completed", { ok: true, method: "ssh-stream", durationMs: Date.now() - started, remoteDir, remotePath, size, stdout: result.stdout.slice(-1000), stderr: result.stderr.slice(-1000) });
+  databaseBackupAudit("battlegroup_import_transfer_completed", { ok: true, method: "ssh-stream", durationMs: Date.now() - started, remoteDir, remotePath, stageDir, size, stdout: result.stdout.slice(-1000), stderr: result.stderr.slice(-1000) });
   return remotePath;
 }
 
@@ -5690,6 +5865,231 @@ function progressionUnsupported(reason, inspect = null) {
       rawSqlInputEnabled: false
     }
   };
+}
+
+function progressionPlayerActorIds(playerData = {}) {
+  return [...new Set([
+    playerData.player?.actor_id,
+    playerData.player?.player_id,
+    playerData.player?.character_actor_id,
+    playerData.player?.player_controller_id,
+    playerData.player?.player_pawn_id,
+    ...(playerData.factionReputation || []).map((row) => row.actor_id),
+    ...(playerData.currentFactions || []).map((row) => row.actor_id)
+  ].map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))];
+}
+
+async function progressionSkillUnlockStorageScan(playerData = {}, selectedSkills = []) {
+  const actorIds = progressionPlayerActorIds(playerData);
+  if (!actorIds.length) return { status: "unsupported", actorIds: [], candidates: [], matchedSkillRefs: [], reason: "No actor ids were resolved for this player." };
+  const selectedRefs = [...new Set((selectedSkills || []).flatMap((skill) => [skill.id, skill.tag]).map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 60);
+  const actorValues = sqlValuesList(actorIds);
+  const refArray = selectedRefs.length ? sqlTextArray(selectedRefs) : "array[]::text[]";
+  const output = await dbQuery(`
+    with recursive selected_refs(refs) as (values (${refArray})),
+    actor_source as (
+      select id as actor_id, properties as document, 'actors.properties'::text as source, null::bigint as entity_id
+      from dune.actors
+      where id in (select column1 from (values ${actorValues}) as v(column1))
+        and properties is not null
+    ),
+    entity_source as (
+      select afe.actor_id, fe.components as document, 'fgl_entities.components'::text as source, fe.entity_id
+      from dune.actor_fgl_entities afe
+      join dune.fgl_entities fe on fe.entity_id = afe.entity_id
+      where afe.actor_id in (select column1 from (values ${actorValues}) as v(column1))
+        and fe.components is not null
+    ),
+    source as (
+      select * from actor_source
+      union all
+      select * from entity_source
+    ),
+    walk(actor_id, source, entity_id, path, value) as (
+      select actor_id, source, entity_id, array[]::text[], document
+      from source
+      union all
+      select w.actor_id, w.source, w.entity_id, w.path || child.key, child.value
+      from walk w
+      cross join lateral (
+        select e.key, e.value
+        from jsonb_each(case when jsonb_typeof(w.value) = 'object' then w.value else '{}'::jsonb end) e
+        union all
+        select (a.ordinality - 1)::text as key, a.value
+        from jsonb_array_elements(case when jsonb_typeof(w.value) = 'array' then w.value else '[]'::jsonb end) with ordinality a(value, ordinality)
+      ) child
+      where jsonb_typeof(w.value) in ('object', 'array')
+        and coalesce(array_length(w.path, 1), 0) < 18
+    ),
+    flattened as (
+      select actor_id, source, entity_id, array_to_string(path, '.') as path, jsonb_typeof(value) as value_type, left(value #>> '{}', 240) as value_text
+      from walk
+      where coalesce(array_length(path, 1), 0) > 0
+    ),
+    candidates as (
+      select 'keyword'::text as kind, actor_id::text, source, coalesce(entity_id::text, '') as entity_id, path, value_type, coalesce(value_text, '') as value_text
+      from flattened
+      where path ~* '(skill|perk|ability|talent|unlock|learned|purchased|technique|attribute)'
+         or coalesce(value_text, '') ~* '(Skills\\.|skill|perk|ability|talent|unlock|learned|purchased|technique|attribute)'
+      union all
+      select 'selected_skill_ref'::text, f.actor_id::text, f.source, coalesce(f.entity_id::text, ''), f.path, f.value_type, coalesce(f.value_text, '')
+      from flattened f
+      cross join selected_refs s
+      where exists (
+        select 1
+        from unnest(s.refs) ref
+        where ref <> ''
+          and (f.path ilike '%' || ref || '%' or coalesce(f.value_text, '') ilike '%' || ref || '%')
+      )
+    )
+    select kind, actor_id, source, entity_id, path, value_type, value_text
+    from candidates
+    order by case when kind = 'selected_skill_ref' then 0 else 1 end, source, actor_id, path
+    limit 160;
+  `, 20000);
+  const rows = parseDbRows(output, ["kind", "actor_id", "source", "entity_id", "path", "valueType", "valueText"]);
+  const matchedSkillRefs = rows.filter((row) => row.kind === "selected_skill_ref");
+  return {
+    status: matchedSkillRefs.length ? "unknown" : (rows.length ? "unknown" : "unsupported"),
+    actorIds,
+    candidateCount: rows.length,
+    candidates: rows.slice(0, 80),
+    matchedSkillRefs,
+    reason: matchedSkillRefs.length
+      ? "Selected skill references were found, but this beta does not yet have a verified write adapter for the discovered structure."
+      : rows.length
+        ? "Skill-like player data was found, but no selected skill reference matched a verified unlock structure."
+        : "No skill unlock component or selected skill references were found for this player."
+  };
+}
+
+function skillModuleTagKey(tag) {
+  return `(TagName="${String(tag || "").trim()}")`;
+}
+
+function skillPerkTagFromSkillTag(tag) {
+  const text = String(tag || "").trim();
+  if (!/^Skills\.Perk\./i.test(text)) return "";
+  return text.replace(/^Skills\.Perk\./i, "Perks.");
+}
+
+function skillUnlockPointCost(skill = {}) {
+  const costs = Array.isArray(skill.costPerLevel) ? skill.costPerLevel.map((value) => Number(value) || 0).filter((value) => value > 0) : [];
+  if (costs.length) return costs.reduce((sum, value) => sum + value, 0);
+  return Math.max(1, Number(skill.maxLevel) || 1);
+}
+
+async function progressionUnlockSkills(payload) {
+  const timer = progressionPhaseTimer("progression/skill-unlock");
+  try {
+    await timer.step("config_load", async () => loadConfig());
+    await timer.step("safety_check", async () => {
+      if (!loadConfig().progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+    });
+    const catalog = loadDuneSkillsCatalog();
+    if (!catalog.ok || !catalog.skills.length) return progressionUnsupported(catalog.report?.message || catalog.report?.error || "Bundled skill catalog is unavailable.");
+    const requestedSkillIds = [...new Set((Array.isArray(payload?.skillIds) ? payload.skillIds : []).map((value) => String(value || "").trim()).filter(Boolean))];
+    if (!requestedSkillIds.length) throw new Error("Choose at least one skill to unlock.");
+    if (requestedSkillIds.length > 40) throw new Error("Choose 40 skills or fewer per unlock action.");
+    const byId = new Map(catalog.skills.map((skill) => [skill.id, skill]));
+    const selectedSkills = requestedSkillIds.map((id) => byId.get(id)).filter(Boolean);
+    const missingSkillIds = requestedSkillIds.filter((id) => !byId.has(id));
+    if (!selectedSkills.length) throw new Error("None of the selected skill ids exist in the bundled skill catalog.");
+    const query = String(payload?.query || payload?.playerId || "").trim();
+    const playerData = await timer.step("selected_target_validate", () => withProgressionStepTimeout(progressionPlayerLookup(query), 20000, "selected_target_validate"));
+    if (!playerData.ok) return progressionUnsupported(playerData.reason || "Player lookup failed.");
+    if (String(playerData.player?.online_status || "").toLowerCase().includes("online")) throw new Error("Skill unlock editing requires the player to be offline.");
+    const fLevelTarget = playerData.progressionDebug?.fLevelTarget || null;
+    if (!fLevelTarget?.entity_id) throw new Error("Selected FLevelComponent target is missing. Reload the player before unlocking skills.");
+    const fLevelFields = fLevelTarget.fields || {};
+    const fLevelBasePath = (fLevelFields.TotalSkillPoints?.path || fLevelFields.TotalXPEarned?.path || fLevelFields.UnspentSkillPoints?.path || ["FLevelComponent", "1", "TotalSkillPoints"]).slice(0, -1);
+    const actorId = requireInteger(playerData.player.actor_id, "actor_id", 1);
+    const fLevelEntityId = requireSqlIntegerLiteral(fLevelTarget.entity_id, "fLevel_entity_id");
+    const backupId = crypto.randomBytes(16).toString("hex");
+    const backupPath = progressionBackupPath(actorId, "skill_unlocks", backupId);
+    const beforeOutput = await timer.step("read_current", () => withProgressionStepTimeout(dbQuery(`
+      select jsonb_pretty(components #> ${sqlTextArrayPath(fLevelBasePath)})
+      from dune.fgl_entities
+      where entity_id = ${fLevelEntityId}
+      limit 1;
+    `, 12000), 14000, "read_current"));
+    await timer.step("backup_create", async () => {
+      fs.writeFileSync(backupPath, JSON.stringify({
+        createdAt: new Date().toISOString(),
+        action: "skill_unlocks",
+        player: playerData.player,
+        fLevelTarget,
+        selectedSkills,
+        missingSkillIds,
+        beforeFLevelComponent: beforeOutput || "",
+        source: "direct-skill-unlock"
+      }, null, 2), "utf8");
+    });
+    const moduleUpdates = selectedSkills.map((skill) => {
+      const tag = String(skill.tag || "").trim();
+      if (!tag) throw new Error(`Skill ${skill.name || skill.id} is missing a gameplay tag.`);
+      return {
+        id: skill.id,
+        tag,
+        name: skill.name,
+        points: skillUnlockPointCost(skill),
+        maxLevel: Math.max(1, Number(skill.maxLevel) || 1),
+        perkTag: skillPerkTagFromSkillTag(tag)
+      };
+    });
+    let expression = "components";
+    for (const item of moduleUpdates) {
+      expression = `jsonb_set(${expression}, ${sqlTextArrayPath([...fLevelBasePath, "ModuleData", skillModuleTagKey(item.tag)])}, jsonb_build_object('SkillPointsSpent', ${item.points}), true)`;
+      if (item.perkTag) {
+        expression = `jsonb_set(${expression}, ${sqlTextArrayPath([...fLevelBasePath, "PerkData", skillModuleTagKey(item.perkTag)])}, jsonb_build_object('bIsNew', false, 'CurrentLevel', ${item.maxLevel}), true)`;
+      }
+    }
+    await timer.step("unlock_update", () => withProgressionStepTimeout(dbQuery(`
+      begin;
+      update dune.fgl_entities
+      set components = ${expression}
+      where entity_id = ${fLevelEntityId};
+      commit;
+    `, 20000), 22000, "unlock_update"));
+    const verifySelects = moduleUpdates.map((item, index) => `
+      coalesce(components #>> ${sqlTextArrayPath([...fLevelBasePath, "ModuleData", skillModuleTagKey(item.tag), "SkillPointsSpent"])}, '') as module_${index},
+      coalesce(components #>> ${sqlTextArrayPath([...fLevelBasePath, "PerkData", skillModuleTagKey(item.perkTag || "__none__"), "CurrentLevel"])}, '') as perk_${index}
+    `).join(",\n");
+    const verifyOutput = await timer.step("verify_readback", () => withProgressionStepTimeout(dbQuery(`
+      select ${verifySelects}
+      from dune.fgl_entities
+      where entity_id = ${fLevelEntityId}
+      limit 1;
+    `, 12000), 14000, "verify_readback"));
+    const parts = String(verifyOutput || "").split("\t");
+    const readBackValues = moduleUpdates.map((item, index) => ({
+      ...item,
+      moduleSkillPointsSpent: parts[index * 2] || "",
+      perkCurrentLevel: parts[(index * 2) + 1] || ""
+    }));
+    const verified = readBackValues.every((item) => String(item.moduleSkillPointsSpent) === String(item.points) && (!item.perkTag || String(item.perkCurrentLevel) === String(item.maxLevel)));
+    await timer.step("audit_write", async () => progressionAudit("skill_unlocks_applied", { player: playerData.player, fLevelTarget, selectedSkills: moduleUpdates, missingSkillIds, backupFilePath: backupPath, verified, readBackValues }));
+    timer.finish({ status: verified ? "applied" : "verification_failed", action: "skill_unlocks", selected: selectedSkills.length });
+    return {
+      ok: verified,
+      status: verified ? "applied" : "verification_failed",
+      action: "skill_unlocks",
+      player: playerData.player,
+      playerOffline: !String(playerData.player?.online_status || "").toLowerCase().includes("online"),
+      backupPath,
+      auditLogPath: PROGRESSION_AUDIT_LOG,
+      selectedSkills: moduleUpdates,
+      missingSkillIds,
+      readBackValues,
+      timings: timer.timings,
+      message: verified ? `Unlocked ${moduleUpdates.length} selected skill(s).` : "Skill unlock write completed, but read-back verification did not match."
+    };
+  } catch (error) {
+    const timedOut = /timed out|timeout/i.test(error.message);
+    const failedStep = timer.currentStep;
+    timer.finish({ status: timedOut ? "timeout" : "error", action: "skill_unlocks", step: failedStep, error: error.message });
+    return { ok: false, status: timedOut ? "timeout" : "error", step: failedStep, timings: timer.timings, action: "skill_unlocks", error: error.message, auditLogPath: PROGRESSION_AUDIT_LOG };
+  }
 }
 
 function progressionLookupTimer(query) {
@@ -6350,7 +6750,9 @@ function progressionBackupPath(playerId, action, id) {
 }
 
 function sqlTextArrayPath(pathValue) {
-  const parts = String(pathValue || "").split(".").filter(Boolean);
+  const parts = Array.isArray(pathValue)
+    ? pathValue.map((part) => String(part || "").trim()).filter(Boolean)
+    : String(pathValue || "").split(".").filter(Boolean);
   if (!parts.length) throw new Error("Detected JSON path is empty.");
   return `ARRAY[${parts.map((part) => sqlString(part)).join(", ")}]`;
 }
@@ -6422,7 +6824,7 @@ async function progressionPreview(payload) {
     await timer.step("safety_check", async () => {});
     action = await timer.step("request_validate", async () => {
       const requestedAction = String(payload?.action || "").trim();
-      if (!["specialization_xp", "character_xp_skill_points"].includes(requestedAction)) {
+      if (!["specialization_xp", "faction_reputation", "skill_unlocks", "character_xp_skill_points"].includes(requestedAction)) {
         throw new Error("Unsupported progression action.");
       }
       return requestedAction;
@@ -6439,7 +6841,44 @@ async function progressionPreview(payload) {
       let oldValues = {};
       let newValues = {};
       let sqlPreview = "";
-      if (action === "specialization_xp") {
+      if (action === "skill_unlocks") {
+        const catalog = loadDuneSkillsCatalog();
+        if (!catalog.ok || !catalog.skills.length) return progressionUnsupported(catalog.report?.message || catalog.report?.error || "Bundled skill catalog is unavailable.");
+        const requestedSkillIds = [...new Set((Array.isArray(payload?.skillIds) ? payload.skillIds : []).map((value) => String(value || "").trim()).filter(Boolean))];
+        if (!requestedSkillIds.length) throw new Error("Choose at least one skill to unlock.");
+        if (requestedSkillIds.length > 40) throw new Error("Choose 40 skills or fewer per preview.");
+        const byId = new Map(catalog.skills.map((skill) => [skill.id, skill]));
+        const selectedSkills = requestedSkillIds.map((id) => byId.get(id)).filter(Boolean);
+        const missingSkillIds = requestedSkillIds.filter((id) => !byId.has(id));
+        if (!selectedSkills.length) throw new Error("None of the selected skill ids exist in the bundled skill catalog.");
+        const storageScan = await timer.step("skill_unlock_storage_scan", () => withProgressionStepTimeout(progressionSkillUnlockStorageScan(playerData, selectedSkills), 22000, "skill_unlock_storage_scan"));
+        oldValues = {
+          unlockedSkills: "not read",
+          storageStatus: storageScan.status,
+          candidateCount: storageScan.candidateCount || 0,
+          matchedSkillRefs: storageScan.matchedSkillRefs || []
+        };
+        newValues = {
+          selectedSkillIds: selectedSkills.map((skill) => skill.id),
+          skills: selectedSkills.map((skill) => ({
+            id: skill.id,
+            tag: skill.tag,
+            name: skill.name,
+            tree: skill.tree,
+            type: skill.type,
+            maxLevel: skill.maxLevel,
+            costPerLevel: skill.costPerLevel
+          })),
+          missingSkillIds,
+          storageScan
+        };
+        sqlPreview = [
+          "Skill unlock preview only.",
+          "The app found the game skill catalog and your selected skills, then scanned this player's actor/FGL JSON for skill unlock storage.",
+          "Live skill unlock writes are blocked until a verified player skill storage adapter is detected.",
+          `Storage scan: ${storageScan.status}. ${storageScan.reason || ""}`
+        ].join("\n");
+      } else if (action === "specialization_xp") {
         if (inspect.supports?.specializationXp?.status !== "detected") return progressionUnsupported("Specialization XP schema/function support was not detected.", inspect);
         const track = String(payload?.trackType || "").trim();
         if (!track) throw new Error("trackType is required.");
@@ -6483,7 +6922,7 @@ async function progressionPreview(payload) {
         sqlPreview = `For actor IDs ${targetActorIds.join(", ")}: set current faction to ${factionId}, set reputation to ${reputationAmount}, rebuild FactionPlayerComponent cache, and complete ${rankGateNodes.length} faction rank journey gates. Player must be offline for the journey gate write.`;
       }
       const backupPath = progressionBackupPath(actorId, action, previewId);
-      await timer.step("backup_create", async () => fs.writeFileSync(backupPath, JSON.stringify({ createdAt: new Date().toISOString(), action, player: playerData.player, oldValues, source: "progression-preview", readOnlyBackup: true }, null, 2), "utf8"));
+      await timer.step("backup_create", async () => fs.writeFileSync(backupPath, JSON.stringify({ createdAt: new Date().toISOString(), action, player: playerData.player, oldValues, newValues, source: "progression-preview", readOnlyBackup: true }, null, 2), "utf8"));
       const preview = await timer.step("response_build", async () => ({
         ok: true,
         status: "preview",
@@ -6498,7 +6937,9 @@ async function progressionPreview(payload) {
         techKnowledgeTarget: null,
         auditLogPath: PROGRESSION_AUDIT_LOG,
         sqlPreview,
-        warning: `Live progression editing can corrupt player data. Backup first. Type ${PROGRESSION_CONFIRM_TEXT} before applying.`
+        warning: action === "skill_unlocks"
+          ? "Skill unlock selection is available as a guarded preview. Live skill unlock apply is blocked until the player skill storage path is verified."
+          : `Live progression editing can corrupt player data. Backup first. Type ${PROGRESSION_CONFIRM_TEXT} before applying.`
       }));
       preview.timings = timer.finish({ status: "preview", action });
       progressionPreviews.set(previewId, { ...preview, createdAt: Date.now(), componentSupport });
@@ -6682,7 +7123,9 @@ async function progressionApply(payload) {
       if (!fs.existsSync(preview.backupPath)) throw new Error("Matching backup file is missing.");
     });
     const actorId = requireInteger(preview.player.actor_id, "actor_id", 1);
-    if (action === "specialization_xp") {
+    if (action === "skill_unlocks") {
+      throw new Error("Skill unlock apply is not enabled yet. The app can list and preview selected skills, but no verified player skill unlock storage adapter was detected.");
+    } else if (action === "specialization_xp") {
       await timer.step("safety_check", async () => {
         const inspect = await withProgressionStepTimeout(progressionInspector(), 10000, "safety_check");
         if (inspect.supports?.specializationXp?.status !== "detected") throw new Error("Specialization XP support is no longer detected.");
@@ -10040,6 +10483,7 @@ function appPage() {
       --glass:rgba(10,9,7,.64); --line:rgba(246,190,86,.5); --line-strong:rgba(255,225,150,.86); --line-blue:rgba(134,200,255,.32);
       --text:#fff4df; --muted:#d6bf91; --sand:#ffe5b5; --gold:#f6bf55; --gold-bright:#ffe196; --blue:#86c8ff;
       --good:#75d982; --warn:#ffbd5e; --bad:#ff705f; --shadow:0 26px 80px rgba(0,0,0,.58);
+      --option-bg:#090806; --option-text:#fff4df; --option-muted:#8f7d60; --option-selected-bg:#f6bf55; --option-selected-text:#1b1205;
       --content-max:1812px; --panel-gap:10px; --panel-pad:14px; --panel-cut:14px; --panel-radius:22px;
       --font-panel-label:10.5px; --font-panel-title:15.5px; --font-panel-body:12.5px; --font-panel-value:21px; --font-panel-subtle:11.5px; --font-button:12.5px; --font-table:12.5px;
       --hero-banner:url("/assets/theme-alpha-gold-banner.webp"); --hero-size:100% auto; --hero-ratio:2007 / 626; --grid-opacity:.14; --theme-glow:rgba(255,198,91,.28);
@@ -10050,6 +10494,7 @@ function appPage() {
       --bg:#010101; --bg-2:#050403; --panel:rgba(3,3,3,.96); --panel-2:rgba(12,9,5,.9);
       --glass:rgba(0,0,0,.78); --line:rgba(188,132,45,.42); --line-strong:rgba(219,164,67,.76); --line-blue:rgba(56,109,184,.28);
       --text:#f0e4d0; --muted:#aa9168; --sand:#d7b06d; --gold:#c98e32; --gold-bright:#dba443; --blue:#4d8dd4;
+      --option-bg:#050403; --option-text:#f0e4d0; --option-muted:#806a45; --option-selected-bg:#c98e32; --option-selected-text:#090603;
       --hero-banner:url("/assets/theme-command-console-banner.webp"); --hero-size:100% auto; --hero-ratio:1792 / 627; --grid-opacity:.16; --theme-glow:rgba(114,74,18,.14);
       --wizard-overlay:rgba(0,0,0,.94); --wizard-card-bg:linear-gradient(180deg, rgba(8,6,3,.98), rgba(0,0,0,.96)); --wizard-step-bg:rgba(201,142,50,.07); --wizard-step-active-bg:rgba(201,142,50,.16); --wizard-field-bg:rgba(0,0,0,.78); --wizard-test-bg:rgba(201,142,50,.035); --wizard-test-ok-bg:rgba(117,217,130,.07); --wizard-test-bad-bg:rgba(255,112,95,.07);
     }
@@ -10057,6 +10502,7 @@ function appPage() {
       --bg:#100613; --bg-2:#2b1231; --panel:rgba(28,12,34,.9); --panel-2:rgba(48,20,55,.8);
       --glass:rgba(22,10,28,.66); --line:rgba(180,94,203,.46); --line-strong:rgba(229,139,255,.76); --line-blue:rgba(255,159,202,.34);
       --text:#f7eafd; --muted:#c7a3d0; --sand:#f2d9ff; --gold:#c982ff; --gold-bright:#e58bff; --blue:#ff9fca;
+      --option-bg:#1a0820; --option-text:#f7eafd; --option-muted:#a886b3; --option-selected-bg:#c982ff; --option-selected-text:#16051a;
       --good:#89e89d; --warn:#ffbd73; --bad:#ff6e84; --hero-banner:url("/assets/theme-purple-desert-banner.webp"); --hero-size:100% auto; --hero-ratio:1740 / 626; --grid-opacity:.18; --theme-glow:rgba(201,130,255,.2);
       --wizard-overlay:rgba(12,3,17,.94); --wizard-card-bg:linear-gradient(180deg, rgba(35,12,43,.98), rgba(12,5,17,.95)); --wizard-step-bg:rgba(201,130,255,.08); --wizard-step-active-bg:rgba(201,130,255,.18); --wizard-field-bg:rgba(14,5,19,.78); --wizard-test-bg:rgba(201,130,255,.045); --wizard-test-ok-bg:rgba(137,232,157,.08); --wizard-test-bad-bg:rgba(255,110,132,.08);
     }
@@ -10064,6 +10510,7 @@ function appPage() {
       --bg:#070503; --bg-2:#20140b; --panel:rgba(24,16,10,.92); --panel-2:rgba(43,28,16,.82);
       --glass:rgba(18,12,8,.7); --line:rgba(166,113,55,.48); --line-strong:rgba(214,159,83,.82); --line-blue:rgba(138,183,215,.34);
       --text:#f2e7d7; --muted:#b69a78; --sand:#dcc4a2; --gold:#c89446; --gold-bright:#d69f53; --blue:#8ab7d7;
+      --option-bg:#120b06; --option-text:#f2e7d7; --option-muted:#9d8062; --option-selected-bg:#c89446; --option-selected-text:#120b06;
       --warn:#e1a85f; --hero-banner:url("/assets/theme-high-contrast-banner.webp"); --hero-size:100% auto; --hero-ratio:2008 / 627; --grid-opacity:.18; --theme-glow:rgba(202,138,64,.18);
       --wizard-overlay:rgba(8,5,3,.94); --wizard-card-bg:linear-gradient(180deg, rgba(34,21,11,.98), rgba(9,6,4,.95)); --wizard-step-bg:rgba(214,159,83,.08); --wizard-step-active-bg:rgba(214,159,83,.18); --wizard-field-bg:rgba(10,7,5,.78); --wizard-test-bg:rgba(214,159,83,.045); --wizard-test-ok-bg:rgba(117,217,130,.07); --wizard-test-bad-bg:rgba(255,112,95,.07);
     }
@@ -10071,6 +10518,7 @@ function appPage() {
       color-scheme:light; --bg:#efe5d4; --bg-2:#d7b77f; --panel:rgba(255,250,238,.9); --panel-2:rgba(242,222,184,.78);
       --glass:rgba(255,250,238,.64); --line:rgba(175,119,35,.36); --line-strong:rgba(199,139,43,.72); --line-blue:rgba(111,135,149,.3);
       --text:#221914; --muted:#756048; --sand:#6b5032; --gold:#b77a22; --gold-bright:#c98b2b; --blue:#6f8795;
+      --option-bg:#fff8ea; --option-text:#221914; --option-muted:#8d7a60; --option-selected-bg:#dcb268; --option-selected-text:#221914;
       --good:#2f8143; --warn:#aa671b; --bad:#b43b2c; --shadow:0 22px 70px rgba(98,58,18,.22); --hero-banner:url("/assets/theme-royal-desert-banner.webp"); --hero-size:100% auto; --hero-ratio:1712 / 626; --grid-opacity:.1; --theme-glow:rgba(255,238,194,.55);
       --wizard-overlay:rgba(74,43,12,.34); --wizard-card-bg:linear-gradient(180deg, rgba(255,253,247,.98), rgba(242,222,184,.96)); --wizard-step-bg:rgba(183,122,34,.08); --wizard-step-active-bg:rgba(183,122,34,.18); --wizard-field-bg:rgba(255,253,247,.9); --wizard-test-bg:rgba(255,250,238,.72); --wizard-test-ok-bg:rgba(47,129,67,.1); --wizard-test-bad-bg:rgba(180,59,44,.1);
     }
@@ -10456,6 +10904,97 @@ function appPage() {
       border-color:rgba(145,94,30,.3);
       box-shadow:inset 0 0 18px rgba(145,94,30,.06);
     }
+    body.theme-royal #progression,
+    body.theme-royal #progression .progression-shell,
+    body.theme-royal #progression .progression-hero,
+    body.theme-royal #progression .progression-main-grid,
+    body.theme-royal #progression .progression-stack { color:#221914; }
+    body.theme-royal #progression .progression-hero h2,
+    body.theme-royal #progression .progression-profile-name,
+    body.theme-royal #progression .progression-fold > summary,
+    body.theme-royal #progression .progression-recent-item strong,
+    body.theme-royal #progression .detail-row strong,
+    body.theme-royal #progression table,
+    body.theme-royal #progression td,
+    body.theme-royal #progression th,
+    body.theme-royal #progression pre { color:#221914; }
+    body.theme-royal #progression .subtle,
+    body.theme-royal #progression .micro,
+    body.theme-royal #progression .progression-profile-meta,
+    body.theme-royal #progression .progression-recent-item span,
+    body.theme-royal #progression .progression-bar label,
+    body.theme-royal #progression .detail-row .subtle { color:#4f3b26; }
+    body.theme-royal #progression .kicker,
+    body.theme-royal #progression .label,
+    body.theme-royal #progression .progression-bar label span,
+    body.theme-royal #progression .progression-bar label strong,
+    body.theme-royal #progression .progression-fold > summary::after { color:#6d4518; }
+    body.theme-royal #progression .progression-profile-card,
+    body.theme-royal #progression .progression-fold,
+    body.theme-royal #progression .panel,
+    body.theme-royal #progression .empty,
+    body.theme-royal #progression .detail-row,
+    body.theme-royal #progression .progression-recent-item {
+      color:#221914;
+      border-color:rgba(105,73,32,.3);
+      background:linear-gradient(180deg, rgba(255,250,238,.94), rgba(242,222,184,.86));
+      box-shadow:0 18px 48px rgba(116,73,24,.16), inset 0 0 0 1px rgba(255,255,255,.38);
+    }
+    body.theme-royal #progression .progression-profile-card {
+      background:linear-gradient(135deg, rgba(255,253,247,.96), rgba(230,190,122,.48));
+    }
+    body.theme-royal #progression .progression-avatar,
+    body.theme-royal #progression .progression-recent-time {
+      color:#6d4518;
+      border-color:rgba(105,73,32,.42);
+      background:rgba(255,253,247,.64);
+      box-shadow:0 0 24px rgba(116,73,24,.12);
+    }
+    body.theme-royal #progression .progression-meter {
+      border:1px solid rgba(105,73,32,.22);
+      background:rgba(105,73,32,.18);
+      box-shadow:inset 0 0 12px rgba(116,73,24,.16);
+    }
+    body.theme-royal #progression .progression-meter span {
+      background:linear-gradient(90deg, #8d5c21, #c98b2b);
+      box-shadow:0 0 16px rgba(116,73,24,.18);
+    }
+    body.theme-royal #progression .progression-fold.danger-zone {
+      border-color:rgba(145,58,36,.42);
+      background:linear-gradient(180deg, rgba(255,245,231,.95), rgba(229,198,171,.9));
+      box-shadow:0 18px 48px rgba(116,73,24,.2);
+    }
+    body.theme-royal #progression .progression-fold.danger-zone > summary,
+    body.theme-royal #progression .progression-fold.danger-zone .label {
+      color:#74321f;
+    }
+    body.theme-royal #progression .warning {
+      color:#5b3712;
+      border-color:rgba(170,103,27,.42);
+      background:rgba(255,242,212,.82);
+    }
+    body.theme-royal #progression input,
+    body.theme-royal #progression select,
+    body.theme-royal #progression textarea {
+      color:#221914;
+      background:linear-gradient(180deg, rgba(255,253,247,.96), rgba(246,229,194,.86));
+      border-color:rgba(128,85,32,.42);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.65);
+    }
+    body.theme-royal #progression input::placeholder { color:#6d5a43; }
+    body.theme-royal #progression pre {
+      background:rgba(255,253,247,.82);
+      border-color:rgba(105,73,32,.28);
+    }
+    body.theme-royal #progression table {
+      background:rgba(255,253,247,.62);
+      border-color:rgba(105,73,32,.22);
+    }
+    body.theme-royal #progression th {
+      color:#6d4518;
+      background:rgba(230,190,122,.32);
+    }
+    body.theme-royal #progression td { border-top-color:rgba(105,73,32,.16); }
     .live-map-log { max-height:180px; overflow:auto; }
     .live-map-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
     .live-map-marker-table { max-height:360px; overflow:auto; }
@@ -10966,6 +11505,262 @@ function appPage() {
     .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--panel-gap); }
     .diagnostic-log { min-height:220px; max-height:420px; overflow:auto; white-space:pre-wrap; }
     .mt { margin-top:8px; } .mb { margin-bottom:8px; }
+    /* Theme consistency pass: keep feature-specific surfaces on the active theme palette. */
+    .empty,
+    pre,
+    table,
+    .activity-item,
+    .player-card,
+    .admin-item,
+    .item-db-card,
+    .env-card,
+    .vm-status-card,
+    .restore-step,
+    .suite-health-card,
+    .map-intel-card,
+    .map-intel-tile,
+    .intel-stat,
+    .region-detail-panel,
+    .map-region-card,
+    .progression-profile-card,
+    .progression-fold,
+    .progression-recent-item,
+    .setup-card,
+    .setup-step,
+    .test-result,
+    .suite-action-card,
+    .suite-modal-card,
+    .about-card {
+      color:var(--text);
+      border-color:var(--line);
+      background:linear-gradient(180deg, var(--panel-2), var(--panel));
+      box-shadow:0 14px 44px rgba(0,0,0,.18), inset 0 0 0 1px rgba(255,255,255,.025);
+    }
+    .empty,
+    pre,
+    .diagnostic-log,
+    #mapLog,
+    #liveMapLog,
+    #teleportLog,
+    #giveQueueLog,
+    #setupDiscoveryLog {
+      color:var(--text);
+      background:linear-gradient(180deg, var(--glass), var(--panel));
+      border-color:var(--line);
+    }
+    .subtle,
+    .micro,
+    .activity-time,
+    .item-db-meta,
+    .admin-item span,
+    .player-card span,
+    .vm-row small,
+    .env-card span,
+    .env-var-source,
+    .env-section-note,
+    .progression-profile-meta,
+    .progression-recent-item span,
+    .progression-bar label,
+    .detail-row .subtle {
+      color:var(--muted);
+    }
+    .progression-profile-name,
+    .progression-fold > summary,
+    .map-region-card h4,
+    .region-detail-panel h4 {
+      color:var(--text);
+    }
+    .value,
+    .env-card strong,
+    .env-var-value,
+    .health-score strong,
+    .vm-status-card strong,
+    .user-summary-card strong,
+    .suite-action-card strong,
+    .item-db-card strong,
+    .admin-item strong,
+    .player-card strong {
+      color:var(--gold-bright);
+    }
+    .kicker,
+    .label,
+    label,
+    .page-section-title,
+    .panel-head .label,
+    .progression-fold > summary::after,
+    .progression-bar label strong,
+    .item-grade-badge,
+    .status-pill,
+    .vm-details summary,
+    .give-diagnostics summary {
+      color:var(--gold-bright);
+    }
+    select,
+    input,
+    textarea,
+    .setup-card input,
+    .setup-card select,
+    .setup-card textarea,
+    .setup-card pre {
+      color:var(--text);
+      background:linear-gradient(180deg, var(--glass), var(--panel));
+      border-color:var(--line);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.045);
+    }
+    select:focus,
+    input:focus,
+    textarea:focus,
+    .setup-card input:focus,
+    .setup-card select:focus,
+    .setup-card textarea:focus {
+      border-color:var(--line-strong);
+      box-shadow:0 0 0 3px var(--theme-glow), inset 0 1px 0 rgba(255,255,255,.055);
+    }
+    body:not(.theme-royal) select {
+      color-scheme:dark;
+    }
+    body.theme-royal select {
+      color-scheme:light;
+    }
+    select option,
+    select optgroup {
+      color:var(--option-text) !important;
+      background-color:var(--option-bg) !important;
+    }
+    select option:checked,
+    select option:hover {
+      color:var(--option-selected-text) !important;
+      background-color:var(--option-selected-bg) !important;
+    }
+    select option:disabled {
+      color:var(--option-muted) !important;
+      background-color:var(--option-bg) !important;
+    }
+    button,
+    .button,
+    .controls button,
+    .action-row button,
+    .panel-head button,
+    .settings-grid button,
+    .vm-details button,
+    .dashboard-footer button,
+    .sidebar-foot button,
+    .sidebar-links a,
+    .setup-card button {
+      color:var(--sand);
+      background:linear-gradient(180deg, var(--panel-2), var(--panel));
+      border-color:var(--line);
+      box-shadow:0 8px 22px rgba(0,0,0,.12), inset 0 1px 0 rgba(255,255,255,.035);
+    }
+    button:hover,
+    .button:hover,
+    .controls button:hover,
+    .action-row button:hover,
+    .panel-head button:hover,
+    .settings-grid button:hover,
+    .vm-details button:hover,
+    .dashboard-footer button:hover,
+    .sidebar-foot button:hover,
+    .sidebar-links a:hover,
+    .setup-card button:hover {
+      color:var(--gold-bright);
+      border-color:var(--line-strong);
+      background:linear-gradient(180deg, var(--glass), var(--panel-2));
+      box-shadow:0 10px 28px var(--theme-glow), inset 0 1px 0 rgba(255,255,255,.055);
+    }
+    .primary,
+    button.primary,
+    .action-row .primary,
+    .setup-card button.primary,
+    .setup-card .primary {
+      color:var(--bg) !important;
+      background:linear-gradient(180deg, var(--gold-bright), var(--gold)) !important;
+      border-color:var(--line-strong) !important;
+      box-shadow:0 0 24px var(--theme-glow), inset 0 1px 0 rgba(255,255,255,.12);
+    }
+    .danger,
+    button.danger,
+    .danger-zone,
+    .progression-fold.danger-zone {
+      color:var(--text);
+      background:linear-gradient(180deg, rgba(255,112,95,.16), var(--panel));
+      border-color:rgba(255,112,95,.52);
+    }
+    .danger-zone .label,
+    .danger-zone .panel-head .label,
+    .progression-fold.danger-zone > summary,
+    .progression-fold.danger-zone .label {
+      color:var(--bad);
+    }
+    .warning,
+    .warning.map-memory-warning,
+    .test-result.warn,
+    .restore-step.warn,
+    .status-pill.warn,
+    .badge.warn {
+      color:var(--warn) !important;
+      border-color:rgba(255,189,94,.46) !important;
+      background:linear-gradient(180deg, rgba(255,189,94,.12), var(--panel)) !important;
+    }
+    .test-result.ok,
+    .restore-step.ok,
+    .status-pill.ok,
+    .badge.ok,
+    .vm-status-card.ok {
+      color:var(--good);
+      border-color:rgba(89,213,139,.46);
+      background:linear-gradient(180deg, rgba(89,213,139,.12), var(--panel));
+    }
+    .test-result.bad,
+    .restore-step.bad,
+    .status-pill.bad,
+    .badge.bad,
+    .vm-status-card.bad {
+      color:var(--bad);
+      border-color:rgba(255,102,102,.52);
+      background:linear-gradient(180deg, rgba(255,102,102,.12), var(--panel));
+    }
+    .player-card.active,
+    .admin-item.active,
+    .item-db-card.active,
+    .map-region-card.active,
+    .map-region-card:hover,
+    .progression-recent-time,
+    .item-grade-badge {
+      border-color:var(--line-strong);
+      background:linear-gradient(180deg, var(--glass), var(--panel-2));
+      box-shadow:0 0 18px var(--theme-glow);
+    }
+    .avatar,
+    .admin-item img,
+    .item-db-icon,
+    .progression-avatar,
+    .world-map,
+    .live-map-canvas,
+    .live-map-canvas .leaflet-container {
+      color:var(--blue);
+      border-color:var(--line-blue);
+      background:linear-gradient(180deg, var(--bg-2), var(--bg));
+    }
+    .detail-row,
+    .env-var-row,
+    .vm-row,
+    .live-map-layer-row,
+    .panel-head,
+    .map-region-card .line,
+    td,
+    th {
+      border-color:var(--line);
+    }
+    body.theme-royal .primary,
+    body.theme-royal button.primary,
+    body.theme-royal .action-row .primary,
+    body.theme-royal .setup-card button.primary,
+    body.theme-royal .setup-card .primary {
+      color:#fff9ea !important;
+      background:linear-gradient(180deg, #b77a22, #6d4518) !important;
+      border-color:rgba(96,61,20,.82) !important;
+    }
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
@@ -10974,6 +11769,7 @@ function appPage() {
     @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.topbar-actions{justify-content:flex-start}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
     @media (max-width:720px) { .env-var-row{grid-template-columns:1fr;gap:5px}.env-var-value{font-size:12px}.env-help{font-size:11.5px} }
   </style>
+  <link rel="stylesheet" href="/assets/ui-overrides.css">
 </head>
 <body class="simple-mode">
 <div id="aboutDialog" class="about-overlay hidden" role="dialog" aria-modal="true" aria-label="About AlphaNine Dune Suite">
@@ -11151,6 +11947,7 @@ function appPage() {
       </div>
       <div class="nav-group">
         <div class="nav-group-title">Tools</div>
+        <button class="tab" data-view="web-portal">Web Portal</button>
         <button class="tab" data-view="item-database">Item Database</button>
         <button class="tab" data-view="settings">Settings</button>
       </div>
@@ -11697,7 +12494,9 @@ DUNE_RECEIVER_SSH_KEY</pre>
               <div class="progression-fold-body">
                 <div class="subtle">Search by character name, player name, actor id, or player id when available.</div>
                 <div class="field-grid mt">
+                  <label>Detected Player<select id="progressionPlayerSelect" onchange="selectProgressionDetectedPlayer(this.value)"><option value="">Loading detected players...</option></select></label>
                   <label>Player Search<input id="progressionPlayerQuery" placeholder="Character name, actor id, player id"></label>
+                  <button type="button" onclick="refreshProgressionPlayers()">Refresh Detected Players</button>
                   <button type="button" class="primary" onclick="lookupProgressionPlayer()">Lookup Player</button>
                 </div>
                 <div id="progressionPlayerStatus" class="empty mt">No player lookup has been run.</div>
@@ -11748,6 +12547,32 @@ DUNE_RECEIVER_SSH_KEY</pre>
             </details>
 
             <details class="progression-fold">
+              <summary>Skill Unlocks</summary>
+              <div class="progression-fold-body">
+                <div class="warning">Skill unlock writes create an automatic backup and require the selected player to be offline.</div>
+                <div class="field-grid mt">
+                  <label>Skill Search<input id="progressionSkillSearch" placeholder="Skill name, tag, tree" oninput="renderProgressionSkillCatalog()"></label>
+                  <label>Skill Tree<select id="progressionSkillTreeFilter" onchange="renderProgressionSkillCatalog()"><option value="all">All trees</option></select></label>
+                  <label>Skill Type<select id="progressionSkillTypeFilter" onchange="renderProgressionSkillCatalog()"><option value="all">All types</option></select></label>
+                  <button type="button" onclick="refreshProgressionSkillCatalog()">Refresh Skill Catalog</button>
+                </div>
+                <div class="action-row mt">
+                  <button type="button" onclick="selectVisibleProgressionSkills(true)">Select Visible</button>
+                  <button type="button" onclick="selectVisibleProgressionSkills(false)">Clear Visible</button>
+                  <button type="button" onclick="clearProgressionSkillSelection()">Clear All</button>
+                  <button type="button" class="danger" onclick="unlockSelectedProgressionSkills()">Unlock Selected Skills</button>
+                </div>
+                <div id="progressionSkillCatalogStatus" class="empty mt">Skill catalog not loaded.</div>
+                <div id="progressionSkillList" class="item-db-list mt"><div class="empty">Load the skill catalog to choose skills.</div></div>
+                <label class="mt">Type APPLY PROGRESSION<input id="progressionSkillConfirmText" placeholder="APPLY PROGRESSION"></label>
+                <details class="vm-details mt">
+                  <summary>Skill Unlock Log</summary>
+                  <pre id="progressionSkillPreviewLog" class="mt">No skill unlock action has run.</pre>
+                </details>
+              </div>
+            </details>
+
+            <details class="progression-fold">
               <summary>Specialization and Reputation</summary>
               <div class="progression-fold-body">
                 <div class="layout-2">
@@ -11764,7 +12589,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
                       <thead><tr><th>Faction ID</th><th>Reputation</th></tr></thead>
                       <tbody id="progressionFactionRows"><tr><td colspan="2">No player loaded.</td></tr></tbody>
                     </table>
-                    <div class="empty mt">Faction reputation and rank data are read-only in 0.4.5.</div>
+                    <div class="empty mt">Faction reputation and rank data are read-only in this beta.</div>
                   </div>
                 </div>
               </div>
@@ -12006,6 +12831,28 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div class="subtle mt">Opening embedded manager console.</div>
         </div>
         <iframe id="managerFrame" src="/manager/" title="AlphaNine Server Management" style="display:none" onload="handleManagerFrameLoad()"></iframe>
+      </div>
+    </section>
+
+    <section id="web-portal" class="view">
+      <div class="panel pad">
+        <div class="panel-head">
+          <div>
+            <div class="label">Web Portal</div>
+            <div class="subtle mt">Open the Suite web portal from this machine or copy the LAN URLs for another device.</div>
+          </div>
+          <button type="button" onclick="openWebPortal()">Open Portal</button>
+        </div>
+        <div class="detail-list mt">
+          <div class="detail-row"><span class="subtle">Primary URL</span><strong id="webPortalPrimaryUrl">${portalUrls[0]}</strong></div>
+          <div class="detail-row"><span class="subtle">All URLs</span><strong id="webPortalAllUrls" class="env-path-value">${portalUrls.join(" / ")}</strong></div>
+        </div>
+        <div class="action-row mt">
+          <button type="button" onclick="openWebPortal()">Open Portal</button>
+          <button type="button" onclick="copyWebPortalUrl()">Copy URL</button>
+          <button type="button" onclick="refreshDiagnostics()">Refresh URLs</button>
+        </div>
+        <div id="webPortalStatus" class="empty mt">Web portal is served by AlphaNine Dune Suite while the app is running.</div>
       </div>
     </section>
 
@@ -12253,6 +13100,7 @@ const viewCopy={
   server:["Server Control","Battlegroup controls, maps, and live server telemetry."],
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
+  "web-portal":["Web Portal","Open or copy the local and LAN Suite portal URLs."],
   codex:["Gear Codex","Item template reference and operations catalog."],
   "item-database":["Item Database","Bundled offline item catalog with search, grade, and spawn-code filters."],
   env:["Env Setup","Live Give environment requirements and missing variables."],
@@ -12261,10 +13109,10 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression")refreshProgressionInspector();if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -12279,7 +13127,7 @@ function clearActionCenterSoon(delay=4000){const card=document.getElementById("s
 function showToast(message,kind="success"){const toast=document.getElementById("suiteToast");if(!toast)return;const normalized=normalizeActionKind(kind);window.clearTimeout(suiteToastTimer);toast.textContent=String(message||"");toast.className="suite-toast "+normalized;setActionCenter(normalized==="error"?"Action needs attention":normalized==="working"?"Working":"Action complete",String(message||""),normalized);suiteToastTimer=window.setTimeout(()=>toast.classList.add("hidden"),4000);}
 function buttonActionLabel(button){if(!button)return"";const explicit=button.getAttribute("aria-label")||button.getAttribute("title")||button.dataset.actionLabel;if(explicit)return explicit.trim();const open=button.dataset.open;if(open)return"Open "+open.replace(/-/g," ");const text=(button.textContent||"").replace(/\s+/g," ").trim();return text.slice(0,90);}
 let suiteTooltipEl=null,suiteTooltipTarget=null;
-const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.",management:"Open the embedded server manager console.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run connection tests and view troubleshooting details."};
+const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.",management:"Open the embedded server manager console.","web-portal":"Open the Suite web portal or copy the local and LAN portal URLs.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run connection tests and view troubleshooting details."};
 const SUITE_ONCLICK_TOOLTIPS=[[/refreshAll\(/,"Refresh the dashboard, VM monitor, maps, players, receiver status, and admin data."],[/refreshLiveMap\(/,"Reload live map actors and location overlays from the server database."],[/executeLiveTeleport\(/,"Teleport the selected player to the prepared live map coordinates."],[/refreshAdmin\(/,"Refresh players, item catalog state, receiver readiness, and live give capability."],[/giveAdminItem\(/,"Send the selected item to the selected player using the active give transport."],[/giveQueuedItems\(/,"Send every item currently staged in the give queue."],[/refreshProgressionInspector\(/,"Scan progression tables, functions, and support metadata again."],[/lookupProgressionPlayer\(/,"Find a player in progression data using the current search value."],[/previewProgressionApply\(/,"Create a backup and preview the progression change before any live write."],[/applyProgressionLive\(/,"Apply the prepared progression change to the live database."],[/refresh\(/,"Refresh server status, players, resources, and recent activity."],[/act\('start'\)/,"Start the battlegroup server after checking VM and map readiness."],[/act\('restart'\)/,"Restart the battlegroup server."],[/act\('stop'\)/,"Stop the battlegroup server."],[/act\('backup'\)/,"Run the configured server backup action."],[/act\('update'\)/,"Run the configured server update action."],[/openDirector\(/,"Open the battlegroup director interface or management endpoint."],[/refreshVmStatus\(/,"Refresh VM power state, IP, uptime, ping, ports, and services."],[/runVmAction\('start'\)/,"Start the configured Hyper-V virtual machine."],[/runVmAction\('stop'\)/,"Stop the configured Hyper-V virtual machine."],[/deployMap\(/,"Read the selected map partitions, set replicas, and apply the requested memory limit."],[/stopSelectedMap\(/,"Scale the selected map down so it stops running."],[/refreshMaps\(/,"Reload map deployment status, available maps, memory limits, and partition readiness."],[/startDatabaseTunnel\(/,"Start or retry the SSH tunnel that exposes Postgres locally."],[/createDatabaseBackup\(/,"Create a database backup using the configured backup location."],[/restoreDatabaseBackup\(/,"Import the selected battlegroup backup into the database."],[/reloadManagerFrame\(/,"Reload the embedded server manager console."],[/refreshItemDatabase\(/,"Reload the bundled item database and filters."],[/refreshDiagnostics\(/,"Refresh diagnostics, connection checks, and version/runtime details."],[/openSetupWizard\(/,"Open the setup wizard to review or change core Suite configuration."],[/refreshBattlegroups\(/,"Reload battlegroups and selected battlegroup metadata."],[/useSelectedBattlegroup\(/,"Make the selected battlegroup the active target for Suite actions."],[/saveBattlegroupTitle\(/,"Save a friendly title for the selected battlegroup."],[/refreshReceiverStatus\(/,"Refresh receiver service status and reachability."],[/receiverAction\('start'\)/,"Start the live give receiver service."],[/receiverAction\('stop'\)/,"Stop the live give receiver service."],[/receiverAction\('restart'\)/,"Restart the live give receiver service."],[/saveSettings\(/,"Save the current Suite settings to config.json."],[/checkUpdates\(/,"Check the configured update source for a newer Suite release."],[/exportSettings\(/,"Export Suite settings to a file."],[/importSettings\(/,"Import Suite settings from a file."],[/openAboutDialog\(/,"Show Suite version, build, links, and project information."]];
 function suitePanelContext(button){const panel=button.closest(".panel,.map-deployment-panel,.setup-card,.suite-modal-card,.about-card");const label=panel?.querySelector(".label,h2,h3,strong")?.textContent;return label?String(label).replace(/\s+/g," ").trim():"";}
 function suiteDescriptiveTooltip(button){if(!button||button.dataset.tooltip==="false")return"";if(button.dataset.tooltip)return button.dataset.tooltip;if(button.classList.contains("tab"))return SUITE_VIEW_TOOLTIPS[button.dataset.view]||("Open the "+buttonActionLabel(button)+" workspace.");if(button.dataset.open)return SUITE_VIEW_TOOLTIPS[button.dataset.open]||("Open the "+button.dataset.open.replace(/-/g," ")+" panel.");const onclick=String(button.getAttribute("onclick")||"");for(const [pattern,text] of SUITE_ONCLICK_TOOLTIPS){if(pattern.test(onclick))return text;}if(button.classList.contains("player-card"))return"Select this player for details, item grants, permission tools, and related actions.";if(button.classList.contains("admin-item"))return"Select this item template for live giving or queue staging.";if(button.classList.contains("item-db-card"))return"Open this item record in the item database details panel.";const text=buttonActionLabel(button);const context=suitePanelContext(button);if(context&&text)return context+": "+text+". Click to run this action.";return text?("Click to run: "+text+"."):"";}
@@ -12294,7 +13142,9 @@ function registerActionFeedback(){document.addEventListener("click",event=>{cons
 registerActionFeedback();
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
 function portalUrlText(urls=WEB_PORTAL_URLS){return (urls&&urls.length?urls:WEB_PORTAL_URLS).join(" / ");}
-function renderWebPortalUrls(urls=WEB_PORTAL_URLS){setText("diagPortal",portalUrlText(urls));setText("settingsWebPortalUrl",portalUrlText(urls));}
+function renderWebPortalUrls(urls=WEB_PORTAL_URLS){const resolved=urls&&urls.length?urls:WEB_PORTAL_URLS;setText("diagPortal",portalUrlText(resolved));setText("settingsWebPortalUrl",portalUrlText(resolved));setText("webPortalPrimaryUrl",resolved[0]||"");setText("webPortalAllUrls",portalUrlText(resolved));}
+function openWebPortal(){const url=(WEB_PORTAL_URLS&&WEB_PORTAL_URLS[0])||location.origin;window.open(url,"_blank","noopener");setText("webPortalStatus","Opened "+url);playUiSound("click");}
+async function copyWebPortalUrl(){const text=portalUrlText(WEB_PORTAL_URLS);try{await navigator.clipboard.writeText(text);setText("webPortalStatus","Web portal URL copied.");showToast("Web Portal URL copied","success");playUiSound("success");}catch(error){setText("webPortalStatus",betterError(error));playUiSound("warning");}}
 function normalizeUiMode(value){return String(value||"").toLowerCase()==="advanced"?"advanced":"simple";}
 function applyUiMode(value){uiMode=normalizeUiMode(value);document.body.classList.toggle("simple-mode",uiMode==="simple");document.body.classList.toggle("advanced-mode",uiMode==="advanced");setValue("headerUiMode",uiMode);setValue("settingsUiMode",uiMode);if(appConfig)appConfig.uiMode=uiMode;if(uiMode==="simple"&&(document.getElementById("logs")?.classList.contains("active")||document.getElementById("diagnostics")?.classList.contains("active")))setView("dashboard");}
 async function changeUiMode(value){const previous=uiMode;applyUiMode(value);try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,uiMode})});appConfig=data.config||{...current,uiMode};applyUiMode(appConfig.uiMode);setText("settingsSaveStatus","UI mode saved.");playUiSound("click");}catch(error){applyUiMode(previous);setText("settingsSaveStatus","Could not save UI mode: "+betterError(error));playUiSound("warning");}}
@@ -12686,9 +13536,13 @@ function wireDatabaseImportControls(){const file=document.getElementById("dbRest
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,databaseReachable:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);const dbReachable=probe.databaseReachable===true||probe.ok===true;adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",dbReachable?"Reachable":"Limited");tone("adminDbMirror",dbReachable?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",dbReachable?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Unknown");tone("adminDbMirror","Unknown");badge("topDb","DB status unknown");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
-function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Template: '+esc(item.id||"--")+'</span>';}
-function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(players[0]&&!selectedPlayerId){selectedPlayerId=players[0].id;select.value=selectedPlayerId;}updateGiveTargetSummary();}
-async function refreshGivePlayersFast(){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();addActivity("probe","Give Item players loaded",adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
+function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=kind==="Research Unlock"?"Research":"Inventory";el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
+function progressionPlayerLookupValue(p){return String(p?.player_controller_id||p?.character_id||p?.player_pawn_id||p?.id||p?.character_name||p?.name||"").trim();}
+function renderProgressionPlayerSelect(){const select=document.getElementById("progressionPlayerSelect");if(!select)return;const current=select.value;const options=adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);const meta=[p.player_controller_id&&("controller "+p.player_controller_id),p.character_id&&("character "+p.character_id),p.online_status||p.status].filter(Boolean).join(" / ");return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+(meta?" / "+meta:""))+'</option>':"";}).filter(Boolean).join("");select.innerHTML='<option value="">Choose detected player...</option>'+(options||'<option value="" disabled>No detected players</option>');if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
+async function refreshProgressionPlayers(){const select=document.getElementById("progressionPlayerSelect");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();renderProgressionPlayerSelect();addActivity("progression","Progression players loaded",adminPlayers.length+" detected players");return data;}catch(e){if(select)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Progression players failed",e.message);return null;}}
+function selectProgressionDetectedPlayer(value){const query=String(value||"").trim();setValue("progressionPlayerQuery",query);if(query)lookupProgressionPlayer();}
+function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(players[0]&&!selectedPlayerId){selectedPlayerId=players[0].id;select.value=selectedPlayerId;}updateGiveTargetSummary();renderProgressionPlayerSelect();}
+async function refreshGivePlayersFast(){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();renderProgressionPlayerSelect();addActivity("probe","Give Item players loaded",adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
 function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
@@ -12728,12 +13582,27 @@ function renderProgressionInspector(data){
   const columnRows=document.getElementById("progressionColumnRows");
   if(columnRows)columnRows.innerHTML=(data?.columns||[]).length?(data.columns||[]).map(row=>'<tr><td>'+esc(row.schema+"."+row.table)+'</td><td>'+esc(row.column)+'</td><td>'+esc(row.dataType||row.udtName||"")+'</td><td>'+progressionBadge(row.status)+'</td></tr>').join(""):'<tr><td colspan="4">No target progression columns detected.</td></tr>';
 }
-async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});addActivity("warn","Progression database unavailable",e.message);}}
+function progressionSkillFilters(){return{query:String(document.getElementById("progressionSkillSearch")?.value||"").trim().toLowerCase(),tree:document.getElementById("progressionSkillTreeFilter")?.value||"all",type:document.getElementById("progressionSkillTypeFilter")?.value||"all"};}
+function filteredProgressionSkills(){const filters=progressionSkillFilters();return progressionSkillCatalog.filter(skill=>{if(filters.tree!=="all"&&skill.tree!==filters.tree)return false;if(filters.type!=="all"&&skill.type!==filters.type)return false;if(filters.query){const text=[skill.name,skill.id,skill.tag,skill.tree,skill.type,(skill.prerequisites||[]).join(" ")].join(" ").toLowerCase();if(!text.includes(filters.query))return false;}return true;});}
+function fillProgressionSkillFilters(){const tree=document.getElementById("progressionSkillTreeFilter");const type=document.getElementById("progressionSkillTypeFilter");if(tree){const current=tree.value||"all";const trees=[...new Set(progressionSkillCatalog.map(skill=>skill.tree).filter(Boolean))].sort();tree.innerHTML='<option value="all">All trees</option>'+trees.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tree.value=trees.includes(current)?current:"all";}if(type){const current=type.value||"all";const types=[...new Set(progressionSkillCatalog.map(skill=>skill.type).filter(Boolean))].sort();type.innerHTML='<option value="all">All types</option>'+types.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");type.value=types.includes(current)?current:"all";}}
+function progressionSkillSummary(skill){const costs=(skill.costPerLevel||[]).filter(value=>value!=null).join("/");return [skill.tree,skill.type,skill.maxLevel?("Max "+skill.maxLevel):"",costs?("Cost "+costs):""].filter(Boolean).join(" / ");}
+function progressionSkillStats(skill){const stats=(skill.stats||[]).slice(0,3).map(stat=>[stat.name||stat.key,stat.value!=null?stat.value:""].filter(value=>String(value)!=="").join(" ")).filter(Boolean);return stats.length?stats.join(" | "):(skill.tag||skill.id);}
+function renderProgressionSkillCatalog(){const list=document.getElementById("progressionSkillList");const status=document.getElementById("progressionSkillCatalogStatus");if(!list)return;const rows=filteredProgressionSkills();if(status)status.innerHTML='<strong>'+esc(progressionSkillSelectedIds.size)+' selected</strong><div class="subtle">'+esc(rows.length+" shown / "+progressionSkillCatalog.length+" skills loaded")+'</div>';list.innerHTML=rows.length?rows.slice(0,180).map(skill=>{const checked=progressionSkillSelectedIds.has(skill.id)?" checked":"";return '<label class="item-db-card progression-skill-card"><input type="checkbox" data-progression-skill-id="'+esc(skill.id)+'"'+checked+'><span><strong>'+esc(skill.name)+'</strong><span class="item-db-meta"><span>'+esc(progressionSkillSummary(skill))+'</span></span><span class="subtle env-path-value">'+esc(progressionSkillStats(skill))+'</span></span></label>';}).join(""):'<div class="empty">No skills match the current filters.</div>';list.querySelectorAll("[data-progression-skill-id]").forEach(el=>el.addEventListener("change",()=>{if(el.checked)progressionSkillSelectedIds.add(el.dataset.progressionSkillId);else progressionSkillSelectedIds.delete(el.dataset.progressionSkillId);progressionSkillPreviewState=null;renderProgressionSkillCatalog();}));}
+async function refreshProgressionSkillCatalog(){const status=document.getElementById("progressionSkillCatalogStatus");try{if(status){status.className="warning mt";status.textContent="Loading bundled skill catalog...";}const data=await getJson("/api/progression/skills");if(!data.ok)throw new Error(data.report?.message||data.report?.error||"Skill catalog unavailable.");progressionSkillCatalog=data.skills||[];const validIds=new Set(progressionSkillCatalog.map(skill=>skill.id));progressionSkillSelectedIds=new Set([...progressionSkillSelectedIds].filter(id=>validIds.has(id)));fillProgressionSkillFilters();renderProgressionSkillCatalog();if(status){status.className="empty mt";status.innerHTML='<strong>'+esc(progressionSkillCatalog.length)+' skills loaded.</strong><div class="subtle">Source: bundled game skill catalog.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Skill catalog load failed",e.message);}}
+function visibleProgressionSkillIds(){return filteredProgressionSkills().map(skill=>skill.id);}
+function selectVisibleProgressionSkills(selected){visibleProgressionSkillIds().forEach(id=>{if(selected)progressionSkillSelectedIds.add(id);else progressionSkillSelectedIds.delete(id);});progressionSkillPreviewState=null;renderProgressionSkillCatalog();}
+function clearProgressionSkillSelection(){progressionSkillSelectedIds.clear();progressionSkillPreviewState=null;renderProgressionSkillCatalog();}
+async function previewProgressionSkillUnlocks(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup a player before previewing skill unlocks.");const skillIds=[...progressionSkillSelectedIds];if(!skillIds.length)throw new Error("Choose at least one skill first.");const lookupId=progressionPlayerState.player?.actor_id||progressionPlayerState.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";const data=await getJson("/api/progression/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"skill_unlocks",query:lookupId,playerId:lookupId,skillIds}),timeoutMs:70000});if(!data.ok)throw new Error(data.reason||data.error||"Skill unlock preview failed.");progressionSkillPreviewState=data;setText("progressionSkillPreviewLog","Skill unlock preview generated. Backup created before any write.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nSelected skills:\\n"+JSON.stringify(data.newValues?.skills||[],null,2)+"\\n\\nStorage scan:\\n"+JSON.stringify(data.newValues?.storageScan||{},null,2)+"\\n\\nOperation:\\n"+data.sqlPreview+"\\n\\nLive apply is blocked until the skill storage adapter is verified.");pushProgressionRecent("Skill unlock preview",skillIds.length+" selected skill(s)","NOW");addActivity("progression","Skill unlock preview created",skillIds.length+" skills");playUiSound("success");}catch(e){progressionSkillPreviewState=null;setText("progressionSkillPreviewLog",betterError(e));pushProgressionRecent("Skill unlock preview failed",betterError(e),"ERR");addActivity("error","Skill unlock preview failed",e.message);playUiSound("warning");}}
+async function applyProgressionSkillUnlocks(){try{if(!progressionSkillPreviewState)throw new Error("Generate Skill Unlock Preview first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionSkillPreviewState.previewId,confirmText:document.getElementById("progressionSkillConfirmText")?.value||""}),timeoutMs:45000});if(!data.ok)throw new Error((data.warning||data.error||"Skill unlock apply failed")+"\\n"+JSON.stringify(data.debug||{},null,2));setText("progressionSkillPreviewLog","Skill unlock apply succeeded.\\n"+JSON.stringify(data,null,2));pushProgressionRecent("Skill unlock applied",data.action||"Skill unlocks updated.","NOW");playUiSound("success");}catch(e){setText("progressionSkillPreviewLog",betterError(e));pushProgressionRecent("Skill unlock apply blocked",betterError(e),"ERR");addActivity("warn","Skill unlock apply blocked",e.message);playUiSound("warning");}}
+async function unlockSelectedProgressionSkills(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before unlocking skills.");const skillIds=[...progressionSkillSelectedIds];if(!skillIds.length)throw new Error("Choose at least one skill first.");const lookupId=progressionPlayerState.player?.actor_id||progressionPlayerState.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";setText("progressionSkillPreviewLog","Unlocking "+skillIds.length+" selected skill(s)...");const data=await getJson("/api/progression/skill-unlocks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:lookupId,playerId:lookupId,skillIds}),timeoutMs:90000});if(!data.ok)throw new Error((data.message||data.reason||data.error||"Skill unlock failed")+"\\n"+JSON.stringify(data.readBackValues||data.timings||{},null,2));setText("progressionSkillPreviewLog","Skill unlock completed.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nUnlocked skills:\\n"+JSON.stringify(data.selectedSkills||[],null,2)+"\\n\\nRead-back verification:\\n"+JSON.stringify(data.readBackValues||[],null,2));pushProgressionRecent("Skills unlocked",(data.selectedSkills||[]).length+" selected skill(s)","NOW");addActivity("progression","Skills unlocked",(data.selectedSkills||[]).length+" skills");await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionSkillPreviewLog",betterError(e));pushProgressionRecent("Skill unlock failed",betterError(e),"ERR");addActivity("error","Skill unlock failed",e.message);playUiSound("warning");}}
+async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(!progressionSkillCatalog.length)refreshProgressionSkillCatalog();if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});if(!progressionSkillCatalog.length)refreshProgressionSkillCatalog();addActivity("warn","Progression database unavailable",e.message);}}
 function detailRows(rows){return Object.entries(rows||{}).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value||"--")+'</strong></div>').join("");}
 function renderProgressionPlayer(data){
   progressionPlayerState=data?.ok?data:null;
   progressionPreviewState=null;
   progressionFactionPreviewState=null;
+  progressionSkillPreviewState=null;
+  setValue("progressionSkillConfirmText","");
   const status=document.getElementById("progressionPlayerStatus");
   if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Current values loaded into the guarded editor.":(data?.reason||data?.error||"Progression player lookup failed.");}
   const p=data?.player||{};
@@ -12793,31 +13662,42 @@ function addReputation(){runReputationAction("add");}
 function setReputation(){runReputationAction("set");}
 function jumpToGive(){setView("give");renderPlayerSelect();}
 function renderAdminChannels(rows){const body=document.getElementById("adminChannels");body.innerHTML=rows.length?rows.map(row=>'<tr><td>'+esc(row.accountId)+'</td><td>'+esc(row.selectedChannel||"-")+'</td><td>'+esc(row.channelName||"-")+'</td><td><span class="badge '+(/^true$/i.test(row.isTuned)?'ok':'warn')+'">'+esc(row.isTuned||"-")+'</span></td></tr>').join(""):'<tr><td colspan="4">No tuned channel rows found.</td></tr>';}
+function itemClassificationText(item){return [item?.name,item?.id,item?.category,item?.subtype,item?.type,item?.detail,item?.description,item?.spawnCode,item?.itemCode,item?.detailUrl,item?.imageUrl,item?.imageLocalPath,item?.source].filter(Boolean).join(" ").toLowerCase();}
+function isSchematicItem(item){if(String(item?.category||"").trim().toLowerCase()==="schematics")return true;const text=itemClassificationText(item);return /\\bschematics?\\b/.test(text)||/\\bblueprints?\\b/.test(text)||/\\brecipes?\\b/.test(text)||/\\bplans?\\b/.test(text)||/\\bschematicfragment\\b/.test(text)||/(^|[\\/_\\-\\s])schematic(s)?($|[\\/_\\-\\s])/.test(text);}
 const NON_DLC_BUILDING_STYLE_IDS=new Set(["atreidesset","harkonnenset"]);
 function isNonDlcBuildingStyleItem(item){return NON_DLC_BUILDING_STYLE_IDS.has(String(item?.id||"").trim().toLowerCase());}
-function renderAdminItemFilters(){const select=document.getElementById("adminItemCategory");if(select){const current=select.value;const categories=[...new Set(adminItems.map(item=>item.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All discovered items</option><option value="__building_styles">Building Styles / Blueprints (non-DLC)</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");select.value=[...categories,"","__unknown","__building_styles"].includes(current)?current:"";}const tierSelect=document.getElementById("adminItemTier");if(tierSelect){const current=tierSelect.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tierSelect.innerHTML='<option value="all">All tiers</option>'+tiers.map(tier=>'<option value="'+esc(tier)+'">'+esc(tier)+'</option>').join("");tierSelect.value=tiers.includes(current)?current:"all";}}
+function renderAdminItemFilters(){const select=document.getElementById("adminItemCategory");if(select){const current=select.value;const categories=[...new Set(adminItems.map(item=>item.category).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All discovered items</option><option value="__schematics">Schematics</option><option value="__building_styles">Building Styles / Blueprints (non-DLC)</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");select.value=[...categories,"","__unknown","__building_styles","__schematics"].includes(current)?current:"";}const tierSelect=document.getElementById("adminItemTier");if(tierSelect){const current=tierSelect.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tierSelect.innerHTML='<option value="all">All tiers</option>'+tiers.map(tier=>'<option value="'+esc(tier)+'">'+esc(tier)+'</option>').join("");tierSelect.value=tiers.includes(current)?current:"all";}}
 function renderGearDiscoveryStatus(){const el=document.getElementById("gearDiscoveryStatus");if(!el)return;const report=adminItemReport||{};const total=Number(report.totalItemsFound||adminItems.length||0);const named=Number(report.itemsWithDisplayNames||adminItems.filter(item=>item.hasDisplayName).length||0);const unknown=Number(report.unknownOrUnclassifiedItems||adminItems.filter(item=>!item.hasDisplayName||!item.category).length||0);const pages=Number(report.totalFilesScanned||(report.filesScanned||[]).length||0);const downloaded=Number(report.totalImagesDownloaded||0);const reused=Number(report.totalImagesReused||0);const failed=Number(report.failedImageDownloads||0);const missing=Number(report.missingImages||0);const cache=report.cachePath?'<div class="subtle env-path-value">'+esc(report.cachePath)+'</div>':"";el.className=total?"empty mt":"warning mt";el.innerHTML='<strong>Items imported: '+total+'</strong><div class="subtle">Pages scanned: '+pages+' / Display names: '+named+' / Unknown or unclassified: '+unknown+'</div><div class="subtle">Images downloaded: '+downloaded+' / Reused: '+reused+' / Failed: '+failed+' / Missing: '+missing+'</div>'+cache+(report.message?'<div class="subtle">'+esc(report.message)+'</div>':'');}
 async function discoverGearItems(){const status=document.getElementById("gearDiscoveryStatus");try{if(status){status.className="warning mt";status.textContent="Importing Gear items and caching local icons...";}const data=await getJson("/api/gear/discover",{method:"POST",timeoutMs:300000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Gear item import completed",(adminItemReport?.totalItemsFound||adminItems.length)+" items imported");playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Gear item import failed",e.message);playUiSound("warning");}}
 function normalizeUiGrade(value){const text=String(value||"").trim();return ["Common","Uncommon","Rare","Epic","Legendary","Unique","Unknown"].includes(text)?text:"Unknown";}
-function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=document.getElementById("adminItemCategory")?.value||"";const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const styleNote=document.getElementById("buildingStyleFilterNote");if(styleNote)styleNote.classList.toggle("hidden",category!=="__building_styles");const filtered=adminItems.filter(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const matchesSearch=(item.name+" "+item.id+" "+item.category+" "+(item.type||"")+" "+(item.subtype||"")+" "+item.detail+" "+itemGrade+" "+itemTier).toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!item.category||!item.hasDisplayName):(category==="__building_styles"?isNonDlcBuildingStyleItem(item):item.category===category));const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;});const list=filtered.slice(0,120);const wrap=document.getElementById("adminItems");const emptyMessage=category==="__building_styles"?"No matching non-DLC building style item templates were found in the bundled catalog.":"No matching bundled item templates. Build the bundled catalog with npm run build:item-catalog.";wrap.innerHTML=list.length?list.map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return '<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(item.name)+'</strong><span>'+esc(item.id)+' / '+esc(item.category||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join(""):'<div class="empty">'+esc(emptyMessage)+'</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function itemCatalogNameKey(item){return String(item?.name||"").trim().toLowerCase();}
+function duplicatedItemNameSet(items){const counts=new Map();(items||[]).forEach(item=>{const key=itemCatalogNameKey(item);if(key)counts.set(key,(counts.get(key)||0)+1);});return new Set([...counts].filter(([,count])=>count>1).map(([key])=>key));}
+function catalogStyleFromId(item){const id=String(item?.id||"").toLowerCase();const pairs=[["choam_level2","CHOAM Level 2"],["choam_shelter","CHOAM Shelter"],["harkonnen_","Harkonnen"],["atreides_","Atreides"],["choam_","CHOAM"],["mtx_smug_","Smuggler"],["watershippers_","Watershippers"],["blockout_","Blockout"],["mtx_neut_jailset_","Jail Set"],["mtx_neut_desertmechanic_","Desert Mechanic"],["landingpad_","Landing Pad"]];const match=pairs.find(([prefix])=>id.startsWith(prefix));return match?match[1]:"";}
+function itemDisplayDisambiguator(item){const parts=[];const style=catalogStyleFromId(item);const category=String(item?.category||"").trim();const subtype=String(item?.subtype||item?.type||"").trim();const tier=String(item?.tier||"").trim();[style,category,subtype,tier].forEach(value=>{if(value&&value!=="Unknown"&&!parts.some(part=>part.toLowerCase()===value.toLowerCase()))parts.push(value);});return parts.join(" / ");}
+function itemListTitle(item,duplicateNames){const name=String(item?.name||item?.id||"");if(!duplicateNames?.has(itemCatalogNameKey(item)))return name;const detail=itemDisplayDisambiguator(item);return name+" - "+(detail?detail+" / ":"")+String(item?.id||"");}
+function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=document.getElementById("adminItemCategory")?.value||"";const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const styleNote=document.getElementById("buildingStyleFilterNote");if(styleNote)styleNote.classList.toggle("hidden",category!=="__building_styles");const filtered=adminItems.filter(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const matchesSearch=(item.name+" "+item.id+" "+item.category+" "+(item.type||"")+" "+(item.subtype||"")+" "+item.detail+" "+itemDisplayDisambiguator(item)+" "+itemGrade+" "+itemTier).toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!item.category||!item.hasDisplayName):(category==="__building_styles"?isNonDlcBuildingStyleItem(item):(category==="__schematics"?isSchematicItem(item):(String(category).toLowerCase()==="items"?!isSchematicItem(item)&&item.category===category:item.category===category))));const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;});const duplicateNames=duplicatedItemNameSet(filtered);const list=filtered.slice(0,120);const wrap=document.getElementById("adminItems");const emptyMessage=category==="__building_styles"?"No matching non-DLC building style item templates were found in the bundled catalog.":(category==="__schematics"?"No schematic item templates were found in the bundled catalog.":"No matching bundled item templates. Build the bundled catalog with npm run build:item-catalog.");wrap.innerHTML=list.length?list.map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return '<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(item.category||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join(""):'<div class="empty">'+esc(emptyMessage)+'</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
 function itemDbIcon(item){return item.icon?'<span class="item-db-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.remove();this.parentElement.textContent=&quot;IT&quot;"></span>':'<span class="item-db-icon">IT</span>';}
-function itemDbText(item){return [item.name,item.id,item.category,item.subtype,item.type,item.grade,item.rarity,item.tier,item.detail,item.description,item.spawnCode,item.itemCode].filter(Boolean).join(" ").toLowerCase();}
-function fillItemDbFilters(){const cat=document.getElementById("itemDbCategory");const tier=document.getElementById("itemDbTier");if(cat){const current=cat.value;const categories=[...new Set(itemDatabaseItems.map(item=>item.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b));cat.innerHTML='<option value="">All categories</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");cat.value=categories.includes(current)?current:"";}if(tier){const current=tier.value;const tiers=[...new Set(itemDatabaseItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"";}}
-function filteredItemDatabaseItems(){const q=(document.getElementById("itemDbSearch")?.value||"").trim().toLowerCase();const category=document.getElementById("itemDbCategory")?.value||"";const grade=document.getElementById("itemDbGrade")?.value||"all";const tier=document.getElementById("itemDbTier")?.value||"";const spawnableOnly=Boolean(document.getElementById("itemDbSpawnableOnly")?.checked);return itemDatabaseItems.filter(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);if(category&&item.category!==category)return false;if(grade&&grade!=="all"&&itemGrade!==grade)return false;if(tier&&item.tier!==tier)return false;if(spawnableOnly&&item.spawnable===false)return false;if(q&&!itemDbText({...item,grade:itemGrade}).includes(q))return false;return true;});}
+function itemDbText(item){return [item.name,itemDisplayDisambiguator(item),item.id,item.category,item.subtype,item.type,item.grade,item.rarity,item.tier,item.detail,item.description,item.spawnCode,item.itemCode].filter(Boolean).join(" ").toLowerCase();}
+function fillItemDbFilters(){const cat=document.getElementById("itemDbCategory");const tier=document.getElementById("itemDbTier");if(cat){const current=cat.value;const categories=[...new Set(itemDatabaseItems.map(item=>item.category).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));cat.innerHTML='<option value="">All categories</option><option value="__schematics">Schematics</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");cat.value=[...categories,"__schematics"].includes(current)?current:"";}if(tier){const current=tier.value;const tiers=[...new Set(itemDatabaseItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"";}}
+function filteredItemDatabaseItems(){const q=(document.getElementById("itemDbSearch")?.value||"").trim().toLowerCase();const category=document.getElementById("itemDbCategory")?.value||"";const grade=document.getElementById("itemDbGrade")?.value||"all";const tier=document.getElementById("itemDbTier")?.value||"";const spawnableOnly=Boolean(document.getElementById("itemDbSpawnableOnly")?.checked);return itemDatabaseItems.filter(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);if(category==="__schematics"){if(!isSchematicItem(item))return false;}else if(String(category).toLowerCase()==="items"&&isSchematicItem(item))return false;else if(category&&item.category!==category)return false;if(grade&&grade!=="all"&&itemGrade!==grade)return false;if(tier&&item.tier!==tier)return false;if(spawnableOnly&&item.spawnable===false)return false;if(q&&!itemDbText({...item,grade:itemGrade}).includes(q))return false;return true;});}
 function renderItemDatabaseDetails(item){const detail=document.getElementById("itemDbDetails");if(!detail)return;if(!item){detail.className="empty mt";detail.textContent="Select an item to inspect spawn data, grade, category, and stats.";return;}const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const rows={"Name":item.name||item.id,"Spawn Code":item.spawnCode||item.itemCode||item.id,"Category":item.category||"Unknown","Subcategory":item.subtype||item.type||"--","Grade":itemGrade,"Tier":item.tier||"--","Max Stack":item.maxStack||"--","Spawnable":item.spawnable===false?"No":"Yes"};const stats=item.stats&&typeof item.stats==="object"?Object.entries(item.stats).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join(""):"";detail.className="mt";detail.innerHTML='<div class="detail-list">'+Object.entries(rows).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join("")+'</div>'+(item.description?'<div class="empty mt">'+esc(item.description)+'</div>':'')+(stats?'<div class="label mt">Stats</div><div class="detail-list">'+stats+'</div>':'');}
-function renderItemDatabase(){const rows=filteredItemDatabaseItems();const list=document.getElementById("itemDbList");const count=document.getElementById("itemDbCount");if(count)count.textContent=rows.length+" shown / "+itemDatabaseItems.length+" loaded";if(!selectedItemDatabaseId&&rows[0])selectedItemDatabaseId=rows[0].id;if(list){list.innerHTML=rows.slice(0,250).map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);return '<button type="button" class="item-db-card '+(selectedItemDatabaseId===item.id?'active':'')+'" data-item-db-id="'+esc(item.id)+'">'+itemDbIcon(item)+'<span><strong>'+esc(item.name||item.id)+'</strong><span class="item-db-meta"><span class="item-grade-badge">'+esc(itemGrade)+'</span><span>'+esc(item.category||"Unknown")+'</span><span>'+esc(item.subtype||item.type||"")+'</span><span>'+esc(item.tier||"")+'</span></span><span class="subtle env-path-value">'+esc(item.id||"")+'</span></span></button>';}).join("")||'<div class="empty">No items match the current filters.</div>';list.querySelectorAll("[data-item-db-id]").forEach(el=>el.addEventListener("click",()=>{selectedItemDatabaseId=el.dataset.itemDbId;renderItemDatabase();}));}renderItemDatabaseDetails(itemDatabaseItems.find(item=>item.id===selectedItemDatabaseId)||rows[0]);}
+function renderItemDatabase(){const rows=filteredItemDatabaseItems();const duplicateNames=duplicatedItemNameSet(rows);const list=document.getElementById("itemDbList");const count=document.getElementById("itemDbCount");if(count)count.textContent=rows.length+" shown / "+itemDatabaseItems.length+" loaded";if(!selectedItemDatabaseId&&rows[0])selectedItemDatabaseId=rows[0].id;if(list){list.innerHTML=rows.slice(0,250).map(item=>{const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);return '<button type="button" class="item-db-card '+(selectedItemDatabaseId===item.id?'active':'')+'" data-item-db-id="'+esc(item.id)+'">'+itemDbIcon(item)+'<span><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span class="item-db-meta"><span class="item-grade-badge">'+esc(itemGrade)+'</span><span>'+esc(item.category||"Unknown")+'</span><span>'+esc(item.subtype||item.type||"")+'</span><span>'+esc(item.tier||"")+'</span></span><span class="subtle env-path-value">'+esc(item.id||"")+'</span></span></button>';}).join("")||'<div class="empty">No items match the current filters.</div>';list.querySelectorAll("[data-item-db-id]").forEach(el=>el.addEventListener("click",()=>{selectedItemDatabaseId=el.dataset.itemDbId;renderItemDatabase();}));}renderItemDatabaseDetails(itemDatabaseItems.find(item=>item.id===selectedItemDatabaseId)||rows[0]);}
 async function refreshItemDatabase(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Loading bundled item database...";}const data=await getJson("/api/item-database/items?grade=all");itemDatabaseItems=data.items||[];if(!selectedItemDatabaseId&&itemDatabaseItems[0])selectedItemDatabaseId=itemDatabaseItems[0].id;fillItemDbFilters();renderItemDatabase();if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML='<strong>'+esc(itemDatabaseItems.length)+' items loaded.</strong><div class="subtle">Source: shared bundled/user item catalog. No server scan required.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
-function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select an item from the catalog below.";return;}selected.className="detail-row";selected.innerHTML='<span class="subtle">Selected Item</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>';}
+function giveItemGrantKind(item){return isSchematicItem(item)?"Research Unlock":"Inventory Item";}
+function giveItemSchematicNotice(item){return isSchematicItem(item)?"Schematic templates are applied by the game as research unlocks, not normal character inventory items.":"";}
+function catalogItemByTemplate(template){const id=String(template||"");return adminItems.find(item=>item.id===id)||itemDatabaseItems.find(item=>item.id===id)||null;}
+function templateIsSchematic(template){const item=catalogItemByTemplate(template);return item?isSchematicItem(item):/schematic/i.test(String(template||""));}
+function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select an item from the catalog below.";return;}const kind=giveItemGrantKind(selectedAdminItem);const notice=giveItemSchematicNotice(selectedAdminItem);selected.className=notice?"warning":"detail-row";selected.innerHTML='<span class="subtle">'+esc(kind)+'</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>'+(notice?'<div class="subtle mt">'+esc(notice)+'</div>':'');}
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();}
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;if(!supported)input.value=0;}if(!warning)return;warning.classList.toggle("hidden",supported);warning.textContent=supported?"":"Durability is not supported by the current receiver method.";}
-function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1)};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
-function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / quality "+row.quality:"");}
+function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(selectedAdminItem)};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
+function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / quality "+row.quality:"")+(row.grantKind?" / "+row.grantKind:"");}
 function updateGiveQueueSummary(processed=0,total=giveQueue.length,succeeded=0,failed=0){const el=document.getElementById("giveQueueSummary");if(el)el.textContent="Progress: "+processed+" / "+total+" · Succeeded: "+succeeded+" · Failed: "+failed;const retry=document.getElementById("retryGiveQueueButton");if(retry)retry.disabled=!lastGiveQueueFailedItems.length||liveGiveBusy;syncGiveItemControls();}
-function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span></span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
-function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1]);addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
+function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span>'+(row.grantKind?'<br><span class="subtle">'+esc(row.grantKind)+'</span>':'')+'</span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
+function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality,grantKind:payload.grantKind});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1])+(templateIsSchematic(payload.template)?"\\nNote: this schematic will appear under research, not character inventory.":"");addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
 function removeGiveQueueItem(index){giveQueue.splice(index,1);renderGiveQueue();updateGiveQueueSummary();}
 function clearGiveQueue(){giveQueue=[];lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const log=document.getElementById("giveQueueLog");if(log)log.value="Give Queue cleared.";}
-function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];if(data.timings)lines.push("Queue timings: "+JSON.stringify(data.timings));(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(row.result?.timings)lines.push("  Timings: "+JSON.stringify(row.result.timings));if(row.result?.response?.timings)lines.push("  Receiver timings: "+JSON.stringify(row.result.response.timings));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
+function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];if(data.timings)lines.push("Queue timings: "+JSON.stringify(data.timings));(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(templateIsSchematic(row.itemId))lines.push("  Note: schematic templates are research unlocks; check the player's research, not inventory.");if(row.result?.timings)lines.push("  Timings: "+JSON.stringify(row.result.timings));if(row.result?.response?.timings)lines.push("  Receiver timings: "+JSON.stringify(row.result.response.timings));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
 async function giveQueuedItems(itemsOverride=null){const log=document.getElementById("giveQueueLog");if(liveGiveBusy)return;const items=itemsOverride||giveQueue;if(!items.length){if(log)log.value="Give Queue is empty.";playUiSound("warning");return;}try{liveGiveBusy=true;syncGiveItemControls();updateGiveQueueSummary(0,items.length,0,0);if(log)log.value="Checking receiver transport before Give Queue...";await refreshLiveGiveEnv();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"&&!adminLiveGiveAvailable)throw new Error(liveGiveUnavailableMessage||"Live Give unavailable.");if(mode==="execute"&&!(await appConfirm("Confirm Live Give Queue","Send "+items.length+" queued item(s) to the selected player?","Give Queue","Cancel")))return;const playerId=document.getElementById("adminPlayer").value;if(!playerId)throw new Error("Choose a player first.");if(log)log.value="Processing Give Queue 0 / "+items.length+"...";addActivity("grant","Give Queue started",items.length+" item(s)");const data=await getJson("/api/live-give/queue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,mode,confirmed:mode==="execute",items}),timeoutMs:300000});lastGiveQueueFailedItems=(data.results||[]).filter(row=>!row.success).map(row=>({template:row.itemId,name:row.itemName,qty:row.quantity,quality:row.quality}));updateGiveQueueSummary(data.processed||0,data.total||items.length,data.succeeded||0,data.failed||0);if(log)log.value=queueResultLog(data);if(!itemsOverride&&data.failed===0)giveQueue=[];renderGiveQueue();addActivity("grant","Give Queue completed",(data.succeeded||0)+" succeeded / "+(data.failed||0)+" failed");playUiSound(data.failed?"warning":"success");}catch(e){if(log)log.value=betterError(e);addActivity("error","Give Queue failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function retryFailedGiveQueueItems(){if(!lastGiveQueueFailedItems.length)return;giveQueuedItems(lastGiveQueueFailedItems.slice());}
 async function copyGiveQueueLog(){const text=document.getElementById("giveQueueLog")?.value||"";if(!text)return;try{await navigator.clipboard.writeText(text);playUiSound("success");}catch{const log=document.getElementById("giveQueueLog");if(log){log.focus();log.select();document.execCommand("copy");}}}
@@ -12845,7 +13725,7 @@ async function startGiveItemTool(){const mode=document.getElementById("liveGiveM
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 const giveAdminItemWithoutSentToast=giveAdminItem;
-giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const text=String(document.getElementById("adminLog")?.textContent||"");if(/Live Give (verified|published)/i.test(text))showToast("Item sent","success");};
+giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");if(log&&selectedAdminItem&&isSchematicItem(selectedAdminItem)&&text&&!/research unlocks; check/i.test(text))log.textContent=text+"\\n\\nNote: schematic templates are research unlocks; check the player's research, not inventory.";if(/Live Give (verified|published)/i.test(text))showToast(selectedAdminItem&&isSchematicItem(selectedAdminItem)?"Research schematic sent":"Item sent","success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
 renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
@@ -12860,6 +13740,13 @@ async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === "/" || url.pathname === "/index.html") {
     send(res, 200, "text/html", appPage());
+    return;
+  }
+  if (url.pathname === "/assets/ui-overrides.css") {
+    const cssPath = fs.existsSync(UI_OVERRIDE_CSS_PATH) ? UI_OVERRIDE_CSS_PATH : BUNDLED_UI_OVERRIDE_CSS_PATH;
+    const css = fs.existsSync(cssPath) ? fs.readFileSync(cssPath, "utf8") : "";
+    res.writeHead(200, { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(css);
     return;
   }
   if (url.pathname.startsWith("/assets/")) {
@@ -13347,6 +14234,21 @@ async function route(req, res) {
   if (url.pathname === "/api/progression/player" && req.method === "GET") {
     const result = await progressionPlayerLookup(url.searchParams.get("query"));
     await json(res, result, result?.status === "timeout" ? 504 : 200);
+    return;
+  }
+  if (url.pathname === "/api/progression/skills" && req.method === "GET") {
+    const catalog = loadDuneSkillsCatalog();
+    await json(res, { ok: catalog.ok, skills: catalog.skills, generatedAt: catalog.generatedAt, treeCounts: catalog.treeCounts, typeCounts: catalog.typeCounts, report: catalog.report }, catalog.ok ? 200 : 500);
+    return;
+  }
+  if (url.pathname === "/api/progression/skill-unlocks" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await progressionUnlockSkills(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/progression/preview" && req.method === "POST") {

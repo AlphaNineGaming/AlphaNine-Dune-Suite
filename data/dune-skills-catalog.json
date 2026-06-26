@@ -1,0 +1,7253 @@
+{
+  "ok": true,
+  "generatedAt": "2026-06-25T22:33:21.019Z",
+  "sourceUrl": "https://cdn-hosted.gaming.tools/dune/data/en/entities.d.json",
+  "totalSkills": 113,
+  "treeCounts": {
+    "BeneGesserit": 22,
+    "Hidden": 5,
+    "Mentat": 22,
+    "Planetologist": 20,
+    "Swordmaster": 22,
+    "Trooper": 22
+  },
+  "typeCounts": {
+    "Ability": 38,
+    "Attribute": 54,
+    "Technique": 21
+  },
+  "skills": [
+    {
+      "id": "skills-ability-hypersprint",
+      "tag": "Skills.Ability.Hypersprint",
+      "name": "Bindu Sprint",
+      "tree": "BeneGesserit",
+      "type": "Ability",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 1,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        2,
+        3
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Hypersprint.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Hypersprint.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 19,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Hypersprint.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Hypersprint.StaminaStartCost",
+          "name": "Stamina Start Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Hypersprint.StaminaStartCost",
+          "name": "Stamina Start Cost",
+          "type": "number",
+          "value": 10,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Hypersprint.StaminaStartCost",
+          "name": "Stamina Start Cost",
+          "type": "number",
+          "value": 5,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Hypersprint.StaminaDrain",
+          "name": "Stamina Drain",
+          "type": "number",
+          "value": 40,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Hypersprint.StaminaDrain",
+          "name": "Stamina Drain",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Hypersprint.StaminaDrain",
+          "name": "Stamina Drain",
+          "type": "number",
+          "value": 10,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitydash_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-voicecompel",
+      "tag": "Skills.Ability.VoiceCompel",
+      "name": "Compel",
+      "tree": "BeneGesserit",
+      "type": "Ability",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 3,
+      "gridY": 0,
+      "maxLevel": 1,
+      "costPerLevel": [
+        1
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Compel.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 35,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.VeryHigh",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 45,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Compel.BaseCastTime",
+          "name": "Voice Channel Time",
+          "type": "number",
+          "value": 1.5,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "VoiceAbilityRange",
+          "name": "Range",
+          "type": "number",
+          "value": 0.3,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitythevoicecompel_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-selfcontrol1",
+      "tag": "Skills.Attribute.SelfControl1",
+      "name": "Recovery",
+      "tree": "BeneGesserit",
+      "type": "Attribute",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 5,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_HealingRegenLimit",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_HealingRegenLimit",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_HealingRegenLimit",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "HealingRegenMaxPercentage",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 1.1,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HealingRegenMaxPercentage",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 1.15,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HealingRegenMaxPercentage",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 1.2,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillhealingmultiplier_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-backstabber",
+      "tag": "Skills.Perk.Backstabber",
+      "name": "Manipulate Instability",
+      "tree": "BeneGesserit",
+      "type": "Technique",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 1,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.Hypersprint",
+        "Skills.Ability.BinduNerveStrike",
+        "Skills.Attribute.WeirdingWay2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "BackstabDamageBonus",
+          "name": "Instability Bonus Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "BackstabDamageBonus",
+          "name": "Instability Bonus Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "BackstabDamageBonus",
+          "name": "Instability Bonus Damage",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkbackstabber_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-weirdingway1",
+      "tag": "Skills.Attribute.WeirdingWay1",
+      "name": "Blade Damage",
+      "tree": "BeneGesserit",
+      "type": "Attribute",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 2,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.Hypersprint",
+        "Skills.Perk.Backstabber",
+        "Skills.Attribute.WeirdingWay2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "ShortBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.03,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "ShortBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.06,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "ShortBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.09,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "LongBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.03,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "LongBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.06,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "LongBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.09,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillbrawler_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-blindspot",
+      "tag": "Skills.Ability.Blindspot",
+      "name": "Ignore",
+      "tree": "BeneGesserit",
+      "type": "Ability",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 3,
+      "gridY": 1,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.VoiceCompel",
+        "Skills.Perk.VoiceAnalysis"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Blindspot.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.VeryHigh",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 45,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Blindspot.Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 10,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "VoiceAbilityRange",
+          "name": "Range",
+          "type": "number",
+          "value": 0.3,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilityblindspot_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-manipulation1",
+      "tag": "Skills.Attribute.Manipulation1",
+      "name": "Voice Training",
+      "tree": "BeneGesserit",
+      "type": "Technique",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 4,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.VoiceCompel",
+        "Skills.Ability.VoiceStop"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "CooldownScalar_BeneGesserit",
+          "name": "Ability Cooldowns",
+          "type": "number",
+          "value": -0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "CooldownScalar_BeneGesserit",
+          "name": "Ability Cooldowns",
+          "type": "number",
+          "value": -0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "CooldownScalar_BeneGesserit",
+          "name": "Ability Cooldowns",
+          "type": "number",
+          "value": -0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreebenegesseritcooldown_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-regencap",
+      "tag": "Skills.Perk.RegenCap",
+      "name": "Trauma Recovery",
+      "tree": "BeneGesserit",
+      "type": "Technique",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 5,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.SelfControl1",
+        "Skills.Attribute.SelfControl4",
+        "Skills.Attribute.SelfControl3"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_HealingRegenLimit",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_HealingRegenLimit",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_HealingRegenLimit",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "UI_HealingRegenRate",
+          "name": "Healing Regen Rate",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_HealingRegenRate",
+          "name": "Healing Regen Rate",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_HealingRegenRate",
+          "name": "Healing Regen Rate",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "HealingRegenMaxPercentage",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 1.2,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HealingRegenMaxPercentage",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 1.25,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HealingRegenMaxPercentage",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 1.3,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "HealingRegenPerTickMultiplier",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HealingRegenPerTickMultiplier",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HealingRegenPerTickMultiplier",
+          "name": "Healing Regen Limit",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkhealingfactor_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-selfcontrol2",
+      "tag": "Skills.Attribute.SelfControl2",
+      "name": "Sun Tolerance",
+      "tree": "BeneGesserit",
+      "type": "Attribute",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 6,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.SelfControl1",
+        "Skills.Attribute.SelfControl4",
+        "Skills.Attribute.SelfControl5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "HeatExhaustionBuildupRate",
+          "name": "Sun Stroke Rate",
+          "type": "number",
+          "value": 0.9,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HeatExhaustionBuildupRate",
+          "name": "Sun Stroke Rate",
+          "type": "number",
+          "value": 0.79999995,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HeatExhaustionBuildupRate",
+          "name": "Sun Stroke Rate",
+          "type": "number",
+          "value": 0.7,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributesundefense_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-weirdingway2",
+      "tag": "Skills.Attribute.WeirdingWay2",
+      "name": "Short Blade Damage",
+      "tree": "BeneGesserit",
+      "type": "Attribute",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 1,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.Backstabber",
+        "Skills.Attribute.WeirdingWay1",
+        "Skills.Ability.BinduNerveStrike",
+        "Skills.Ability.WeirdingStep"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "ShortBladeDamageBonus",
+          "name": "Short Blade Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "ShortBladeDamageBonus",
+          "name": "Short Blade Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "ShortBladeDamageBonus",
+          "name": "Short Blade Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillbrawler_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-selfcontrol3",
+      "tag": "Skills.Attribute.SelfControl3",
+      "name": "Vitality",
+      "tree": "BeneGesserit",
+      "type": "Attribute",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 4,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.RegenCap",
+        "Skills.Perk.BinduStability"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MaxHealth",
+          "name": "Max Health",
+          "type": "number",
+          "value": 25,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "MaxHealth",
+          "name": "Max Health",
+          "type": "number",
+          "value": 40,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "MaxHealth",
+          "name": "Max Health",
+          "type": "number",
+          "value": 55,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributemaxhpbonus_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-selfcontrol4",
+      "tag": "Skills.Attribute.SelfControl4",
+      "name": "Self-Healing",
+      "tree": "BeneGesserit",
+      "type": "Attribute",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 5,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.RegenCap",
+        "Skills.Attribute.SelfControl2",
+        "Skills.Perk.BinduStability",
+        "Skills.Perk.MetabolizePoison"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "ItemGadgetHealingMultiplier",
+          "name": "Healing Effectiveness",
+          "type": "number",
+          "value": 0.125,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "ItemGadgetHealingMultiplier",
+          "name": "Healing Effectiveness",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "ItemGadgetHealingMultiplier",
+          "name": "Healing Effectiveness",
+          "type": "number",
+          "value": 0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "HealingRegenPerTickMultiplier",
+          "name": "Healing Effectiveness",
+          "type": "number",
+          "value": 0.125,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HealingRegenPerTickMultiplier",
+          "name": "Healing Effectiveness",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HealingRegenPerTickMultiplier",
+          "name": "Healing Effectiveness",
+          "type": "number",
+          "value": 0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillmaxhealth_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-selfcontrol5",
+      "tag": "Skills.Attribute.SelfControl5",
+      "name": "Poison Tolerance",
+      "tree": "BeneGesserit",
+      "type": "Attribute",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 6,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.SelfControl2",
+        "Skills.Perk.MetabolizePoison"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_PoisonTolerance",
+          "name": "Poison Tolerance",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_PoisonTolerance",
+          "name": "Poison Tolerance",
+          "type": "number",
+          "value": 0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_PoisonTolerance",
+          "name": "Poison Tolerance",
+          "type": "number",
+          "value": 0.45,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "PoisonStatusTolerance",
+          "name": "Poison Tolerance",
+          "type": "number",
+          "value": 20,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "PoisonStatusTolerance",
+          "name": "Poison Tolerance",
+          "type": "number",
+          "value": 30,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "PoisonStatusTolerance",
+          "name": "Poison Tolerance",
+          "type": "number",
+          "value": 45,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributepoisondefense_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-bindunervestrike",
+      "tag": "Skills.Ability.BinduNerveStrike",
+      "name": "Prana-Bindu Strikes",
+      "tree": "BeneGesserit",
+      "type": "Ability",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 1,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Perk.Backstabber",
+        "Skills.Attribute.WeirdingWay2",
+        "Skills.Spice.BinduDodge"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "NerveStrike.Cooldown",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "NerveStrikeDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 7,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitybindunervestrike_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-weirdingstep",
+      "tag": "Skills.Ability.WeirdingStep",
+      "name": "Weirding Step",
+      "tree": "BeneGesserit",
+      "type": "Ability",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 2,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.WeirdingWay1",
+        "Skills.Attribute.WeirdingWay2",
+        "Skills.Spice.BinduDodge"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "WeirdingStep.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.High",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 37.5,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "WeirdingStepRange",
+          "name": "Range",
+          "type": "number",
+          "value": 0.3,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilityweirdingstep_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-voiceanalysis",
+      "tag": "Skills.Perk.VoiceAnalysis",
+      "name": "Rapid Register",
+      "tree": "BeneGesserit",
+      "type": "Technique",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 3,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.Blindspot",
+        "Skills.Spice.VoiceSplash"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "CastTimeScalar_BeneGesserit_Voice",
+          "name": "Voice Channel Time",
+          "type": "number",
+          "value": 0.3,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreevoiceanalysis_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-voicestop",
+      "tag": "Skills.Ability.VoiceStop",
+      "name": "Stop",
+      "tree": "BeneGesserit",
+      "type": "Ability",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 4,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Manipulation1",
+        "Skills.Spice.VoiceSplash"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "VoiceStop.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 35,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.High",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 37.5,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "VoiceStop.StunDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 5,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilityvoicestop_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-bindustability",
+      "tag": "Skills.Perk.BinduStability",
+      "name": "Prana-Bindu Stability",
+      "tree": "BeneGesserit",
+      "type": "Technique",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 5,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.SelfControl3",
+        "Skills.Attribute.SelfControl4",
+        "Skills.Ability.LitanyAgainstFear"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "PoiseDamageResistance",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "PoiseDamageResistance",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "PoiseDamageResistance",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreebindustability_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-metabolizepoison",
+      "tag": "Skills.Perk.MetabolizePoison",
+      "name": "Metabolize Poison",
+      "tree": "BeneGesserit",
+      "type": "Technique",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 6,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.SelfControl4",
+        "Skills.Attribute.SelfControl5",
+        "Skills.Ability.LitanyAgainstFear"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "PoisonMitigation",
+          "name": "Poison Mitigation:",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreemetabolizeposion_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-spice-bindudodge",
+      "tag": "Skills.Spice.BinduDodge",
+      "name": "Bindu Dodge",
+      "tree": "BeneGesserit",
+      "type": "Attribute",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 1,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        3
+      ],
+      "prerequisites": [
+        "Skills.Ability.BinduNerveStrike",
+        "Skills.Ability.WeirdingStep"
+      ],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreebindudodge_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-spice-voicesplash",
+      "tag": "Skills.Spice.VoiceSplash",
+      "name": "Screech",
+      "tree": "BeneGesserit",
+      "type": "Attribute",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 3,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        3
+      ],
+      "prerequisites": [
+        "Skills.Perk.VoiceAnalysis",
+        "Skills.Ability.VoiceStop"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_Range",
+          "name": "Range",
+          "type": "number",
+          "value": 6,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreescreech_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-litanyagainstfear",
+      "tag": "Skills.Ability.LitanyAgainstFear",
+      "name": "Litany Against Fear",
+      "tree": "BeneGesserit",
+      "type": "Ability",
+      "category": "BeneGesserit",
+      "categories": [
+        "skills/benegesserit"
+      ],
+      "gridX": 5,
+      "gridY": 4,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.BinduStability",
+        "Skills.Perk.MetabolizePoison"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "LitanyAgainstFear.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 35,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "LitanyAgainstFear.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 33,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "LitanyAgainstFear.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.VeryHigh",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 45,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.VeryHigh",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 45,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.VeryHigh",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 45,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "LitanyAgainstFear.Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 12,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "LitanyAgainstFear.Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 14,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "LitanyAgainstFear.Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 16,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "LitanyAgainstFear.DamageReduction",
+          "name": "Armor Multiplier",
+          "type": "number",
+          "value": 2,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "LitanyAgainstFear.DamageReduction",
+          "name": "Armor Multiplier",
+          "type": "number",
+          "value": 2.5,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "LitanyAgainstFear.DamageReduction",
+          "name": "Armor Multiplier",
+          "type": "number",
+          "value": 3,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "LitanyAgainstFear.PoiseReduction",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "LitanyAgainstFear.PoiseReduction",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.2,
+          "operation": "",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "LitanyAgainstFear.PoiseReduction",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.25,
+          "operation": "",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitylitanyagainstfear_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-healingcapsule",
+      "tag": "Skills.Ability.HealingCapsule",
+      "name": "LOC_Ability: Healing Capsule",
+      "tree": "Hidden",
+      "type": "Ability",
+      "category": "Hidden",
+      "categories": [],
+      "gridX": 4,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        2,
+        3
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgethealingcapsule_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-gunsmith",
+      "tag": "Skills.Perk.Gunsmith",
+      "name": "Gunsmith",
+      "tree": "Hidden",
+      "type": "Technique",
+      "category": "Hidden",
+      "categories": [],
+      "gridX": 5,
+      "gridY": 4,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "DurabilityLossReduction_WeaponsAndTools",
+          "name": "Reduce Durability Loss",
+          "type": "number",
+          "value": 0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "DurabilityLossReduction_WeaponsAndTools",
+          "name": "Reduce Durability Loss",
+          "type": "number",
+          "value": 0.4,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "DurabilityLossReduction_WeaponsAndTools",
+          "name": "Reduce Durability Loss",
+          "type": "number",
+          "value": 0.5,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkgunsmith_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-suspensormine_stabilization",
+      "tag": "Skills.Ability.SuspensorMine_Stabilization",
+      "name": "Remote Stabilization Mine",
+      "tree": "Hidden",
+      "type": "Ability",
+      "category": "Hidden",
+      "categories": [],
+      "gridX": 5,
+      "gridY": 5,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetstabilizationremotemine_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-suspensorgrenade_stabilization",
+      "tag": "Skills.Ability.SuspensorGrenade_Stabilization",
+      "name": "Stabilization Bomb",
+      "tree": "Hidden",
+      "type": "Ability",
+      "category": "Hidden",
+      "categories": [],
+      "gridX": 5,
+      "gridY": 6,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetstabilizationsuspensorgrenade_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-healerseeker",
+      "tag": "Skills.Ability.HealerSeeker",
+      "name": "LOC_Ability: Healer Seeker",
+      "tree": "Hidden",
+      "type": "Ability",
+      "category": "Hidden",
+      "categories": [],
+      "gridX": 5,
+      "gridY": 12,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgethealerseeker_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-turretseeker",
+      "tag": "Skills.Ability.TurretSeeker",
+      "name": "The Sentinel",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 1,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        2,
+        3
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Seeker.Sentry.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 22,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Seeker.Sentry.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Seeker.Sentry.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Seeker.Sentry.TurretDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Seeker.Sentry.TurretDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Seeker.Sentry.TurretDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Seeker.Sentry.BaseDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 14,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Seeker.Sentry.BaseDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 31,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Seeker.Sentry.BaseDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 87,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilityturretseeker_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-poisoncapsulelauncher",
+      "tag": "Skills.Ability.PoisonCapsuleLauncher",
+      "name": "Poison Capsule",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 3,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        2,
+        3
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "PoisonCapsule.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "PoisonCapsule.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "PoisonCapsule.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 16,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "CapsuleLauncher_Poison_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 9,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "CapsuleLauncher_Poison_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 9,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "CapsuleLauncher_Poison_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 9,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "PoisonCapsuleAndMineDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 3,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "PoisonCapsuleAndMineDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 9,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "PoisonCapsuleAndMineDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetpoisoncapsulelauncher_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-suspensorwall",
+      "tag": "Skills.Ability.SuspensorWall",
+      "name": "Shield Wall",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 5,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        2,
+        3
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "SuspensorWall.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 22,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "SuspensorWall.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "SuspensorWall.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "SuspensorWall.DeployedWallLifespan",
+          "name": "Duration",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "SuspensorWall.DeployedWallLifespan",
+          "name": "Duration",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "SuspensorWall.DeployedWallLifespan",
+          "name": "Duration",
+          "type": "number",
+          "value": 35,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitysuspensorwall_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-mentalcalculus1",
+      "tag": "Skills.Attribute.MentalCalculus1",
+      "name": "Garment Keeper",
+      "tree": "Mentat",
+      "type": "Attribute",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 1,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.TurretSeeker",
+        "Skills.Attribute.MentalCalculus3",
+        "Skills.Perk.HeadShots"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "DurabilityLossReduction_Apparels",
+          "name": "Reduce Durability Loss",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "DurabilityLossReduction_Apparels",
+          "name": "Reduce Durability Loss",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "DurabilityLossReduction_Apparels",
+          "name": "Reduce Durability Loss",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributerepair_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-mentalcalculus2",
+      "tag": "Skills.Attribute.MentalCalculus2",
+      "name": "Ranged Damage",
+      "tree": "Mentat",
+      "type": "Attribute",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 2,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.TurretSeeker",
+        "Skills.Perk.HeadShots",
+        "Skills.Attribute.MentalCalculus4"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "RangedDamageBonus",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.03,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "RangedDamageBonus",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.06,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "RangedDamageBonus",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.09,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributedamage_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-poisonmine",
+      "tag": "Skills.Ability.PoisonMine",
+      "name": "Poison Mine",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 3,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.PoisonCapsuleLauncher",
+        "Skills.Perk.PoisonTooth",
+        "Skills.Attribute.Assassination2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MinePoison.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "MinePoison.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 16,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "MinePoison.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 14,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "CapsuleLauncher_Poison_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 9,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "CapsuleLauncher_Poison_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 9,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "CapsuleLauncher_Poison_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 9,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "PoisonCapsuleAndMineDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 3,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "PoisonCapsuleAndMineDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 9,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "PoisonCapsuleAndMineDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitypoisonmine_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-assassination1",
+      "tag": "Skills.Attribute.Assassination1",
+      "name": "Headshot Damage",
+      "tree": "Mentat",
+      "type": "Attribute",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 4,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.PoisonCapsuleLauncher",
+        "Skills.Ability.StunDart",
+        "Skills.Attribute.Assassination2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "HeadDamageBonus",
+          "name": "Headshot Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HeadDamageBonus",
+          "name": "Headshot Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HeadDamageBonus",
+          "name": "Headshot Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributeheadshotbonus_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-suspensormine_amplification",
+      "tag": "Skills.Ability.SuspensorMine_Amplification",
+      "name": "Gravity Mine",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 5,
+      "gridY": 1,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.SuspensorWall",
+        "Skills.Ability.SuspensorMine_Reduction"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MineSusAmp.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "MineSusAmp.Lifespan",
+          "name": "Duration",
+          "type": "number",
+          "value": 17,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AmplificationFieldPowerDrainPercent",
+          "name": "Power Drain",
+          "type": "number",
+          "value": 0.015,
+          "operation": "",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetamplificationremotemine_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-solidodecoy",
+      "tag": "Skills.Ability.SolidoDecoy",
+      "name": "Solido Decoy",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 6,
+      "gridY": 1,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Perk.IronWill",
+        "Skills.Ability.SuspensorWall"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "SolidoDecoy.Stationary.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 23,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "SolidoDecoy.Stationary.Lifetime",
+          "name": "Duration",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitysolidodecoy_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-mentalcalculus3",
+      "tag": "Skills.Attribute.MentalCalculus3",
+      "name": "Tailoring",
+      "tree": "Mentat",
+      "type": "Attribute",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 0,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.MentalCalculus1",
+        "Skills.Perk.ExploitWeakness"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MaxDurabilityRepairReduction_Apparels",
+          "name": "Reduce Max Durability Loss",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "MaxDurabilityRepairReduction_Apparels",
+          "name": "Reduce Max Durability Loss",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "MaxDurabilityRepairReduction_Apparels",
+          "name": "Reduce Max Durability Loss",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributerepairefficiency_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-headshots",
+      "tag": "Skills.Perk.HeadShots",
+      "name": "Marksman",
+      "tree": "Mentat",
+      "type": "Technique",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 1,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.MentalCalculus1",
+        "Skills.Attribute.MentalCalculus2",
+        "Skills.Attribute.MentalCalculus5",
+        "Skills.Perk.ExploitWeakness"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "HeadDamageBonus",
+          "name": "Headshot Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HeadDamageBonus",
+          "name": "Headshot Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HeadDamageBonus",
+          "name": "Headshot Damage",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkmarksman_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-mentalcalculus4",
+      "tag": "Skills.Attribute.MentalCalculus4",
+      "name": "Pistol Damage",
+      "tree": "Mentat",
+      "type": "Attribute",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 2,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.MentalCalculus2",
+        "Skills.Attribute.MentalCalculus5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "PistolDamageBonus",
+          "name": "Pistol Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "PistolDamageBonus",
+          "name": "Pistol Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "PistolDamageBonus",
+          "name": "Pistol Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributedamagebonusgun_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-assassination2",
+      "tag": "Skills.Attribute.Assassination2",
+      "name": "Assassin's Shot",
+      "tree": "Mentat",
+      "type": "Attribute",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 3,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.PoisonMine",
+        "Skills.Attribute.Assassination1",
+        "Skills.Perk.PoisonTooth",
+        "Skills.Ability.StunDart"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "SurpriseAttackDamageBonus",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "SurpriseAttackDamageBonus",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "SurpriseAttackDamageBonus",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributedamage_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-exploitweakness",
+      "tag": "Skills.Perk.ExploitWeakness",
+      "name": "Exploit Weakness",
+      "tree": "Mentat",
+      "type": "Technique",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 1,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.MentalCalculus3",
+        "Skills.Perk.HeadShots",
+        "Skills.Perk.ShieldWeakpoint"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 10,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "UI_RangedDamage",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreespiceeffectexploitweakness_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-mentalcalculus5",
+      "tag": "Skills.Attribute.MentalCalculus5",
+      "name": "Rifle Damage",
+      "tree": "Mentat",
+      "type": "Attribute",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 2,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.HeadShots",
+        "Skills.Attribute.MentalCalculus4",
+        "Skills.Perk.ShieldWeakpoint"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "RifleDamageBonus",
+          "name": "Rifle Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "RifleDamageBonus",
+          "name": "Rifle Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "RifleDamageBonus",
+          "name": "Rifle Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributedamagebonusscattergun_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-poisontooth",
+      "tag": "Skills.Perk.PoisonTooth",
+      "name": "Poison Tooth",
+      "tree": "Mentat",
+      "type": "Technique",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 3,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.PoisonMine",
+        "Skills.Ability.HunterSeeker",
+        "Skills.Attribute.Assassination2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 9,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "UI_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 9,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "UI_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 9,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "UI_Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 3,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "UI_Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 9,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "UI_Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 18,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreepoisontooth_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-stundart",
+      "tag": "Skills.Ability.StunDart",
+      "name": "Stunner",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 4,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Assassination1",
+        "Skills.Ability.HunterSeeker",
+        "Skills.Attribute.Assassination2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Stunner.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 35,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.VeryHigh",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 45,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Stunner.StunDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 6,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitystunnerdart_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-suspensormine_reduction",
+      "tag": "Skills.Ability.SuspensorMine_Reduction",
+      "name": "Anti-gravity Mine",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 5,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.SuspensorMine_Amplification",
+        "Skills.Ability.PortableGenerator"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MineSusRed.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "MineSusRed.Lifespan",
+          "name": "Duration",
+          "type": "number",
+          "value": 17,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetreductionremotemine_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-ironwill",
+      "tag": "Skills.Perk.IronWill",
+      "name": "Iron Will",
+      "tree": "Mentat",
+      "type": "Technique",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 6,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.PortableGenerator",
+        "Skills.Ability.SolidoDecoy"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_StaminaCost",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 20,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "UI_Cooldown",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 8,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeironwill_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-shieldweakpoint",
+      "tag": "Skills.Perk.ShieldWeakpoint",
+      "name": "Shield Overcharge",
+      "tree": "Mentat",
+      "type": "Attribute",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 1,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        3
+      ],
+      "prerequisites": [
+        "Skills.Perk.ExploitWeakness",
+        "Skills.Attribute.MentalCalculus5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 10,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "UI_ShieldDamage",
+          "name": "Shield Damage",
+          "type": "number",
+          "value": 0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeshieldovercharge_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-hunterseeker",
+      "tag": "Skills.Ability.HunterSeeker",
+      "name": "Hunter-Seeker",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 3,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Perk.PoisonTooth",
+        "Skills.Ability.StunDart"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "HunterSeeker.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 60,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "HunterSeeker.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 1200,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgethunterseeker_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-portablegenerator",
+      "tag": "Skills.Ability.PortableGenerator",
+      "name": "Source of Power",
+      "tree": "Mentat",
+      "type": "Ability",
+      "category": "Mentat",
+      "categories": [
+        "skills/mentat"
+      ],
+      "gridX": 5,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.SuspensorMine_Reduction",
+        "Skills.Perk.IronWill"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "PortableGenerator.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 35,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "PortableGenerator.DeployableLifetime",
+          "name": "Duration",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "SourceOfPowerRegen",
+          "name": "Power Regeneration",
+          "type": "number",
+          "value": 0.3,
+          "operation": "",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilityportablegenerator_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-scientist1",
+      "tag": "Skills.Attribute.Scientist1",
+      "name": "Cutteray Mining",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 1,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "CutterayLowEngagementYieldBonus",
+          "name": "Vehicle Cutteray Yield",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "CutterayLowEngagementYieldBonus",
+          "name": "Vehicle Cutteray Yield",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "CutterayLowEngagementYieldBonus",
+          "name": "Vehicle Cutteray Yield",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "UI_Hand-heldCutterayYield",
+          "name": "Hand-held Cutteray Yield",
+          "type": "number",
+          "value": 2.5,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_Hand-heldCutterayYield",
+          "name": "Hand-held Cutteray Yield",
+          "type": "number",
+          "value": 3.75,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_Hand-heldCutterayYield",
+          "name": "Hand-held Cutteray Yield",
+          "type": "number",
+          "value": 5,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributemineralyield_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-suspensorpad",
+      "tag": "Skills.Ability.SuspensorPad",
+      "name": "Suspensor Pad",
+      "tree": "Planetologist",
+      "type": "Ability",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 3,
+      "gridY": 0,
+      "maxLevel": 1,
+      "costPerLevel": [
+        1
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "SuspensorDisc.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "SuspensorDisc.Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 10,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitysuspensorpad_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-driver1",
+      "tag": "Skills.Attribute.Driver1",
+      "name": "Vehicle Repair",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 5,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MaxDurabilityRepairReduction_Vehicles",
+          "name": "Reduce Max Durability Loss",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "MaxDurabilityRepairReduction_Vehicles",
+          "name": "Reduce Max Durability Loss",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "MaxDurabilityRepairReduction_Vehicles",
+          "name": "Reduce Max Durability Loss",
+          "type": "number",
+          "value": 0.35,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributerepairefficiency_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-scientist2",
+      "tag": "Skills.Attribute.Scientist2",
+      "name": "Dew Gathering",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 1,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Scientist1",
+        "Skills.Attribute.Scientist4",
+        "Skills.Attribute.Scientist5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "DewReapingYieldModifier",
+          "name": "Dew Reaper Yield",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "DewReapingYieldModifier",
+          "name": "Dew Reaper Yield",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "DewReapingYieldModifier",
+          "name": "Dew Reaper Yield",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributewatheryield_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-scientist3",
+      "tag": "Skills.Attribute.Scientist3",
+      "name": "Rerouting",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 2,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Scientist1",
+        "Skills.Science.m_PowerMax",
+        "Skills.Attribute.Scientist4"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "PowerPackRegenBonus",
+          "name": "Power Regeneration",
+          "type": "number",
+          "value": 0.03,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "PowerPackRegenBonus",
+          "name": "Power Regeneration",
+          "type": "number",
+          "value": 0.06,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "PowerPackRegenBonus",
+          "name": "Power Regeneration",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillpowerefficiency_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-explorer1",
+      "tag": "Skills.Attribute.Explorer1",
+      "name": "Cartographer",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 3,
+      "gridY": 1,
+      "maxLevel": 1,
+      "costPerLevel": [
+        1
+      ],
+      "prerequisites": [
+        "Skills.Ability.SuspensorPad",
+        "Skills.Attribute.Explorer3"
+      ],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillobservation_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-explorer2",
+      "tag": "Skills.Attribute.Explorer2",
+      "name": "Mountaineer",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 4,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.SuspensorPad",
+        "Skills.Attribute.Explorer4"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "ClimbingStaminaScalar",
+          "name": "Climbing Stamina Drain",
+          "type": "number",
+          "value": -0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "ClimbingStaminaScalar",
+          "name": "Climbing Stamina Drain",
+          "type": "number",
+          "value": -0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "ClimbingStaminaScalar",
+          "name": "Climbing Stamina Drain",
+          "type": "number",
+          "value": -0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillclimber_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-driver2",
+      "tag": "Skills.Attribute.Driver2",
+      "name": "Fuel Efficient Driver",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 5,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Driver1",
+        "Skills.Attribute.Driver4",
+        "Skills.Attribute.Driver5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "GroundVehiclesFuelUsageMultiplier",
+          "name": "Fuel Usage",
+          "type": "number",
+          "value": -0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "GroundVehiclesFuelUsageMultiplier",
+          "name": "Fuel Usage",
+          "type": "number",
+          "value": -0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "GroundVehiclesFuelUsageMultiplier",
+          "name": "Fuel Usage",
+          "type": "number",
+          "value": -0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributevehicle_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-driver3",
+      "tag": "Skills.Attribute.Driver3",
+      "name": "Vehicle Mining",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 6,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Driver1",
+        "Skills.Attribute.Driver4",
+        "Skills.Attribute.Driver6"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "VehicleMiningYieldBonus",
+          "name": "Vehicle Cutteray Yield",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "VehicleMiningYieldBonus",
+          "name": "Vehicle Cutteray Yield",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "VehicleMiningYieldBonus",
+          "name": "Vehicle Cutteray Yield",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributemineralyield_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-scientist4",
+      "tag": "Skills.Attribute.Scientist4",
+      "name": "Deep Analysis",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 1,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Scientist2",
+        "Skills.Science.m_PowerMax",
+        "Skills.Attribute.Scientist3",
+        "Skills.Attribute.Scientist5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_AnalysisModeYield",
+          "name": "Analysis Mode Yield",
+          "type": "number",
+          "value": 7.5,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_AnalysisModeYield",
+          "name": "Analysis Mode Yield",
+          "type": "number",
+          "value": 11.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_AnalysisModeYield",
+          "name": "Analysis Mode Yield",
+          "type": "number",
+          "value": 15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "CutterayHighEngagementYieldBonus",
+          "name": "Analysis Mode Yield",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "CutterayHighEngagementYieldBonus",
+          "name": "Analysis Mode Yield",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "CutterayHighEngagementYieldBonus",
+          "name": "Analysis Mode Yield",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributemineralyield_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-driver4",
+      "tag": "Skills.Attribute.Driver4",
+      "name": "Vehicle Scanning",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 5,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Driver2",
+        "Skills.Attribute.Driver3",
+        "Skills.Attribute.Driver5",
+        "Skills.Attribute.Driver6"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "VehicleScannerRangeBonus",
+          "name": "Detection Radius",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "VehicleScannerRangeBonus",
+          "name": "Detection Radius",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "VehicleScannerRangeBonus",
+          "name": "Detection Radius",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributescanningbonus_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-scientist5",
+      "tag": "Skills.Attribute.Scientist5",
+      "name": "Compaction",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 1,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Scientist2",
+        "Skills.Attribute.Scientist4",
+        "Skills.Perk.BatteryExpert"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "CompactorYieldScalar",
+          "name": "Compactor Yield",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "CompactorYieldScalar",
+          "name": "Compactor Yield",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "CompactorYieldScalar",
+          "name": "Compactor Yield",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributespiceyield_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-science-m_powermax",
+      "tag": "Skills.Science.m_PowerMax",
+      "name": "Overcharge",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 2,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Scientist3",
+        "Skills.Perk.BatteryExpert",
+        "Skills.Attribute.Scientist4"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MaxPower",
+          "name": "Maximum Power",
+          "type": "number",
+          "value": 20,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "MaxPower",
+          "name": "Maximum Power",
+          "type": "number",
+          "value": 30,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "MaxPower",
+          "name": "Maximum Power",
+          "type": "number",
+          "value": 40,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/techtree/equipment/t_techtree_icon_power_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-explorer3",
+      "tag": "Skills.Attribute.Explorer3",
+      "name": "Scanner Mastery",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 3,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Explorer1",
+        "Skills.Attribute.Explorer5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "HandheldScannerRangeBonus",
+          "name": "Detection Radius",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HandheldScannerRangeBonus",
+          "name": "Detection Radius",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HandheldScannerRangeBonus",
+          "name": "Detection Radius",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributescanningbonus_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-explorer4",
+      "tag": "Skills.Attribute.Explorer4",
+      "name": "Stillsuit Seals",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 4,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Explorer2",
+        "Skills.Attribute.Explorer5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_HydrationCapture",
+          "name": "Hydration Capture",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_HydrationCapture",
+          "name": "Hydration Capture",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_HydrationCapture",
+          "name": "Hydration Capture",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "ClothingDehydrationCaptureTrainingModifier",
+          "name": "Hydration Capture",
+          "type": "number",
+          "value": 1.05,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "ClothingDehydrationCaptureTrainingModifier",
+          "name": "Hydration Capture",
+          "type": "number",
+          "value": 1.1,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "ClothingDehydrationCaptureTrainingModifier",
+          "name": "Hydration Capture",
+          "type": "number",
+          "value": 1.15,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillhydration_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-driver5",
+      "tag": "Skills.Attribute.Driver5",
+      "name": "Fuel Efficient Pilot",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 5,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Driver2",
+        "Skills.Attribute.Driver4",
+        "Skills.Spice.VehicleHeat"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "FlyingVehiclesFuelUsageMultiplier",
+          "name": "Fuel Usage",
+          "type": "number",
+          "value": -0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "FlyingVehiclesFuelUsageMultiplier",
+          "name": "Fuel Usage",
+          "type": "number",
+          "value": -0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "FlyingVehiclesFuelUsageMultiplier",
+          "name": "Fuel Usage",
+          "type": "number",
+          "value": -0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributevehicle_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-driver6",
+      "tag": "Skills.Attribute.Driver6",
+      "name": "Sandcrawler Yield",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 6,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Driver3",
+        "Skills.Attribute.Driver4",
+        "Skills.Spice.VehicleHeat"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "HarvesterVehicleYieldBonus",
+          "name": "Sandcrawler Yield",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HarvesterVehicleYieldBonus",
+          "name": "Sandcrawler Yield",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HarvesterVehicleYieldBonus",
+          "name": "Sandcrawler Yield",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributespiceyield_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-batteryexpert",
+      "tag": "Skills.Perk.BatteryExpert",
+      "name": "Conservation of Energy",
+      "tree": "Planetologist",
+      "type": "Technique",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 1,
+      "gridY": 4,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Scientist5",
+        "Skills.Science.m_PowerMax"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "PowerEfficiency",
+          "name": "Power Usage",
+          "type": "number",
+          "value": -0.03,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "PowerEfficiency",
+          "name": "Power Usage",
+          "type": "number",
+          "value": -0.06,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "PowerEfficiency",
+          "name": "Power Usage",
+          "type": "number",
+          "value": -0.09,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkbatteryexpert_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-explorer5",
+      "tag": "Skills.Attribute.Explorer5",
+      "name": "Spice Surveyor",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 3,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Explorer3",
+        "Skills.Attribute.Explorer4"
+      ],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributespice_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-spice-vehicleheat",
+      "tag": "Skills.Spice.VehicleHeat",
+      "name": "Heat Management",
+      "tree": "Planetologist",
+      "type": "Attribute",
+      "category": "Planetologist",
+      "categories": [
+        "skills/planetologist"
+      ],
+      "gridX": 5,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        3
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Driver5",
+        "Skills.Attribute.Driver6"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "VehicleHeatIncreaseRateMultiplier",
+          "name": "Heat Generation",
+          "type": "number",
+          "value": -0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "VehicleInstantHeatIncreaseMultiplier",
+          "name": "Heat Generation",
+          "type": "number",
+          "value": -0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeheatmanagement_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-blade1",
+      "tag": "Skills.Attribute.Blade1",
+      "name": "Blade Damage",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 1,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "ShortBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.03,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "ShortBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.06,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "ShortBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.09,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "LongBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.03,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "LongBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.06,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "LongBladeDamageBonus",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.09,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillbrawler_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-deflectionslow",
+      "tag": "Skills.Ability.DeflectionSlow",
+      "name": "Deflection",
+      "tree": "Swordmaster",
+      "type": "Ability",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 3,
+      "gridY": 0,
+      "maxLevel": 1,
+      "costPerLevel": [
+        1
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Deflection.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 12,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Deflection.Cost.StaminaPerTrigger",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 2,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitydeflection_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-kneecharge",
+      "tag": "Skills.Ability.KneeCharge",
+      "name": "Knee Charge",
+      "tree": "Swordmaster",
+      "type": "Ability",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 5,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        2,
+        3
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "KneeCharge.Starter.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "KneeCharge.Starter.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 12,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "KneeCharge.Starter.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 10,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "KneeCharge.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 50,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "KneeCharge.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 160,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "KneeCharge.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 325,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "KneeCharge.DamagePoise",
+          "name": "Poise Damage",
+          "type": "number",
+          "value": 120,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "KneeCharge.DamagePoise",
+          "name": "Poise Damage",
+          "type": "number",
+          "value": 140,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "KneeCharge.DamagePoise",
+          "name": "Poise Damage",
+          "type": "number",
+          "value": 160,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitykneecharge_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-meleechain",
+      "tag": "Skills.Perk.MeleeChain",
+      "name": "Dance of Blades",
+      "tree": "Swordmaster",
+      "type": "Technique",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 1,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Blade1",
+        "Skills.Ability.Whirlwind",
+        "Skills.Attribute.Blade2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MeleeDamageBonus",
+          "name": "Damage Boost",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "MeleeDamageBonus",
+          "name": "Damage Boost",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "MeleeDamageBonus",
+          "name": "Damage Boost",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "UI_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 10,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "UI_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 10,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "UI_Duration",
+          "name": "Duration",
+          "type": "number",
+          "value": 10,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkbladechaining_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-riposteinjure",
+      "tag": "Skills.Ability.RiposteInjure",
+      "name": "Retaliate",
+      "tree": "Swordmaster",
+      "type": "Ability",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 2,
+      "gridY": 1,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Blade2",
+        "Skills.Attribute.Blade1",
+        "Skills.Ability.RiposteBreak"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Riposte.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 12,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Riposte.Injure.WeaponDamageMultiplier",
+          "name": "Weapon Damage",
+          "type": "number",
+          "value": 1.2,
+          "operation": "",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "RiposteInjureBleed",
+          "name": "Bleed",
+          "type": "number",
+          "value": 4,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "RiposteInjureDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 6,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilityinjuringreposte_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-resolve1",
+      "tag": "Skills.Attribute.Resolve1",
+      "name": "Bleed Tolerance",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 3,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.DeflectionSlow",
+        "Skills.Attribute.Resolve2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_BleedTolerance",
+          "name": "Bleed Tolerance",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_BleedTolerance",
+          "name": "Bleed Tolerance",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_BleedTolerance",
+          "name": "Bleed Tolerance",
+          "type": "number",
+          "value": 0.35,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "BleedStatusTolerance",
+          "name": "Bleed Tolerance",
+          "type": "number",
+          "value": 15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "BleedStatusTolerance",
+          "name": "Bleed Tolerance",
+          "type": "number",
+          "value": 25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "BleedStatusTolerance",
+          "name": "Bleed Tolerance",
+          "type": "number",
+          "value": 35,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillmaxhealth_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-toughlunge",
+      "tag": "Skills.Perk.ToughLunge",
+      "name": "Reckless Lunge",
+      "tree": "Swordmaster",
+      "type": "Technique",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 4,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.UnstoppableAttacks",
+        "Skills.Ability.DeflectionSlow"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "TotalDamageMitigation",
+          "name": "Damage Mitigation",
+          "type": "number",
+          "value": 0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "TotalDamageMitigation",
+          "name": "Damage Mitigation",
+          "type": "number",
+          "value": 0.4,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "TotalDamageMitigation",
+          "name": "Damage Mitigation",
+          "type": "number",
+          "value": 0.5,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreetoughlunge_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-aggression1",
+      "tag": "Skills.Attribute.Aggression1",
+      "name": "Field Medicine",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 5,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.KneeCharge",
+        "Skills.Ability.CripplingStrike",
+        "Skills.Perk.SprintStamina"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "ItemGadgetInstantHealingMultiplier",
+          "name": "Healkit Instant Restoration Bonus",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "ItemGadgetInstantHealingMultiplier",
+          "name": "Healkit Instant Restoration Bonus",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "ItemGadgetInstantHealingMultiplier",
+          "name": "Healkit Instant Restoration Bonus",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillhealingmultiplier_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-aggression2",
+      "tag": "Skills.Attribute.Aggression2",
+      "name": "Optimized Hydration",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 6,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.KneeCharge",
+        "Skills.Perk.SprintStamina",
+        "Skills.Ability.BattleCry"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "HydrationStaminaBonus",
+          "name": "Hydrated Stamina Bonus",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HydrationStaminaBonus",
+          "name": "Hydrated Stamina Bonus",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HydrationStaminaBonus",
+          "name": "Hydrated Stamina Bonus",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributewatherbonus_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-blade2",
+      "tag": "Skills.Attribute.Blade2",
+      "name": "Long Blade Damage",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 1,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.Whirlwind",
+        "Skills.Ability.RiposteBreak",
+        "Skills.Ability.RiposteInjure",
+        "Skills.Perk.MeleeChain"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "LongBladeDamageBonus",
+          "name": "Long Blade Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "LongBladeDamageBonus",
+          "name": "Long Blade Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "LongBladeDamageBonus",
+          "name": "Long Blade Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillbrawler_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-cripplingstrike",
+      "tag": "Skills.Ability.CripplingStrike",
+      "name": "Crippling Strike",
+      "tree": "Swordmaster",
+      "type": "Ability",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 4,
+      "gridY": 2,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Aggression1",
+        "Skills.Attribute.Aggression3"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "CripplingStrike.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "CripplingStrike.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 50,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "CripplingStrike.DashStaminaCostMultiplier",
+          "name": "Dash Cost Multiplier",
+          "type": "number",
+          "value": 3,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "CripplingStrike.DebuffDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 7.5,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitycripplingstrike_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-sprintstamina",
+      "tag": "Skills.Perk.SprintStamina",
+      "name": "Disciplined Breathing",
+      "tree": "Swordmaster",
+      "type": "Technique",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 5,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Aggression1",
+        "Skills.Attribute.Aggression2",
+        "Skills.Attribute.Aggression3",
+        "Skills.Attribute.Aggression4"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "StaminaRegenPerTickMultiplier",
+          "name": "Stamina Recovery Rate",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "StaminaRegenPerTickMultiplier",
+          "name": "Stamina Recovery Rate",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "StaminaRegenPerTickMultiplier",
+          "name": "Stamina Recovery Rate",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkrunner_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-battlecry",
+      "tag": "Skills.Ability.BattleCry",
+      "name": "Inspiration",
+      "tree": "Swordmaster",
+      "type": "Ability",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 6,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Aggression2",
+        "Skills.Attribute.Aggression4"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "BattleCry.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "BattleCry.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "BattleCry.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "BattleCry.BuffDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 14,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "BattleCry.BuffDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "BattleCry.BuffDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 23,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "BattleCry.MeleeBonusDamage",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.25,
+          "operation": "",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "BattleCry.MeleeBonusDamage",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.3,
+          "operation": "",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "BattleCry.MeleeBonusDamage",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.35,
+          "operation": "",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitybattlecry_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-whirlwind",
+      "tag": "Skills.Ability.Whirlwind",
+      "name": "Eye of the Storm",
+      "tree": "Swordmaster",
+      "type": "Ability",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 1,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.MeleeChain",
+        "Skills.Attribute.Blade2",
+        "Skills.Spice.ParryBoost"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Whirlwind.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Whirlwind.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Whirlwind.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 16,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Whirlwind.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Whirlwind.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 65,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Whirlwind.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 140,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitywhirlwind_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-ripostebreak",
+      "tag": "Skills.Ability.RiposteBreak",
+      "name": "Foil",
+      "tree": "Swordmaster",
+      "type": "Ability",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 2,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.RiposteInjure",
+        "Skills.Spice.ParryBoost",
+        "Skills.Attribute.Blade2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Riposte.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 12,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Riposte.Break.WeaponDamageMultiplier",
+          "name": "Weapon Damage",
+          "type": "number",
+          "value": 1.2,
+          "operation": "",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "RiposteBreakDebuff",
+          "name": "Enemy Damage",
+          "type": "number",
+          "value": -0.5,
+          "operation": "",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "Riposte.Break.DebuffDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 10,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitybreakingreposte_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-resolve2",
+      "tag": "Skills.Attribute.Resolve2",
+      "name": "Solid Stance",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 3,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Resolve1",
+        "Skills.Perk.ThriveOnDanger"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "PoiseDamageResistance",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.03,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "PoiseDamageResistance",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.06,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "PoiseDamageResistance",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.09,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributepoisedefense_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-unstoppableattacks",
+      "tag": "Skills.Attribute.UnstoppableAttacks",
+      "name": "Confidence",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 4,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.ToughLunge",
+        "Skills.Perk.ThriveOnDanger"
+      ],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributedamagemitigation_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-aggression3",
+      "tag": "Skills.Attribute.Aggression3",
+      "name": "General Conditioning",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 5,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.CripplingStrike",
+        "Skills.Perk.SprintStamina",
+        "Skills.Spice.ShadowStrike"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MaxStamina",
+          "name": "Max Stamina",
+          "type": "number",
+          "value": 15,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "MaxStamina",
+          "name": "Max Stamina",
+          "type": "number",
+          "value": 20,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "MaxStamina",
+          "name": "Max Stamina",
+          "type": "number",
+          "value": 25,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributestamina_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-aggression4",
+      "tag": "Skills.Attribute.Aggression4",
+      "name": "Desert Conditioning",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 6,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.SprintStamina",
+        "Skills.Ability.BattleCry",
+        "Skills.Spice.ShadowStrike"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "DehydrationStaminaReductionModifier",
+          "name": "Dehydrated Stamina Limit",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "DehydrationStaminaReductionModifier",
+          "name": "Dehydrated Stamina Limit",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "DehydrationStaminaReductionModifier",
+          "name": "Dehydrated Stamina Limit",
+          "type": "number",
+          "value": 0.35,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributewatherdefense_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-spice-parryboost",
+      "tag": "Skills.Spice.ParryBoost",
+      "name": "Precise Parry",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 1,
+      "gridY": 4,
+      "maxLevel": 3,
+      "costPerLevel": [
+        3,
+        3,
+        3
+      ],
+      "prerequisites": [
+        "Skills.Ability.Whirlwind",
+        "Skills.Ability.RiposteBreak"
+      ],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreepreciseparry_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-thriveondanger",
+      "tag": "Skills.Perk.ThriveOnDanger",
+      "name": "Thrive on Danger",
+      "tree": "Swordmaster",
+      "type": "Technique",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 3,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.UnstoppableAttacks",
+        "Skills.Attribute.Resolve2"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "StaminaUsageBonus",
+          "name": "Stamina Costs",
+          "type": "number",
+          "value": -0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "HealingRegenPerTickMultiplier",
+          "name": "Increase Health Regeneration",
+          "type": "number",
+          "value": 2,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "PoiseDamageResistance",
+          "name": "Reduce Poise Damage",
+          "type": "number",
+          "value": 0.34,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "UI_HealthRegenDelay",
+          "name": "Health Regen Delay",
+          "type": "number",
+          "value": -0.75,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "DashStaminaCost",
+          "name": "Stamina Costs",
+          "type": "number",
+          "value": 0.7,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreethriveondanger_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-spice-shadowstrike",
+      "tag": "Skills.Spice.ShadowStrike",
+      "name": "Prescient Strike",
+      "tree": "Swordmaster",
+      "type": "Attribute",
+      "category": "Swordmaster",
+      "categories": [
+        "skills/swordmaster"
+      ],
+      "gridX": 5,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        3
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Aggression3",
+        "Skills.Attribute.Aggression4"
+      ],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeprescientstrike_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-weaponry1",
+      "tag": "Skills.Attribute.Weaponry1",
+      "name": "Ranged Damage",
+      "tree": "Trooper",
+      "type": "Attribute",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 1,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "RangedDamageBonus",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.03,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "RangedDamageBonus",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.06,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "RangedDamageBonus",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.09,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributedamage_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-suspensorgrenade_reduction",
+      "tag": "Skills.Ability.SuspensorGrenade_Reduction",
+      "name": "Anti-gravity Field",
+      "tree": "Trooper",
+      "type": "Ability",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 3,
+      "gridY": 0,
+      "maxLevel": 1,
+      "costPerLevel": [
+        1
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "GrenadeSusRed.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "GrenadeSusRed.Lifespan",
+          "name": "Duration",
+          "type": "number",
+          "value": 12,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetreductionsuspensorgrenade_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-cablepull",
+      "tag": "Skills.Ability.CablePull",
+      "name": "Shigawire Claw",
+      "tree": "Trooper",
+      "type": "Ability",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 5,
+      "gridY": 0,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        2,
+        3
+      ],
+      "prerequisites": [],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "SardaukarPull.Short.CooldownTerrain",
+          "name": "Cooldown (Terrain)",
+          "type": "number",
+          "value": 8,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "SardaukarPull.Short.CooldownTerrain",
+          "name": "Cooldown (Terrain)",
+          "type": "number",
+          "value": 8,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "SardaukarPull.Short.CooldownTerrain",
+          "name": "Cooldown (Terrain)",
+          "type": "number",
+          "value": 8,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "SardaukarPull.Short.CooldownTarget",
+          "name": "Cooldown (Enemy)",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "SardaukarPull.Short.CooldownTarget",
+          "name": "Cooldown (Enemy)",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "SardaukarPull.Short.CooldownTarget",
+          "name": "Cooldown (Enemy)",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "SardaukarPull.Short.MaxTraceDistance",
+          "name": "Range",
+          "type": "number",
+          "value": 1800,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "SardaukarPull.Short.MaxTraceDistance",
+          "name": "Range",
+          "type": "number",
+          "value": 2160,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "SardaukarPull.Short.MaxTraceDistance",
+          "name": "Range",
+          "type": "number",
+          "value": 2520,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetshigmultitoolsardaukarpull_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-weaponry2",
+      "tag": "Skills.Attribute.Weaponry2",
+      "name": "Disruptor Damage",
+      "tree": "Trooper",
+      "type": "Attribute",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 1,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Weaponry1",
+        "Skills.Perk.HeavyWeaponNaib",
+        "Skills.Attribute.Weaponry3"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "CarbineDamageBonus",
+          "name": "Disruptor Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "CarbineDamageBonus",
+          "name": "Disruptor Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "CarbineDamageBonus",
+          "name": "Disruptor Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributedamagebonussmg_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-bodyshots",
+      "tag": "Skills.Perk.BodyShots",
+      "name": "Center of Mass",
+      "tree": "Trooper",
+      "type": "Technique",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 2,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Weaponry3",
+        "Skills.Attribute.Weaponry4",
+        "Skills.Attribute.Weaponry1"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "BodyDamageBonus",
+          "name": "Body Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "BodyDamageBonus",
+          "name": "Body Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "BodyDamageBonus",
+          "name": "Body Damage",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "HeadDamageBonus",
+          "name": "Headshot Damage",
+          "type": "number",
+          "value": -0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "HeadDamageBonus",
+          "name": "Headshot Damage",
+          "type": "number",
+          "value": -0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "HeadDamageBonus",
+          "name": "Headshot Damage",
+          "type": "number",
+          "value": -0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "UI_BladeDamage",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_BladeDamage",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_BladeDamage",
+          "name": "Blade Damage",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "UI_ShieldDamage",
+          "name": "Shield Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UI_ShieldDamage",
+          "name": "Shield Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UI_ShieldDamage",
+          "name": "Shield Damage",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkcentralaim_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-suspensordash",
+      "tag": "Skills.Perk.SuspensorDash",
+      "name": "Suspensor Dash",
+      "tree": "Trooper",
+      "type": "Technique",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 3,
+      "gridY": 1,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.SuspensorGrenade_Reduction",
+        "Skills.Perk.DeathFromAbove",
+        "Skills.Attribute.SuspensorTech1"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UI_Cooldown",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 2,
+          "operation": "Additive",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "UI_SuspensorPowerDrain",
+          "name": "Suspensor Power Drain",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreesuspensordash_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-suspensorgrenade_amplification",
+      "tag": "Skills.Ability.SuspensorGrenade_Amplification",
+      "name": "Gravity Field",
+      "tree": "Trooper",
+      "type": "Ability",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 4,
+      "gridY": 1,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.SuspensorGrenade_Reduction",
+        "Skills.Ability.CollapseGrenade",
+        "Skills.Attribute.SuspensorTech1"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "GrenadeSusAmp.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "GrenadeSusAmp.Lifespan",
+          "name": "Duration",
+          "type": "number",
+          "value": 8,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AmplificationFieldPowerDrainPercent",
+          "name": "Power Drain",
+          "type": "number",
+          "value": 0.015,
+          "operation": "",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetamplificationgrenade_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-fraggrenade",
+      "tag": "Skills.Ability.FragGrenade",
+      "name": "Explosive Grenade",
+      "tree": "Trooper",
+      "type": "Ability",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 5,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.CablePull",
+        "Skills.Ability.AssaultSeeker"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "GrenadeFrag.TimedFuse.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "GrenadeFrag.TimedFuse.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "GrenadeFrag.TimedFuse.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 16,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "GrenadeFrag.TimedFuse.MaxDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 75,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "GrenadeFrag.TimedFuse.MaxDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 240,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "GrenadeFrag.TimedFuse.MaxDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 490,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetfraggrenades_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-troopercooldowns",
+      "tag": "Skills.Perk.TrooperCooldowns",
+      "name": "Battle Hardened",
+      "tree": "Trooper",
+      "type": "Technique",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 6,
+      "gridY": 1,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.CablePull",
+        "Skills.Ability.MagneticAttractor"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "CooldownScalar_Trooper",
+          "name": "Ability Cooldowns",
+          "type": "number",
+          "value": -0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "CooldownScalar_Trooper",
+          "name": "Ability Cooldowns",
+          "type": "number",
+          "value": -0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "CooldownScalar_Trooper",
+          "name": "Ability Cooldowns",
+          "type": "number",
+          "value": -0.3,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreetroopercooldown_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-heavyweaponnaib",
+      "tag": "Skills.Perk.HeavyWeaponNaib",
+      "name": "Heavy Weapon Agility",
+      "tree": "Trooper",
+      "type": "Technique",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 0,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Weaponry2",
+        "Skills.Attribute.Weaponry5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "UnholsteredMoveSpeedMultiplier",
+          "name": "Penalty Reduced To",
+          "type": "number",
+          "value": 0.6,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "UnholsteredMoveSpeedMultiplier",
+          "name": "Penalty Reduced To",
+          "type": "number",
+          "value": 0.4,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "UnholsteredMoveSpeedMultiplier",
+          "name": "Penalty Reduced To",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Multiplicitive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkheavyweaponnaib_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-weaponry3",
+      "tag": "Skills.Attribute.Weaponry3",
+      "name": "Scattergun Damage",
+      "tree": "Trooper",
+      "type": "Attribute",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 1,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Weaponry2",
+        "Skills.Attribute.Weaponry5",
+        "Skills.Perk.BodyShots",
+        "Skills.Attribute.Weaponry6"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "ScattergunDamageBonus",
+          "name": "Scattergun Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "ScattergunDamageBonus",
+          "name": "Scattergun Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "ScattergunDamageBonus",
+          "name": "Scattergun Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributedamagebonusrifle_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-weaponry4",
+      "tag": "Skills.Attribute.Weaponry4",
+      "name": "Field Maintenance",
+      "tree": "Trooper",
+      "type": "Attribute",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 2,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.BodyShots",
+        "Skills.Attribute.Weaponry6"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "DurabilityLossReduction_WeaponsAndTools",
+          "name": "Reduce Durability Loss",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "DurabilityLossReduction_WeaponsAndTools",
+          "name": "Reduce Durability Loss",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "DurabilityLossReduction_WeaponsAndTools",
+          "name": "Reduce Durability Loss",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributerepair_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-suspensortech1",
+      "tag": "Skills.Attribute.SuspensorTech1",
+      "name": "Suspensor Efficiency",
+      "tree": "Trooper",
+      "type": "Attribute",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 3,
+      "gridY": 2,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.SuspensorDash",
+        "Skills.Ability.SuspensorGrenade_Amplification",
+        "Skills.Ability.CollapseGrenade",
+        "Skills.Perk.DeathFromAbove"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "PowerSuspensorEfficiency",
+          "name": "Suspensor Power Drain",
+          "type": "number",
+          "value": -0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "PowerSuspensorEfficiency",
+          "name": "Suspensor Power Drain",
+          "type": "number",
+          "value": -0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "PowerSuspensorEfficiency",
+          "name": "Suspensor Power Drain",
+          "type": "number",
+          "value": -0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeskillpowerefficiency_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-weaponry5",
+      "tag": "Skills.Attribute.Weaponry5",
+      "name": "Heavy Weapon Damage",
+      "tree": "Trooper",
+      "type": "Attribute",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 1,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Weaponry3",
+        "Skills.Perk.HeavyWeaponNaib",
+        "Skills.Ability.EnergyCapsule"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "LmgDamageBonus",
+          "name": "Heavy Weapon Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "LmgDamageBonus",
+          "name": "Heavy Weapon Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "LmgDamageBonus",
+          "name": "Heavy Weapon Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "FlameThrowerDamageBonus",
+          "name": "Heavy Weapon Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "FlameThrowerDamageBonus",
+          "name": "Heavy Weapon Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "FlameThrowerDamageBonus",
+          "name": "Heavy Weapon Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 1,
+          "key": "LasgunDamageBonus",
+          "name": "Heavy Weapon Damage",
+          "type": "number",
+          "value": 0.05,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "LasgunDamageBonus",
+          "name": "Heavy Weapon Damage",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "LasgunDamageBonus",
+          "name": "Heavy Weapon Damage",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributedamagebonusheavyweapon_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-attribute-weaponry6",
+      "tag": "Skills.Attribute.Weaponry6",
+      "name": "Gunsmith",
+      "tree": "Trooper",
+      "type": "Attribute",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 2,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        1,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.EnergyCapsule",
+        "Skills.Attribute.Weaponry3",
+        "Skills.Attribute.Weaponry4"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MaxDurabilityRepairReduction_WeaponsAndTools",
+          "name": "Reduce Max Durability Loss",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "MaxDurabilityRepairReduction_WeaponsAndTools",
+          "name": "Reduce Max Durability Loss",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "MaxDurabilityRepairReduction_WeaponsAndTools",
+          "name": "Reduce Max Durability Loss",
+          "type": "number",
+          "value": 0.25,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeattributerepairefficiency_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-perk-deathfromabove",
+      "tag": "Skills.Perk.DeathFromAbove",
+      "name": "Death from Above",
+      "tree": "Trooper",
+      "type": "Technique",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 3,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Perk.SuspensorDash",
+        "Skills.Ability.SuspensorBlast",
+        "Skills.Attribute.SuspensorTech1"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "WeaponDamageBonus",
+          "name": "Damage While Suspended",
+          "type": "number",
+          "value": 0.1,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 2,
+          "key": "WeaponDamageBonus",
+          "name": "Damage While Suspended",
+          "type": "number",
+          "value": 0.15,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        },
+        {
+          "level": 3,
+          "key": "WeaponDamageBonus",
+          "name": "Damage While Suspended",
+          "type": "number",
+          "value": 0.2,
+          "operation": "Additive",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreeperkdeathfromabove_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-collapsegrenade",
+      "tag": "Skills.Ability.CollapseGrenade",
+      "name": "Collapse Grenade",
+      "tree": "Trooper",
+      "type": "Ability",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 4,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Ability.SuspensorGrenade_Amplification",
+        "Skills.Ability.SuspensorBlast",
+        "Skills.Attribute.SuspensorTech1"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "GrenadeHoltzmanCollapse.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 35,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "GrenadeHoltzmanCollapse.HoldDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 1,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitycollapsegrenade_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-assaultseeker",
+      "tag": "Skills.Ability.AssaultSeeker",
+      "name": "Assault Seeker",
+      "tree": "Trooper",
+      "type": "Ability",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 5,
+      "gridY": 3,
+      "maxLevel": 3,
+      "costPerLevel": [
+        2,
+        3,
+        4
+      ],
+      "prerequisites": [
+        "Skills.Ability.FragGrenade",
+        "Skills.Spice.GadgetReload"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "Seeker.Assault.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 22,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Seeker.Assault.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Seeker.Assault.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 18,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Seeker.Assault.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 80,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Seeker.Assault.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 250,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Seeker.Assault.Damage",
+          "name": "Damage",
+          "type": "number",
+          "value": 550,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "Seeker.Assault.MaxDistance",
+          "name": "Range",
+          "type": "number",
+          "value": 2000,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 2,
+          "key": "Seeker.Assault.MaxDistance",
+          "name": "Range",
+          "type": "number",
+          "value": 2500,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 3,
+          "key": "Seeker.Assault.MaxDistance",
+          "name": "Range",
+          "type": "number",
+          "value": 3000,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilityassaultseeker_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-magneticattractor",
+      "tag": "Skills.Ability.MagneticAttractor",
+      "name": "Attractor Field",
+      "tree": "Trooper",
+      "type": "Ability",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 6,
+      "gridY": 3,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Spice.GadgetReload",
+        "Skills.Perk.TrooperCooldowns"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "MagneticAttractor.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Medium",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 30,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AttractorFieldDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 8,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/gadgets/t_ui_icongadgetshigmultitoolmagneticattractor_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-energycapsule",
+      "tag": "Skills.Ability.EnergyCapsule",
+      "name": "Energy Capsule",
+      "tree": "Trooper",
+      "type": "Ability",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 1,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Attribute.Weaponry6",
+        "Skills.Attribute.Weaponry5"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "EnergyCapsule.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 25,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "AbilityStaminaCost.Low",
+          "name": "Stamina Cost",
+          "type": "number",
+          "value": 15,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "EnergyCapsule.BuffDuration",
+          "name": "Duration",
+          "type": "number",
+          "value": 10,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "EnergyCapsuleDamageBuff",
+          "name": "Ranged Damage",
+          "type": "number",
+          "value": 0.35,
+          "operation": "",
+          "format": "{v:0.#}%"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilityenergycapsule_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-ability-suspensorblast",
+      "tag": "Skills.Ability.SuspensorBlast",
+      "name": "Suspensor Blast",
+      "tree": "Trooper",
+      "type": "Ability",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 3,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        2
+      ],
+      "prerequisites": [
+        "Skills.Perk.DeathFromAbove",
+        "Skills.Ability.CollapseGrenade"
+      ],
+      "description": "",
+      "stats": [
+        {
+          "level": 1,
+          "key": "SuspensorBlast.CooldownFull",
+          "name": "Cooldown",
+          "type": "number",
+          "value": 20,
+          "operation": "",
+          "format": "{v:0.#}"
+        },
+        {
+          "level": 1,
+          "key": "SuspensorBlastDamage",
+          "name": "Damage",
+          "type": "number",
+          "value": 35,
+          "operation": "",
+          "format": "{v:0.#}"
+        }
+      ],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/gadgetsandabilities/abilities/t_ui_iconabilitysuspensorblast_d.webp",
+      "source": "gaming-tools-entities"
+    },
+    {
+      "id": "skills-spice-gadgetreload",
+      "tag": "Skills.Spice.GadgetReload",
+      "name": "Reflexive Reload",
+      "tree": "Trooper",
+      "type": "Attribute",
+      "category": "Trooper",
+      "categories": [
+        "skills/trooper"
+      ],
+      "gridX": 5,
+      "gridY": 4,
+      "maxLevel": 1,
+      "costPerLevel": [
+        3
+      ],
+      "prerequisites": [
+        "Skills.Ability.AssaultSeeker",
+        "Skills.Ability.MagneticAttractor"
+      ],
+      "description": "",
+      "stats": [],
+      "iconPath": "/images/dune/gui/textures/icons/gameplay/skillsandperks/t_ui_iconskilltreereflexivereload_d.webp",
+      "source": "gaming-tools-entities"
+    }
+  ]
+}

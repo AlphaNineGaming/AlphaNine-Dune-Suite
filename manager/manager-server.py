@@ -145,7 +145,8 @@ def build_ini(profile):
         force_pvp = False
         security_zones = True
 
-    storm_enabled = setting(profile, "environment", "stormFrequency", 1) > 0 and setting(profile, "environment", "stormSeverity", 1) > 0
+    storm_switch = bool(setting(profile, "environment", "stormEnabled", True))
+    storm_enabled = storm_switch and setting(profile, "environment", "stormFrequency", 1) > 0 and setting(profile, "environment", "stormSeverity", 1) > 0
     worm_enabled = setting(profile, "environment", "wormAggression", 1) > 0
     item_decay = max(0, min(10, float(setting(profile, "resources", "structureDecayMultiplier", 1))))
     mining = max(0, float(setting(profile, "resources", "harvestMultiplier", 1)))

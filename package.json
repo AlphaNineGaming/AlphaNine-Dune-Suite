@@ -1,11 +1,12 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
   "scripts": {
     "build:item-catalog": "node scripts/build-item-catalog.js",
+    "build:skill-catalog": "node scripts/build-skill-catalog.js",
     "test:secret-persistence": "node scripts/test-secret-config-persistence.js",
     "test:setup-paths": "node scripts/test-setup-path-persistence.js",
     "test:setup-database": "node scripts/test-setup-database-auth.js",
@@ -46,7 +47,9 @@
       "assets/**",
       "lib/**",
       "data/.gitkeep",
+      "data/ui-overrides.css",
       "data/dune-items-catalog.json",
+      "data/dune-skills-catalog.json",
       "data/gear-images/**",
       "gear-codex/**",
       "manager/**",

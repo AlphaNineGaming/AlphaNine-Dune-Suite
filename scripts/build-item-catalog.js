@@ -10,6 +10,7 @@ const ENTITY_URL = "https://cdn-hosted.gaming.tools/dune/data/en/entities.d.json
 const CDN_BASE = "https://cdn-hosted.gaming.tools/dune";
 const ALLOW_EMPTY = process.argv.includes("--allow-empty");
 const GRADE_VALUES = ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Unique", "Unknown"];
+const CATALOG_MAIN_CATEGORIES = new Set(["items", "buildables", "placeables", "customizations"]);
 
 function requestBuffer(url, timeoutMs = 30000, redirects = 4) {
   return new Promise((resolve, reject) => {
@@ -86,7 +87,11 @@ function titleCaseGearCategory(value = "") {
 
 function gearItemCategory(entity = {}) {
   const categories = Array.isArray(entity.categories) ? entity.categories : [];
-  const primary = categories.find((entry) => /^items\/[^/]+$/i.test(entry)) || categories[0] || "";
+  const main = String(entity.mainCategoryId || "").toLowerCase();
+  const primary = categories.find((entry) => new RegExp(`^${main || "items"}\\/[^/]+$`, "i").test(entry))
+    || categories.find((entry) => /^items\/[^/]+$/i.test(entry))
+    || categories[0]
+    || "";
   return titleCaseGearCategory(primary || entity.category || entity.categoryName || entity.mainCategoryName || entity.mainCategoryId || "");
 }
 
@@ -261,13 +266,16 @@ function collectEntityObjects(root, out = [], seen = new Set()) {
 
 function fieldText(entity) {
   return Object.entries(entity || {})
-    .filter(([, value]) => typeof value === "string" || typeof value === "number")
-    .map(([key, value]) => `${key}:${value}`)
+    .filter(([, value]) => typeof value === "string" || typeof value === "number" || Array.isArray(value))
+    .map(([key, value]) => `${key}:${Array.isArray(value) ? value.join("/") : value}`)
     .join(" ")
     .toLowerCase();
 }
 
 function isLikelyItemEntity(entity) {
+  const main = String(entity?.mainCategoryId || entity?.mainCategory || "").trim().toLowerCase();
+  if (CATALOG_MAIN_CATEGORIES.has(main)) return true;
+  if (main) return false;
   const text = fieldText(entity);
   if (/\bmaincategoryid:items\b/.test(text)) return true;
   if (/\b(category|type|kind|path|class|asset|template)[^ ]*(item|weapon|armor|armour|resource|equipment|tool|vehicle|consumable|schematic|blueprint|material|module|component|placeable|building)/i.test(text)) return true;
@@ -302,7 +310,9 @@ function normalizeItem(entity) {
   const tier = tierValue && !/^tier\b/i.test(tierValue) ? `Tier ${tierValue}` : tierValue;
   const rarity = firstString(entity.rarity, entity.quality);
   const grade = normalizeGrade(entity.grade, rarity, entity.quality, tier, entity.itemGrade, entity.itemRarity);
-  const detailUrl = id ? `https://dune.gaming.tools/items/${encodeURIComponent(id)}` : "";
+  const mainCategory = String(entity.mainCategoryId || "items").trim().toLowerCase() || "items";
+  const detailPath = CATALOG_MAIN_CATEGORIES.has(mainCategory) ? mainCategory : "items";
+  const detailUrl = id ? `https://dune.gaming.tools/${detailPath}/${encodeURIComponent(id)}` : "";
   const imageUrl = resolveImageUrl(entity);
   return {
     id,

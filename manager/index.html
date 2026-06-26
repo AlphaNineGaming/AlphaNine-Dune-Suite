@@ -320,8 +320,7 @@
     body.theme-royal .panel,
     body.theme-royal .summary,
     body.theme-royal .rail,
-    body.theme-royal .group,
-    body.theme-royal .reward-panel {
+    body.theme-royal .group {
       color: var(--text);
       background: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(242, 222, 184, 0.88));
       border-color: rgba(145, 94, 30, 0.34);
@@ -881,6 +880,28 @@
       grid-template-columns: 1fr 1fr;
     }
 
+    .server-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--server-profile-input-line);
+      background: var(--server-profile-input-bg);
+      color: var(--server-profile-text);
+    }
+
+    .server-toggle strong,
+    .server-toggle small {
+      display: block;
+    }
+
+    .server-toggle small {
+      margin-top: 3px;
+      color: var(--server-profile-muted);
+      font-size: 11px;
+    }
+
     .server-endpoint {
       min-width: 0;
       width: 100%;
@@ -1007,102 +1028,6 @@
 
     .server-status.ok { color: var(--ok); }
     .server-status.error { color: var(--danger); }
-
-    .reward-panel {
-      display: grid;
-      gap: 12px;
-      margin: 14px 0 16px;
-      padding: 12px;
-      border: 1px solid var(--line);
-      background: var(--manager-surface-strong);
-      box-shadow: inset 0 0 36px var(--line-soft);
-    }
-
-    .reward-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: start;
-    }
-
-    .reward-head h3 {
-      margin: 0;
-      font-size: 15px;
-    }
-
-    .reward-head span,
-    .reward-panel label,
-    .reward-status,
-    .reward-log {
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-
-    .reward-grid {
-      display: grid;
-      grid-template-columns: 1fr 100px;
-      gap: 8px;
-    }
-
-    .reward-input,
-    .reward-textarea,
-    .reward-select {
-      width: 100%;
-      color: var(--text);
-      border: 1px solid var(--line);
-      background: rgba(6, 8, 5, 0.9);
-      padding: 0 10px;
-      outline: none;
-    }
-
-    .reward-input,
-    .reward-select { height: 38px; }
-
-    .reward-textarea {
-      min-height: 66px;
-      padding-top: 9px;
-      resize: vertical;
-    }
-
-    .reward-items {
-      display: grid;
-      gap: 8px;
-    }
-
-    .reward-item-row {
-      display: grid;
-      grid-template-columns: 116px 1fr 72px 40px;
-      gap: 8px;
-    }
-
-    .reward-status.ok { color: var(--ok); }
-    .reward-status.error { color: var(--danger); }
-
-    .reward-log {
-      display: grid;
-      gap: 7px;
-      max-height: 132px;
-      overflow: auto;
-      padding-right: 4px;
-    }
-
-    .reward-log div {
-      border-top: 1px solid var(--line-soft);
-      padding-top: 7px;
-    }
-
-    .reward-log strong {
-      display: block;
-      color: var(--text);
-      font-size: 12px;
-    }
-
-    .reward-source {
-      color: var(--accent-bright);
-      font-size: 12px;
-      line-height: 1.4;
-    }
 
     .score {
       display: grid;
@@ -1290,11 +1215,6 @@
         </div>
         <input class="profile-name" id="profileName" value="Arrakis Balanced Profile" aria-label="Profile name">
         <div class="server-panel">
-          <label for="serverEndpoint">Server apply endpoint</label>
-          <div class="server-row endpoint-row">
-            <textarea class="server-endpoint" id="serverEndpoint" spellcheck="false" aria-label="Server apply endpoint">/manager-api/api/server/settings</textarea>
-          </div>
-          <div class="endpoint-help">Keep this local endpoint as 127.0.0.1. Put the server VM IP in the VM IP box below.</div>
           <div class="server-row server-action-row">
             <button class="btn" id="refreshServerBtn" title="Refresh current server values">
               <svg viewBox="0 0 24 24" fill="none"><path d="M20 12a8 8 0 0 1-14 5m-2-5a8 8 0 0 1 14-5M18 3v4h-4M6 21v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -1305,6 +1225,13 @@
               Apply
             </button>
           </div>
+          <label class="server-toggle">
+            <span>
+              <strong>Coriolis storm</strong>
+              <small>UserGame.ini m_bCoriolisAutoSpawnEnabled</small>
+            </span>
+            <span class="switch"><input id="serverStormToggle" type="checkbox" checked><span class="track"></span><span id="serverStormToggleText">Enabled</span></span>
+          </label>
           <div class="setup-grid">
             <label>VM IP<input class="setup-input" id="setupVmIp" placeholder="192.168.1.11" aria-label="Dune server VM IP"></label>
             <label>Battlegroup<input class="setup-input" id="setupBattlegroup" placeholder="sh-..." aria-label="Dune battlegroup ID"></label>
@@ -1321,42 +1248,6 @@
             </button>
           </div>
           <div class="server-status" id="serverStatus">Ready to apply real self-hosted UserSettings. Applying restarts the battlegroup.</div>
-        </div>
-        <div class="reward-panel">
-          <div class="reward-head">
-            <div>
-              <h3>Character Rewards</h3>
-              <span>Send item grants directly to a specific character.</span>
-            </div>
-            <button class="btn icon" id="refreshRewardsBtn" title="Refresh reward requests">
-              <svg viewBox="0 0 24 24" fill="none"><path d="M20 12a8 8 0 0 1-14 5m-2-5a8 8 0 0 1 14-5M18 3v4h-4M6 21v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-          </div>
-          <div class="reward-source" id="rewardCatalogStatus">Loading item catalog...</div>
-          <div class="reward-grid">
-            <label>Character<input class="reward-input" id="rewardCharacter" placeholder="Name or player ID"></label>
-            <label>XP not wired<input class="reward-input" id="rewardXp" type="number" min="0" step="100" value="0"></label>
-          </div>
-          <label>Preset bundle
-            <select class="reward-select" id="rewardBundle">
-              <option value="">No preset</option>
-              <option value="starter">Starter kit</option>
-              <option value="builder">Builder kit</option>
-              <option value="spice">Spice run</option>
-            </select>
-          </label>
-          <div class="reward-items" id="rewardItems"></div>
-          <button class="btn" id="addRewardItemBtn" title="Add an item row">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
-            Add Item
-          </button>
-          <textarea class="reward-textarea" id="rewardReason" placeholder="Reason or event note" aria-label="Reward reason"></textarea>
-          <button class="btn set-server" id="queueRewardBtn" title="Send character reward">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M4 12.5 9 17 20 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Send Reward
-          </button>
-          <div class="reward-status" id="rewardStatus">Sent reward history appears below.</div>
-          <div class="reward-log" id="rewardLog"></div>
         </div>
         <div class="summary-grid">
           <div>
@@ -1413,6 +1304,7 @@
         title: "Environmental Rules",
         description: "Control storms, heat, water pressure, worms, and world resets.",
         settings: [
+          { key: "stormEnabled", label: "Coriolis storm", help: "Allow Coriolis storm and major sandstorm auto-spawn.", type: "toggle", value: true },
           { key: "stormFrequency", label: "Storm frequency", help: "How often major sandstorms roll through.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
           { key: "stormSeverity", label: "Storm severity", help: "Damage, visibility loss, and travel disruption.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
           { key: "heatDrainMultiplier", label: "Heat drain", help: "Thirst and exposure pressure during daytime.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x" },
@@ -1465,7 +1357,7 @@
         harvestMultiplier: 0.75, spiceYieldMultiplier: 0.75, refiningSpeedMultiplier: 0.8, craftingSpeedMultiplier: 0.85,
         lootQualityMultiplier: 0.85, structureDecayMultiplier: 1.4, pvpMode: "scheduled", raidWindowHours: 6,
         friendlyFire: true, deathDropMode: "full_inventory", newPlayerGraceHours: 4, offlineRaidProtection: false,
-        stormFrequency: 1.6, stormSeverity: 1.5, heatDrainMultiplier: 1.45, waterRetentionMultiplier: 0.75,
+        stormEnabled: true, stormFrequency: 1.6, stormSeverity: 1.5, heatDrainMultiplier: 1.45, waterRetentionMultiplier: 0.75,
         wormAggression: 1.7, deepDesertResetDays: 5, xpMultiplier: 0.75, researchCostMultiplier: 1.35,
         vendorPriceMultiplier: 1.25, reputationMultiplier: 0.8, fastTravelCostMultiplier: 1.4, maxClanSize: 12,
         allianceLimit: 1, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
@@ -1474,7 +1366,7 @@
         harvestMultiplier: 2.5, spiceYieldMultiplier: 1.8, refiningSpeedMultiplier: 3, craftingSpeedMultiplier: 4,
         lootQualityMultiplier: 1.4, structureDecayMultiplier: 0.25, pvpMode: "off", raidWindowHours: 0,
         friendlyFire: false, deathDropMode: "none", newPlayerGraceHours: 72, offlineRaidProtection: true,
-        stormFrequency: 0.55, stormSeverity: 0.6, heatDrainMultiplier: 0.65, waterRetentionMultiplier: 1.7,
+        stormEnabled: true, stormFrequency: 0.55, stormSeverity: 0.6, heatDrainMultiplier: 0.65, waterRetentionMultiplier: 1.7,
         wormAggression: 0.5, deepDesertResetDays: 10, xpMultiplier: 2, researchCostMultiplier: 0.7,
         vendorPriceMultiplier: 0.75, reputationMultiplier: 1.6, fastTravelCostMultiplier: 0.4, maxClanSize: 40,
         allianceLimit: 5, baseClaimLimit: 8, buildHeightLimit: 8, publicBuildDamage: false
@@ -1491,40 +1383,14 @@
     const search = document.querySelector("#search");
     const jsonOut = document.querySelector("#jsonOut");
     const profileName = document.querySelector("#profileName");
-    const serverEndpoint = document.querySelector("#serverEndpoint");
+    const serverEndpoint = { value: "/manager-api/api/server/settings" };
     const serverStatus = document.querySelector("#serverStatus");
+    const serverStormToggle = document.querySelector("#serverStormToggle");
+    const serverStormToggleText = document.querySelector("#serverStormToggleText");
     const setupVmIp = document.querySelector("#setupVmIp");
     const setupBattlegroup = document.querySelector("#setupBattlegroup");
     const setupSshKeyPath = document.querySelector("#setupSshKeyPath");
     const toast = document.querySelector("#toast");
-    const rewardCharacter = document.querySelector("#rewardCharacter");
-    const rewardXp = document.querySelector("#rewardXp");
-    const rewardBundle = document.querySelector("#rewardBundle");
-    const rewardItems = document.querySelector("#rewardItems");
-    const rewardReason = document.querySelector("#rewardReason");
-    const rewardStatus = document.querySelector("#rewardStatus");
-    const rewardLog = document.querySelector("#rewardLog");
-    const rewardCatalogStatus = document.querySelector("#rewardCatalogStatus");
-
-    const rewardBundles = {
-      starter: [
-        { id: "WaterPack_Consumable", label: "Cup of Water", quantity: 5, category: "Tools" },
-        { id: "ScrapMetalKnife", label: "Scrap Metal Knife", quantity: 1, category: "Weapons" },
-        { id: "ScrapMetal", label: "Salvaged Metal", quantity: 50, category: "Resources" }
-      ],
-      builder: [
-        { id: "ScrapMetal", label: "Salvaged Metal", quantity: 250, category: "Resources" },
-        { id: "T2UniqueComponent", label: "Spice-infused Iron Dust", quantity: 12, category: "Resources" },
-        { id: "SurveyProbe_1", label: "Survey Probe", quantity: 4, category: "Other" }
-      ],
-      spice: [
-        { id: "SpiceResidue", label: "Spice Residue", quantity: 100, category: "Resources" },
-        { id: "SurveyProbe_1", label: "Survey Probe", quantity: 2, category: "Other" },
-        { id: "WaterPack_Consumable", label: "Cup of Water", quantity: 8, category: "Tools" }
-      ]
-    };
-    const rewardCategoryOrder = ["Weapons", "Armor", "Tools", "Consumables", "Resources", "Schematics", "Vehicles", "Other"];
-    let itemCatalog = [];
 
     function fmt(setting, value) {
       if (setting.type === "toggle") return value ? "On" : "Off";
@@ -1567,15 +1433,6 @@
       return endpointFor("/api/server/discover");
     }
 
-    function rewardEndpoint() {
-      return endpointFor("/api/server/rewards");
-    }
-
-    function setRewardStatus(message, tone = "") {
-      rewardStatus.textContent = message;
-      rewardStatus.className = `reward-status ${tone}`.trim();
-    }
-
     function readableError(text, fallback = "Server request failed") {
       if (!text) return fallback;
       try {
@@ -1586,140 +1443,6 @@
       const messageMatch = text.match(/<p>Message:\s*([^<]+)<\/p>/i);
       if (messageMatch) return messageMatch[1].replace(/\.\.$/, ".");
       return text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim() || fallback;
-    }
-
-    function rewardFailureMessage(error) {
-      if (error instanceof TypeError && /fetch/i.test(error.message || "")) {
-        return "Local receiver is not running or was blocked by security software. Open AlphaNine Dune Control again and allow DuneAwakeningManager.exe in Kaspersky.";
-      }
-      return error.message || "Reward request failed.";
-    }
-
-    function escapeHtml(value) {
-      return String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char]));
-    }
-
-    function itemMeta(item) {
-      return [item.detail, item.tier ? `T${item.tier}` : "", item.rarity].filter(Boolean).join(" - ");
-    }
-
-    function itemLabel(item) {
-      const meta = itemMeta(item);
-      return meta ? `${item.name} (${meta})` : item.name;
-    }
-
-    function categoryOptions(selected = "Weapons") {
-      return rewardCategoryOrder.map(category => `<option value="${category}" ${category === selected ? "selected" : ""}>${category}</option>`).join("");
-    }
-
-    function itemOptions(category = "Weapons", selectedId = "") {
-      const scoped = itemCatalog.filter(item => item.category === category);
-      const options = scoped.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selectedId ? "selected" : ""}>${escapeHtml(itemLabel(item))}</option>`).join("");
-      const custom = selectedId && !scoped.some(item => item.id === selectedId)
-        ? `<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedId)} (custom ID)</option>`
-        : "";
-      return `<option value="">Select item</option>${custom}${options}`;
-    }
-
-    function findCatalogItem(id) {
-      return itemCatalog.find(item => item.id === id);
-    }
-
-    function renderRewardItems(items = [{ id: "", label: "", quantity: 1, category: "Weapons" }]) {
-      rewardItems.innerHTML = items.map(item => `
-        <div class="reward-item-row">
-          <select class="reward-select" data-reward-category aria-label="Item category">${categoryOptions(item.category || findCatalogItem(item.id)?.category || "Weapons")}</select>
-          <select class="reward-select" data-reward-id aria-label="Reward item">${itemOptions(item.category || findCatalogItem(item.id)?.category || "Weapons", item.id || "")}</select>
-          <input class="reward-input" data-reward-quantity type="number" min="1" step="1" value="${item.quantity || 1}" aria-label="Item quantity">
-          <button class="btn icon" data-remove-reward-item title="Remove item">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M6 12h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
-          </button>
-        </div>
-      `).join("");
-    }
-
-    function readRewardItems() {
-      return Array.from(rewardItems.querySelectorAll(".reward-item-row")).map(row => {
-        const id = row.querySelector("[data-reward-id]").value;
-        const catalogItem = findCatalogItem(id);
-        return {
-          id,
-          label: catalogItem?.name || id,
-          category: catalogItem?.category || row.querySelector("[data-reward-category]").value,
-          quantity: Number(row.querySelector("[data-reward-quantity]").value || 1)
-        };
-      }).filter(item => item.id);
-    }
-
-    async function loadItemCatalog() {
-      try {
-        const response = await fetch("dune-item-catalog.json");
-        if (!response.ok) throw new Error(`Catalog returned ${response.status}`);
-        const catalog = await response.json();
-        itemCatalog = (catalog.items || []).filter(item => item.id && item.name);
-        rewardCatalogStatus.textContent = `Item lists loaded: ${itemCatalog.length.toLocaleString()} items from the public wiki API.`;
-        renderRewardItems([{ id: "", label: "", quantity: 1, category: "Weapons" }]);
-      } catch (error) {
-        rewardCatalogStatus.textContent = "Item catalog could not load. Restart the manager or keep using manual queued bundles.";
-      }
-    }
-
-    async function refreshRewards() {
-      const endpoint = rewardEndpoint();
-      if (!endpoint) return;
-
-      try {
-        const response = await fetch(endpoint);
-        if (!response.ok) throw new Error(`Server returned ${response.status}`);
-        const data = await response.json();
-        const requests = data.requests || [];
-        rewardLog.innerHTML = requests.slice(0, 5).map(request => {
-          const itemText = request.items?.length ? request.items.map(item => `${item.quantity} ${item.label}`).join(", ") : "No items";
-          const xpText = request.xp ? `${request.xp.toLocaleString()} XP` : "No XP";
-          return `<div><strong>${request.character} - ${request.status}</strong><span>${xpText}; ${itemText}</span></div>`;
-        }).join("") || `<div><span>No reward requests yet.</span></div>`;
-      } catch (error) {
-        rewardLog.innerHTML = `<div><span>Could not load reward requests.</span></div>`;
-      }
-    }
-
-    async function queueReward() {
-      const payload = {
-        character: rewardCharacter.value.trim(),
-        xp: Number(rewardXp.value || 0),
-        items: readRewardItems(),
-        reason: rewardReason.value.trim(),
-        createdAt: new Date().toISOString()
-      };
-
-      if (!payload.character) {
-        setRewardStatus("Add a character name or player ID.", "error");
-        return;
-      }
-
-      setRewardStatus("Saving reward request...");
-      try {
-        const response = await fetch(rewardEndpoint(), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        if (!response.ok) {
-          const detail = await response.text().catch(() => "");
-          throw new Error(readableError(detail, `Server returned ${response.status}`));
-        }
-        const result = await response.json();
-        rewardXp.value = 0;
-        rewardReason.value = "";
-        rewardBundle.value = "";
-        renderRewardItems();
-        await refreshRewards();
-        const warnings = result.request?.applied?.warnings || [];
-        setRewardStatus(warnings.length ? `Reward sent. ${warnings.join(" ")}` : "Reward sent.", "ok");
-        showToast("Reward sent");
-      } catch (error) {
-        setRewardStatus(`Could not send reward: ${rewardFailureMessage(error)}`, "error");
-      }
     }
 
     function flattenSettings(settings) {
@@ -1792,7 +1515,7 @@
       return {
         profileName: profileName.value.trim() || "Arrakis Server Profile",
         generatedAt: new Date().toISOString(),
-        applyEndpoint: serverEndpoint.value.trim(),
+        applyEndpoint: settingsEndpoint(),
         note: "Manager profile. Map these values to official server config keys once your host exposes them.",
         settings: grouped
       };
@@ -1899,14 +1622,6 @@
 
     async function setServerSettings() {
       const endpoint = settingsEndpoint();
-      serverEndpoint.value = "/manager-api/api/server/settings";
-      if (!endpoint) {
-        setServerStatus("Add a server endpoint before applying settings.", "error");
-        showToast("Server endpoint required");
-        return;
-      }
-
-      localStorage.setItem("arrakisServerEndpoint", endpoint);
       try {
         await saveServerSetup(false);
       } catch (error) {
@@ -1944,13 +1659,6 @@
 
     async function refreshServerSettings() {
       const endpoint = settingsEndpoint();
-      serverEndpoint.value = "/manager-api/api/server/settings";
-      if (!endpoint) {
-        setServerStatus("Add a server endpoint before refreshing current values.", "error");
-        return;
-      }
-
-      localStorage.setItem("arrakisServerEndpoint", endpoint);
       setServerStatus("Refreshing current values...");
       try {
         const response = await fetch(endpoint);
@@ -1968,8 +1676,9 @@
 
     function pressureScore() {
       let score = 38;
-      score += (state.stormFrequency - 1) * 9;
-      score += (state.stormSeverity - 1) * 9;
+      const stormsActive = state.stormEnabled && state.stormFrequency > 0 && state.stormSeverity > 0;
+      score += stormsActive ? (state.stormFrequency - 1) * 9 : -9;
+      score += stormsActive ? (state.stormSeverity - 1) * 9 : -9;
       score += (state.heatDrainMultiplier - 1) * 11;
       score += (state.wormAggression - 1) * 10;
       score += state.pvpMode === "always_on" ? 19 : state.pvpMode === "scheduled" ? 11 : state.pvpMode === "off" ? -12 : 5;
@@ -1994,16 +1703,19 @@
             : "The profile favors building, travel, and social play over punishment.";
 
       const find = key => sections.flatMap(section => section.settings).find(setting => setting.key === key);
+      const stormsActive = state.stormEnabled && state.stormFrequency > 0 && state.stormSeverity > 0;
+      serverStormToggle.checked = Boolean(state.stormEnabled);
+      serverStormToggleText.textContent = state.stormEnabled ? "Enabled" : "Disabled";
       document.querySelector("#statusMode").textContent = profileName.value.replace("Arrakis ", "").replace(" Profile", "") || "Custom";
       document.querySelector("#statusHarvest").textContent = fmt(find("harvestMultiplier"), state.harvestMultiplier);
       document.querySelector("#statusPvp").textContent = fmt(find("pvpMode"), state.pvpMode);
-      document.querySelector("#statusEnv").textContent = state.stormFrequency > 1.2 || state.stormSeverity > 1.2 ? "Punishing" : state.stormFrequency < 0.8 ? "Calm" : "Standard";
+      document.querySelector("#statusEnv").textContent = !stormsActive ? "Storms Off" : state.stormFrequency > 1.2 || state.stormSeverity > 1.2 ? "Punishing" : state.stormFrequency < 0.8 ? "Calm" : "Standard";
 
       document.querySelector("#summaryList").innerHTML = [
         ["Harvest", fmt(find("harvestMultiplier"), state.harvestMultiplier)],
         ["PvP", fmt(find("pvpMode"), state.pvpMode)],
         ["Raid Window", fmt(find("raidWindowHours"), state.raidWindowHours)],
-        ["Storms", `${fmt(find("stormFrequency"), state.stormFrequency)} / ${fmt(find("stormSeverity"), state.stormSeverity)}`],
+        ["Storms", stormsActive ? `${fmt(find("stormFrequency"), state.stormFrequency)} / ${fmt(find("stormSeverity"), state.stormSeverity)}` : "Off"],
         ["Clan Size", fmt(find("maxClanSize"), state.maxClanSize)],
         ["Backups", fmt(find("backupIntervalMinutes"), state.backupIntervalMinutes)]
       ].map(([label, value]) => `<div class="summary-item"><span>${label}</span><strong>${value}</strong></div>`).join("");
@@ -2059,8 +1771,9 @@
 
     search.addEventListener("input", renderSettings);
     profileName.addEventListener("input", updateSummary);
-    serverEndpoint.addEventListener("input", () => {
-      localStorage.setItem("arrakisServerEndpoint", serverEndpoint.value.trim());
+    serverStormToggle.addEventListener("change", () => {
+      state.stormEnabled = serverStormToggle.checked;
+      renderSettings();
       updateSummary();
     });
 
@@ -2087,37 +1800,6 @@
     document.querySelector("#refreshServerBtn").addEventListener("click", refreshServerSettings);
     document.querySelector("#saveSetupBtn").addEventListener("click", handleSaveSetup);
     document.querySelector("#detectBattlegroupBtn").addEventListener("click", detectBattlegroup);
-    document.querySelector("#queueRewardBtn").addEventListener("click", queueReward);
-    document.querySelector("#refreshRewardsBtn").addEventListener("click", refreshRewards);
-    document.querySelector("#addRewardItemBtn").addEventListener("click", () => {
-      rewardItems.insertAdjacentHTML("beforeend", `
-        <div class="reward-item-row">
-          <select class="reward-select" data-reward-category aria-label="Item category">${categoryOptions("Weapons")}</select>
-          <select class="reward-select" data-reward-id aria-label="Reward item">${itemOptions("Weapons")}</select>
-          <input class="reward-input" data-reward-quantity type="number" min="1" step="1" value="1" aria-label="Item quantity">
-          <button class="btn icon" data-remove-reward-item title="Remove item">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M6 12h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
-          </button>
-        </div>
-      `);
-    });
-    rewardItems.addEventListener("click", event => {
-      const button = event.target.closest("[data-remove-reward-item]");
-      if (!button) return;
-      button.closest(".reward-item-row").remove();
-      if (!rewardItems.children.length) renderRewardItems();
-    });
-    rewardItems.addEventListener("change", event => {
-      const category = event.target.closest("[data-reward-category]");
-      if (!category) return;
-      const row = category.closest(".reward-item-row");
-      row.querySelector("[data-reward-id]").innerHTML = itemOptions(category.value);
-    });
-    rewardBundle.addEventListener("change", () => {
-      const bundle = rewardBundles[rewardBundle.value];
-      if (bundle) renderRewardItems(bundle);
-    });
-
     document.querySelector("#importBtn").addEventListener("click", () => document.querySelector("#fileInput").click());
     document.querySelector("#fileInput").addEventListener("change", async event => {
       const file = event.target.files[0];
@@ -2127,7 +1809,6 @@
         const imported = profile.settings ? flattenSettings(profile.settings) : profile;
         state = { ...defaults, ...imported };
         profileName.value = profile.profileName || "Imported Arrakis Profile";
-        if (profile.applyEndpoint) serverEndpoint.value = profile.applyEndpoint;
         renderSettings();
         updateSummary();
         showToast("Profile imported");
@@ -2138,20 +1819,11 @@
       }
     });
 
-    const previousEndpoint = "http://127.0.0.1:8787/api/server/settings";
-    const savedEndpoint = localStorage.getItem("arrakisServerEndpoint");
-    const defaultEndpoint = "/manager-api/api/server/settings";
-    serverEndpoint.value = savedEndpoint && savedEndpoint !== previousEndpoint && savedEndpoint.startsWith("/manager-api/")
-      ? savedEndpoint
-      : defaultEndpoint;
     renderNav();
     renderSettings();
-    renderRewardItems();
     updateSummary();
     loadServerSetup();
     refreshServerSettings();
-    refreshRewards();
-    loadItemCatalog();
   </script>
 </body>
 </html>

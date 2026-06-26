@@ -1,0 +1,51 @@
+/* Runtime UI hotfixes. This file is loaded after bundled Suite CSS. */
+body.theme-royal #progression,
+body.theme-royal #progression .progression-shell,
+body.theme-royal #progression .progression-hero,
+body.theme-royal #progression .progression-main-grid,
+body.theme-royal #progression .progression-stack {
+  color: #221914;
+}
+
+body.theme-royal #progression .progression-profile-card,
+body.theme-royal #progression .progression-fold,
+body.theme-royal #progression .panel,
+body.theme-royal #progression .empty,
+body.theme-royal #progression .detail-row {
+  color: #221914;
+  border-color: rgba(105, 73, 32, .3);
+  background: linear-gradient(180deg, rgba(255, 250, 238, .94), rgba(242, 222, 184, .86));
+}
+
+body.theme-royal #progression .subtle,
+body.theme-royal #progression .micro,
+body.theme-royal #progression .progression-profile-meta,
+body.theme-royal #progression .progression-recent-item span,
+body.theme-royal #progression .detail-row .subtle {
+  color: #4f3b26;
+}
+
+body.theme-royal #progression .kicker,
+body.theme-royal #progression .label,
+body.theme-royal #progression .progression-fold > summary::after {
+  color: #6d4518;
+}
+
+body.theme-royal #progression .progression-fold.danger-zone {
+  border-color: rgba(145, 58, 36, .42);
+  background: linear-gradient(180deg, rgba(255, 245, 231, .95), rgba(229, 198, 171, .9));
+}
+
+body.theme-royal #progression .progression-fold.danger-zone > summary,
+body.theme-royal #progression .progression-fold.danger-zone .label {
+  color: #74321f;
+}
+
+body.theme-royal #progression input,
+body.theme-royal #progression select,
+body.theme-royal #progression textarea,
+body.theme-royal #progression pre {
+  color: #221914;
+  background: linear-gradient(180deg, rgba(255, 253, 247, .96), rgba(246, 229, 194, .86));
+  border-color: rgba(128, 85, 32, .42);
+}

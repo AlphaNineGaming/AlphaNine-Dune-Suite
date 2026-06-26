@@ -1279,11 +1279,11 @@
         description: "Tune gathering, refining, drops, decay, and progression pace.",
         settings: [
           { key: "harvestMultiplier", label: "Harvest yield", help: "Raw materials gathered per node.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
-          { key: "spiceYieldMultiplier", label: "Spice yield", help: "Spice bloom and spice sand returns.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
-          { key: "refiningSpeedMultiplier", label: "Refining speed", help: "Processing speed for ore, water, spice, and crafted inputs.", type: "range", min: 0.5, max: 6, step: 0.25, value: 1, unit: "x" },
+          { key: "spiceYieldMultiplier", label: "Vehicle mining yield", help: "Writes Dune.GlobalVehicleMiningOutputMultiplier.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
+          { key: "refiningSpeedMultiplier", label: "Refining speed", help: "No confirmed self-hosted config key found for refinery processing speed; planning only.", type: "range", min: 0.5, max: 6, step: 0.25, value: 1, unit: "x", supported: false },
           { key: "craftingSpeedMultiplier", label: "Crafting speed", help: "No confirmed self-hosted config key found for workbench or fabrication completion speed; planning only.", type: "range", min: 0.5, max: 8, step: 0.25, value: 1, unit: "x", supported: false },
-          { key: "lootQualityMultiplier", label: "Loot quality", help: "General quality bias for drops and caches.", type: "range", min: 0.5, max: 3, step: 0.1, value: 1, unit: "x" },
-          { key: "structureDecayMultiplier", label: "Structure decay", help: "Base upkeep and abandoned structure decay pressure.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" }
+          { key: "lootQualityMultiplier", label: "PvP resource multiplier", help: "Writes SecurityZones.PvpResourceMultiplier and toggles sandstorm treasure when above 0.", type: "range", min: 0.5, max: 3, step: 0.1, value: 1, unit: "x" },
+          { key: "structureDecayMultiplier", label: "Item deterioration rate", help: "Writes UserGame.ini UpdateRateInSeconds for item deterioration.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" }
         ]
       },
       {
@@ -1291,12 +1291,12 @@
         title: "PvP Settings",
         description: "Shape conflict rules, raiding windows, penalties, and protected spaces.",
         settings: [
-          { key: "pvpMode", label: "PvP mode", help: "Where player combat is allowed.", type: "select", value: "frontier_zones", options: [["off", "Off"], ["frontier_zones", "Frontier zones"], ["scheduled", "Scheduled"], ["always_on", "Always on"]] },
-          { key: "raidWindowHours", label: "Raid window", help: "Daily hours when bases can be raided.", type: "range", min: 0, max: 24, step: 1, value: 4, unit: "h" },
-          { key: "friendlyFire", label: "Friendly fire", help: "Allow damage between clan or party members.", type: "toggle", value: false },
-          { key: "deathDropMode", label: "Death drops", help: "How much carried inventory drops on death.", type: "select", value: "partial", options: [["none", "None"], ["partial", "Partial"], ["full_inventory", "Full inventory"], ["full_with_equipment", "Full with equipment"]] },
-          { key: "newPlayerGraceHours", label: "New player grace", help: "Temporary PvP protection for new arrivals.", type: "range", min: 0, max: 72, step: 1, value: 12, unit: "h" },
-          { key: "offlineRaidProtection", label: "Offline raid protection", help: "Reduce base damage when owners are offline.", type: "toggle", value: true }
+          { key: "pvpMode", label: "PvP mode", help: "Writes UserGame.ini PVP/security-zone toggles. Scheduled mode is not exposed by self-hosted config.", type: "select", value: "frontier_zones", options: [["off", "Off"], ["frontier_zones", "Frontier/security zones"], ["always_on", "Always on"]] },
+          { key: "raidWindowHours", label: "Raid window", help: "No confirmed self-hosted config key found for raid windows; planning only.", type: "range", min: 0, max: 24, step: 1, value: 4, unit: "h", supported: false },
+          { key: "friendlyFire", label: "Friendly fire", help: "No confirmed self-hosted config key found for friendly fire; planning only.", type: "toggle", value: false, supported: false },
+          { key: "deathDropMode", label: "Death drops", help: "No confirmed self-hosted config key found for death-drop behavior; planning only.", type: "select", value: "partial", options: [["none", "None"], ["partial", "Partial"], ["full_inventory", "Full inventory"], ["full_with_equipment", "Full with equipment"]], supported: false },
+          { key: "newPlayerGraceHours", label: "New player grace", help: "No confirmed self-hosted config key found for new-player PvP grace; planning only.", type: "range", min: 0, max: 72, step: 1, value: 12, unit: "h", supported: false },
+          { key: "offlineRaidProtection", label: "Offline raid protection", help: "No confirmed self-hosted config key found for offline raid protection; planning only.", type: "toggle", value: true, supported: false }
         ]
       },
       {
@@ -1305,12 +1305,12 @@
         description: "Control storms, heat, water pressure, worms, and world resets.",
         settings: [
           { key: "stormEnabled", label: "Coriolis storm", help: "Allow Coriolis storm and major sandstorm auto-spawn.", type: "toggle", value: true },
-          { key: "stormFrequency", label: "Storm frequency", help: "How often major sandstorms roll through.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
-          { key: "stormSeverity", label: "Storm severity", help: "Damage, visibility loss, and travel disruption.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
-          { key: "heatDrainMultiplier", label: "Heat drain", help: "Thirst and exposure pressure during daytime.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x" },
-          { key: "waterRetentionMultiplier", label: "Water retention", help: "How long stored water lasts before pressure builds.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x" },
-          { key: "wormAggression", label: "Worm aggression", help: "How quickly large threats respond to vibration and travel.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
-          { key: "deepDesertResetDays", label: "Deep desert reset", help: "Days between high-risk region refreshes.", type: "range", min: 1, max: 14, step: 1, value: 7, unit: "d" }
+          { key: "stormFrequency", label: "Storm frequency", help: "No confirmed self-hosted config key found for storm frequency; planning only.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x", supported: false },
+          { key: "stormSeverity", label: "Storm severity", help: "No confirmed self-hosted config key found for storm severity; planning only.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x", supported: false },
+          { key: "heatDrainMultiplier", label: "Heat drain", help: "No confirmed self-hosted config key found for heat or thirst drain; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
+          { key: "waterRetentionMultiplier", label: "Water retention", help: "No confirmed self-hosted config key found for stored water retention; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
+          { key: "wormAggression", label: "Worm aggression", help: "No confirmed self-hosted config key found for aggression scaling; planning only.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x", supported: false },
+          { key: "deepDesertResetDays", label: "Deep desert reset", help: "No confirmed self-hosted config key found for Deep Desert reset cadence; planning only.", type: "range", min: 1, max: 14, step: 1, value: 7, unit: "d", supported: false }
         ]
       },
       {
@@ -1330,8 +1330,8 @@
         title: "Clans and Bases",
         description: "Set community scale, build limits, alliances, and claim rules.",
         settings: [
-          { key: "maxClanSize", label: "Max clan size", help: "Maximum players in one clan.", type: "range", min: 1, max: 100, step: 1, value: 20, unit: "" },
-          { key: "allianceLimit", label: "Alliance limit", help: "Maximum formal allied clans.", type: "range", min: 0, max: 10, step: 1, value: 2, unit: "" },
+          { key: "maxClanSize", label: "Max clan size", help: "No confirmed self-hosted config key found for clan size; planning only.", type: "range", min: 1, max: 100, step: 1, value: 20, unit: "", supported: false },
+          { key: "allianceLimit", label: "Alliance limit", help: "No confirmed self-hosted config key found for alliance limits; planning only.", type: "range", min: 0, max: 10, step: 1, value: 2, unit: "", supported: false },
           { key: "baseClaimLimit", label: "Base claims", help: "Number of base claims per clan.", type: "range", min: 1, max: 20, step: 1, value: 4, unit: "" },
           { key: "buildHeightLimit", label: "Build height", help: "Maximum vertical build levels.", type: "range", min: 1, max: 12, step: 1, value: 5, unit: "" },
           { key: "publicBuildDamage", label: "Public build damage", help: "Allow world structures to take non-raid damage.", type: "toggle", value: false }
@@ -1342,11 +1342,11 @@
         title: "Admin Rules",
         description: "Configure moderation helpers, backups, restarts, and visibility.",
         settings: [
-          { key: "serverVisibility", label: "Server visibility", help: "Whether the server is discoverable or invite only.", type: "select", value: "public", options: [["public", "Public"], ["listed_password", "Listed with password"], ["private", "Private"]] },
-          { key: "backupIntervalMinutes", label: "Backup interval", help: "Minutes between automatic profile-safe backups.", type: "range", min: 15, max: 360, step: 15, value: 60, unit: "m" },
-          { key: "restartHour", label: "Daily restart hour", help: "Local server restart hour, 24-hour clock.", type: "range", min: 0, max: 23, step: 1, value: 5, unit: ":00" },
-          { key: "adminAuditLog", label: "Admin audit log", help: "Record admin actions into the exported policy.", type: "toggle", value: true },
-          { key: "allowWhitelist", label: "Whitelist", help: "Reserve access for approved player IDs.", type: "toggle", value: false }
+          { key: "serverVisibility", label: "Server visibility", help: "No confirmed self-hosted config key found for server listing visibility; planning only.", type: "select", value: "public", options: [["public", "Public"], ["listed_password", "Listed with password"], ["private", "Private"]], supported: false },
+          { key: "backupIntervalMinutes", label: "Backup interval", help: "No automatic backup scheduler is wired here yet; planning only.", type: "range", min: 15, max: 360, step: 15, value: 60, unit: "m", supported: false },
+          { key: "restartHour", label: "Daily restart hour", help: "No daily restart scheduler is wired here yet; planning only.", type: "range", min: 0, max: 23, step: 1, value: 5, unit: ":00", supported: false },
+          { key: "adminAuditLog", label: "Admin audit log", help: "No manager-side audit policy is wired here yet; planning only.", type: "toggle", value: true, supported: false },
+          { key: "allowWhitelist", label: "Whitelist", help: "No confirmed self-hosted config key found for whitelist control; planning only.", type: "toggle", value: false, supported: false }
         ]
       }
     ];
@@ -1354,22 +1354,14 @@
     const presets = {
       balanced: {},
       hardcore: {
-        harvestMultiplier: 0.75, spiceYieldMultiplier: 0.75, refiningSpeedMultiplier: 0.8,
-        lootQualityMultiplier: 0.85, structureDecayMultiplier: 1.4, pvpMode: "scheduled", raidWindowHours: 6,
-        friendlyFire: true, deathDropMode: "full_inventory", newPlayerGraceHours: 4, offlineRaidProtection: false,
-        stormEnabled: true, stormFrequency: 1.6, stormSeverity: 1.5, heatDrainMultiplier: 1.45, waterRetentionMultiplier: 0.75,
-        wormAggression: 1.7, deepDesertResetDays: 5, xpMultiplier: 0.75, researchCostMultiplier: 1.35,
-        vendorPriceMultiplier: 1.25, reputationMultiplier: 0.8, fastTravelCostMultiplier: 1.4, maxClanSize: 12,
-        allianceLimit: 1, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
+        harvestMultiplier: 0.75, spiceYieldMultiplier: 0.75,
+        lootQualityMultiplier: 0.85, structureDecayMultiplier: 1.4, pvpMode: "frontier_zones",
+        stormEnabled: true, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
       },
       builder: {
-        harvestMultiplier: 2.5, spiceYieldMultiplier: 1.8, refiningSpeedMultiplier: 3,
-        lootQualityMultiplier: 1.4, structureDecayMultiplier: 0.25, pvpMode: "off", raidWindowHours: 0,
-        friendlyFire: false, deathDropMode: "none", newPlayerGraceHours: 72, offlineRaidProtection: true,
-        stormEnabled: true, stormFrequency: 0.55, stormSeverity: 0.6, heatDrainMultiplier: 0.65, waterRetentionMultiplier: 1.7,
-        wormAggression: 0.5, deepDesertResetDays: 10, xpMultiplier: 2, researchCostMultiplier: 0.7,
-        vendorPriceMultiplier: 0.75, reputationMultiplier: 1.6, fastTravelCostMultiplier: 0.4, maxClanSize: 40,
-        allianceLimit: 5, baseClaimLimit: 8, buildHeightLimit: 8, publicBuildDamage: false
+        harvestMultiplier: 2.5, spiceYieldMultiplier: 1.8,
+        lootQualityMultiplier: 1.4, structureDecayMultiplier: 0.25, pvpMode: "off",
+        stormEnabled: true, baseClaimLimit: 8, buildHeightLimit: 8, publicBuildDamage: false
       }
     };
 
@@ -1510,7 +1502,10 @@
       const grouped = {};
       for (const section of sections) {
         grouped[section.id] = {};
-        for (const setting of section.settings) grouped[section.id][setting.key] = state[setting.key];
+        for (const setting of section.settings) {
+          if (setting.supported === false) continue;
+          grouped[section.id][setting.key] = state[setting.key];
+        }
       }
       return {
         profileName: profileName.value.trim() || "Arrakis Server Profile",
@@ -1676,15 +1671,12 @@
 
     function pressureScore() {
       let score = 38;
-      const stormsActive = state.stormEnabled && state.stormFrequency > 0 && state.stormSeverity > 0;
-      score += stormsActive ? (state.stormFrequency - 1) * 9 : -9;
-      score += stormsActive ? (state.stormSeverity - 1) * 9 : -9;
-      score += (state.heatDrainMultiplier - 1) * 11;
-      score += (state.wormAggression - 1) * 10;
-      score += state.pvpMode === "always_on" ? 19 : state.pvpMode === "scheduled" ? 11 : state.pvpMode === "off" ? -12 : 5;
-      score += state.deathDropMode === "full_with_equipment" ? 14 : state.deathDropMode === "full_inventory" ? 10 : state.deathDropMode === "none" ? -8 : 2;
-      score += state.offlineRaidProtection ? -7 : 6;
+      const stormsActive = Boolean(state.stormEnabled);
+      score += stormsActive ? 6 : -9;
+      score += state.pvpMode === "always_on" ? 19 : state.pvpMode === "off" ? -12 : 5;
+      score += state.publicBuildDamage ? 6 : -4;
       score += (1 - state.harvestMultiplier) * 5;
+      score += (1 - state.structureDecayMultiplier) * 4;
       return Math.max(0, Math.min(100, Math.round(score)));
     }
 
@@ -1703,21 +1695,21 @@
             : "The profile favors building, travel, and social play over punishment.";
 
       const find = key => sections.flatMap(section => section.settings).find(setting => setting.key === key);
-      const stormsActive = state.stormEnabled && state.stormFrequency > 0 && state.stormSeverity > 0;
+      const stormsActive = Boolean(state.stormEnabled);
       serverStormToggle.checked = Boolean(state.stormEnabled);
       serverStormToggleText.textContent = state.stormEnabled ? "Enabled" : "Disabled";
       document.querySelector("#statusMode").textContent = profileName.value.replace("Arrakis ", "").replace(" Profile", "") || "Custom";
       document.querySelector("#statusHarvest").textContent = fmt(find("harvestMultiplier"), state.harvestMultiplier);
       document.querySelector("#statusPvp").textContent = fmt(find("pvpMode"), state.pvpMode);
-      document.querySelector("#statusEnv").textContent = !stormsActive ? "Storms Off" : state.stormFrequency > 1.2 || state.stormSeverity > 1.2 ? "Punishing" : state.stormFrequency < 0.8 ? "Calm" : "Standard";
+      document.querySelector("#statusEnv").textContent = stormsActive ? "Storms On" : "Storms Off";
 
       document.querySelector("#summaryList").innerHTML = [
         ["Harvest", fmt(find("harvestMultiplier"), state.harvestMultiplier)],
+        ["Vehicle Mining", fmt(find("spiceYieldMultiplier"), state.spiceYieldMultiplier)],
         ["PvP", fmt(find("pvpMode"), state.pvpMode)],
-        ["Raid Window", fmt(find("raidWindowHours"), state.raidWindowHours)],
-        ["Storms", stormsActive ? `${fmt(find("stormFrequency"), state.stormFrequency)} / ${fmt(find("stormSeverity"), state.stormSeverity)}` : "Off"],
-        ["Clan Size", fmt(find("maxClanSize"), state.maxClanSize)],
-        ["Backups", fmt(find("backupIntervalMinutes"), state.backupIntervalMinutes)]
+        ["Storms", stormsActive ? "Enabled" : "Off"],
+        ["Base Claims", fmt(find("baseClaimLimit"), state.baseClaimLimit)],
+        ["Build Height", fmt(find("buildHeightLimit"), state.buildHeightLimit)]
       ].map(([label, value]) => `<div class="summary-item"><span>${label}</span><strong>${value}</strong></div>`).join("");
 
       jsonOut.value = JSON.stringify(profile, null, 2);

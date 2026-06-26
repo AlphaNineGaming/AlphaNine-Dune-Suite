@@ -1281,7 +1281,7 @@
           { key: "harvestMultiplier", label: "Harvest yield", help: "Raw materials gathered per node.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
           { key: "spiceYieldMultiplier", label: "Spice yield", help: "Spice bloom and spice sand returns.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
           { key: "refiningSpeedMultiplier", label: "Refining speed", help: "Processing speed for ore, water, spice, and crafted inputs.", type: "range", min: 0.5, max: 6, step: 0.25, value: 1, unit: "x" },
-          { key: "craftingSpeedMultiplier", label: "Crafting speed", help: "Workbench and fabrication completion speed.", type: "range", min: 0.5, max: 8, step: 0.25, value: 1, unit: "x" },
+          { key: "craftingSpeedMultiplier", label: "Crafting speed", help: "No confirmed self-hosted config key found for workbench or fabrication completion speed; planning only.", type: "range", min: 0.5, max: 8, step: 0.25, value: 1, unit: "x", supported: false },
           { key: "lootQualityMultiplier", label: "Loot quality", help: "General quality bias for drops and caches.", type: "range", min: 0.5, max: 3, step: 0.1, value: 1, unit: "x" },
           { key: "structureDecayMultiplier", label: "Structure decay", help: "Base upkeep and abandoned structure decay pressure.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" }
         ]
@@ -1354,7 +1354,7 @@
     const presets = {
       balanced: {},
       hardcore: {
-        harvestMultiplier: 0.75, spiceYieldMultiplier: 0.75, refiningSpeedMultiplier: 0.8, craftingSpeedMultiplier: 0.85,
+        harvestMultiplier: 0.75, spiceYieldMultiplier: 0.75, refiningSpeedMultiplier: 0.8,
         lootQualityMultiplier: 0.85, structureDecayMultiplier: 1.4, pvpMode: "scheduled", raidWindowHours: 6,
         friendlyFire: true, deathDropMode: "full_inventory", newPlayerGraceHours: 4, offlineRaidProtection: false,
         stormEnabled: true, stormFrequency: 1.6, stormSeverity: 1.5, heatDrainMultiplier: 1.45, waterRetentionMultiplier: 0.75,
@@ -1363,7 +1363,7 @@
         allianceLimit: 1, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
       },
       builder: {
-        harvestMultiplier: 2.5, spiceYieldMultiplier: 1.8, refiningSpeedMultiplier: 3, craftingSpeedMultiplier: 4,
+        harvestMultiplier: 2.5, spiceYieldMultiplier: 1.8, refiningSpeedMultiplier: 3,
         lootQualityMultiplier: 1.4, structureDecayMultiplier: 0.25, pvpMode: "off", raidWindowHours: 0,
         friendlyFire: false, deathDropMode: "none", newPlayerGraceHours: 72, offlineRaidProtection: true,
         stormEnabled: true, stormFrequency: 0.55, stormSeverity: 0.6, heatDrainMultiplier: 0.65, waterRetentionMultiplier: 1.7,

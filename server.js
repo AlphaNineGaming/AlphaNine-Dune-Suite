@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.4.9";
+const APP_VERSION = "0.5.0";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -70,6 +70,7 @@ const BUNDLED_DATA_DIR = packagedAssetPath("data");
 const BUNDLED_UI_OVERRIDE_CSS_PATH = path.join(BUNDLED_DATA_DIR, "ui-overrides.css");
 const DUNE_ITEMS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-items-catalog.json");
 const DUNE_SKILLS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-skills-catalog.json");
+const MANAGER_ITEM_CATALOG_PATH = path.join(MANAGER_DIR, "dune-item-catalog.json");
 const DUNE_ITEMS_CACHE_PATH = path.join(DATA_DIR, "dune-items-cache.json");
 const GEAR_IMAGE_CACHE_DIR = path.join(DATA_DIR, "gear-images");
 const BUNDLED_GEAR_IMAGE_DIR = path.join(BUNDLED_DATA_DIR, "gear-images");
@@ -3307,6 +3308,164 @@ function isSchematicItem(item = {}) {
     || /(^|[\/_\-\s])schematic(s)?($|[\/_\-\s])/.test(text);
 }
 
+function isUniqueSchematicItem(item = {}) {
+  return String(item.subtype || "").trim().toLowerCase() === "unique schematic"
+    || String(item.source || "").trim().toLowerCase() === "manager-catalog";
+}
+
+function schematicRecipeIdCandidates(template) {
+  const raw = String(template || "").trim();
+  if (!raw) return [];
+  const candidates = new Set();
+  const add = (value) => {
+    const recipeId = String(value || "").trim();
+    if (recipeId && /^[A-Za-z0-9_().+\-]+$/.test(recipeId)) candidates.add(recipeId);
+  };
+  if (/^recipe:/i.test(raw)) add(raw.replace(/^recipe:/i, ""));
+  if (raw === "NPE_ScrapMetalKnife_Schematic") add("ScrapMetalKnifeRecipe");
+  if (/_Schematic$/i.test(raw)) {
+    const base = raw.replace(/_Schematic$/i, "");
+    add(`${base}_Recipe`);
+    add(`${base}_recipe`);
+  }
+  if (/Schematic$/i.test(raw)) {
+    const base = raw.replace(/Schematic$/i, "");
+    add(`${base}Recipe`);
+    add(`${base}recipe`);
+  }
+  if (/^Schematic_/i.test(raw)) {
+    const base = raw.replace(/^Schematic_/i, "");
+    add(`${base}Recipe`);
+    add(`${base}recipe`);
+  }
+  return [...candidates];
+}
+
+function recipeDisplayName(recipeId) {
+  return String(recipeId || "")
+    .replace(/_?recipe$/i, "")
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z0-9])/g, "$1 $2")
+    .replace(/([0-9])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim() || String(recipeId || "");
+}
+
+function isRecipeSchematicItem(item = {}) {
+  if (String(item.subtype || "").trim().toLowerCase() === "unique schematic") return false;
+  if (String(item.source || "").trim().toLowerCase() === "manager-catalog") return false;
+  return isSchematicItem(item) && schematicRecipeIdCandidates(item.id).length > 0;
+}
+
+function techKnowledgeKeyFromTemplate(template) {
+  const raw = String(template || "").trim();
+  return /^tech:/i.test(raw) ? raw.replace(/^tech:/i, "") : "";
+}
+
+function techKnowledgeRecipeIdCandidates(template) {
+  const key = techKnowledgeKeyFromTemplate(template) || String(template || "").trim();
+  if (!/^RCP_/i.test(key)) return [];
+  const recipeId = key.replace(/^RCP_/i, "");
+  return recipeId ? [recipeId] : [];
+}
+
+function isTechKnowledgeItem(item = {}) {
+  return /^tech:/i.test(String(item?.id || ""));
+}
+
+function recipeCategory(recipeId) {
+  const value = String(recipeId || "").toLowerCase();
+  if (/(armor|combat_choam|stillsuit|suit|boots|gloves|helmet|mask|top|bottom|chest|feet|hands|head|legs|rags|leathers)/.test(value)) return "Armor / Wearables";
+  if (/(rangedweapon|meleeweapon|rifle|pistol|shotgun|smg|lmg|sword|kindjal|dirk|rapier|blade|knife|scattergun|rocketlauncher|maula|sda|ar|dmr|smug|hark|atre|napalm|ammo|gunpart)/.test(value)) return "Weapons / Ammo";
+  if (/(tool|mining|scanner|binocular|compactor|repair|probe|cutter|dewreaper|exsanguination|bodyfluid|bloodsack|literjon|healthpack)/.test(value)) return "Tools / Consumables";
+  if (/(vehicle|buggy|sandbike|ornithopter|orni|sandcrawler|treadwheel|boost|chassis|engine|hull|locomotion|launcher|cockpit|wings|treads)/.test(value)) return "Vehicles";
+  if (/(material|bar|t6|silicone|copper|steel|cobalt|fuel|filter|fabric|machinery|piston|pump|regulator|actuator|component|lubricant|welding)/.test(value)) return "Materials / Components";
+  if (/(structure|building|container|backup|light|decajon|windturbine|staking|beacon|silo|powerunit)/.test(value)) return "Structures / Base";
+  return "Other";
+}
+
+function techKnowledgeDisplayName(itemKey) {
+  return String(itemKey || "")
+    .replace(/^RCP_/i, "")
+    .replace(/^BLD_/i, "")
+    .replace(/^DA_GRP_/i, "")
+    .replace(/_Patent$/i, "")
+    .replace(/_?Recipe$/i, "")
+    .replace(/\+/g, " + ")
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z0-9])/g, "$1 $2")
+    .replace(/([0-9])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim() || String(itemKey || "");
+}
+
+function techKnowledgeCategory(itemKey) {
+  const value = String(itemKey || "");
+  if (/^RCP_/i.test(value)) return recipeCategory(value.replace(/^RCP_/i, ""));
+  if (/^BLD_/i.test(value)) return "Structures / Base";
+  if (/armor|stillsuit|wearable|leathers|rags/i.test(value)) return "Armor / Wearables";
+  if (/weapon|rifle|pistol|sword|kindjal|rocket/i.test(value)) return "Weapons / Ammo";
+  if (/vehicle|buggy|sandbike|orni|sandcrawler/i.test(value)) return "Vehicles";
+  return "Research Groups";
+}
+
+async function knownCraftingRecipeCatalogItems() {
+  const output = await dbQuery(`
+    select distinct recipe->'BaseRecipeId'->>'Name' as recipe_id
+    from dune.actors a
+    cross join lateral jsonb_array_elements(coalesce(a.properties->'CraftingRecipesLibraryActorComponent'->'m_KnownItemRecipes', '[]'::jsonb)) recipe
+    where recipe->'BaseRecipeId'->>'Name' is not null
+    order by recipe_id
+  `, 15000);
+  return parseDbRows(output, ["recipeId"]).map((row) => {
+    const recipeId = String(row.recipeId || "").trim();
+    return {
+      id: `recipe:${recipeId}`,
+      name: recipeDisplayName(recipeId),
+      category: "Schematics",
+      type: recipeCategory(recipeId),
+      subtype: "Crafting Recipe",
+      detail: recipeId,
+      tier: "",
+      rarity: "Recipe",
+      grade: "Recipe",
+      source: "Live DB Known Recipes",
+      spawnable: true,
+      hasDisplayName: true,
+      recipeId
+    };
+  }).filter((item) => item.recipeId);
+}
+
+async function knownTechKnowledgeCatalogItems() {
+  const output = await dbQuery(`
+    select distinct elem->>'ItemKey' as item_key
+    from dune.actors a
+    cross join lateral jsonb_array_elements(coalesce(a.properties->'TechKnowledgePlayerComponent'->'m_TechKnowledge'->'m_TechKnowledgeData', '[]'::jsonb)) elem
+    where elem->>'ItemKey' is not null
+    order by item_key
+  `, 15000);
+  return parseDbRows(output, ["itemKey"]).map((row) => {
+    const itemKey = String(row.itemKey || "").trim();
+    return {
+      id: `tech:${itemKey}`,
+      name: techKnowledgeDisplayName(itemKey),
+      category: "Schematics",
+      type: techKnowledgeCategory(itemKey),
+      subtype: /^RCP_/i.test(itemKey) ? "Research Recipe" : "Research Blueprint",
+      detail: itemKey,
+      tier: "",
+      rarity: "Research",
+      grade: "Research",
+      source: "Live DB Research Tree",
+      spawnable: true,
+      hasDisplayName: true,
+      techKnowledgeKey: itemKey,
+      recipeId: techKnowledgeRecipeIdCandidates(itemKey)[0] || ""
+    };
+  }).filter((item) => item.techKnowledgeKey);
+}
+
 function filterItemsByQuery(items = [], searchParams = new URLSearchParams()) {
   const query = String(searchParams.get("q") || searchParams.get("search") || "").trim().toLowerCase();
   const rawCategory = String(searchParams.get("category") || "").trim();
@@ -3319,7 +3478,9 @@ function filterItemsByQuery(items = [], searchParams = new URLSearchParams()) {
   return items.filter((item) => {
     const itemGrade = normalizeItemGrade(item.grade, item.rarity, item.quality, item.tier, item.itemGrade, item.itemRarity);
     const itemTier = normalizeItemTier(item.tier, item.itemTier, item.level, item.itemLevel);
-    if (category === "__schematics") {
+    if (category === "__unique_schematics") {
+      if (!isUniqueSchematicItem(item)) return false;
+    } else if (category === "__schematics") {
       if (!isSchematicItem(item)) return false;
     } else if (String(category).toLowerCase() === "items" && isSchematicItem(item)) {
       return false;
@@ -3374,6 +3535,83 @@ function normalizeBundledItemForUserCache(item = {}) {
     imageError: String(item.imageError || ""),
     source: "bundled"
   };
+}
+
+function managerItemTags(item = {}) {
+  const raw = item.tags;
+  if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
+  if (raw && Array.isArray(raw.value)) return raw.value.map(String).filter(Boolean);
+  return [];
+}
+
+function managerSchematicType(item = {}) {
+  const tags = managerItemTags(item);
+  const tag = tags.find((entry) => /^Items\.Schematics\./i.test(entry)) || "";
+  if (/RangedWeapons|MeleeWeapons|Weapons/i.test(tag)) return "Weapons / Ammo";
+  if (/Clothes|Armor|Stillsuit|Wearables/i.test(tag)) return "Armor / Wearables";
+  if (/Vehicles|Deployables\.Vehicle/i.test(tag)) return "Vehicles";
+  if (/Tools|Consumables/i.test(tag)) return "Tools / Consumables";
+  if (/Buildings|Structures|Placeables/i.test(tag)) return "Structures / Base";
+  if (/Components|Materials/i.test(tag)) return "Materials / Components";
+  return isSchematicItem(item) ? "Unique Schematics" : String(item.type || item.subtype || "");
+}
+
+function normalizeManagerItemForUserCache(item = {}) {
+  const tags = managerItemTags(item);
+  const tier = normalizeItemTier(item.tier, tags.find((entry) => /^LootTier\./i.test(entry))?.replace(/^LootTier\./i, ""));
+  const normalized = sanitizeGearItemForUi({
+    ...item,
+    category: isSchematicItem(item) ? "Schematics" : item.category,
+    type: managerSchematicType(item),
+    subtype: isSchematicItem(item) ? "Unique Schematic" : item.subtype,
+    tier,
+    detail: String(item.detail || tags.join(" / ")),
+    hasDisplayName: Boolean(item.name && item.name !== item.id)
+  });
+  return {
+    ...item,
+    ...normalized,
+    tier,
+    grade: isSchematicItem(item) ? "Unique" : normalized.grade,
+    itemGrade: isSchematicItem(item) ? "Unique" : normalized.grade,
+    detailUrl: String(item.detailUrl || ""),
+    imageUrl: String(item.imageUrl || ""),
+    imageStatus: String(item.imageStatus || ""),
+    imageError: String(item.imageError || ""),
+    source: "manager-catalog"
+  };
+}
+
+function loadManagerCatalogItems() {
+  if (!fs.existsSync(MANAGER_ITEM_CATALOG_PATH)) {
+    return { items: [], report: { managerCatalogPath: MANAGER_ITEM_CATALOG_PATH, managerCatalogPresent: false } };
+  }
+  try {
+    const raw = fs.readFileSync(MANAGER_ITEM_CATALOG_PATH, "utf8").replace(/^\uFEFF/, "");
+    const catalog = JSON.parse(raw);
+    const sourceItems = Array.isArray(catalog) ? catalog : (Array.isArray(catalog.items) ? catalog.items : []);
+    const items = sourceItems
+      .map(normalizeManagerItemForUserCache)
+      .filter((item) => item.id && item.name && isSchematicItem(item));
+    return {
+      items: dedupeGearItemsById(items),
+      report: {
+        managerCatalogPath: MANAGER_ITEM_CATALOG_PATH,
+        managerCatalogPresent: true,
+        managerCatalogItems: sourceItems.length,
+        managerCatalogSchematics: items.length
+      }
+    };
+  } catch (error) {
+    return {
+      items: [],
+      report: {
+        managerCatalogPath: MANAGER_ITEM_CATALOG_PATH,
+        managerCatalogPresent: true,
+        managerCatalogError: error.message
+      }
+    };
+  }
 }
 
 function gearItemDedupeScore(item = {}) {
@@ -3483,11 +3721,21 @@ function loadDuneItemsCache() {
   try {
     const data = JSON.parse(fs.readFileSync(DUNE_ITEMS_CACHE_PATH, "utf8"));
     const rawItems = (data.items || []).map(sanitizeGearItemForUi).filter((item) => item.id && item.name);
-    const items = dedupeGearItemsById(rawItems);
+    const managerCatalog = loadManagerCatalogItems();
+    const mergedRawItems = [...rawItems, ...managerCatalog.items];
+    const items = dedupeGearItemsById(mergedRawItems);
+    const managerOnlySchematics = managerCatalog.items.filter((item) => !rawItems.some((base) => base.id === item.id)).length;
     return {
       ok: true,
       items,
-      report: { ...(data.report || {}), totalItemsFound: items.length, duplicateItemsRemoved: Math.max(0, rawItems.length - items.length) },
+      report: {
+        ...(data.report || {}),
+        ...managerCatalog.report,
+        totalItemsFound: items.length,
+        managerCatalogMergedSchematics: managerCatalog.items.length,
+        managerOnlySchematics,
+        duplicateItemsRemoved: Math.max(0, mergedRawItems.length - items.length)
+      },
       generatedAt: data.generatedAt || "",
       seeded
     };
@@ -6025,7 +6273,10 @@ async function progressionUnlockSkills(payload) {
     const query = String(payload?.query || payload?.playerId || "").trim();
     const playerData = await timer.step("selected_target_validate", () => withProgressionStepTimeout(progressionPlayerLookup(query), 20000, "selected_target_validate"));
     if (!playerData.ok) return progressionUnsupported(playerData.reason || "Player lookup failed.");
-    if (String(playerData.player?.online_status || "").toLowerCase().includes("online")) throw new Error("Skill unlock editing requires the player to be offline.");
+    const playerOnline = String(playerData.player?.online_status || "").toLowerCase().includes("online");
+    const onlineProgressionWarning = playerOnline
+      ? "Online player progression edit applied directly to the database. Read-back verifies the saved progression JSON, but the live game server may require the player to relog or reload before the change is visible."
+      : "";
     const fLevelTarget = playerData.progressionDebug?.fLevelTarget || null;
     if (!fLevelTarget?.entity_id) throw new Error("Selected FLevelComponent target is missing. Reload the player before unlocking skills.");
     const fLevelFields = fLevelTarget.fields || {};
@@ -6049,7 +6300,9 @@ async function progressionUnlockSkills(payload) {
         selectedSkills,
         missingSkillIds,
         beforeFLevelComponent: beforeOutput || "",
-        source: "direct-skill-unlock"
+        playerOnline,
+        onlineProgressionWarning,
+        source: playerOnline ? "direct-online-player-progression-skill-unlock" : "direct-skill-unlock"
       }, null, 2), "utf8");
     });
     const moduleUpdates = selectedSkills.map((skill) => {
@@ -6095,21 +6348,25 @@ async function progressionUnlockSkills(payload) {
       perkCurrentLevel: parts[(index * 2) + 1] || ""
     }));
     const verified = readBackValues.every((item) => String(item.moduleSkillPointsSpent) === String(item.points) && (!item.perkTag || String(item.perkCurrentLevel) === String(item.maxLevel)));
-    await timer.step("audit_write", async () => progressionAudit("skill_unlocks_applied", { player: playerData.player, fLevelTarget, selectedSkills: moduleUpdates, missingSkillIds, backupFilePath: backupPath, verified, readBackValues }));
+    await timer.step("audit_write", async () => progressionAudit("skill_unlocks_applied", { player: playerData.player, fLevelTarget, selectedSkills: moduleUpdates, missingSkillIds, backupFilePath: backupPath, playerOnline, onlineProgressionWarning, verified, readBackValues }));
     timer.finish({ status: verified ? "applied" : "verification_failed", action: "skill_unlocks", selected: selectedSkills.length });
     return {
       ok: verified,
       status: verified ? "applied" : "verification_failed",
       action: "skill_unlocks",
       player: playerData.player,
-      playerOffline: !String(playerData.player?.online_status || "").toLowerCase().includes("online"),
+      playerOnline,
+      playerOffline: !playerOnline,
       backupPath,
       auditLogPath: PROGRESSION_AUDIT_LOG,
       selectedSkills: moduleUpdates,
       missingSkillIds,
       readBackValues,
       timings: timer.timings,
-      message: verified ? `Unlocked ${moduleUpdates.length} selected skill(s).` : "Skill unlock write completed, but read-back verification did not match."
+      warning: verified ? onlineProgressionWarning : "",
+      message: verified
+        ? `Unlocked ${moduleUpdates.length} selected skill(s).${onlineProgressionWarning ? ` ${onlineProgressionWarning}` : ""}`
+        : "Skill unlock write completed, but read-back verification did not match."
     };
   } catch (error) {
     const timedOut = /timed out|timeout/i.test(error.message);
@@ -7645,8 +7902,10 @@ function validateGiveItemPayload(payload) {
   const quality = hasQuality ? Number(payload.quality) : 0;
   if (!playerId) throw new Error("Choose a player first.");
   if (playerId.length > 128 || !/^[A-Za-z0-9_:.+\-# @]+$/.test(playerId)) throw new Error("Player name/id contains unsupported characters.");
-  if (!template || template.length > 160 || !/^[A-Za-z0-9_:.+-]+$/.test(template)) throw new Error("Choose a valid item template.");
-  const catalogMatch = gearCatalog().some((item) => item.id === template);
+  if (!template || template.length > 240 || !/^[A-Za-z0-9_:.()+-]+$/.test(template)) throw new Error("Choose a valid item template.");
+  const catalogMatch = gearCatalog().some((item) => item.id === template)
+    || /^recipe:[A-Za-z0-9_().+\-]+$/.test(template)
+    || /^tech:[A-Za-z0-9_().+\-]+$/.test(template);
   if (!catalogMatch) throw new Error("Item template was not found in the local Gear Codex catalog.");
   if (!Number.isInteger(qty) || qty < 1 || qty > 9999) throw new Error("Quantity must be a whole number between 1 and 9999.");
   if (hasQuality && !capabilities.qualitySupported) throw new Error("Quality giving is not supported by the current receiver method.");
@@ -9431,6 +9690,58 @@ async function adminGiveItem(payload) {
       quality: command.quality,
       requestId: command.requestId
     };
+    const catalogItem = gearCatalog().find((row) => row.id === command.template) || (/^recipe:/i.test(command.template) ? {
+      id: command.template,
+      name: recipeDisplayName(command.template.replace(/^recipe:/i, "")),
+      category: "Schematics",
+      type: recipeCategory(command.template.replace(/^recipe:/i, "")),
+      source: "Live DB Known Recipes",
+      recipeId: command.template.replace(/^recipe:/i, "")
+    } : /^tech:/i.test(command.template) ? {
+      id: command.template,
+      name: techKnowledgeDisplayName(techKnowledgeKeyFromTemplate(command.template)),
+      category: "Schematics",
+      type: techKnowledgeCategory(techKnowledgeKeyFromTemplate(command.template)),
+      source: "Live DB Research Tree",
+      techKnowledgeKey: techKnowledgeKeyFromTemplate(command.template),
+      recipeId: techKnowledgeRecipeIdCandidates(command.template)[0] || ""
+    } : null);
+    if (catalogItem && isTechKnowledgeItem(catalogItem)) {
+      timer.skip("server_availability", "skipped: research blueprint unlock uses database TechKnowledge");
+      timer.skip("runtime_transport_update", "skipped: research blueprint unlock uses database TechKnowledge");
+      timer.skip("transport_health_check", "skipped: research blueprint unlock uses database TechKnowledge");
+      if (mode === "execute" && payload?.confirmed !== true && payload?.confirmed !== "true") {
+        const error = new Error("Confirm real research blueprint unlock before writing to the player database.");
+        appendAdminAudit("research_blueprint_blocked", { ...auditBase, reason: error.message });
+        throw error;
+      }
+      const result = await timer.step("unlock_research_blueprint", () => adminUnlockTechKnowledge(command, { mode }));
+      result.timings = timer.finish();
+      appendAdminAudit(mode === "execute" ? "give_item_research_blueprint_unlocked" : "give_item_research_blueprint_dry_run", {
+        ...auditBase,
+        result: { ok: result.ok, status: result.status, techKnowledgeKey: result.techKnowledgeKey, recipeId: result.recipeId, alreadyUnlocked: result.alreadyUnlocked },
+        timings: result.timings
+      });
+      return result;
+    }
+    if (catalogItem && isRecipeSchematicItem(catalogItem)) {
+      timer.skip("server_availability", "skipped: schematic unlock uses database recipe library");
+      timer.skip("runtime_transport_update", "skipped: schematic unlock uses database recipe library");
+      timer.skip("transport_health_check", "skipped: schematic unlock uses database recipe library");
+      if (mode === "execute" && payload?.confirmed !== true && payload?.confirmed !== "true") {
+        const error = new Error("Confirm real schematic recipe unlock before writing to the player database.");
+        appendAdminAudit("schematic_recipe_blocked", { ...auditBase, reason: error.message });
+        throw error;
+      }
+      const result = await timer.step("unlock_schematic_recipe", () => adminUnlockSchematicRecipe(command, { mode }));
+      result.timings = timer.finish();
+      appendAdminAudit(mode === "execute" ? "give_item_schematic_recipe_unlocked" : "give_item_schematic_recipe_dry_run", {
+        ...auditBase,
+        result: { ok: result.ok, status: result.status, recipeId: result.recipeId, alreadyUnlocked: result.alreadyUnlocked },
+        timings: result.timings
+      });
+      return result;
+    }
     timer.skip("server_availability", "skipped: Live Give uses receiver transport health directly");
     timer.skip("runtime_transport_update", "skipped: no server/VM/battlegroup discovery during Give Item");
     const transport = await timer.step("transport_health_check", () => checkGiveTransport());
@@ -9493,8 +9804,358 @@ async function adminGiveItem(payload) {
 }
 
 function giveItemDisplayName(template) {
+  if (/^recipe:/i.test(String(template || ""))) return recipeDisplayName(String(template || "").replace(/^recipe:/i, ""));
+  if (/^tech:/i.test(String(template || ""))) return techKnowledgeDisplayName(techKnowledgeKeyFromTemplate(template));
   const item = gearCatalog().find((row) => row.id === template);
   return item?.name || template;
+}
+
+async function adminUnlockTechKnowledge(command, options = {}) {
+  const template = String(command?.template || "").trim();
+  const playerId = String(command?.playerId || "").trim();
+  const qty = Math.max(1, Number(command?.qty || 1) || 1);
+  const mode = String(options.mode || "dry-run").toLowerCase();
+  const dryRun = mode !== "execute";
+  const techKey = techKnowledgeKeyFromTemplate(template);
+  if (!techKey || !/^[A-Za-z0-9_().+\-]+$/.test(techKey)) throw new Error("Selected template is not a research blueprint unlock.");
+  const recipeCandidates = techKnowledgeRecipeIdCandidates(techKey);
+  const recipeId = recipeCandidates[0] || "";
+  const targetPredicate = [
+    `ps.account_id::text = ${sqlString(playerId)}`,
+    `ps.player_controller_id::text = ${sqlString(playerId)}`,
+    `ps.player_pawn_id::text = ${sqlString(playerId)}`,
+    `ps.player_state_id::text = ${sqlString(playerId)}`,
+    `lower(ps.character_name) = lower(${sqlString(playerId)})`,
+    `lower(coalesce(ac."user", '')) = lower(${sqlString(playerId)})`
+  ].join("\n         or ");
+  const techPath = "{TechKnowledgePlayerComponent,m_TechKnowledge,m_TechKnowledgeData}";
+  const recipePath = "{CraftingRecipesLibraryActorComponent,m_KnownItemRecipes}";
+  const updateCte = dryRun ? "" : `,
+    next_properties as (
+      select current_state.actor_id,
+             jsonb_set(
+               current_state.properties,
+               '${techPath}',
+               (
+                 select jsonb_agg(
+                   case when ord = matching_tech.ord then
+                     jsonb_set(jsonb_set(elem, '{UnlockedState}', to_jsonb('Purchased'::text), true), '{bIsNewEntry}', 'true'::jsonb, true)
+                   else elem end
+                   order by ord
+                 )
+                 from jsonb_array_elements(current_state.tech_data) with ordinality entries(elem, ord)
+               ),
+               false
+             ) as properties
+      from current_state, matching_tech
+    ),
+    updated as (
+      update dune.actors a
+      set properties = case
+        when ${recipeId ? "not exists(select 1 from already_known_recipe)" : "false"} then
+          jsonb_set(
+            next_properties.properties,
+            '${recipePath}',
+            coalesce(next_properties.properties#>'${recipePath}', '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
+              'm_Source', 'SchematicPickup',
+              'm_bIsNew', true,
+              'BaseRecipeId', jsonb_build_object('Name', (select resolved_recipe_id from selected_recipe)),
+              'm_QualityLevel', 0,
+              'm_NumberOfRecipeUses', 0,
+              'm_bIsLimitedUseRecipe', false
+            )),
+            true
+          )
+        else next_properties.properties end
+      from next_properties, matching_tech
+      where a.id = next_properties.actor_id
+        and (matching_tech.unlocked_state <> 'Purchased' or ${recipeId ? "not exists(select 1 from already_known_recipe)" : "false"})
+      returning a.id
+    )`;
+  const sql = `
+    with target as (
+      select ps.account_id::text as account_id,
+             ps.player_pawn_id::text as actor_id,
+             coalesce(ps.character_name, ac."user", ps.account_id::text) as character_name,
+             coalesce(ps.online_status::text, 'unknown') as online_status
+      from dune.player_state ps
+      left join dune.accounts ac on ac.id = ps.account_id
+      where ${targetPredicate}
+      order by case when lower(coalesce(ps.character_name, '')) = lower(${sqlString(playerId)}) then 0 else 1 end,
+               ps.last_avatar_activity desc nulls last,
+               ps.player_state_id
+      limit 1
+    ),
+    current_state as (
+      select a.id as actor_id,
+             a.properties,
+             coalesce(a.properties#>'${techPath}', '[]'::jsonb) as tech_data,
+             coalesce(a.properties#>'${recipePath}', '[]'::jsonb) as recipes
+      from dune.actors a
+      join target t on t.actor_id::bigint = a.id
+      where a.properties ? 'TechKnowledgePlayerComponent'
+      ${dryRun ? "" : "for update"}
+    ),
+    matching_tech as (
+      select ord,
+             elem,
+             elem->>'UnlockedState' as unlocked_state
+      from current_state
+      cross join lateral jsonb_array_elements(current_state.tech_data) with ordinality entries(elem, ord)
+      where elem->>'ItemKey' = ${sqlString(techKey)}
+      limit 1
+    ),
+    known_recipe as (
+      select recipe->'BaseRecipeId'->>'Name' as resolved_recipe_id
+      from dune.actors source_actor
+      cross join lateral jsonb_array_elements(coalesce(source_actor.properties#>'${recipePath}', '[]'::jsonb)) recipe
+      where ${recipeId ? `lower(recipe->'BaseRecipeId'->>'Name') = lower(${sqlString(recipeId)})` : "false"}
+      order by recipe->'BaseRecipeId'->>'Name'
+      limit 1
+    ),
+    selected_recipe as (
+      select ${recipeId ? `coalesce((select resolved_recipe_id from known_recipe), ${sqlString(recipeId)})` : "''"} as resolved_recipe_id
+    ),
+    already_known_recipe as (
+      select 1
+      from current_state, selected_recipe
+      cross join lateral jsonb_array_elements(current_state.recipes) recipe
+      where selected_recipe.resolved_recipe_id <> ''
+        and lower(recipe->'BaseRecipeId'->>'Name') = lower(selected_recipe.resolved_recipe_id)
+      limit 1
+    )
+    ${updateCte}
+    select
+      case
+        when not exists(select 1 from target) then 'player_not_found'
+        when not exists(select 1 from current_state) then 'component_missing'
+        when not exists(select 1 from matching_tech) then 'tech_missing'
+        when (select unlocked_state from matching_tech limit 1) = 'Purchased'
+          and (${recipeId ? "exists(select 1 from already_known_recipe)" : "true"}) then 'already_unlocked'
+        when ${dryRun ? "true" : "exists(select 1 from updated)"} then '${dryRun ? "dry-run-passed" : "research-unlocked"}'
+        else 'failed'
+      end,
+      coalesce((select account_id from target limit 1), ''),
+      coalesce((select actor_id from target limit 1), ''),
+      coalesce((select character_name from target limit 1), ''),
+      coalesce((select online_status from target limit 1), ''),
+      ${sqlString(techKey)},
+      coalesce((select unlocked_state from matching_tech limit 1), ''),
+      coalesce((select resolved_recipe_id from selected_recipe limit 1), ''),
+      coalesce((select exists(select 1 from already_known_recipe)::text), 'false')
+  `;
+  const output = await dbQuery(sql, dryRun ? 15000 : 30000);
+  const row = parseDbRows(output, ["status", "accountId", "actorId", "characterName", "onlineStatus", "techKnowledgeKey", "previousState", "recipeId", "recipeAlreadyKnown"])[0] || {};
+  if (row.status === "player_not_found") throw new Error(`Player was not found for research blueprint unlock target: ${playerId}`);
+  if (row.status === "component_missing") throw new Error(`TechKnowledgePlayerComponent was not found for ${row.characterName || playerId}.`);
+  if (row.status === "tech_missing") throw new Error(`Research blueprint ${techKey} was not found in ${row.characterName || playerId}'s TechKnowledge tree.`);
+  if (row.status === "failed") throw new Error(`Research blueprint unlock failed for ${techKey}.`);
+  const online = String(row.onlineStatus || "").toLowerCase() === "online";
+  const alreadyUnlocked = row.status === "already_unlocked";
+  const result = {
+    ok: true,
+    dryRun,
+    status: row.status,
+    grantKind: "Research Blueprint Unlock",
+    transport: "database",
+    command,
+    item: { id: template, name: techKnowledgeDisplayName(techKey) },
+    player: {
+      accountId: row.accountId,
+      actorId: row.actorId,
+      characterName: row.characterName,
+      onlineStatus: row.onlineStatus
+    },
+    techKnowledgeKey: techKey,
+    previousState: row.previousState,
+    recipeId: row.recipeId || "",
+    recipeName: row.recipeId ? recipeDisplayName(row.recipeId) : "",
+    recipeAlreadyKnown: row.recipeAlreadyKnown === "true",
+    alreadyUnlocked,
+    quantityIgnored: qty > 1,
+    verified: !dryRun,
+    stdout: alreadyUnlocked
+      ? `${row.characterName || playerId} already has ${techKnowledgeDisplayName(techKey)} unlocked in Research.`
+      : dryRun
+        ? `Dry-run passed. ${techKnowledgeDisplayName(techKey)} maps to Research TechKnowledge key ${techKey}${row.recipeId ? ` and crafting recipe ${row.recipeId}` : ""}.`
+        : `Research blueprint unlocked: ${techKnowledgeDisplayName(techKey)} for ${row.characterName || playerId}.`,
+    stderr: online ? (dryRun ? "Player is online. Dry-run did not write anything; a live research unlock may require relog/server reload before it appears." : "Player is online. The research value was written to the database, but the live game may require relog/server reload before it appears.") : "",
+    note: "Research-screen blueprint unlock: writes TechKnowledgePlayerComponent.m_TechKnowledge.m_TechKnowledgeData and, for RCP_ entries, CraftingRecipesLibraryActorComponent.m_KnownItemRecipes.",
+    timings: {}
+  };
+  appendAdminAudit(dryRun ? "research_blueprint_dry_run" : "research_blueprint_unlocked", {
+    playerId,
+    template,
+    techKnowledgeKey: techKey,
+    recipeId: row.recipeId || "",
+    status: row.status,
+    online,
+    alreadyUnlocked
+  });
+  return result;
+}
+
+async function adminUnlockSchematicRecipe(command, options = {}) {
+  const template = String(command?.template || "").trim();
+  const playerId = String(command?.playerId || "").trim();
+  const qty = Math.max(1, Number(command?.qty || 1) || 1);
+  const mode = String(options.mode || "dry-run").toLowerCase();
+  const dryRun = mode !== "execute";
+  const recipeTemplateMatch = /^recipe:/i.test(template);
+  const recipeIdFromTemplate = recipeTemplateMatch ? template.replace(/^recipe:/i, "") : "";
+  const item = gearCatalog().find((row) => row.id === template) || (recipeTemplateMatch ? {
+    id: template,
+    name: recipeDisplayName(recipeIdFromTemplate),
+    category: "Schematics",
+    type: recipeCategory(recipeIdFromTemplate),
+    source: "Live DB Known Recipes",
+    recipeId: recipeIdFromTemplate
+  } : null);
+  if (!item || !isRecipeSchematicItem(item)) throw new Error("Selected template is not a schematic recipe unlock.");
+  const candidates = schematicRecipeIdCandidates(template);
+  if (!candidates.length) throw new Error(`No crafting recipe mapping could be derived for schematic ${template}.`);
+  const valuesSql = candidates.map((recipeId, index) => `(${index}, ${sqlString(recipeId.toLowerCase())}, ${sqlString(recipeId)})`).join(",\n        ");
+  const targetPredicate = [
+    `ps.account_id::text = ${sqlString(playerId)}`,
+    `ps.player_controller_id::text = ${sqlString(playerId)}`,
+    `ps.player_pawn_id::text = ${sqlString(playerId)}`,
+    `ps.player_state_id::text = ${sqlString(playerId)}`,
+    `lower(ps.character_name) = lower(${sqlString(playerId)})`,
+    `lower(coalesce(ac."user", '')) = lower(${sqlString(playerId)})`
+  ].join("\n         or ");
+  const componentPath = "{CraftingRecipesLibraryActorComponent,m_KnownItemRecipes}";
+  const updateCte = dryRun ? "" : `,
+      updated as (
+        update dune.actors a
+        set properties = jsonb_set(
+          a.properties,
+          '${componentPath}',
+          current_recipes.recipes || jsonb_build_array(jsonb_build_object(
+            'm_Source', 'SchematicPickup',
+            'm_bIsNew', true,
+            'BaseRecipeId', jsonb_build_object('Name', selected_recipe.recipe_id),
+            'm_QualityLevel', 0,
+            'm_NumberOfRecipeUses', 0,
+            'm_bIsLimitedUseRecipe', false
+          )),
+          true
+        )
+        from current_recipes, selected_recipe
+        where a.id = current_recipes.actor_id
+          and not exists (select 1 from already_known)
+        returning a.id
+      )`;
+  const updatedExistsSql = dryRun ? "false" : "exists(select 1 from updated)";
+  const sql = `
+    with input(ord, recipe_lower, recipe_id) as (
+      values
+        ${valuesSql}
+    ),
+    target as (
+      select ps.account_id::text as account_id,
+             ps.player_pawn_id::text as actor_id,
+             coalesce(ps.character_name, ac."user", ps.account_id::text) as character_name,
+             coalesce(ps.online_status::text, 'unknown') as online_status
+      from dune.player_state ps
+      left join dune.accounts ac on ac.id = ps.account_id
+      where ${targetPredicate}
+      order by case when lower(coalesce(ps.character_name, '')) = lower(${sqlString(playerId)}) then 0 else 1 end,
+               ps.last_avatar_activity desc nulls last,
+               ps.player_state_id
+      limit 1
+    ),
+    current_recipes as (
+      select a.id as actor_id,
+             coalesce(a.properties#>'${componentPath}', '[]'::jsonb) as recipes
+      from dune.actors a
+      join target t on t.actor_id::bigint = a.id
+      where a.properties ? 'CraftingRecipesLibraryActorComponent'
+      ${dryRun ? "" : "for update"}
+    ),
+    known_recipe as (
+      select recipe->'BaseRecipeId'->>'Name' as recipe_id, min(input.ord) as ord
+      from input
+      join dune.actors source_actor on source_actor.properties ? 'CraftingRecipesLibraryActorComponent'
+      cross join lateral jsonb_array_elements(coalesce(source_actor.properties#>'${componentPath}', '[]'::jsonb)) recipe
+      where lower(recipe->'BaseRecipeId'->>'Name') = input.recipe_lower
+      group by recipe->'BaseRecipeId'->>'Name'
+      order by min(input.ord)
+      limit 1
+    ),
+    selected_recipe as (
+      select coalesce((select recipe_id from known_recipe limit 1), (select recipe_id from input order by ord limit 1)) as recipe_id
+    ),
+    already_known as (
+      select 1
+      from current_recipes, selected_recipe
+      cross join lateral jsonb_array_elements(current_recipes.recipes) recipe
+      where lower(recipe->'BaseRecipeId'->>'Name') = lower(selected_recipe.recipe_id)
+      limit 1
+    )
+    ${updateCte}
+    select
+      case
+        when not exists(select 1 from target) then 'player_not_found'
+        when not exists(select 1 from current_recipes) then 'component_missing'
+        when exists(select 1 from already_known) then 'already_unlocked'
+        when ${dryRun ? "true" : updatedExistsSql} then '${dryRun ? "dry-run-passed" : "recipe-unlocked"}'
+        else 'failed'
+      end,
+      coalesce((select account_id from target limit 1), ''),
+      coalesce((select actor_id from target limit 1), ''),
+      coalesce((select character_name from target limit 1), ''),
+      coalesce((select online_status from target limit 1), ''),
+      coalesce((select recipe_id from selected_recipe limit 1), ''),
+      coalesce((select count(*)::text from current_recipes cross join lateral jsonb_array_elements(current_recipes.recipes) recipe), '0'),
+      coalesce((select count(*)::text from current_recipes cross join lateral jsonb_array_elements(current_recipes.recipes) recipe), '0'),
+      coalesce((select recipe_id from known_recipe limit 1), '')
+  `;
+  const output = await dbQuery(sql, dryRun ? 15000 : 30000);
+  const row = parseDbRows(output, ["status", "accountId", "actorId", "characterName", "onlineStatus", "recipeId", "beforeCount", "afterCount", "matchedRecipeId"])[0] || {};
+  if (row.status === "player_not_found") throw new Error(`Player was not found for schematic unlock target: ${playerId}`);
+  if (row.status === "component_missing") throw new Error(`CraftingRecipesLibraryActorComponent was not found for ${row.characterName || playerId}.`);
+  if (row.status === "failed") throw new Error(`Crafting recipe unlock failed for ${row.recipeId || template}.`);
+  const online = String(row.onlineStatus || "").toLowerCase() === "online";
+  const alreadyUnlocked = row.status === "already_unlocked";
+  const result = {
+    ok: true,
+    dryRun,
+    status: row.status,
+    grantKind: "Crafting Recipe Unlock",
+    transport: "database",
+    command,
+    item: { id: template, name: item.name || template },
+    player: {
+      accountId: row.accountId,
+      actorId: row.actorId,
+      characterName: row.characterName,
+      onlineStatus: row.onlineStatus
+    },
+    recipeId: row.recipeId,
+    recipeName: recipeDisplayName(row.recipeId),
+    recipeCandidates: candidates,
+    matchedRecipeId: row.matchedRecipeId || "",
+    alreadyUnlocked,
+    quantityIgnored: qty > 1,
+    verified: !dryRun,
+    stdout: alreadyUnlocked
+      ? `${row.characterName || playerId} already knows ${recipeDisplayName(row.recipeId)}.`
+      : dryRun
+        ? `Dry-run passed. ${item.name || template} maps to crafting recipe ${row.recipeId}.`
+        : `Crafting recipe unlocked: ${recipeDisplayName(row.recipeId)} for ${row.characterName || playerId}.`,
+    stderr: online ? (dryRun ? "Player is online. Dry-run did not write anything; a live recipe unlock may require relog/server reload before it appears." : "Player is online. The recipe was written to the database, but the live game may require relog/server reload before it appears.") : "",
+    note: "Red-Blink-style schematic unlock: writes CraftingRecipesLibraryActorComponent.m_KnownItemRecipes instead of character inventory.",
+    timings: {}
+  };
+  appendAdminAudit(dryRun ? "schematic_recipe_dry_run" : "schematic_recipe_unlocked", {
+    playerId,
+    template,
+    recipeId: row.recipeId,
+    status: row.status,
+    online,
+    alreadyUnlocked
+  });
+  return result;
 }
 
 function liveGiveTimingTracker() {
@@ -10562,16 +11223,44 @@ function appPage() {
       radial-gradient(circle at 86% 19%, rgba(240,201,106,.3), transparent 12%); }
     button, input, select { font:inherit; }
     button { cursor:pointer; }
-    .shell { min-height:100vh; display:grid; grid-template-columns:276px minmax(0,1fr); }
+    .shell { min-height:100vh; display:grid; grid-template-columns:276px minmax(0,1fr); transition:grid-template-columns .18s ease; }
+    body.sidebar-collapsed .shell { grid-template-columns:76px minmax(0,1fr); }
     .sidebar { position:sticky; top:0; height:100vh; display:flex; flex-direction:column; overflow:hidden; box-sizing:border-box; padding:20px 14px; border-right:1px solid var(--line); background:
       linear-gradient(180deg, var(--panel), var(--glass)),
       radial-gradient(circle at 22% 0%, rgba(224,173,99,.16), transparent 35%); box-shadow:var(--shadow), inset -18px 0 40px rgba(0,0,0,.35); }
+    .sidebar-collapse { flex:0 0 auto; min-height:34px; width:100%; display:flex; align-items:center; justify-content:center; margin-bottom:10px; border:1px solid rgba(214,166,69,.28); background:rgba(255,255,255,.02); color:var(--gold-bright); font-size:18px; font-weight:950; line-height:1; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+    .sidebar-collapse:hover { border-color:var(--line-strong); background:rgba(214,166,69,.1); box-shadow:0 0 18px rgba(214,166,69,.11); }
+    .sidebar-collapse::before { content:"<"; display:block; transform:translateY(-1px); }
+    body.sidebar-collapsed .sidebar { padding:16px 10px; }
+    body.sidebar-collapsed .sidebar-collapse::before { content:">"; }
     .brand { flex:0 0 auto; position:relative; padding:18px 16px 20px; border:1px solid rgba(214,166,69,.34); background:linear-gradient(135deg, rgba(214,166,69,.12), rgba(255,255,255,.018)); clip-path:polygon(0 0, 88% 0, 100% 18px, 100% 100%, 12px 100%, 0 calc(100% - 12px)); box-shadow:inset 0 0 0 1px rgba(240,201,106,.045), 0 0 24px rgba(214,166,69,.08); }
     .brand::before { content:""; display:block; width:58px; height:58px; margin-bottom:14px; border:1px solid var(--line-strong); background:
       linear-gradient(30deg, transparent 45%, rgba(240,201,106,.65) 46% 54%, transparent 55%),
       radial-gradient(circle, rgba(240,201,106,.22), rgba(4,6,4,.65)); box-shadow:0 0 28px rgba(240,201,106,.18); }
     .brand h1 { margin:0; font-size:28px; line-height:.95; letter-spacing:.09em; text-transform:uppercase; color:var(--gold-bright); }
     .brand p { margin:9px 0 0; color:var(--sand); font-size:14px; text-transform:uppercase; letter-spacing:.18em; }
+    .brand-collapse { position:absolute; top:8px; right:8px; z-index:2; width:30px; min-height:26px; display:flex; align-items:center; justify-content:center; padding:0; border:1px solid rgba(214,166,69,.28); background:rgba(5,7,5,.62); color:var(--gold-bright); font-size:12px; line-height:1; font-weight:950; clip-path:polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 7px 100%, 0 calc(100% - 7px)); }
+    .brand-collapse:hover { border-color:var(--line-strong); background:rgba(214,166,69,.12); box-shadow:0 0 18px rgba(214,166,69,.12); }
+    .brand-collapse::before { content:"^"; }
+    body.brand-collapsed .brand { min-height:42px; padding:8px 44px 8px 12px; display:flex; align-items:center; }
+    body.brand-collapsed .brand::before,
+    body.brand-collapsed .brand h1,
+    body.brand-collapsed .build-info,
+    body.brand-collapsed .sidebar-update { display:none !important; }
+    body.brand-collapsed .brand::after { content:"AlphaNine Suite"; color:var(--gold-bright); font-size:11px; line-height:1; font-weight:900; letter-spacing:.11em; text-transform:uppercase; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    body.brand-collapsed .brand-collapse::before { content:"v"; }
+    body.sidebar-collapsed .brand { padding:10px 8px; min-height:56px; display:grid; place-items:center; }
+    body.sidebar-collapsed .brand::before { width:34px; height:34px; margin:0; }
+    body.sidebar-collapsed .brand h1,
+    body.sidebar-collapsed .brand p,
+    body.sidebar-collapsed .build-info,
+    body.sidebar-collapsed .sidebar-update,
+    body.sidebar-collapsed .sidebar-update-status,
+    body.sidebar-collapsed .nav-group-title,
+    body.sidebar-collapsed .sidebar-foot { display:none !important; }
+    body.sidebar-collapsed .brand-collapse { position:static; width:34px; min-height:34px; }
+    body.sidebar-collapsed.brand-collapsed .brand { min-height:42px; padding:4px; }
+    body.sidebar-collapsed.brand-collapsed .brand::after { display:none; }
     .build-info { display:grid; gap:3px; margin-top:14px; padding-top:12px; border-top:1px solid rgba(214,166,69,.18); color:rgba(240,201,106,.78); font-size:11px; line-height:1.25; letter-spacing:.08em; text-transform:uppercase; }
     .build-info span { display:block; }
     .sidebar-update { display:grid; gap:7px; margin-top:10px; }
@@ -10579,6 +11268,7 @@ function appPage() {
     .sidebar-update button:hover { border-color:var(--line-strong); background:rgba(214,166,69,.1); box-shadow:0 0 18px rgba(214,166,69,.11); }
     .sidebar-update-status { min-height:28px; color:rgba(214,196,151,.78); font-size:10.5px; line-height:1.35; letter-spacing:.04em; text-transform:none; }
     .nav { flex:1 1 auto; min-height:0; display:grid; align-content:start; gap:5px; margin-top:18px; padding-right:7px; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-color:rgba(240,201,106,.58) rgba(5,7,5,.68); scrollbar-width:thin; }
+    body.sidebar-collapsed .nav { margin-top:12px; padding-right:0; gap:8px; justify-items:center; }
     .nav::-webkit-scrollbar { width:9px; }
     .nav::-webkit-scrollbar-track { background:rgba(5,7,5,.68); border:1px solid rgba(214,166,69,.1); }
     .nav::-webkit-scrollbar-thumb { background:linear-gradient(180deg, rgba(240,201,106,.72), rgba(111,80,30,.74)); border:1px solid rgba(240,201,106,.34); }
@@ -10587,7 +11277,11 @@ function appPage() {
     .tab::before { content:""; flex:0 0 auto; width:8px; height:8px; border:1px solid currentColor; transform:rotate(45deg); box-shadow:0 0 8px currentColor; opacity:.72; }
     .tab.active, .tab:hover { color:var(--text); border-color:var(--line); background:rgba(246,202,135,.1); box-shadow:inset 0 0 22px rgba(246,202,135,.07), 0 0 14px rgba(224,173,99,.09); }
     .tab.active { font-size:12px; font-weight:850; }
+    body.sidebar-collapsed .tab { width:46px; min-height:46px; justify-content:center; padding:0; gap:0; font-size:0; letter-spacing:0; }
+    body.sidebar-collapsed .tab.active { font-size:0; }
+    body.sidebar-collapsed .tab::before { margin:0; }
     .nav-group { display:grid; gap:5px; margin-bottom:8px; }
+    body.sidebar-collapsed .nav-group { gap:8px; margin-bottom:4px; }
     .nav-group-title { display:flex; align-items:center; gap:9px; margin:8px 4px 2px; color:rgba(243,204,140,.72); font-size:9.5px; line-height:1; font-weight:900; text-transform:uppercase; letter-spacing:.18em; }
     .nav-group-title::after { content:""; height:1px; flex:1 1 auto; background:linear-gradient(90deg, rgba(240,201,106,.34), transparent); }
     .nav-group.advanced-nav { border-top:1px solid rgba(214,166,69,.13); padding-top:5px; }
@@ -11971,9 +12665,10 @@ function appPage() {
 </div>
 <div class="shell">
   <aside class="sidebar">
+    <button type="button" id="sidebarCollapseButton" class="sidebar-collapse" aria-label="Collapse sidebar" title="Collapse sidebar" onclick="toggleSidebarCollapsed()"></button>
     <div class="brand">
+      <button type="button" id="brandCollapseButton" class="brand-collapse" aria-label="Collapse brand panel" title="Collapse brand panel" onclick="toggleBrandCollapsed()"></button>
       <h1>AlphaNine Dune Suite</h1>
-      <p>Dune Operations Center</p>
       <div class="build-info" aria-label="Application version and build">
         <span>Version ${APP_VERSION}</span>
         <span>Build ${APP_VERSION}</span>
@@ -13207,6 +13902,12 @@ function syncManagerFrameTheme(){const frame=document.getElementById("managerFra
 function applyTheme(value){uiTheme=normalizeTheme(value);document.body.classList.remove("theme-gold","theme-command","theme-purple","theme-contrast","theme-royal");document.body.classList.add("theme-"+uiTheme);setValue("headerTheme",uiTheme);setValue("settingsTheme",uiTheme);syncManagerFrameTheme();try{localStorage.setItem("alphaNineTheme",uiTheme);}catch{}}
 function changeTheme(value){applyTheme(value);showToast("Theme changed","success");playUiSound("click");}
 function loadTheme(){let saved="gold";try{saved=localStorage.getItem("alphaNineTheme")||"gold";}catch{}applyTheme(saved);}
+function applySidebarCollapsed(collapsed){document.body.classList.toggle("sidebar-collapsed",Boolean(collapsed));const button=document.getElementById("sidebarCollapseButton");if(button){button.setAttribute("aria-label",collapsed?"Expand sidebar":"Collapse sidebar");button.title=collapsed?"Expand sidebar":"Collapse sidebar";}}
+function toggleSidebarCollapsed(){const collapsed=!document.body.classList.contains("sidebar-collapsed");applySidebarCollapsed(collapsed);try{localStorage.setItem("alphaNineSidebarCollapsed",collapsed?"1":"0");}catch{}playUiSound("click");}
+function loadSidebarCollapsed(){let collapsed=false;try{collapsed=localStorage.getItem("alphaNineSidebarCollapsed")==="1";}catch{}applySidebarCollapsed(collapsed);}
+function applyBrandCollapsed(collapsed){document.body.classList.toggle("brand-collapsed",Boolean(collapsed));const button=document.getElementById("brandCollapseButton");if(button){button.setAttribute("aria-label",collapsed?"Expand brand panel":"Collapse brand panel");button.title=collapsed?"Expand brand panel":"Collapse brand panel";}}
+function toggleBrandCollapsed(){const collapsed=!document.body.classList.contains("brand-collapsed");applyBrandCollapsed(collapsed);try{localStorage.setItem("alphaNineBrandCollapsed",collapsed?"1":"0");}catch{}playUiSound("click");}
+function loadBrandCollapsed(){let collapsed=false;try{collapsed=localStorage.getItem("alphaNineBrandCollapsed")==="1";}catch{}applyBrandCollapsed(collapsed);}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;syncManagerFrameTheme();let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:21px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
 function managerFrameHasContent(){const frame=document.getElementById("managerFrame");try{return Boolean(frame&&frame.contentDocument&&frame.contentDocument.body&&frame.contentDocument.body.innerText.trim());}catch{return false;}}
@@ -13596,7 +14297,7 @@ function wireDatabaseImportControls(){const file=document.getElementById("dbRest
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,databaseReachable:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);const dbReachable=probe.databaseReachable===true||probe.ok===true;adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",dbReachable?"Reachable":"Limited");tone("adminDbMirror",dbReachable?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",dbReachable?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Unknown");tone("adminDbMirror","Unknown");badge("topDb","DB status unknown");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
-function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=kind==="Research Unlock"?"Research":"Inventory";el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
+function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory");el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
 function progressionPlayerLookupValue(p){return String(p?.player_controller_id||p?.character_id||p?.player_pawn_id||p?.id||p?.character_name||p?.name||"").trim();}
 function renderProgressionPlayerSelect(){const select=document.getElementById("progressionPlayerSelect");if(!select)return;const current=select.value;const options=adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);const meta=[p.player_controller_id&&("controller "+p.player_controller_id),p.character_id&&("character "+p.character_id),p.online_status||p.status].filter(Boolean).join(" / ");return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+(meta?" / "+meta:""))+'</option>':"";}).filter(Boolean).join("");select.innerHTML='<option value="">Choose detected player...</option>'+(options||'<option value="" disabled>No detected players</option>');if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
 async function refreshProgressionPlayers(){const select=document.getElementById("progressionPlayerSelect");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();renderProgressionPlayerSelect();addActivity("progression","Progression players loaded",adminPlayers.length+" detected players");return data;}catch(e){if(select)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Progression players failed",e.message);return null;}}
@@ -13726,7 +14427,8 @@ function itemClassificationText(item){return [item?.name,item?.id,item?.category
 function isSchematicItem(item){if(String(item?.category||"").trim().toLowerCase()==="schematics")return true;const text=itemClassificationText(item);return /\\bschematics?\\b/.test(text)||/\\bblueprints?\\b/.test(text)||/\\brecipes?\\b/.test(text)||/\\bplans?\\b/.test(text)||/\\bschematicfragment\\b/.test(text)||/(^|[\\/_\\-\\s])schematic(s)?($|[\\/_\\-\\s])/.test(text);}
 const NON_DLC_BUILDING_STYLE_IDS=new Set(["atreidesset","harkonnenset"]);
 function isNonDlcBuildingStyleItem(item){return NON_DLC_BUILDING_STYLE_IDS.has(String(item?.id||"").trim().toLowerCase());}
-function renderAdminItemFilters(){const select=document.getElementById("adminItemCategory");if(select){const current=normalizeUiItemCategory(select.value);const categories=[...new Set(adminItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All discovered items</option><option value="__schematics">Schematics</option><option value="__building_styles">Building Styles / Blueprints (non-DLC)</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");select.value=[...categories,"","__unknown","__building_styles","__schematics"].includes(current)?current:"";}const tierSelect=document.getElementById("adminItemTier");if(tierSelect){const current=tierSelect.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tierSelect.innerHTML='<option value="all">All tiers</option>'+tiers.map(tier=>'<option value="'+esc(tier)+'">'+esc(tier)+'</option>').join("");tierSelect.value=tiers.includes(current)?current:"all";}}
+function isUniqueSchematicCatalogItem(item){return String(item?.subtype||"").trim().toLowerCase()==="unique schematic"||String(item?.source||"").trim().toLowerCase()==="manager-catalog";}
+function renderAdminItemFilters(){const select=document.getElementById("adminItemCategory");if(select){const current=normalizeUiItemCategory(select.value);const categories=[...new Set(adminItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All discovered items</option><option value="__unique_schematics">Unique Schematics</option><option value="__schematics">Schematics</option><option value="__building_styles">Building Styles / Blueprints (non-DLC)</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");select.value=[...categories,"","__unknown","__building_styles","__schematics","__unique_schematics"].includes(current)?current:"";}const tierSelect=document.getElementById("adminItemTier");if(tierSelect){const current=tierSelect.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tierSelect.innerHTML='<option value="all">All tiers</option>'+tiers.map(tier=>'<option value="'+esc(tier)+'">'+esc(tier)+'</option>').join("");tierSelect.value=tiers.includes(current)?current:"all";}}
 function renderGearDiscoveryStatus(){const el=document.getElementById("gearDiscoveryStatus");if(!el)return;const report=adminItemReport||{};const total=Number(report.totalItemsFound||adminItems.length||0);const named=Number(report.itemsWithDisplayNames||adminItems.filter(item=>item.hasDisplayName).length||0);const unknown=Number(report.unknownOrUnclassifiedItems||adminItems.filter(item=>!item.hasDisplayName||!item.category).length||0);const pages=Number(report.totalFilesScanned||(report.filesScanned||[]).length||0);const downloaded=Number(report.totalImagesDownloaded||0);const reused=Number(report.totalImagesReused||0);const failed=Number(report.failedImageDownloads||0);const missing=Number(report.missingImages||0);const cache=report.cachePath?'<div class="subtle env-path-value">'+esc(report.cachePath)+'</div>':"";el.className=total?"empty mt":"warning mt";el.innerHTML='<strong>Items imported: '+total+'</strong><div class="subtle">Pages scanned: '+pages+' / Display names: '+named+' / Unknown or unclassified: '+unknown+'</div><div class="subtle">Images downloaded: '+downloaded+' / Reused: '+reused+' / Failed: '+failed+' / Missing: '+missing+'</div>'+cache+(report.message?'<div class="subtle">'+esc(report.message)+'</div>':'');}
 async function discoverGearItems(){const status=document.getElementById("gearDiscoveryStatus");try{if(status){status.className="warning mt";status.textContent="Importing Gear items and caching local icons...";}const data=await getJson("/api/gear/discover",{method:"POST",timeoutMs:300000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Gear item import completed",(adminItemReport?.totalItemsFound||adminItems.length)+" items imported");playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Gear item import failed",e.message);playUiSound("warning");}}
 function normalizeUiGrade(value){const text=String(value||"").trim();return ["Common","Uncommon","Rare","Epic","Legendary","Unique","Unknown"].includes(text)?text:"Unknown";}
@@ -13736,18 +14438,22 @@ function duplicatedItemNameSet(items){const counts=new Map();(items||[]).forEach
 function catalogStyleFromId(item){const id=String(item?.id||"").toLowerCase();const pairs=[["choam_level2","CHOAM Level 2"],["choam_shelter","CHOAM Shelter"],["harkonnen_","Harkonnen"],["atreides_","Atreides"],["choam_","CHOAM"],["mtx_smug_","Smuggler"],["watershippers_","Watershippers"],["blockout_","Blockout"],["mtx_neut_jailset_","Jail Set"],["mtx_neut_desertmechanic_","Desert Mechanic"],["landingpad_","Landing Pad"]];const match=pairs.find(([prefix])=>id.startsWith(prefix));return match?match[1]:"";}
 function itemDisplayDisambiguator(item){const parts=[];const style=catalogStyleFromId(item);const category=String(item?.category||"").trim();const subtype=String(item?.subtype||item?.type||"").trim();const tier=String(item?.tier||"").trim();[style,category,subtype,tier].forEach(value=>{if(value&&value!=="Unknown"&&!parts.some(part=>part.toLowerCase()===value.toLowerCase()))parts.push(value);});return parts.join(" / ");}
 function itemListTitle(item,duplicateNames){const name=String(item?.name||item?.id||"");if(!duplicateNames?.has(itemCatalogNameKey(item)))return name;const detail=itemDisplayDisambiguator(item);return name+" - "+(detail?detail+" / ":"")+String(item?.id||"");}
-function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=normalizeUiItemCategory(document.getElementById("adminItemCategory")?.value||"");const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const styleNote=document.getElementById("buildingStyleFilterNote");if(styleNote)styleNote.classList.toggle("hidden",category!=="__building_styles");const filtered=adminItems.filter(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const matchesSearch=(item.name+" "+item.id+" "+itemCategory+" "+(item.type||"")+" "+(item.subtype||"")+" "+item.detail+" "+itemDisplayDisambiguator(item)+" "+itemGrade+" "+itemTier).toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!itemCategory||!item.hasDisplayName):(category==="__building_styles"?isNonDlcBuildingStyleItem(item):(category==="__schematics"?isSchematicItem(item):(String(category).toLowerCase()==="items"?!isSchematicItem(item)&&itemCategory===category:itemCategory===category))));const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;});const duplicateNames=duplicatedItemNameSet(filtered);const list=filtered.slice(0,120);const wrap=document.getElementById("adminItems");const emptyMessage=category==="__building_styles"?"No matching non-DLC building style item templates were found in the bundled catalog.":(category==="__schematics"?"No schematic item templates were found in the bundled catalog.":"No matching bundled item templates. Build the bundled catalog with npm run build:item-catalog.");wrap.innerHTML=list.length?list.map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return '<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(itemCategory||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join(""):'<div class="empty">'+esc(emptyMessage)+'</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function renderAdminItems(){const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=normalizeUiItemCategory(document.getElementById("adminItemCategory")?.value||"");const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const styleNote=document.getElementById("buildingStyleFilterNote");if(styleNote)styleNote.classList.toggle("hidden",category!=="__building_styles");const filtered=adminItems.filter(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const matchesSearch=(item.name+" "+item.id+" "+itemCategory+" "+(item.type||"")+" "+(item.subtype||"")+" "+item.detail+" "+itemDisplayDisambiguator(item)+" "+itemGrade+" "+itemTier+" "+(isUniqueSchematicCatalogItem(item)?"unique schematics":"")).toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!itemCategory||!item.hasDisplayName):(category==="__building_styles"?isNonDlcBuildingStyleItem(item):(category==="__unique_schematics"?isUniqueSchematicCatalogItem(item):(category==="__schematics"?isSchematicItem(item):(String(category).toLowerCase()==="items"?!isSchematicItem(item)&&itemCategory===category:itemCategory===category)))));const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;});const duplicateNames=duplicatedItemNameSet(filtered);const list=filtered.slice(0,120);const wrap=document.getElementById("adminItems");const emptyMessage=category==="__building_styles"?"No matching non-DLC building style item templates were found in the bundled catalog.":(category==="__unique_schematics"?"No unique schematic item templates were found.":(category==="__schematics"?"No schematic item templates were found in the bundled catalog.":"No matching bundled item templates. Build the bundled catalog with npm run build:item-catalog."));wrap.innerHTML=list.length?list.map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return '<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(isUniqueSchematicCatalogItem(item)?"Unique Schematics":(itemCategory||"Unknown"))+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join(""):'<div class="empty">'+esc(emptyMessage)+'</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
 function itemDbIcon(item){return item.icon?'<span class="item-db-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.remove();this.parentElement.textContent=&quot;IT&quot;"></span>':'<span class="item-db-icon">IT</span>';}
 function itemDbText(item){return [item.name,itemDisplayDisambiguator(item),item.id,item.category,item.subtype,item.type,item.grade,item.rarity,item.tier,item.detail,item.description,item.spawnCode,item.itemCode].filter(Boolean).join(" ").toLowerCase();}
-function fillItemDbFilters(){const cat=document.getElementById("itemDbCategory");const tier=document.getElementById("itemDbTier");if(cat){const current=normalizeUiItemCategory(cat.value);const categories=[...new Set(itemDatabaseItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));cat.innerHTML='<option value="">All categories</option><option value="__schematics">Schematics</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");cat.value=[...categories,"__schematics"].includes(current)?current:"";}if(tier){const current=tier.value;const tiers=[...new Set(itemDatabaseItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"";}}
-function filteredItemDatabaseItems(){const q=(document.getElementById("itemDbSearch")?.value||"").trim().toLowerCase();const category=normalizeUiItemCategory(document.getElementById("itemDbCategory")?.value||"");const grade=document.getElementById("itemDbGrade")?.value||"all";const tier=document.getElementById("itemDbTier")?.value||"";const spawnableOnly=Boolean(document.getElementById("itemDbSpawnableOnly")?.checked);return itemDatabaseItems.filter(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);if(category==="__schematics"){if(!isSchematicItem(item))return false;}else if(String(category).toLowerCase()==="items"&&isSchematicItem(item))return false;else if(category&&itemCategory!==category)return false;if(grade&&grade!=="all"&&itemGrade!==grade)return false;if(tier&&item.tier!==tier)return false;if(spawnableOnly&&item.spawnable===false)return false;if(q&&!itemDbText({...item,category:itemCategory,grade:itemGrade}).includes(q))return false;return true;});}
+function fillItemDbFilters(){const cat=document.getElementById("itemDbCategory");const tier=document.getElementById("itemDbTier");if(cat){const current=normalizeUiItemCategory(cat.value);const categories=[...new Set(itemDatabaseItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));cat.innerHTML='<option value="">All categories</option><option value="__unique_schematics">Unique Schematics</option><option value="__schematics">Schematics</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");cat.value=[...categories,"__schematics","__unique_schematics"].includes(current)?current:"";}if(tier){const current=tier.value;const tiers=[...new Set(itemDatabaseItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"";}}
+function filteredItemDatabaseItems(){const q=(document.getElementById("itemDbSearch")?.value||"").trim().toLowerCase();const category=normalizeUiItemCategory(document.getElementById("itemDbCategory")?.value||"");const grade=document.getElementById("itemDbGrade")?.value||"all";const tier=document.getElementById("itemDbTier")?.value||"";const spawnableOnly=Boolean(document.getElementById("itemDbSpawnableOnly")?.checked);return itemDatabaseItems.filter(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);if(category==="__unique_schematics"){if(!isUniqueSchematicCatalogItem(item))return false;}else if(category==="__schematics"){if(!isSchematicItem(item))return false;}else if(String(category).toLowerCase()==="items"&&isSchematicItem(item))return false;else if(category&&itemCategory!==category)return false;if(grade&&grade!=="all"&&itemGrade!==grade)return false;if(tier&&item.tier!==tier)return false;if(spawnableOnly&&item.spawnable===false)return false;if(q&&!itemDbText({...item,category:itemCategory,grade:itemGrade}).includes(q))return false;return true;});}
 function renderItemDatabaseDetails(item){const detail=document.getElementById("itemDbDetails");if(!detail)return;if(!item){detail.className="empty mt";detail.textContent="Select an item to inspect spawn data, grade, category, and stats.";return;}const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const rows={"Name":item.name||item.id,"Spawn Code":item.spawnCode||item.itemCode||item.id,"Category":normalizeUiItemCategory(item.category)||"Unknown","Subcategory":item.subtype||item.type||"--","Grade":itemGrade,"Tier":item.tier||"--","Max Stack":item.maxStack||"--","Spawnable":item.spawnable===false?"No":"Yes"};const stats=item.stats&&typeof item.stats==="object"?Object.entries(item.stats).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join(""):"";detail.className="mt";detail.innerHTML='<div class="detail-list">'+Object.entries(rows).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join("")+'</div>'+(item.description?'<div class="empty mt">'+esc(item.description)+'</div>':'')+(stats?'<div class="label mt">Stats</div><div class="detail-list">'+stats+'</div>':'');}
 function renderItemDatabase(){const rows=filteredItemDatabaseItems();const duplicateNames=duplicatedItemNameSet(rows);const list=document.getElementById("itemDbList");const count=document.getElementById("itemDbCount");if(count)count.textContent=rows.length+" shown / "+itemDatabaseItems.length+" loaded";if(!selectedItemDatabaseId&&rows[0])selectedItemDatabaseId=rows[0].id;if(list){list.innerHTML=rows.slice(0,250).map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);return '<button type="button" class="item-db-card '+(selectedItemDatabaseId===item.id?'active':'')+'" data-item-db-id="'+esc(item.id)+'">'+itemDbIcon(item)+'<span><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span class="item-db-meta"><span class="item-grade-badge">'+esc(itemGrade)+'</span><span>'+esc(itemCategory||"Unknown")+'</span><span>'+esc(item.subtype||item.type||"")+'</span><span>'+esc(item.tier||"")+'</span></span><span class="subtle env-path-value">'+esc(item.id||"")+'</span></span></button>';}).join("")||'<div class="empty">No items match the current filters.</div>';list.querySelectorAll("[data-item-db-id]").forEach(el=>el.addEventListener("click",()=>{selectedItemDatabaseId=el.dataset.itemDbId;renderItemDatabase();}));}renderItemDatabaseDetails(itemDatabaseItems.find(item=>item.id===selectedItemDatabaseId)||rows[0]);}
 async function refreshItemDatabase(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Loading bundled item database...";}const data=await getJson("/api/item-database/items?grade=all");itemDatabaseItems=data.items||[];if(!selectedItemDatabaseId&&itemDatabaseItems[0])selectedItemDatabaseId=itemDatabaseItems[0].id;fillItemDbFilters();renderItemDatabase();if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML='<strong>'+esc(itemDatabaseItems.length)+' items loaded.</strong><div class="subtle">Source: shared bundled/user item catalog. No server scan required.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
-function giveItemGrantKind(item){return isSchematicItem(item)?"Research Unlock":"Inventory Item";}
-function giveItemSchematicNotice(item){return isSchematicItem(item)?"Schematic templates are applied by the game as research unlocks, not normal character inventory items.":"";}
+function schematicRecipeCandidates(template){const raw=String(template||"").trim();const out=[];const add=value=>{const recipeId=String(value||"").trim();if(recipeId&&/^[A-Za-z0-9_().+\\-]+$/.test(recipeId)&&!out.includes(recipeId))out.push(recipeId);};if(/^recipe:/i.test(raw))add(raw.replace(/^recipe:/i,""));if(raw==="NPE_ScrapMetalKnife_Schematic")add("ScrapMetalKnifeRecipe");if(/_Schematic$/i.test(raw)){const base=raw.replace(/_Schematic$/i,"");add(base+"_Recipe");add(base+"_recipe");}if(/Schematic$/i.test(raw)){const base=raw.replace(/Schematic$/i,"");add(base+"Recipe");add(base+"recipe");}if(/^Schematic_/i.test(raw)){const base=raw.replace(/^Schematic_/i,"");add(base+"Recipe");add(base+"recipe");}return out;}
+function techKnowledgeKeyFromTemplate(template){const raw=String(template||"").trim();return /^tech:/i.test(raw)?raw.replace(/^tech:/i,""):"";}
+function isRecipeSchematicItem(item){if(String(item?.subtype||"").trim().toLowerCase()==="unique schematic")return false;if(String(item?.source||"").trim().toLowerCase()==="manager-catalog")return false;return isSchematicItem(item)&&schematicRecipeCandidates(item?.id).length>0;}
+function isTechKnowledgeItem(item){return /^tech:/i.test(String(item?.id||""));}
+function giveItemGrantKind(item){return isTechKnowledgeItem(item)?"Research Blueprint Unlock":(isRecipeSchematicItem(item)?"Crafting Recipe Unlock":"Inventory Item");}
+function giveItemSchematicNotice(item){return isTechKnowledgeItem(item)?"Research blueprints unlock the player's Research tree. RCP entries also add the matching crafting recipe.":(isRecipeSchematicItem(item)?"Recipe schematics unlock the player's crafting recipe library. Schematic pattern grades and fragments are normal inventory items.":"");}
 function catalogItemByTemplate(template){const id=String(template||"");return adminItems.find(item=>item.id===id)||itemDatabaseItems.find(item=>item.id===id)||null;}
-function templateIsSchematic(template){const item=catalogItemByTemplate(template);return item?isSchematicItem(item):/schematic/i.test(String(template||""));}
+function templateIsSchematic(template){const item=catalogItemByTemplate(template);return item?(isTechKnowledgeItem(item)||isRecipeSchematicItem(item)):/^tech:/i.test(String(template||""))||/_schematic$/i.test(String(template||""))||/schematic$/i.test(String(template||""));}
 function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select an item from the catalog below.";return;}const kind=giveItemGrantKind(selectedAdminItem);const notice=giveItemSchematicNotice(selectedAdminItem);selected.className=notice?"warning":"detail-row";selected.innerHTML='<span class="subtle">'+esc(kind)+'</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>'+(notice?'<div class="subtle mt">'+esc(notice)+'</div>':'');}
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();}
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;if(!supported)input.value=0;}if(!warning)return;warning.classList.toggle("hidden",supported);warning.textContent=supported?"":"Durability is not supported by the current receiver method.";}
@@ -13755,10 +14461,10 @@ function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an ite
 function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / quality "+row.quality:"")+(row.grantKind?" / "+row.grantKind:"");}
 function updateGiveQueueSummary(processed=0,total=giveQueue.length,succeeded=0,failed=0){const el=document.getElementById("giveQueueSummary");if(el)el.textContent="Progress: "+processed+" / "+total+" · Succeeded: "+succeeded+" · Failed: "+failed;const retry=document.getElementById("retryGiveQueueButton");if(retry)retry.disabled=!lastGiveQueueFailedItems.length||liveGiveBusy;syncGiveItemControls();}
 function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span>'+(row.grantKind?'<br><span class="subtle">'+esc(row.grantKind)+'</span>':'')+'</span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
-function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality,grantKind:payload.grantKind});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1])+(templateIsSchematic(payload.template)?"\\nNote: this schematic will appear under research, not character inventory.":"");addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
+function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality,grantKind:payload.grantKind});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const note=/^tech:/i.test(payload.template)?"\\nNote: this research blueprint will unlock the Research tree, not character inventory.":(templateIsSchematic(payload.template)?"\\nNote: this recipe schematic will unlock crafting recipes, not character inventory.":"");document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1])+note;addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
 function removeGiveQueueItem(index){giveQueue.splice(index,1);renderGiveQueue();updateGiveQueueSummary();}
 function clearGiveQueue(){giveQueue=[];lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const log=document.getElementById("giveQueueLog");if(log)log.value="Give Queue cleared.";}
-function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];if(data.timings)lines.push("Queue timings: "+JSON.stringify(data.timings));(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(templateIsSchematic(row.itemId))lines.push("  Note: schematic templates are research unlocks; check the player's research, not inventory.");if(row.result?.timings)lines.push("  Timings: "+JSON.stringify(row.result.timings));if(row.result?.response?.timings)lines.push("  Receiver timings: "+JSON.stringify(row.result.response.timings));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
+function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];if(data.timings)lines.push("Queue timings: "+JSON.stringify(data.timings));(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(/^tech:/i.test(row.itemId))lines.push("  Note: research blueprint unlocks the Research tree; check the player's Research screen, not inventory.");else if(templateIsSchematic(row.itemId))lines.push("  Note: recipe schematic unlocks crafting recipes; check the player's crafting recipes, not inventory.");if(row.result?.timings)lines.push("  Timings: "+JSON.stringify(row.result.timings));if(row.result?.response?.timings)lines.push("  Receiver timings: "+JSON.stringify(row.result.response.timings));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
 async function giveQueuedItems(itemsOverride=null){const log=document.getElementById("giveQueueLog");if(liveGiveBusy)return;const items=itemsOverride||giveQueue;if(!items.length){if(log)log.value="Give Queue is empty.";playUiSound("warning");return;}try{liveGiveBusy=true;syncGiveItemControls();updateGiveQueueSummary(0,items.length,0,0);if(log)log.value="Checking receiver transport before Give Queue...";await refreshLiveGiveEnv();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"&&!adminLiveGiveAvailable)throw new Error(liveGiveUnavailableMessage||"Live Give unavailable.");if(mode==="execute"&&!(await appConfirm("Confirm Live Give Queue","Send "+items.length+" queued item(s) to the selected player?","Give Queue","Cancel")))return;const playerId=document.getElementById("adminPlayer").value;if(!playerId)throw new Error("Choose a player first.");if(log)log.value="Processing Give Queue 0 / "+items.length+"...";addActivity("grant","Give Queue started",items.length+" item(s)");const data=await getJson("/api/live-give/queue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,mode,confirmed:mode==="execute",items}),timeoutMs:300000});lastGiveQueueFailedItems=(data.results||[]).filter(row=>!row.success).map(row=>({template:row.itemId,name:row.itemName,qty:row.quantity,quality:row.quality}));updateGiveQueueSummary(data.processed||0,data.total||items.length,data.succeeded||0,data.failed||0);if(log)log.value=queueResultLog(data);if(!itemsOverride&&data.failed===0)giveQueue=[];renderGiveQueue();addActivity("grant","Give Queue completed",(data.succeeded||0)+" succeeded / "+(data.failed||0)+" failed");playUiSound(data.failed?"warning":"success");}catch(e){if(log)log.value=betterError(e);addActivity("error","Give Queue failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function retryFailedGiveQueueItems(){if(!lastGiveQueueFailedItems.length)return;giveQueuedItems(lastGiveQueueFailedItems.slice());}
 async function copyGiveQueueLog(){const text=document.getElementById("giveQueueLog")?.value||"";if(!text)return;try{await navigator.clipboard.writeText(text);playUiSound("success");}catch{const log=document.getElementById("giveQueueLog");if(log){log.focus();log.select();document.execCommand("copy");}}}
@@ -13786,10 +14492,10 @@ async function startGiveItemTool(){const mode=document.getElementById("liveGiveM
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 const giveAdminItemWithoutSentToast=giveAdminItem;
-giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");if(log&&selectedAdminItem&&isSchematicItem(selectedAdminItem)&&text&&!/research unlocks; check/i.test(text))log.textContent=text+"\\n\\nNote: schematic templates are research unlocks; check the player's research, not inventory.";if(/Live Give (verified|published)/i.test(text))showToast(selectedAdminItem&&isSchematicItem(selectedAdminItem)?"Research schematic sent":"Item sent","success");};
+giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");const notice=selectedAdminItem?giveItemSchematicNotice(selectedAdminItem):"";if(log&&notice&&text&&!text.includes(notice))log.textContent=text+"\\n\\nNote: "+notice;if(/Live Give (verified|published)/i.test(text))showToast(notice?"Research unlock sent":"Item sent","success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 </script>
@@ -14235,8 +14941,21 @@ async function route(req, res) {
   }
   if (["/api/admin/items", "/api/give-items", "/api/gear-codex/items", "/api/item-database/items"].includes(url.pathname) && req.method === "GET") {
     const cache = loadDuneItemsCache();
-    const items = filterItemsByQuery(cache.items || [], url.searchParams);
-    await json(res, { ok: cache.ok !== false, items, totalItems: (cache.items || []).length, gradeCounts: itemGradeCounts(cache.items || []), tierCounts: itemTierCounts(cache.items || []), report: cache.report || {}, generatedAt: cache.generatedAt || "" });
+    const dynamicRecipes = ["/api/admin/items", "/api/give-items", "/api/item-database/items"].includes(url.pathname)
+      ? await knownCraftingRecipeCatalogItems().catch((error) => {
+        appendAdminAudit("known_recipe_catalog_unavailable", { error: error.message });
+        return [];
+      })
+      : [];
+    const dynamicTechKnowledge = ["/api/admin/items", "/api/give-items", "/api/item-database/items"].includes(url.pathname)
+      ? await knownTechKnowledgeCatalogItems().catch((error) => {
+        appendAdminAudit("known_tech_knowledge_catalog_unavailable", { error: error.message });
+        return [];
+      })
+      : [];
+    const allItems = [...(cache.items || []), ...dynamicTechKnowledge, ...dynamicRecipes];
+    const items = filterItemsByQuery(allItems, url.searchParams);
+    await json(res, { ok: cache.ok !== false, items, totalItems: allItems.length, dynamicRecipeCount: dynamicRecipes.length, dynamicTechKnowledgeCount: dynamicTechKnowledge.length, gradeCounts: itemGradeCounts(allItems), tierCounts: itemTierCounts(allItems), report: { ...(cache.report || {}), dynamicRecipeCount: dynamicRecipes.length, dynamicTechKnowledgeCount: dynamicTechKnowledge.length }, generatedAt: cache.generatedAt || "" });
     return;
   }
   if (url.pathname === "/api/gear/discovery" && req.method === "GET") {

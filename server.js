@@ -1632,55 +1632,72 @@ function importSettings(payload) {
   return saveConfig({ ...loadConfig(), ...configPayload });
 }
 
-function checkGitHubUpdates(repo) {
-  return new Promise((resolve) => {
-    const targetRepo = String(repo || loadConfig().updateRepo || "").trim();
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(targetRepo)) {
-      resolve({ ok: false, currentVersion: APP_VERSION, error: "Set a GitHub owner/repo in Settings first." });
-      return;
-    }
-    const options = {
+function githubApiJson(pathname) {
+  return new Promise((resolve, reject) => {
+    const req = https.get({
       hostname: "api.github.com",
-      path: `/repos/${targetRepo}/releases/latest`,
+      path: pathname,
       headers: { "User-Agent": "AlphaNine-Dune-Suite" },
       timeout: 7000
-    };
-    const req = https.get(options, (res) => {
+    }, (res) => {
       let body = "";
       res.on("data", (chunk) => { body += chunk; });
       res.on("end", () => {
         try {
           const data = JSON.parse(body || "{}");
           if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(data.message || `GitHub returned ${res.statusCode}`);
-          const assets = Array.isArray(data.assets) ? data.assets : [];
-          const installerAsset = assets.find((asset) => /setup.*\.exe$/i.test(String(asset.name || "")))
-            || assets.find((asset) => /\.exe$/i.test(String(asset.name || "")))
-            || null;
-          resolve({
-            ok: true,
-            currentVersion: APP_VERSION,
-            latestVersion: String(data.tag_name || data.name || ""),
-            releaseName: data.name || "",
-            url: data.html_url || `https://github.com/${targetRepo}/releases/latest`,
-            publishedAt: data.published_at || "",
-            installerAsset: installerAsset ? {
-              name: String(installerAsset.name || ""),
-              size: Number(installerAsset.size || 0),
-              downloadUrl: String(installerAsset.browser_download_url || ""),
-              contentType: String(installerAsset.content_type || "")
-            } : null
-          });
+          resolve(data);
         } catch (error) {
-          resolve({ ok: false, currentVersion: APP_VERSION, error: error.message });
+          reject(error);
         }
       });
     });
     req.on("timeout", () => {
       req.destroy();
-      resolve({ ok: false, currentVersion: APP_VERSION, error: "GitHub update check timed out." });
+      reject(new Error("GitHub update check timed out."));
     });
-    req.on("error", (error) => resolve({ ok: false, currentVersion: APP_VERSION, error: error.message }));
+    req.on("error", reject);
   });
+}
+
+function githubReleaseUpdatePayload(data, targetRepo, sourcePath = "") {
+  const assets = Array.isArray(data?.assets) ? data.assets : [];
+  const installerAsset = assets.find((asset) => /setup.*\.exe$/i.test(String(asset.name || "")))
+    || assets.find((asset) => /\.exe$/i.test(String(asset.name || "")))
+    || null;
+  return {
+    ok: true,
+    currentVersion: APP_VERSION,
+    latestVersion: String(data?.tag_name || data?.name || ""),
+    releaseName: data?.name || "",
+    prerelease: Boolean(data?.prerelease),
+    url: data?.html_url || `https://github.com/${targetRepo}/releases/latest`,
+    publishedAt: data?.published_at || "",
+    sourcePath,
+    installerAsset: installerAsset ? {
+      name: String(installerAsset.name || ""),
+      size: Number(installerAsset.size || 0),
+      downloadUrl: String(installerAsset.browser_download_url || ""),
+      contentType: String(installerAsset.content_type || "")
+    } : null
+  };
+}
+
+async function checkGitHubUpdates(repo) {
+  const targetRepo = String(repo || loadConfig().updateRepo || "").trim();
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(targetRepo)) {
+    return { ok: false, currentVersion: APP_VERSION, error: "Set a GitHub owner/repo in Settings first." };
+  }
+  try {
+    const releasesPath = `/repos/${targetRepo}/releases?per_page=20`;
+    const releases = await githubApiJson(releasesPath);
+    const latestRelease = Array.isArray(releases) ? releases.find((release) => !release?.draft) : null;
+    if (latestRelease) return githubReleaseUpdatePayload(latestRelease, targetRepo, releasesPath);
+    const latestPath = `/repos/${targetRepo}/releases/latest`;
+    return githubReleaseUpdatePayload(await githubApiJson(latestPath), targetRepo, latestPath);
+  } catch (error) {
+    return { ok: false, currentVersion: APP_VERSION, error: error.message };
+  }
 }
 
 function run(command, args, options = {}) {

@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.4.8";
+const APP_VERSION = "0.4.9";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -6000,6 +6000,12 @@ function skillUnlockPointCost(skill = {}) {
   return Math.max(1, Number(skill.maxLevel) || 1);
 }
 
+function jsonPathParts(pathValue) {
+  return Array.isArray(pathValue)
+    ? pathValue.map((part) => String(part || "").trim()).filter(Boolean)
+    : String(pathValue || "").split(".").map((part) => part.trim()).filter(Boolean);
+}
+
 async function progressionUnlockSkills(payload) {
   const timer = progressionPhaseTimer("progression/skill-unlock");
   try {
@@ -6023,7 +6029,7 @@ async function progressionUnlockSkills(payload) {
     const fLevelTarget = playerData.progressionDebug?.fLevelTarget || null;
     if (!fLevelTarget?.entity_id) throw new Error("Selected FLevelComponent target is missing. Reload the player before unlocking skills.");
     const fLevelFields = fLevelTarget.fields || {};
-    const fLevelBasePath = (fLevelFields.TotalSkillPoints?.path || fLevelFields.TotalXPEarned?.path || fLevelFields.UnspentSkillPoints?.path || ["FLevelComponent", "1", "TotalSkillPoints"]).slice(0, -1);
+    const fLevelBasePath = jsonPathParts(fLevelFields.TotalSkillPoints?.path || fLevelFields.TotalXPEarned?.path || fLevelFields.UnspentSkillPoints?.path || ["FLevelComponent", "1", "TotalSkillPoints"]).slice(0, -1);
     const actorId = requireInteger(playerData.player.actor_id, "actor_id", 1);
     const fLevelEntityId = requireSqlIntegerLiteral(fLevelTarget.entity_id, "fLevel_entity_id");
     const backupId = crypto.randomBytes(16).toString("hex");

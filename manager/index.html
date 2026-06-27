@@ -1280,10 +1280,26 @@
         settings: [
           { key: "harvestMultiplier", label: "Harvest yield", help: "Raw materials gathered per node.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
           { key: "spiceYieldMultiplier", label: "Vehicle mining yield", help: "Writes Dune.GlobalVehicleMiningOutputMultiplier.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
+          { key: "globalHarvestAmountMultiplier", label: "Harvest amount", help: "Writes UserGame.ini m_GlobalHarvestAmountMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "globalHarvestHealthMultiplier", label: "Harvest node health", help: "Writes UserGame.ini m_GlobalHarvestHealthMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "cutterayHemMultiplierPerNodeTierTable", label: "Cutteray HEM/node tier", help: "Writes UserGame.ini CutterayHemMultiplierPerNodeTierTable.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "minimumAugmentableItemQuality", label: "Minimum augment quality", help: "Writes UserGame.ini m_MinimumAugmentableItemQuality.", type: "range", min: 0, max: 10, step: 1, value: 0, unit: "" },
+          { key: "itemDurabilityLossMultiplier", label: "Item durability loss", help: "Writes UserGame.ini m_ItemDurabilityLossMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
           { key: "refiningSpeedMultiplier", label: "Refining speed", help: "No confirmed self-hosted config key found for refinery processing speed; planning only.", type: "range", min: 0.5, max: 6, step: 0.25, value: 1, unit: "x", supported: false },
           { key: "craftingSpeedMultiplier", label: "Crafting speed", help: "No confirmed self-hosted config key found for workbench or fabrication completion speed; planning only.", type: "range", min: 0.5, max: 8, step: 0.25, value: 1, unit: "x", supported: false },
           { key: "lootQualityMultiplier", label: "PvP resource multiplier", help: "Writes SecurityZones.PvpResourceMultiplier and toggles sandstorm treasure when above 0.", type: "range", min: 0.5, max: 3, step: 0.1, value: 1, unit: "x" },
           { key: "structureDecayMultiplier", label: "Item deterioration rate", help: "Writes UserGame.ini UpdateRateInSeconds for item deterioration.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" }
+        ]
+      },
+      {
+        id: "inventory",
+        title: "Inventory",
+        description: "Set player starting inventory defaults and inventory weight behavior.",
+        settings: [
+          { key: "inventoryWeightMultiplier", label: "Inventory weight", help: "Writes UserGame.ini m_InventoryWeightMultiplier under DuneGameMode.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "playerStartingWater", label: "Starting water", help: "Writes UserGame.ini m_PlayerStartingWater under DuneGameMode.", type: "range", min: 0, max: 1000, step: 5, value: 100, unit: "" },
+          { key: "playerInventoryStartingSize", label: "Starting inventory slots", help: "Writes UserGame.ini PlayerInventoryStartingSize under InventorySystemSettings.", type: "range", min: 1, max: 200, step: 1, value: 40, unit: "" },
+          { key: "playerInventoryStartingVolumeCapacity", label: "Starting inventory capacity", help: "Writes UserGame.ini PlayerInventoryStartingVolumeCapacity under InventorySystemSettings.", type: "range", min: 1, max: 1000, step: 5, value: 225, unit: "" }
         ]
       },
       {
@@ -1292,6 +1308,8 @@
         description: "Shape where player combat is allowed.",
         settings: [
           { key: "pvpMode", label: "PvP mode", help: "Writes UserGame.ini PVP/security-zone toggles. Scheduled mode is not exposed by self-hosted config.", type: "select", value: "frontier_zones", options: [["off", "Off"], ["frontier_zones", "Frontier/security zones"], ["always_on", "Always on"]] },
+          { key: "legacyPvpEnabled", label: "Legacy PvP flag", help: "Writes UserGame.ini bPvPEnabled under DuneGameMode.", type: "toggle", value: false },
+          { key: "serverPve", label: "Server PvE flag", help: "Writes UserGame.ini bServerPVE under DuneGameMode.", type: "toggle", value: true },
           { key: "raidWindowHours", label: "Raid window", help: "No confirmed self-hosted config key found for raid windows; planning only.", type: "range", min: 0, max: 24, step: 1, value: 4, unit: "h", supported: false },
           { key: "friendlyFire", label: "Friendly fire", help: "No confirmed self-hosted config key found for friendly fire; planning only.", type: "toggle", value: false, supported: false },
           { key: "deathDropMode", label: "Death drops", help: "No confirmed self-hosted config key found for death-drop behavior; planning only.", type: "select", value: "partial", options: [["none", "None"], ["partial", "Partial"], ["full_inventory", "Full inventory"], ["full_with_equipment", "Full with equipment"]], supported: false },
@@ -1307,7 +1325,14 @@
           { key: "stormEnabled", label: "Coriolis storm", help: "Allow Coriolis storm and major sandstorm auto-spawn.", type: "toggle", value: true },
           { key: "stormFrequency", label: "Storm availability", help: "0 disables Sandstorm.Enabled; values above 0 allow sandstorm/Coriolis output.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
           { key: "stormSeverity", label: "Vehicle storm damage", help: "Writes dw.VehicleDurabilityDamageMultiplier and also gates Sandstorm.Enabled when set to 0.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
-          { key: "heatDrainMultiplier", label: "Heat drain", help: "No confirmed self-hosted config key found for heat or thirst drain; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
+          { key: "waterConsumptionRate", label: "Water consumption", help: "Writes UserGame.ini m_WaterConsumptionRate.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "waterConsumptionInStormMultiplier", label: "Storm water use", help: "Writes UserGame.ini m_WaterConsumptionInStormMultiplier.", type: "range", min: 0, max: 10, step: 0.1, value: 4, unit: "x" },
+          { key: "globalDamageToNpcsMultiplier", label: "Damage to NPCs", help: "Writes UserGame.ini m_GlobalDamageToNpcsMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "globalDamageToPlayersMultiplier", label: "Damage to players", help: "Writes UserGame.ini m_GlobalDamageToPlayersMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "globalHealthMultiplier", label: "Health multiplier", help: "Writes UserGame.ini m_GlobalHealthMultiplier.", type: "range", min: 0.1, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "globalBuildingDamageMultiplier", label: "Building damage", help: "Writes UserGame.ini m_GlobalBuildingDamageMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "vehicleQuicksandDamage", label: "Vehicle quicksand damage", help: "Writes UserGame.ini m_VehicleQuicksandDamage.", type: "range", min: 0, max: 100, step: 1, value: 10, unit: "" },
+          { key: "heatDrainMultiplier", label: "Heat drain", help: "No confirmed self-hosted config key found for heat drain; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
           { key: "waterRetentionMultiplier", label: "Sandworm safe time", help: "Writes Vehicle.SandwormInvulnerabilitySecondsOnExit as multiplier x 900 seconds.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x" },
           { key: "wormAggression", label: "Sandworm enabled", help: "0 disables sandworm console variables; values above 0 enable sandworm danger zones and vehicle collision.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
           { key: "deepDesertResetDays", label: "Deep desert reset", help: "No confirmed self-hosted config key found for Deep Desert reset cadence; planning only.", type: "range", min: 1, max: 14, step: 1, value: 7, unit: "d", supported: false }
@@ -1316,9 +1341,15 @@
       {
         id: "progression",
         title: "Progression",
-        description: "Visible for planning only. No confirmed self-hosted INI keys for XP, research, reputation, or vendor pricing were found.",
+        description: "Tune XP, fame, progression speed, guild creation, market fees, and spice tax.",
         settings: [
-          { key: "xpMultiplier", label: "XP gain", help: "No confirmed self-hosted config key found; does not affect in-game XP.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x", supported: false },
+          { key: "xpMultiplier", label: "XP gain", help: "Writes UserGame.ini m_GlobalXPMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "fameMultiplier", label: "Fame gain", help: "Writes UserGame.ini m_GlobalFameMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "progressionSpeedMultiplier", label: "Progression speed", help: "Writes UserGame.ini m_GlobalProgressionSpeedMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "guildCreationCost", label: "Guild creation cost", help: "Writes UserGame.ini m_GuildCreationCost.", type: "range", min: 0, max: 100000, step: 100, value: 1000, unit: "" },
+          { key: "sellOrderPricePercentageFee", label: "Sell order fee", help: "Writes UserGame.ini SellOrderPricePercentageFee.", type: "range", min: 0, max: 100, step: 0.25, value: 2, unit: "%" },
+          { key: "spiceTaxAmount", label: "Spice tax amount", help: "Writes UserGame.ini SpiceTaxAmount.", type: "range", min: 0, max: 10, step: 0.05, value: 0.1, unit: "" },
+          { key: "spiceTaxInterval", label: "Spice tax interval", help: "Writes UserGame.ini SpiceTaxInterval in seconds.", type: "range", min: 0, max: 86400, step: 60, value: 3600, unit: "s" },
           { key: "researchCostMultiplier", label: "Research cost", help: "No confirmed self-hosted config key found; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
           { key: "vendorPriceMultiplier", label: "Vendor prices", help: "No confirmed self-hosted config key found; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
           { key: "reputationMultiplier", label: "Reputation gain", help: "No confirmed self-hosted config key found; planning only.", type: "range", min: 0.25, max: 4, step: 0.25, value: 1, unit: "x", supported: false },
@@ -1331,10 +1362,15 @@
         description: "Set base claim and build limits.",
         settings: [
           { key: "maxClanSize", label: "Max clan size", help: "No confirmed self-hosted config key found for clan size; planning only.", type: "range", min: 1, max: 100, step: 1, value: 20, unit: "", supported: false },
+          { key: "maxGuildMembersAllowed", label: "Max guild members", help: "Writes UserGame.ini m_MaxGuildMembersAllowed.", type: "range", min: 1, max: 500, step: 1, value: 32, unit: "" },
+          { key: "maxGuildsAllowed", label: "Max guilds", help: "Writes UserGame.ini m_MaxGuildsAllowed.", type: "range", min: 1, max: 100, step: 1, value: 3, unit: "" },
+          { key: "maxPermissionsPerActor", label: "Permissions per actor", help: "Writes UserGame.ini m_MaxPermissionsPerActor.", type: "range", min: 1, max: 500, step: 1, value: 20, unit: "" },
           { key: "allianceLimit", label: "Alliance limit", help: "No confirmed self-hosted config key found for alliance limits; planning only.", type: "range", min: 0, max: 10, step: 1, value: 2, unit: "", supported: false },
           { key: "baseClaimLimit", label: "Base claims", help: "Number of base claims per clan.", type: "range", min: 1, max: 20, step: 1, value: 4, unit: "" },
           { key: "buildHeightLimit", label: "Build height", help: "Maximum vertical build levels.", type: "range", min: 1, max: 12, step: 1, value: 5, unit: "" },
-          { key: "publicBuildDamage", label: "Public build damage", help: "Allow world structures to take non-raid damage.", type: "toggle", value: false }
+          { key: "publicBuildDamage", label: "Public build damage", help: "Allow world structures to take non-raid damage.", type: "toggle", value: false },
+          { key: "buildingDecayRateMultiplier", label: "Building decay rate", help: "Writes UserGame.ini m_BuildingDecayRateMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "enableBuildingStability", label: "Building stability", help: "Writes UserGame.ini bEnableBuildingStability.", type: "toggle", value: true }
         ]
       },
       {
@@ -1345,6 +1381,9 @@
           { key: "serverVisibility", label: "Server visibility", help: "No confirmed self-hosted config key found for server listing visibility; planning only.", type: "select", value: "public", options: [["public", "Public"], ["listed_password", "Listed with password"], ["private", "Private"]], supported: false },
           { key: "backupIntervalMinutes", label: "Backup interval", help: "No automatic backup scheduler is wired here yet; planning only.", type: "range", min: 15, max: 360, step: 15, value: 60, unit: "m", supported: false },
           { key: "restartHour", label: "Daily restart hour", help: "No daily restart scheduler is wired here yet; planning only.", type: "range", min: 0, max: 23, step: 1, value: 5, unit: ":00", supported: false },
+          { key: "defaultReconnectGracePeriodSeconds", label: "Reconnect grace", help: "Writes UserGame.ini m_DefaultReconnectGracePeriodSeconds.", type: "range", min: 0, max: 3600, step: 30, value: 300, unit: "s" },
+          { key: "cycleDurationInDays", label: "World cycle duration", help: "Writes UserGame.ini m_CycleDurationInDays.", type: "range", min: 1, max: 365, step: 1, value: 7, unit: "d" },
+          { key: "dbWipeEnabled", label: "DB wipe on cycle", help: "Writes UserGame.ini m_bIsDbWipeEnabled.", type: "toggle", value: true },
           { key: "adminAuditLog", label: "Admin audit log", help: "No manager-side audit policy is wired here yet; planning only.", type: "toggle", value: true, supported: false },
           { key: "allowWhitelist", label: "Whitelist", help: "No confirmed self-hosted config key found for whitelist control; planning only.", type: "toggle", value: false, supported: false }
         ]
@@ -1356,12 +1395,14 @@
       hardcore: {
         harvestMultiplier: 0.75, spiceYieldMultiplier: 0.75,
         lootQualityMultiplier: 0.85, structureDecayMultiplier: 1.4, pvpMode: "frontier_zones",
+        inventoryWeightMultiplier: 1.25, playerInventoryStartingSize: 30, playerInventoryStartingVolumeCapacity: 175,
         stormEnabled: true, stormFrequency: 1.6, stormSeverity: 1.5, waterRetentionMultiplier: 0.75,
         wormAggression: 1.7, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
       },
       builder: {
         harvestMultiplier: 2.5, spiceYieldMultiplier: 1.8,
         lootQualityMultiplier: 1.4, structureDecayMultiplier: 0.25, pvpMode: "off",
+        inventoryWeightMultiplier: 0.5, playerInventoryStartingSize: 80, playerInventoryStartingVolumeCapacity: 450,
         stormEnabled: true, stormFrequency: 0.55, stormSeverity: 0.6, waterRetentionMultiplier: 1.7,
         wormAggression: 0.5, baseClaimLimit: 8, buildHeightLimit: 8, publicBuildDamage: false
       }

@@ -155,6 +155,39 @@ def build_ini(profile):
     mining = max(0, float(setting(profile, "resources", "harvestMultiplier", 1)))
     vehicle_mining = max(0, float(setting(profile, "resources", "spiceYieldMultiplier", mining)))
     pvp_resource = max(0, float(setting(profile, "resources", "lootQualityMultiplier", 2.5)))
+    harvest_amount = max(0, float(setting(profile, "resources", "globalHarvestAmountMultiplier", 1)))
+    harvest_health = max(0, float(setting(profile, "resources", "globalHarvestHealthMultiplier", 1)))
+    cutteray_hem = max(0, float(setting(profile, "resources", "cutterayHemMultiplierPerNodeTierTable", 1)))
+    min_augment_quality = max(0, int(setting(profile, "resources", "minimumAugmentableItemQuality", 0)))
+    item_durability_loss = max(0, float(setting(profile, "resources", "itemDurabilityLossMultiplier", 1)))
+    xp_multiplier = max(0, float(setting(profile, "progression", "xpMultiplier", 1)))
+    fame_multiplier = max(0, float(setting(profile, "progression", "fameMultiplier", 1)))
+    progression_speed = max(0, float(setting(profile, "progression", "progressionSpeedMultiplier", 1)))
+    guild_creation_cost = max(0, int(setting(profile, "progression", "guildCreationCost", 1000)))
+    sell_fee = max(0, float(setting(profile, "progression", "sellOrderPricePercentageFee", 2)))
+    spice_tax_amount = max(0, float(setting(profile, "progression", "spiceTaxAmount", 0.1)))
+    spice_tax_interval = max(0, int(setting(profile, "progression", "spiceTaxInterval", 3600)))
+    legacy_pvp = bool(setting(profile, "pvp", "legacyPvpEnabled", False))
+    server_pve = bool(setting(profile, "pvp", "serverPve", True))
+    water_rate = max(0, float(setting(profile, "environment", "waterConsumptionRate", 1)))
+    storm_water_rate = max(0, float(setting(profile, "environment", "waterConsumptionInStormMultiplier", 4)))
+    npc_damage = max(0, float(setting(profile, "environment", "globalDamageToNpcsMultiplier", 1)))
+    player_damage = max(0, float(setting(profile, "environment", "globalDamageToPlayersMultiplier", 1)))
+    health_multiplier = max(0, float(setting(profile, "environment", "globalHealthMultiplier", 1)))
+    building_damage = max(0, float(setting(profile, "environment", "globalBuildingDamageMultiplier", 1)))
+    building_decay = max(0, float(setting(profile, "clans", "buildingDecayRateMultiplier", 1)))
+    building_stability = bool(setting(profile, "clans", "enableBuildingStability", True))
+    inventory_weight = max(0, float(setting(profile, "inventory", "inventoryWeightMultiplier", 1)))
+    inventory_slots = max(1, int(setting(profile, "inventory", "playerInventoryStartingSize", 40)))
+    inventory_volume = max(1, float(setting(profile, "inventory", "playerInventoryStartingVolumeCapacity", 225)))
+    starting_water = max(0, float(setting(profile, "inventory", "playerStartingWater", 100)))
+    reconnect_grace = max(0, int(setting(profile, "admin", "defaultReconnectGracePeriodSeconds", 300)))
+    cycle_days = max(1, int(setting(profile, "admin", "cycleDurationInDays", 7)))
+    db_wipe = bool(setting(profile, "admin", "dbWipeEnabled", True))
+    max_guild_members = max(1, int(setting(profile, "clans", "maxGuildMembersAllowed", 32)))
+    max_guilds = max(1, int(setting(profile, "clans", "maxGuildsAllowed", 3)))
+    max_permissions = max(1, int(setting(profile, "clans", "maxPermissionsPerActor", 20)))
+    vehicle_quicksand_damage = max(0, float(setting(profile, "environment", "vehicleQuicksandDamage", 10)))
     max_claims = int(setting(profile, "clans", "baseClaimLimit", 6))
     build_ext = int(setting(profile, "clans", "buildHeightLimit", 4))
     restriction_limits = not bool(setting(profile, "clans", "publicBuildDamage", False))
@@ -187,6 +220,51 @@ m_BuildingBlueprintMaxExtensions={build_ext}
 m_BaseBackupMaxExtensions={max(0, build_ext * 2)}
 ; Enable building restriction limits. Needs to also be applied to each client.
 m_bBuildingRestrictionLimitsEnabled={bool_text(restriction_limits)}
+
+[/Script/DuneSandbox.DuneGameMode]
+; Advanced progression and economy settings from community documentation.
+m_GlobalXPMultiplier={xp_multiplier:.2f}
+m_GlobalFameMultiplier={fame_multiplier:.2f}
+m_GlobalProgressionSpeedMultiplier={progression_speed:.2f}
+m_GuildCreationCost={guild_creation_cost}
+SellOrderPricePercentageFee={sell_fee:.2f}
+SpiceTaxAmount={spice_tax_amount:.2f}
+SpiceTaxInterval={spice_tax_interval}
+
+; Advanced harvesting and item settings from community documentation.
+m_GlobalHarvestAmountMultiplier={harvest_amount:.2f}
+m_GlobalHarvestHealthMultiplier={harvest_health:.2f}
+CutterayHemMultiplierPerNodeTierTable={cutteray_hem:.2f}
+m_MinimumAugmentableItemQuality={min_augment_quality}
+m_ItemDurabilityLossMultiplier={item_durability_loss:.2f}
+
+; Advanced survival and combat settings from community documentation.
+bPvPEnabled={bool_text(legacy_pvp)}
+bServerPVE={bool_text(server_pve)}
+m_WaterConsumptionRate={water_rate:.2f}
+m_WaterConsumptionInStormMultiplier={storm_water_rate:.2f}
+m_GlobalDamageToNpcsMultiplier={npc_damage:.2f}
+m_GlobalDamageToPlayersMultiplier={player_damage:.2f}
+m_GlobalHealthMultiplier={health_multiplier:.2f}
+m_GlobalBuildingDamageMultiplier={building_damage:.2f}
+m_BuildingDecayRateMultiplier={building_decay:.2f}
+bEnableBuildingStability={bool_text(building_stability)}
+m_InventoryWeightMultiplier={inventory_weight:.2f}
+m_PlayerStartingWater={starting_water:.1f}
+m_DefaultReconnectGracePeriodSeconds={reconnect_grace}
+
+; Advanced world reset, guild, permission, and vehicle settings from community documentation.
+m_CycleDurationInDays={cycle_days}
+m_bIsDbWipeEnabled={bool_text(db_wipe)}
+m_MaxGuildMembersAllowed={max_guild_members}
+m_MaxGuildsAllowed={max_guilds}
+m_MaxPermissionsPerActor={max_permissions}
+m_VehicleQuicksandDamage={vehicle_quicksand_damage:.1f}
+
+[/Script/DuneSandbox.InventorySystemSettings]
+; Player starting inventory defaults from server UserGame.ini.
+PlayerInventoryStartingSize={inventory_slots}
+PlayerInventoryStartingVolumeCapacity={inventory_volume:.1f}
 """
 
     display_name = profile.get("profileName", "Dune Awakening Server").replace('"', "'").replace("|", "-")

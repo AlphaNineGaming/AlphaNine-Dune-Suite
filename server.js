@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.5.1";
+const APP_VERSION = "0.5.2";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -7928,14 +7928,15 @@ function giveItemCapabilities() {
   return {
     quantity: true,
     tierFilter: true,
-    qualitySupported: false,
-    qualityParameterName: null,
-    acceptedQualityValues: [],
+    qualitySupported: true,
+    qualityParameterName: "quality",
+    acceptedQualityValues: [0, 1, 2, 3, 4, 5],
     notes: [
-      "Current receiver route uses RabbitMQ AddItemToInventory with ItemName and Quantity.",
-      "Receiver validates quality but rejects non-zero values because this method has no confirmed quality/grade parameter.",
+      "Grade 0 uses the live receiver route with RabbitMQ AddItemToInventory.",
+      "Grades 1-5 use a database-backed inventory grant and may require the player to relog or refresh inventory.",
+      "Dry-run validates the player inventory and next item slot without inserting an item.",
       "Known item metadata fields inspected for display/filtering: quality, Quality, itemQuality, durability, rarity, tier, grade, roll, statRoll, itemLevel.",
-      "No database writes are performed for quality capability detection."
+      "No database writes are performed for capability detection."
     ]
   };
 }
@@ -7955,15 +7956,15 @@ function validateGiveItemPayload(payload) {
     || /^tech:[A-Za-z0-9_().+\-]+$/.test(template);
   if (!catalogMatch) throw new Error("Item template was not found in the local Gear Codex catalog.");
   if (!Number.isInteger(qty) || qty < 1 || qty > 9999) throw new Error("Quantity must be a whole number between 1 and 9999.");
-  if (hasQuality && !capabilities.qualitySupported) throw new Error("Quality giving is not supported by the current receiver method.");
-  if (hasQuality && (!Number.isInteger(quality) || quality < 0 || quality > 100)) throw new Error("Quality must be a whole number between 0 and 100.");
+  if (hasQuality && !capabilities.qualitySupported) throw new Error("Grade giving is not supported by the current receiver method.");
+  if (hasQuality && (!Number.isInteger(quality) || quality < 0 || quality > 5)) throw new Error("Grade must be a whole number between 0 and 5.");
   const command = {
     playerId,
     template,
     qty,
     requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`
   };
-  if (capabilities.qualitySupported && hasQuality) command.quality = quality;
+  if (hasQuality) command.quality = quality;
   return command;
 }
 
@@ -9722,6 +9723,209 @@ async function liveGiveServerAvailability() {
   return { online, vm, status: status?.summary || null, raw };
 }
 
+function dbBackedGiveItemGrade(command) {
+  const grade = Number(command?.quality || 0);
+  return Number.isInteger(grade) && grade > 0 ? grade : 0;
+}
+
+async function adminGiveDbItemToPlayer(command, options = {}) {
+  const playerId = String(command?.playerId || "").trim();
+  const template = String(command?.template || "").trim();
+  const qty = requireInteger(command?.qty, "quantity", 1, 9999);
+  const grade = requireInteger(command?.quality, "grade", 1, 5);
+  const mode = String(options.mode || "dry-run").toLowerCase();
+  const dryRun = mode !== "execute";
+  if (!playerId) throw new Error("Choose a player first.");
+  if (!template || !/^[A-Za-z0-9_:.()+-]+$/.test(template)) throw new Error("Choose a valid item template.");
+  const targetPredicate = [
+    `ps.account_id::text = ${sqlString(playerId)}`,
+    `ps.player_controller_id::text = ${sqlString(playerId)}`,
+    `ps.player_pawn_id::text = ${sqlString(playerId)}`,
+    `ps.player_state_id::text = ${sqlString(playerId)}`,
+    `lower(ps.character_name) = lower(${sqlString(playerId)})`,
+    `lower(coalesce(ac."user", '')) = lower(${sqlString(playerId)})`
+  ].join("\n         or ");
+  const targetCte = `
+    target as (
+      select ps.account_id::text as account_id,
+             ps.player_pawn_id::text as actor_id,
+             coalesce(ps.character_name, ac."user", ps.account_id::text) as character_name,
+             coalesce(ps.online_status::text, 'unknown') as online_status
+      from dune.player_state ps
+      left join dune.accounts ac on ac.id = ps.account_id
+      where ${targetPredicate}
+      order by case when lower(coalesce(ps.character_name, '')) = lower(${sqlString(playerId)}) then 0 else 1 end,
+               ps.last_avatar_activity desc nulls last,
+               ps.player_state_id
+      limit 1
+    )`;
+  const inventoryCtes = `
+    preferred_inventory as (
+      select inv.id::text as inventory_id,
+             inv.actor_id::text as actor_id,
+             coalesce(inv.max_item_count, 0)::int as max_item_count,
+             coalesce(inv.max_item_volume, 0)::int as max_item_volume,
+             coalesce(inv.inventory_type, -1)::int as inventory_type
+      from dune.inventories inv
+      where inv.actor_id = (select actor_id::bigint from target limit 1)
+        and inv.inventory_type = 0
+      order by inv.id
+      limit 1
+    ),
+    fallback_inventory as (
+      select inv.id::text as inventory_id,
+             inv.actor_id::text as actor_id,
+             coalesce(inv.max_item_count, 0)::int as max_item_count,
+             coalesce(inv.max_item_volume, 0)::int as max_item_volume,
+             coalesce(inv.inventory_type, -1)::int as inventory_type
+      from dune.inventories inv
+      where inv.actor_id = (select actor_id::bigint from target limit 1)
+        and not exists(select 1 from preferred_inventory)
+      order by inv.id
+      limit 1
+    ),
+    chosen_inventory as (
+      select * from preferred_inventory
+      union all
+      select * from fallback_inventory
+      limit 1
+    ),
+    current_count as (
+      select count(*)::int as item_count
+      from dune.items i
+      where i.inventory_id = (select inventory_id::bigint from chosen_inventory limit 1)
+    ),
+    next_position as (
+      select coalesce(max(i.position_index), -1) + 1 as position_index
+      from dune.items i
+      where i.inventory_id = (select inventory_id::bigint from chosen_inventory limit 1)
+    )`;
+  const precheckSql = `
+    with ${targetCte},
+    ${inventoryCtes}
+    select
+      case
+        when not exists(select 1 from target) then 'player_not_found'
+        when not exists(select 1 from chosen_inventory) then 'inventory_not_found'
+        when (select max_item_count from chosen_inventory limit 1) > 0
+          and (select item_count from current_count) >= (select max_item_count from chosen_inventory limit 1) then 'inventory_full'
+        else 'ready'
+      end,
+      coalesce((select account_id from target limit 1), ''),
+      coalesce((select actor_id from target limit 1), ''),
+      coalesce((select character_name from target limit 1), ''),
+      coalesce((select online_status from target limit 1), ''),
+      coalesce((select inventory_id from chosen_inventory limit 1), ''),
+      coalesce((select inventory_type::text from chosen_inventory limit 1), ''),
+      coalesce((select max_item_count::text from chosen_inventory limit 1), ''),
+      coalesce((select max_item_volume::text from chosen_inventory limit 1), ''),
+      coalesce((select item_count::text from current_count), '0'),
+      coalesce((select position_index::text from next_position), '0')
+  `;
+  const precheckOutput = await dbQuery(precheckSql, 15000);
+  const precheck = parseDbRows(precheckOutput, ["status", "accountId", "actorId", "characterName", "onlineStatus", "inventoryId", "inventoryType", "maxItemCount", "maxItemVolume", "itemCount", "nextPosition"])[0] || {};
+  if (precheck.status === "player_not_found") throw new Error(`Player was not found for item grant target: ${playerId}`);
+  if (precheck.status === "inventory_not_found") throw new Error(`Player inventory was not found for ${precheck.characterName || playerId}.`);
+  if (precheck.status === "inventory_full") throw new Error(`Player inventory is full for ${precheck.characterName || playerId}.`);
+  if (precheck.status !== "ready") throw new Error(`Database item grant precheck failed: ${precheck.status || "unknown"}.`);
+  const player = {
+    accountId: precheck.accountId,
+    actorId: precheck.actorId,
+    characterName: precheck.characterName,
+    onlineStatus: precheck.onlineStatus
+  };
+  const inventory = {
+    id: precheck.inventoryId,
+    type: Number(precheck.inventoryType || 0),
+    maxItemCount: Number(precheck.maxItemCount || 0),
+    maxItemVolume: Number(precheck.maxItemVolume || 0),
+    itemCount: Number(precheck.itemCount || 0),
+    nextPosition: Number(precheck.nextPosition || 0)
+  };
+  if (dryRun) {
+    return {
+      ok: true,
+      dryRun: true,
+      status: "dry-run-passed",
+      grantKind: "Inventory Item Grade Grant",
+      transport: "database",
+      command,
+      player,
+      inventory,
+      item: { id: template, name: giveItemDisplayName(template), qty, grade },
+      stdout: `Dry-run passed. ${giveItemDisplayName(template)} x${qty} grade ${grade} would be inserted into inventory ${inventory.id} at position ${inventory.nextPosition}.`,
+      stderr: "",
+      note: "Dry-run validated the target player inventory and next item slot. No database write was performed."
+    };
+  }
+  const statsJson = JSON.stringify({ FCustomizationStats: [[], {}], FItemStackAndDurabilityStats: [[], {}] });
+  const insertSql = `
+    with selected_inventory as (
+      select id,
+             coalesce(max_item_count, 0)::int as max_item_count
+      from dune.inventories
+      where id = ${requireInteger(inventory.id, "inventory_id", 1)}
+      limit 1
+    ),
+    current_count as (
+      select count(*)::int as item_count
+      from dune.items i
+      where i.inventory_id = (select id from selected_inventory limit 1)
+    ),
+    next_position as (
+      select coalesce(max(i.position_index), -1) + 1 as position_index
+      from dune.items i
+      where i.inventory_id = (select id from selected_inventory limit 1)
+    ),
+    inserted as (
+      insert into dune.items (inventory_id, template_id, stack_size, quality_level, position_index, stats)
+      select selected_inventory.id,
+             ${sqlString(template)},
+             ${qty},
+             ${grade},
+             next_position.position_index,
+             ${sqlString(statsJson)}
+      from selected_inventory, current_count, next_position
+      where selected_inventory.max_item_count <= 0
+         or current_count.item_count < selected_inventory.max_item_count
+      returning id, inventory_id, template_id, stack_size, quality_level, position_index
+    )
+    select
+      case when exists(select 1 from inserted) then 'inserted' else 'inventory_full' end,
+      coalesce((select id::text from inserted limit 1), ''),
+      coalesce((select inventory_id::text from inserted limit 1), ''),
+      coalesce((select template_id from inserted limit 1), ''),
+      coalesce((select stack_size::text from inserted limit 1), ''),
+      coalesce((select quality_level::text from inserted limit 1), ''),
+      coalesce((select position_index::text from inserted limit 1), '')
+  `;
+  const insertOutput = await dbQuery(insertSql, 30000);
+  const inserted = parseDbRows(insertOutput, ["status", "itemId", "inventoryId", "templateId", "stackSize", "qualityLevel", "positionIndex"])[0] || {};
+  if (inserted.status === "inventory_full") throw new Error(`Player inventory became full before inserting ${giveItemDisplayName(template)}.`);
+  if (inserted.status !== "inserted") throw new Error(`Database item grant failed: ${inserted.status || "unknown"}.`);
+  return {
+    ok: true,
+    dryRun: false,
+    status: "db-inserted",
+    grantKind: "Inventory Item Grade Grant",
+    transport: "database",
+    command,
+    player,
+    inventory,
+    item: {
+      id: inserted.templateId || template,
+      name: giveItemDisplayName(template),
+      qty: Number(inserted.stackSize || qty),
+      grade: Number(inserted.qualityLevel || grade),
+      itemId: inserted.itemId,
+      positionIndex: Number(inserted.positionIndex || inventory.nextPosition)
+    },
+    stdout: `Inserted ${giveItemDisplayName(template)} x${qty} grade ${grade} into ${player.characterName || playerId}'s inventory. Item id ${inserted.itemId}, inventory ${inserted.inventoryId}, position ${inserted.positionIndex}.`,
+    stderr: "",
+    note: "Database grant completed. The player may need to relog or refresh inventory before the item appears."
+  };
+}
+
 async function adminGiveItem(payload) {
   const timer = liveGiveTimingTracker();
   let command = null;
@@ -9785,6 +9989,25 @@ async function adminGiveItem(payload) {
       appendAdminAudit(mode === "execute" ? "give_item_schematic_recipe_unlocked" : "give_item_schematic_recipe_dry_run", {
         ...auditBase,
         result: { ok: result.ok, status: result.status, recipeId: result.recipeId, alreadyUnlocked: result.alreadyUnlocked },
+        timings: result.timings
+      });
+      return result;
+    }
+    const dbGrade = dbBackedGiveItemGrade(command);
+    if (dbGrade > 0) {
+      timer.skip("server_availability", "skipped: grade item grant uses database inventory insert");
+      timer.skip("runtime_transport_update", "skipped: grade item grant uses database inventory insert");
+      timer.skip("transport_health_check", "skipped: grade item grant does not use receiver transport");
+      if (mode === "execute" && payload?.confirmed !== true && payload?.confirmed !== "true") {
+        const error = new Error("Confirm real grade item database grant before writing to the player inventory.");
+        appendAdminAudit("give_item_db_grade_blocked", { ...auditBase, reason: error.message });
+        throw error;
+      }
+      const result = await timer.step("database_grade_item_grant", () => adminGiveDbItemToPlayer(command, { mode }));
+      result.timings = timer.finish();
+      appendAdminAudit(mode === "execute" ? "give_item_db_grade_inserted" : "give_item_db_grade_dry_run", {
+        ...auditBase,
+        result: { ok: result.ok, status: result.status, player: result.player, inventory: result.inventory, item: result.item },
         timings: result.timings
       });
       return result;
@@ -10341,7 +10564,7 @@ function normalizeGiveQueuePresetItems(items) {
     };
     if (Object.prototype.hasOwnProperty.call(item || {}, "quality") && item.quality !== "" && item.quality !== null && item.quality !== undefined) {
       const quality = Number(item.quality);
-      if (!Number.isInteger(quality) || quality < 0 || quality > 100) throw new Error(`Preset item ${index + 1} quality must be a whole number between 0 and 100.`);
+      if (!Number.isInteger(quality) || quality < 0 || quality > 5) throw new Error(`Preset item ${index + 1} grade must be a whole number between 0 and 5.`);
       normalized.quality = quality;
     }
     return normalized;
@@ -13034,7 +13257,7 @@ function appPage() {
             <label>Player Search<input id="givePlayerSearch" placeholder="Search player or account" oninput="renderPlayerSelect()"></label>
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
             <label>Quantity<input id="adminQty" type="number" min="1" max="9999" value="1" oninput="updateGiveTargetSummary()"></label>
-            <label id="adminQualityWrap" class="unsupported-control">Durability<input id="adminQuality" type="number" min="0" max="100" value="0" disabled oninput="syncQualityWarning()"></label>
+            <label id="adminQualityWrap">Grade<input id="adminQuality" type="number" min="0" max="5" value="0" oninput="syncQualityWarning()"></label>
             <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute">Live Give</option></select></label>
             <div class="give-primary-actions">
               <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
@@ -13045,7 +13268,7 @@ function appPage() {
             <summary>Troubleshooting and Status</summary>
             <div id="liveGiveServerStatus" class="warning mt">Server Status: Checking</div>
             <div id="liveGiveTransportStatus" class="warning mt">Live Give transport: Checking</div>
-            <div id="qualityWarning" class="warning mt">Durability is not supported by the current receiver method.</div>
+            <div id="qualityWarning" class="warning mt">Grade 1-5 uses a database-backed grant and may require relog or inventory refresh. Grade 0 uses the live receiver.</div>
             <div class="action-row mt">
               <button id="liveGiveStartServerButton" onclick="startServerForGiveItem()">Start Server</button>
               <button onclick="refreshAdmin()">Refresh Admin Data</button>
@@ -13907,7 +14130,7 @@ let managerFrameCheckTimer=null;
 function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:false,qualityParameterName:null,acceptedQualityValues:[],notes:["Quality giving is not supported by the current receiver method."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -14341,7 +14564,7 @@ async function openRestoreLog(){const path=window.lastDatabaseRestoreLogPath||""
 async function pollDatabaseRestoreStatus(jobId){if(window.databaseRestorePolling===jobId)return;window.databaseRestorePolling=jobId;window.activeDatabaseRestoreJobId=jobId;localStorage.setItem("activeDatabaseRestoreJobId",jobId);setDatabaseRestoreRunning(true);let finalJob=null;let pollError=null;try{for(let i=0;i<720;i++){try{const job=await getJson("/api/database/import-status/"+encodeURIComponent(jobId),{timeoutMs:5000});window.lastDatabaseRestoreLogPath=job.logPath||job.result?.logPath||"";renderDatabaseRestoreStatus(job);if(job.status==="success"||job.status==="failed"){finalJob=job;break;}}catch(e){pollError=e;break;}await new Promise(resolve=>setTimeout(resolve,2000));}}finally{window.databaseRestorePolling="";setDatabaseRestoreRunning(false);window.activeDatabaseRestoreJobId="";localStorage.removeItem("activeDatabaseRestoreJobId");await refreshDatabaseImportReadiness().catch(()=>{});}const el=document.getElementById("dbRestoreResult");if(pollError){const msg=betterError(pollError);if(el){el.className="warning mt";el.textContent=/not found|was not found|missing/i.test(msg)?"Import job not found. Cleared stale import state.":msg;}const progress=document.getElementById("dbRestoreProgress");if(progress){progress.className="empty mt";progress.textContent="No import job running.";}addActivity("warn","Import status cleared",msg);return;}if(!finalJob){if(el){el.className="warning mt";el.textContent="Import status polling timed out. Check audit log for details.";}return;}if(el)el.innerHTML=restoreFinalSummaryHtml(finalJob);if(finalJob.status==="success"){document.getElementById("dbRestoreConfirm").value="";addActivity("database","Battlegroup import completed and verified",finalJob.jobId);await refreshDatabaseBackups();playUiSound("success");}else{addActivity("error","Battlegroup import failed",finalJob.error||finalJob.jobId);playUiSound("warning");}}
 async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="IMPORT")throw new Error("Type IMPORT before importing.");await ensureBattlegroupStoppedBeforeImport();if(!(await appConfirm("Import Battlegroup backup","Import Battlegroup backup from this file? Stop the server first. A safety Battlegroup backup will be created first.","Import","Cancel")))return;setDatabaseRestoreRunning(true);el.className="warning mt";el.textContent="Import job starting...";const data=await getJson("/api/database/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:15000});if(!data.jobId)throw new Error(data.error||"Import job was not created.");renderDatabaseRestoreStatus(data);addActivity("database","Battlegroup import started",data.jobId);await pollDatabaseRestoreStatus(data.jobId);}catch(e){setDatabaseRestoreRunning(false);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup import blocked",e.message);playUiSound("warning");}}
 function wireDatabaseImportControls(){const file=document.getElementById("dbRestoreFile");const confirm=document.getElementById("dbRestoreConfirm");if(file){file.addEventListener("input",()=>refreshDatabaseImportReadiness());file.addEventListener("change",()=>refreshDatabaseImportReadiness());}if(confirm){confirm.addEventListener("input",renderDatabaseImportControls);confirm.addEventListener("change",renderDatabaseImportControls);}renderDatabaseImportControls();}
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,databaseReachable:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:false,notes:["Quality giving is not supported by the current receiver method."]})]);const dbReachable=probe.databaseReachable===true||probe.ok===true;adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",dbReachable?"Reachable":"Limited");tone("adminDbMirror",dbReachable?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",dbReachable?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Unknown");tone("adminDbMirror","Unknown");badge("topDb","DB status unknown");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,databaseReachable:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]})]);const dbReachable=probe.databaseReachable===true||probe.ok===true;adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",dbReachable?"Reachable":"Limited");tone("adminDbMirror",dbReachable?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",dbReachable?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Unknown");tone("adminDbMirror","Unknown");badge("topDb","DB status unknown");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory");el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
@@ -14503,9 +14726,9 @@ function catalogItemByTemplate(template){const id=String(template||"");return ad
 function templateIsSchematic(template){const item=catalogItemByTemplate(template);return item?(isTechKnowledgeItem(item)||isRecipeSchematicItem(item)):/^tech:/i.test(String(template||""))||/_schematic$/i.test(String(template||""))||/schematic$/i.test(String(template||""));}
 function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select an item from the catalog below.";return;}const kind=giveItemGrantKind(selectedAdminItem);const notice=giveItemSchematicNotice(selectedAdminItem);selected.className=notice?"warning":"detail-row";selected.innerHTML='<span class="subtle">'+esc(kind)+'</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>'+(notice?'<div class="subtle mt">'+esc(notice)+'</div>':'');}
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();}
-function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;if(!supported)input.value=0;}if(!warning)return;warning.classList.toggle("hidden",supported);warning.textContent=supported?"":"Durability is not supported by the current receiver method.";}
+function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;input.min=0;input.max=5;if(!supported)input.value=0;else{const grade=Number(input.value||0);if(Number.isFinite(grade)&&grade<0)input.value=0;if(Number.isFinite(grade)&&grade>5)input.value=5;}}if(warning){warning.classList.toggle("hidden",false);warning.textContent=supported?"Grade 1-5 uses a database-backed grant and may require relog or inventory refresh. Grade 0 uses the live receiver.":"Grade giving is not supported by the current receiver method.";}syncGiveItemControls();}
 function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(selectedAdminItem)};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
-function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / quality "+row.quality:"")+(row.grantKind?" / "+row.grantKind:"");}
+function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Grade "+row.quality:"")+(row.grantKind?" / "+row.grantKind:"");}
 function updateGiveQueueSummary(processed=0,total=giveQueue.length,succeeded=0,failed=0){const el=document.getElementById("giveQueueSummary");if(el)el.textContent="Progress: "+processed+" / "+total+" · Succeeded: "+succeeded+" · Failed: "+failed;const retry=document.getElementById("retryGiveQueueButton");if(retry)retry.disabled=!lastGiveQueueFailedItems.length||liveGiveBusy;syncGiveItemControls();}
 function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span>'+(row.grantKind?'<br><span class="subtle">'+esc(row.grantKind)+'</span>':'')+'</span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
 function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality,grantKind:payload.grantKind});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const note=/^tech:/i.test(payload.template)?"\\nNote: this research blueprint will unlock the Research tree, not character inventory.":(templateIsSchematic(payload.template)?"\\nNote: this recipe schematic will unlock crafting recipes, not character inventory.":"");document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1])+note;addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
@@ -14522,7 +14745,7 @@ function giveQueuePresetInputName(){return String(document.getElementById("giveQ
 function setGiveQueuePresetValidation(message){const el=document.getElementById("giveQueuePresetValidation");if(el)el.textContent=message||"";}
 function setGiveQueuePresetName(name){const input=document.getElementById("giveQueuePresetName");if(input)input.value=name||"";}
 function giveQueuePresetExists(name){const target=String(name||"").toLowerCase();return giveQueuePresets.some(p=>String(p.name||"").toLowerCase()===target);}
-function normalizeClientPresetItems(items){if(!Array.isArray(items)||!items.length)throw new Error("Preset JSON must contain an items array.");return items.map((item,index)=>{const template=String(item?.template||item?.itemId||item?.id||"").trim();const qty=Number(item?.qty??item?.quantity??1);if(!template)throw new Error("Imported preset item "+(index+1)+" is missing a template.");if(!Number.isInteger(qty)||qty<1||qty>9999)throw new Error("Imported preset item "+(index+1)+" has an invalid quantity.");const row={template,name:String(item?.name||template),qty};if(item&&Object.prototype.hasOwnProperty.call(item,"quality")&&item.quality!==""&&item.quality!==null&&item.quality!==undefined){const quality=Number(item.quality);if(!Number.isInteger(quality)||quality<0||quality>100)throw new Error("Imported preset item "+(index+1)+" has an invalid quality.");row.quality=quality;}return row;});}
+function normalizeClientPresetItems(items){if(!Array.isArray(items)||!items.length)throw new Error("Preset JSON must contain an items array.");return items.map((item,index)=>{const template=String(item?.template||item?.itemId||item?.id||"").trim();const qty=Number(item?.qty??item?.quantity??1);if(!template)throw new Error("Imported preset item "+(index+1)+" is missing a template.");if(!Number.isInteger(qty)||qty<1||qty>9999)throw new Error("Imported preset item "+(index+1)+" has an invalid quantity.");const row={template,name:String(item?.name||template),qty};if(item&&Object.prototype.hasOwnProperty.call(item,"quality")&&item.quality!==""&&item.quality!==null&&item.quality!==undefined){const quality=Number(item.quality);if(!Number.isInteger(quality)||quality<0||quality>5)throw new Error("Imported preset item "+(index+1)+" has an invalid grade.");row.quality=quality;}return row;});}
 async function saveGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{setGiveQueuePresetValidation("");if(!giveQueue.length)throw new Error("Queue is empty.");const name=giveQueuePresetInputName();if(!name){setGiveQueuePresetValidation("Enter a preset name.");document.getElementById("giveQueuePresetName")?.focus();playUiSound("warning");return;}if(giveQueuePresetExists(name)&&!(await appConfirm("Overwrite preset","A preset named '"+name+"' already exists. Overwrite it?","Overwrite","Cancel")))return;const data=await getJson("/api/live-give/queue-presets/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,items:giveQueue})});if(log)log.value="Saved Give Queue preset: "+data.preset.name+"\\nItems: "+data.preset.items.length;await refreshGiveQueuePresets();const select=document.getElementById("giveQueuePresetSelect");if(select)select.value=data.preset.name;setGiveQueuePresetName(data.preset.name);playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
 async function loadGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{const name=selectedGiveQueuePresetName();if(!name)throw new Error("Choose a preset first.");const data=await getJson("/api/live-give/queue-presets/get?name="+encodeURIComponent(name));const items=normalizeClientPresetItems(data.preset?.items||[]);const mode=document.getElementById("giveQueuePresetLoadMode")?.value||"replace";giveQueue=mode==="append"?giveQueue.concat(items):items;lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();setGiveQueuePresetName(data.preset.name);setGiveQueuePresetValidation("");if(log)log.value=(mode==="append"?"Appended":"Loaded")+" preset: "+data.preset.name+"\\nItems: "+items.length;playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
 async function deleteGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{const name=selectedGiveQueuePresetName();if(!name)throw new Error("Choose a preset first.");if(!(await appConfirm("Delete preset","Delete Give Queue preset '"+name+"'?","Delete","Cancel")))return;await getJson("/api/live-give/queue-presets?name="+encodeURIComponent(name),{method:"DELETE"});if(log)log.value="Deleted preset: "+name;if(giveQueuePresetInputName().toLowerCase()===name.toLowerCase())setGiveQueuePresetName("");setGiveQueuePresetValidation("");await refreshGiveQueuePresets();playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
@@ -14533,11 +14756,11 @@ function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.
 function syncGiveItemResultFromLog(){if(!document.getElementById("give")?.classList.contains("active"))return;const source=document.getElementById("adminLog");const result=document.getElementById("giveItemResult");const detail=document.getElementById("giveItemResultDetail");const message=String(source?.textContent||"").trim();if(detail)detail.textContent=message||"No Give Item request has run.";if(result){const summary=message.split(/\r?\n/).find(Boolean)||"Ready to give an item.";result.className=(/failed|error|unavailable|offline|blocked/i.test(summary)?"warning":"empty")+" give-result";result.textContent=summary;}}
 function wireGiveItemResult(){const source=document.getElementById("adminLog");if(!source||source.dataset.giveResultWired)return;source.dataset.giveResultWired="true";new MutationObserver(syncGiveItemResultFromLog).observe(source,{childList:true,characterData:true,subtree:true});syncGiveItemResultFromLog();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
-function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(mode==="execute"&&!adminLiveGiveAvailable);if(give)give.disabled=blocked;if(add)add.disabled=liveGiveBusy||!selectedAdminItem;if(queue)queue.disabled=blocked||!giveQueue.length;if(retry)retry.disabled=blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
-async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const data=await getJson("/api/status");liveGiveServerOnline=isServerOnlineStatus(data);setGiveServerStatus(liveGiveServerOnline?"Server Status: Online. Give Item is available.":"Server Status: Offline. Start the server before using Give Item.",liveGiveServerOnline?"ok":"warn");await refreshLiveGiveEnv();return data;}catch(e){liveGiveServerOnline=false;setGiveServerStatus("Server Status: Offline. "+betterError(e),"warn");return null;}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
+function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(mode==="execute"&&!usesDbGrade&&!adminLiveGiveAvailable);if(give)give.disabled=blocked;if(add)add.disabled=liveGiveBusy||!selectedAdminItem;if(queue)queue.disabled=blocked||!giveQueue.length;if(retry)retry.disabled=blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
+async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const receiver=await getJson("/api/receiver/status",{timeoutMs:5000});liveGiveServerOnline=Boolean(receiver.ok);adminLiveGiveAvailable=Boolean(receiver.ok);liveGiveTransport={mode:"http-json",configured:Boolean(receiver.ok),reachable:Boolean(receiver.ok),target:receiver.giveUrl||"",reason:receiver.ok?"":(receiver.reason||receiver.error||"Receiver is offline.")};liveGiveUnavailableMessage=receiver.ok?"":liveGiveTransportMessage(liveGiveTransport);setGiveServerStatus(receiver.ok?"Server Status: Online. Give Item receiver is available.":"Server Status: Offline. "+(receiver.reason||receiver.error||"Receiver is offline."),receiver.ok?"ok":"warn");syncLiveGiveTransportStatus();return receiver;}catch(receiverError){try{const env=await getJson("/api/live-give/env",{timeoutMs:8000});adminLiveGiveAvailable=Boolean(env.liveGiveAvailable);liveGiveTransport=env.giveTransport||liveGiveTransport;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(env.message||liveGiveTransportMessage(liveGiveTransport||env));liveGiveServerOnline=adminLiveGiveAvailable||Boolean(env.giveTransport?.reachable);setGiveServerStatus(liveGiveServerOnline?(adminLiveGiveAvailable?"Server Status: Online. Give Item is available.":"Server Status: Receiver online. Live Give transport is limited."):"Server Status: Offline. "+(liveGiveUnavailableMessage||env.error||"Start the server before using Give Item."),liveGiveServerOnline?"ok":"warn");syncLiveGiveTransportStatus();return env;}catch(envError){liveGiveServerOnline=false;adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(receiverError)+" / "+betterError(envError);setGiveServerStatus("Server Status: Offline. "+liveGiveUnavailableMessage,"warn");syncLiveGiveTransportStatus();return null;}}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
 async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="dry-run";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncLiveGiveMode();await Promise.all([refreshGivePlayersFast(),checkGiveItemServerStatus()]);syncLiveGiveTransportStatus();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
-async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"){if(!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent="Publishing Live Give...";addActivity("grant","Publishing Live Give",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status="Live Give failed.";if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent="Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty);const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
+async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const usesDbGrade=Number(payload.quality||0)>0;if(!usesDbGrade){log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();}else log.textContent=mode==="execute"?"Preparing database grade grant...":"Running database grade dry-run...";if(mode==="execute"){if(!usesDbGrade&&!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}log.textContent=usesDbGrade?"Writing grade item to player inventory...":"Publishing Live Give...";addActivity("grant",usesDbGrade?"Database grade grant":"Publishing Live Give",payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status=usesDbGrade?"Database grade grant failed.":"Live Give failed.";if(data.status==="db-inserted")status="Database grade grant inserted.";else if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),player:data.player||null,inventory:data.inventory||null,item:data.item||null,timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent=usesDbGrade?"Running database grade Dry-Run...":"Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,player:data.player||null,inventory:data.inventory||null,item:data.item||null,command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 const giveAdminItemWithoutSentToast=giveAdminItem;
 giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");const notice=selectedAdminItem?giveItemSchematicNotice(selectedAdminItem):"";if(log&&notice&&text&&!text.includes(notice))log.textContent=text+"\\n\\nNote: "+notice;if(/Live Give (verified|published)/i.test(text))showToast(notice?"Research unlock sent":"Item sent","success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}

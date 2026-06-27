@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.5.0";
+const APP_VERSION = "0.5.1";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -3294,6 +3294,36 @@ function normalizeItemCategory(value = "") {
   if (compact === "meleeweapon" || compact === "meleeweapons" || compact === "rangedweapon" || compact === "rangedweapons" || compact === "rangeweapon" || compact === "rangeweapons") return "Weapons";
   if (compact === "vehicle" || compact === "vehicles" || compact === "vehiclebase" || compact === "vehicleextra") return "Vehicles";
   return raw;
+}
+
+const GIVE_ITEM_HIDDEN_CATEGORY_KEYS = new Set([
+  "buildables",
+  "atreides",
+  "choam",
+  "choam2",
+  "construction",
+  "extrasets",
+  "fabricators",
+  "harkonnen",
+  "refineries",
+  "smuggler",
+  "smugglers",
+  "storage",
+  "utilities",
+  "watershipper",
+  "watershippers"
+]);
+
+function giveItemCategoryKey(value = "") {
+  return String(value || "").trim().replace(/[\s_\-]+/g, "").toLowerCase();
+}
+
+function isHiddenGiveItemCategory(item = {}) {
+  return GIVE_ITEM_HIDDEN_CATEGORY_KEYS.has(giveItemCategoryKey(item.category));
+}
+
+function visibleGiveItems(items = []) {
+  return items.filter((item) => !isHiddenGiveItemCategory(item));
 }
 
 function itemClassificationText(item = {}) {
@@ -14970,7 +15000,10 @@ async function route(req, res) {
         return [];
       })
       : [];
-    const allItems = [...(cache.items || []), ...dynamicTechKnowledge, ...dynamicRecipes];
+    const isGiveItemCatalog = ["/api/admin/items", "/api/give-items"].includes(url.pathname);
+    const allItems = isGiveItemCatalog
+      ? visibleGiveItems([...(cache.items || []), ...dynamicTechKnowledge, ...dynamicRecipes])
+      : [...(cache.items || []), ...dynamicTechKnowledge, ...dynamicRecipes];
     const items = filterItemsByQuery(allItems, url.searchParams);
     await json(res, { ok: cache.ok !== false, items, totalItems: allItems.length, dynamicRecipeCount: dynamicRecipes.length, dynamicTechKnowledgeCount: dynamicTechKnowledge.length, gradeCounts: itemGradeCounts(allItems), tierCounts: itemTierCounts(allItems), report: { ...(cache.report || {}), dynamicRecipeCount: dynamicRecipes.length, dynamicTechKnowledgeCount: dynamicTechKnowledge.length }, generatedAt: cache.generatedAt || "" });
     return;
@@ -14992,7 +15025,19 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/gear/discover" && req.method === "POST") {
-    try { await json(res, await discoverDuneItems()); }
+    try {
+      const result = await discoverDuneItems();
+      const items = visibleGiveItems(result.items || []);
+      await json(res, {
+        ...result,
+        items,
+        report: {
+          ...(result.report || {}),
+          totalItemsFound: items.length,
+          giveItemCategoriesHidden: true
+        }
+      });
+    }
     catch (error) { await json(res, { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, error: error.message, filesScanned: [], totalItemsFound: 0 } }, 500); }
     return;
   }

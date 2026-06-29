@@ -68,6 +68,16 @@ Node.js is only required for developers running from source. Installed users sho
 
 The installer includes the suite app and receiver files. Settings are stored in the Windows app data folder so they survive updates.
 
+## Mobile App
+
+AlphaNine Dune Suite includes mobile web app metadata, an install manifest, and a service worker. When the Suite is running, open the Web Portal URL shown in the app from a phone on the same network, then use the browser menu to add it to the home screen.
+
+Notes:
+
+- Android and iOS can launch the Suite from a home-screen icon.
+- Browser-installed PWA mode normally requires HTTPS on real phones. A plain LAN `http://` URL may still work as a home-screen shortcut, but full install prompts and service-worker behavior depend on the mobile browser.
+- For a store-distributed native app, wrap the same web portal in an Android/iOS shell and point it at the Suite host URL.
+
 ## First-Time Setup
 
 On first launch, the Setup Wizard opens automatically.

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="AlphaNine Dune Suite">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a1308"/>
+      <stop offset="0.48" stop-color="#050604"/>
+      <stop offset="1" stop-color="#8b5a18"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe196"/>
+      <stop offset="1" stop-color="#c98224"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <path d="M68 392h376v28H68z" fill="#2b1d0c"/>
+  <path d="M86 360c65-103 132-154 199-154 48 0 95 26 141 78 14 16 28 35 42 57H86z" fill="#3f2a10"/>
+  <path d="M92 346c62-91 126-136 191-136 64 0 125 45 184 136H92z" fill="#6d4518"/>
+  <path d="M116 320c54-62 109-94 166-94 56 0 110 31 162 94H116z" fill="#b77a22"/>
+  <path d="M118 132h276v62H118z" fill="none" stroke="url(#gold)" stroke-width="18"/>
+  <path d="M132 142l249 118" fill="none" stroke="url(#gold)" stroke-width="24" stroke-linecap="square"/>
+  <path d="M118 132h276v256H118z" fill="none" stroke="#ffe196" stroke-width="10" opacity=".82"/>
+  <path d="M165 280h182v28H165z" fill="#ffe196"/>
+</svg>

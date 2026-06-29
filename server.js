@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.5.2";
+const APP_VERSION = "0.5.3";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -11083,6 +11083,7 @@ function contentTypeFor(filePath) {
   if (ext === ".js") return "text/javascript";
   if (ext === ".css") return "text/css";
   if (ext === ".json") return "application/json";
+  if (ext === ".webmanifest") return "application/manifest+json";
   if (ext === ".png") return "image/png";
   if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
   if (ext === ".svg") return "image/svg+xml";
@@ -11319,7 +11320,7 @@ function serveStatic(res, baseDir, requestPath) {
   const filePath = safeFile(baseDir, requestPath);
   if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return false;
   const ext = path.extname(filePath).toLowerCase();
-  const cacheControl = [".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".css", ".js"].includes(ext)
+  const cacheControl = [".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".css", ".js", ".webmanifest"].includes(ext)
     ? "public, max-age=86400"
     : "no-store";
   res.writeHead(200, { "Content-Type": contentTypeFor(filePath), "Cache-Control": cacheControl });
@@ -11432,6 +11433,15 @@ function appPage() {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AlphaNine Dune Suite</title>
+  <meta name="application-name" content="AlphaNine Dune Suite">
+  <meta name="apple-mobile-web-app-title" content="Dune Suite">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#c98224">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="/assets/mobile-icon.svg">
+  <link rel="apple-touch-icon" href="/assets/alphanine-logo.jpg">
   <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
   <script src="/vendor/leaflet/leaflet.js"></script>
   <script src="/assets/coordinate-system.js"></script>
@@ -12499,6 +12509,28 @@ function appPage() {
     body.theme-royal .setup-card button.primary,
     body.theme-royal .setup-card .primary { color:#fff8ea; background:linear-gradient(180deg, #b77a22, #6d4518); }
     .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--panel-gap); }
+    .setup-doctor-grid { display:grid; grid-template-columns:minmax(300px,.9fr) minmax(360px,1.1fr); gap:var(--panel-gap); align-items:stretch; }
+    .setup-doctor-grid.secondary { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    .doctor-score-wrap { display:grid; grid-template-columns:118px minmax(0,1fr); gap:16px; align-items:center; margin:14px 0; }
+    .doctor-score-ring { width:112px; height:112px; border-radius:999px; display:grid; place-items:center; border:1px solid var(--line-strong); background:radial-gradient(circle at 50% 38%, var(--panel-2), var(--panel)); box-shadow:0 12px 28px var(--shadow), inset 0 0 0 10px rgba(255,255,255,.06); color:var(--gold-bright); font-size:28px; font-weight:1000; }
+    .doctor-score-wrap h2 { margin:0 0 4px; font-size:22px; }
+    .doctor-check-list,.doctor-issues { display:grid; gap:8px; }
+    .doctor-check { display:grid; grid-template-columns:12px minmax(0,1fr) auto; gap:10px; align-items:start; border:1px solid var(--line); border-radius:12px; padding:10px; background:var(--wizard-test-bg); }
+    .doctor-dot { width:10px; height:10px; border-radius:999px; margin-top:4px; background:var(--muted); box-shadow:0 0 0 4px rgba(255,255,255,.04); }
+    .doctor-check.ok .doctor-dot,.doctor-issue.ok .doctor-dot { background:var(--good); }
+    .doctor-check.warn .doctor-dot,.doctor-issue.warn .doctor-dot { background:var(--warn); }
+    .doctor-check.bad .doctor-dot,.doctor-issue.bad .doctor-dot { background:var(--bad); }
+    .doctor-check.info .doctor-dot,.doctor-issue.info .doctor-dot { background:var(--gold); }
+    .doctor-check strong,.doctor-issue strong { color:var(--text); }
+    .doctor-status { font-size:10px; font-weight:1000; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+    .doctor-issue { border:1px solid var(--line); border-radius:12px; padding:12px; background:var(--wizard-test-bg); }
+    .doctor-issue.ok { border-color:rgba(89,213,139,.4); }
+    .doctor-issue.warn { border-color:rgba(229,172,76,.5); }
+    .doctor-issue.bad { border-color:rgba(255,102,102,.5); }
+    .doctor-issue-head { display:grid; grid-template-columns:12px minmax(0,1fr); gap:10px; align-items:start; }
+    .doctor-fix { margin-top:8px; padding-top:8px; border-top:1px solid var(--line); color:var(--muted); font-size:12px; line-height:1.45; }
+    .doctor-path { overflow-wrap:anywhere; font-family:Consolas, "Liberation Mono", monospace; }
+    .doctor-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
     .diagnostic-log { min-height:220px; max-height:420px; overflow:auto; white-space:pre-wrap; }
     .mt { margin-top:8px; } .mb { margin-bottom:8px; }
     /* Theme consistency pass: keep feature-specific surfaces on the active theme palette. */
@@ -12779,8 +12811,44 @@ function appPage() {
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1350px) { .give-layout{grid-template-columns:minmax(260px,35fr) minmax(0,65fr);grid-template-areas:"form catalog" "presets presets"}.give-sidebar{position:static;max-height:none} }
     @media (max-width:800px) { .give-layout{grid-template-columns:1fr;grid-template-areas:"form" "catalog" "presets"}.give-primary-actions{grid-template-columns:1fr} }
-    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.topbar-actions{justify-content:flex-start}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.topbar-actions{justify-content:flex-start}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid,.setup-doctor-grid,.setup-doctor-grid.secondary{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
     @media (max-width:720px) { .env-var-row{grid-template-columns:1fr;gap:5px}.env-var-value{font-size:12px}.env-help{font-size:11.5px} }
+    @media (max-width:640px) {
+      :root{--panel-pad:12px;--panel-gap:10px;--font-body:13px;--font-button:11px}
+      body{min-width:0}
+      body.sidebar-collapsed .shell,.shell{grid-template-columns:1fr}
+      .sidebar{position:relative;height:auto;max-height:none;padding:12px;border-right:0;border-bottom:1px solid var(--line)}
+      .sidebar-collapse{display:none}
+      .brand{min-height:0;padding:12px}
+      .brand::before{width:42px;height:42px;margin-bottom:8px}
+      .brand h1{font-size:18px}
+      .brand p,.build-info,.sidebar-update,.sidebar-foot{display:none}
+      .nav{display:flex;gap:7px;margin-top:10px;padding:0 0 8px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x proximity}
+      .nav-group{display:flex;gap:7px;margin:0}
+      .nav-group-title{display:none}
+      .tab{flex:0 0 auto;width:auto;min-height:40px;padding:0 12px;font-size:11px;scroll-snap-align:start}
+      .content{padding:10px;overflow-x:hidden}
+      .topbar{position:relative;margin:-10px -10px 10px;padding:10px;grid-template-columns:1fr}
+      .topbar-actions,.status-strip,.controls,.action-row,.primary-action-row,.hero-actions{justify-content:flex-start}
+      .button,.controls button,button{min-height:42px}
+      .panel-head,.hero-actions,.preset-name-row,.give-sidebar .preset-name-row,.live-map-toolbar,.feed-row,.ops-row,.detail-row,.path-picker-row{grid-template-columns:1fr}
+      .panel-head{align-items:flex-start}
+      .suite-health-strip,.field-grid,.settings-grid,.test-grid,.progression-bars,.progression-editor-grid,.progression-compact-support{grid-template-columns:1fr}
+      .hero{min-height:auto}
+      .hero-body{padding:16px; padding-bottom:16px}
+      .hero-actions{position:static;margin-top:14px}
+      .map-controls{left:10px;right:10px;top:10px;justify-content:flex-start;max-width:none}
+      .map-legend,.map-intel-overlay{position:static;width:auto;max-width:none;margin:8px}
+      .live-map-stage{width:100%;max-width:100%}
+      .live-map-panel{width:100%}
+      .live-map-result-badge{top:8px;max-width:calc(100% - 18px);border-radius:14px}
+      .live-map-marker-table{overflow-x:auto}
+      .frame-wrap,iframe{min-height:520px}
+      iframe{height:calc(100vh - 170px)}
+      .table-wrap table{min-width:640px}
+      .suite-action-center{left:10px;right:10px;top:10px;width:auto}
+      .suite-toast{width:calc(100vw - 18px);font-size:14px}
+    }
   </style>
   <link rel="stylesheet" href="/assets/ui-overrides.css">
 </head>
@@ -12975,7 +13043,7 @@ function appPage() {
         <button class="tab advanced-only" data-view="admin">Admin Tools</button>
         <button class="tab advanced-only" data-view="env">Env Setup</button>
         <button class="tab advanced-only" data-view="logs">Logs</button>
-        <button class="tab advanced-only" data-view="diagnostics">Diagnostics</button>
+        <button class="tab advanced-only" data-view="diagnostics">Setup Doctor</button>
       </div>
     </nav>
     <div class="sidebar-foot">
@@ -13919,16 +13987,36 @@ DUNE_RECEIVER_SSH_KEY</pre>
     </section>
 
     <section id="diagnostics" class="view">
-      <div class="layout-3">
+      <div class="setup-doctor-grid">
+        <div class="panel pad doctor-score-card">
+          <div class="panel-head"><div><div class="label">Setup Doctor</div><div class="subtle">Guided checks for first-run setup, safe defaults, VM access, and core services.</div></div><button type="button" onclick="refreshDiagnostics()">Run Doctor</button></div>
+          <div class="doctor-score-wrap">
+            <div class="doctor-score-ring"><span id="doctorScore">--</span></div>
+            <div>
+              <h2 id="doctorScoreLabel">Not checked</h2>
+              <div id="doctorScoreDetail" class="subtle">Run Doctor to inspect database, receiver, local paths, Hyper-V access, and Suite logs.</div>
+            </div>
+          </div>
+          <div id="doctorCheckList" class="doctor-check-list"><div class="empty">No checks run yet.</div></div>
+        </div>
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Diagnostics</div><div class="subtle">Database, receiver, API, version, and logs.</div></div><button type="button" onclick="refreshDiagnostics()">Refresh</button></div>
-          <div class="detail-list">
+          <div class="panel-head"><div><div class="label">Recommended Fixes</div><div class="subtle">Each item explains what to keep, where to change it, and what to try next.</div></div><button type="button" onclick="openSetupWizard()">Open Setup Wizard</button></div>
+          <div id="doctorIssueList" class="doctor-issues"><div class="empty">Run Doctor to generate setup guidance.</div></div>
+        </div>
+      </div>
+      <div class="setup-doctor-grid secondary mt">
+        <div class="panel pad">
+          <div class="label">Current Signals</div>
+          <div class="detail-list mt">
             <div class="detail-row"><span class="subtle">Database</span><strong id="diagDatabase">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Receiver</span><strong id="diagReceiver">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">API</span><strong id="diagApi">Unknown</strong></div>
             <div class="detail-row"><span class="subtle">Version</span><strong id="diagVersion">${APP_VERSION}</strong></div>
             <div class="detail-row"><span class="subtle">Web Portal</span><strong id="diagPortal">${portalUrls[0]}</strong></div>
           </div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Quick Tests</div>
           <div class="test-grid mt">
             <button type="button" onclick="runConnectionTest('database','diagTestDb')">Test Database</button>
             <button type="button" onclick="runConnectionTest('receiver','diagTestReceiver')">Test Receiver</button>
@@ -13939,16 +14027,20 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div id="diagTestReceiver" class="test-result">Receiver not tested.</div>
             <div id="diagTestServer" class="test-result">Server not tested.</div>
           </div>
+          <div class="doctor-actions">
+            <button type="button" onclick="openSetupWizard()">Review Setup</button>
+            <button type="button" onclick="receiverAction('restart')">Restart Receiver</button>
+          </div>
         </div>
         <div class="panel pad">
-          <div class="label">Log Viewer</div>
+          <div class="label">Support Logs</div>
           <select id="diagnosticLogSelect" class="mt" onchange="renderDiagnosticLog()">
             <option value="suite">Suite</option>
             <option value="receiver">Receiver</option>
             <option value="desktop">Desktop Launcher</option>
             <option value="audit">Admin Audit</option>
           </select>
-          <pre id="diagnosticLog" class="diagnostic-log mt">Diagnostics not loaded.</pre>
+          <pre id="diagnosticLog" class="diagnostic-log mt">Setup Doctor has not loaded logs yet.</pre>
         </div>
       </div>
     </section>
@@ -14123,7 +14215,7 @@ const viewCopy={
   "item-database":["Item Database","Bundled offline item catalog with search, grade, and spawn-code filters."],
   env:["Env Setup","Live Give environment requirements and missing variables."],
   logs:["Logs","Recent grants, probe results, and errors."],
-  diagnostics:["Diagnostics","Connection health, version info, and log viewer."],
+  diagnostics:["Setup Doctor","Guided setup checks, safe defaults, and exact fixes."],
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
@@ -14145,8 +14237,8 @@ function clearActionCenterSoon(delay=4000){const card=document.getElementById("s
 function showToast(message,kind="success"){const toast=document.getElementById("suiteToast");if(!toast)return;const normalized=normalizeActionKind(kind);window.clearTimeout(suiteToastTimer);toast.textContent=String(message||"");toast.className="suite-toast "+normalized;setActionCenter(normalized==="error"?"Action needs attention":normalized==="working"?"Working":"Action complete",String(message||""),normalized);suiteToastTimer=window.setTimeout(()=>toast.classList.add("hidden"),4000);}
 function buttonActionLabel(button){if(!button)return"";const explicit=button.getAttribute("aria-label")||button.getAttribute("title")||button.dataset.actionLabel;if(explicit)return explicit.trim();const open=button.dataset.open;if(open)return"Open "+open.replace(/-/g," ");const text=(button.textContent||"").replace(/\s+/g," ").trim();return text.slice(0,90);}
 let suiteTooltipEl=null,suiteTooltipTarget=null;
-const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.",management:"Open the embedded server manager console.","web-portal":"Open the Suite web portal or copy the local and LAN portal URLs.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run connection tests and view troubleshooting details."};
-const SUITE_ONCLICK_TOOLTIPS=[[/refreshAll\(/,"Refresh the dashboard, VM monitor, maps, players, receiver status, and admin data."],[/refreshLiveMap\(/,"Reload live map actors and location overlays from the server database."],[/executeLiveTeleport\(/,"Teleport the selected player to the prepared live map coordinates."],[/refreshAdmin\(/,"Refresh players, item catalog state, receiver readiness, and live give capability."],[/giveAdminItem\(/,"Send the selected item to the selected player using the active give transport."],[/giveQueuedItems\(/,"Send every item currently staged in the give queue."],[/refreshProgressionInspector\(/,"Scan progression tables, functions, and support metadata again."],[/lookupProgressionPlayer\(/,"Find a player in progression data using the current search value."],[/previewProgressionApply\(/,"Create a backup and preview the progression change before any live write."],[/applyProgressionLive\(/,"Apply the prepared progression change to the live database."],[/refresh\(/,"Refresh server status, players, resources, and recent activity."],[/act\('start'\)/,"Start the battlegroup server after checking VM and map readiness."],[/act\('restart'\)/,"Restart the battlegroup server."],[/act\('stop'\)/,"Stop the battlegroup server."],[/act\('backup'\)/,"Run the configured server backup action."],[/act\('update'\)/,"Run the configured server update action."],[/openDirector\(/,"Open the battlegroup director interface or management endpoint."],[/refreshVmStatus\(/,"Refresh VM power state, IP, uptime, ping, ports, and services."],[/runVmAction\('start'\)/,"Start the configured Hyper-V virtual machine."],[/runVmAction\('stop'\)/,"Stop the configured Hyper-V virtual machine."],[/deployMap\(/,"Read the selected map partitions, set replicas, and apply the requested memory limit."],[/stopSelectedMap\(/,"Scale the selected map down so it stops running."],[/refreshMaps\(/,"Reload map deployment status, available maps, memory limits, and partition readiness."],[/startDatabaseTunnel\(/,"Start or retry the SSH tunnel that exposes Postgres locally."],[/createDatabaseBackup\(/,"Create a database backup using the configured backup location."],[/restoreDatabaseBackup\(/,"Import the selected battlegroup backup into the database."],[/reloadManagerFrame\(/,"Reload the embedded server manager console."],[/refreshItemDatabase\(/,"Reload the bundled item database and filters."],[/refreshDiagnostics\(/,"Refresh diagnostics, connection checks, and version/runtime details."],[/openSetupWizard\(/,"Open the setup wizard to review or change core Suite configuration."],[/refreshBattlegroups\(/,"Reload battlegroups and selected battlegroup metadata."],[/useSelectedBattlegroup\(/,"Make the selected battlegroup the active target for Suite actions."],[/saveBattlegroupTitle\(/,"Save a friendly title for the selected battlegroup."],[/refreshReceiverStatus\(/,"Refresh receiver service status and reachability."],[/receiverAction\('start'\)/,"Start the live give receiver service."],[/receiverAction\('stop'\)/,"Stop the live give receiver service."],[/receiverAction\('restart'\)/,"Restart the live give receiver service."],[/saveSettings\(/,"Save the current Suite settings to config.json."],[/checkUpdates\(/,"Check the configured update source for a newer Suite release."],[/exportSettings\(/,"Export Suite settings to a file."],[/importSettings\(/,"Import Suite settings from a file."],[/openAboutDialog\(/,"Show Suite version, build, links, and project information."]];
+const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.",management:"Open the embedded server manager console.","web-portal":"Open the Suite web portal or copy the local and LAN portal URLs.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run Setup Doctor for guided checks, safe defaults, paths, and service fixes."};
+const SUITE_ONCLICK_TOOLTIPS=[[/refreshAll\(/,"Refresh the dashboard, VM monitor, maps, players, receiver status, and admin data."],[/refreshLiveMap\(/,"Reload live map actors and location overlays from the server database."],[/executeLiveTeleport\(/,"Teleport the selected player to the prepared live map coordinates."],[/refreshAdmin\(/,"Refresh players, item catalog state, receiver readiness, and live give capability."],[/giveAdminItem\(/,"Send the selected item to the selected player using the active give transport."],[/giveQueuedItems\(/,"Send every item currently staged in the give queue."],[/refreshProgressionInspector\(/,"Scan progression tables, functions, and support metadata again."],[/lookupProgressionPlayer\(/,"Find a player in progression data using the current search value."],[/previewProgressionApply\(/,"Create a backup and preview the progression change before any live write."],[/applyProgressionLive\(/,"Apply the prepared progression change to the live database."],[/refresh\(/,"Refresh server status, players, resources, and recent activity."],[/act\('start'\)/,"Start the battlegroup server after checking VM and map readiness."],[/act\('restart'\)/,"Restart the battlegroup server."],[/act\('stop'\)/,"Stop the battlegroup server."],[/act\('backup'\)/,"Run the configured server backup action."],[/act\('update'\)/,"Run the configured server update action."],[/openDirector\(/,"Open the battlegroup director interface or management endpoint."],[/refreshVmStatus\(/,"Refresh VM power state, IP, uptime, ping, ports, and services."],[/runVmAction\('start'\)/,"Start the configured Hyper-V virtual machine."],[/runVmAction\('stop'\)/,"Stop the configured Hyper-V virtual machine."],[/deployMap\(/,"Read the selected map partitions, set replicas, and apply the requested memory limit."],[/stopSelectedMap\(/,"Scale the selected map down so it stops running."],[/refreshMaps\(/,"Reload map deployment status, available maps, memory limits, and partition readiness."],[/startDatabaseTunnel\(/,"Start or retry the SSH tunnel that exposes Postgres locally."],[/createDatabaseBackup\(/,"Create a database backup using the configured backup location."],[/restoreDatabaseBackup\(/,"Import the selected battlegroup backup into the database."],[/reloadManagerFrame\(/,"Reload the embedded server manager console."],[/refreshItemDatabase\(/,"Reload the bundled item database and filters."],[/refreshDiagnostics\(/,"Run Setup Doctor and refresh setup checks, fixes, logs, and runtime details."],[/openSetupWizard\(/,"Open the setup wizard to review or change core Suite configuration."],[/refreshBattlegroups\(/,"Reload battlegroups and selected battlegroup metadata."],[/useSelectedBattlegroup\(/,"Make the selected battlegroup the active target for Suite actions."],[/saveBattlegroupTitle\(/,"Save a friendly title for the selected battlegroup."],[/refreshReceiverStatus\(/,"Refresh receiver service status and reachability."],[/receiverAction\('start'\)/,"Start the live give receiver service."],[/receiverAction\('stop'\)/,"Stop the live give receiver service."],[/receiverAction\('restart'\)/,"Restart the live give receiver service."],[/saveSettings\(/,"Save the current Suite settings to config.json."],[/checkUpdates\(/,"Check the configured update source for a newer Suite release."],[/exportSettings\(/,"Export Suite settings to a file."],[/importSettings\(/,"Import Suite settings from a file."],[/openAboutDialog\(/,"Show Suite version, build, links, and project information."]];
 function suitePanelContext(button){const panel=button.closest(".panel,.map-deployment-panel,.setup-card,.suite-modal-card,.about-card");const label=panel?.querySelector(".label,h2,h3,strong")?.textContent;return label?String(label).replace(/\s+/g," ").trim():"";}
 function suiteDescriptiveTooltip(button){if(!button||button.dataset.tooltip==="false")return"";if(button.dataset.tooltip)return button.dataset.tooltip;if(button.classList.contains("tab"))return SUITE_VIEW_TOOLTIPS[button.dataset.view]||("Open the "+buttonActionLabel(button)+" workspace.");if(button.dataset.open)return SUITE_VIEW_TOOLTIPS[button.dataset.open]||("Open the "+button.dataset.open.replace(/-/g," ")+" panel.");const onclick=String(button.getAttribute("onclick")||"");for(const [pattern,text] of SUITE_ONCLICK_TOOLTIPS){if(pattern.test(onclick))return text;}if(button.classList.contains("player-card"))return"Select this player for details, item grants, permission tools, and related actions.";if(button.classList.contains("admin-item"))return"Select this item template for live giving or queue staging.";if(button.classList.contains("item-db-card"))return"Open this item record in the item database details panel.";const text=buttonActionLabel(button);const context=suitePanelContext(button);if(context&&text)return context+": "+text+". Click to run this action.";return text?("Click to run: "+text+"."):"";}
 function suiteTooltipText(button){const text=suiteDescriptiveTooltip(button);return String(text||"").replace(/\s+/g," ").trim().slice(0,180);}
@@ -14470,8 +14562,14 @@ function updateStatusMessage(data){if(!data?.ok)return{message:"Update check fai
 async function checkUpdates(openRelease=false,options={}){const silent=Boolean(options.silent);try{if(!silent)setUpdateStatus("Checking for updates...");const repo=getValue("settingsUpdateRepo");const data=await getJson("/api/updates/check"+(repo?"?repo="+encodeURIComponent(repo):""));window.latestSuiteUpdate=data;const status=updateStatusMessage(data);setUpdateStatus(status.message,status.available);if(!status.available&&data.ok&&compareVersions(data.latestVersion,data.currentVersion)>0&&!data.installerAsset?.downloadUrl)setUpdateStatus("Update available, installer missing.",false);if(openRelease&&data.ok&&data.url&&!window.alphaNineSuite?.installSelfUpdate&&status.available)window.open(data.url,"_blank");if(!silent)playUiSound(data.ok?"success":"warning");return data;}catch(e){if(!silent){setUpdateStatus("Update check failed.");playUiSound("warning");}return null;}}
 async function installSelfUpdate(){try{if(!window.alphaNineSuite?.installSelfUpdate)throw new Error("Self update is available only in the installed desktop app.");const data=window.latestSuiteUpdate?.ok?window.latestSuiteUpdate:await checkUpdates(false);if(!data?.ok)throw new Error(data?.error||"Could not check for updates.");const asset=data.installerAsset;if(!asset?.downloadUrl)throw new Error("The latest GitHub release does not include a Windows installer asset.");const confirmed=await appConfirm("Install Suite update","Download and run "+asset.name+" for "+(data.latestVersion||"the latest release")+"?\\n\\nAlphaNine Dune Suite will close after the installer starts.","Install Update","Cancel");if(!confirmed)return;setUpdateStatus("Downloading update...",true);const stopProgress=window.alphaNineSuite.onSelfUpdateProgress?.(payload=>{if(!payload)return;if(payload.state==="downloading"){const total=Number(payload.total||0);const downloaded=Number(payload.downloaded||0);const pct=total?Math.round((downloaded/total)*100):0;setUpdateStatus("Downloading update"+(pct?" "+pct+"%":"..."),true);}else if(payload.state==="launching"){setUpdateStatus("Launching installer...",false);}else if(payload.state==="failed"){setUpdateStatus("Update failed.",true);}});const result=await window.alphaNineSuite.installSelfUpdate({version:data.latestVersion,fileName:asset.name,name:asset.name,downloadUrl:asset.downloadUrl,releaseUrl:data.url});if(stopProgress)stopProgress();if(!result?.ok)throw new Error(result?.error||"Installer did not launch.");setUpdateStatus("Installer launched.",false);playUiSound("success");}catch(e){setUpdateStatus("Update failed.",Boolean(window.latestSuiteUpdate?.installerAsset?.downloadUrl));playUiSound("warning");}}
 async function checkUpdatesOnStartup(){const data=await checkUpdates(false,{silent:true});const status=updateStatusMessage(data);if(!status.available)return;if(!window.alphaNineSuite?.installSelfUpdate)return;const confirmed=await appConfirm("Suite update available","AlphaNine Dune Suite "+(data.latestVersion||"update")+" is available. Update now?","Update Now","Later");if(confirmed)await installSelfUpdate();}
-async function refreshDiagnostics(){try{const data=await getJson("/api/diagnostics");diagnosticsData=data;setText("diagDatabase",data.database?.ok?"Reachable":"Failed");setText("diagReceiver",data.receiver?.ok?"Online":"Offline");setText("diagApi",data.api?.status||"Unknown");setText("diagVersion",data.version||"Unknown");renderWebPortalUrls(data.webPortal?.urls);renderDiagnosticLog();}catch(e){setText("diagnosticLog",betterError(e));}}
+async function refreshDiagnostics(){try{setText("doctorScoreLabel","Checking setup...");setText("doctorScoreDetail","Reading Suite config, connection tests, VM state, and recent logs.");const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:betterError(e)};}};const [data,cfg,vmStatus]=await Promise.all([safeGet("/api/diagnostics",{ok:false}),safeGet("/api/config",{}),safeGet("/api/vm/status",{ok:false,vm:null})]);diagnosticsData=data;appConfig=cfg&&Object.keys(cfg).length?cfg:appConfig;setText("diagDatabase",data.database?.ok?"Reachable":"Failed");setText("diagReceiver",data.receiver?.ok?"Online":"Offline");setText("diagApi",data.api?.status||"Unknown");setText("diagVersion",data.version||"Unknown");renderWebPortalUrls(data.webPortal?.urls);renderSetupDoctor(data,cfg,vmStatus);renderDiagnosticLog();}catch(e){setText("doctorScoreLabel","Doctor failed");setText("doctorScoreDetail",betterError(e));setText("diagnosticLog",betterError(e));}}
 function renderDiagnosticLog(){const key=getValue("diagnosticLogSelect")||"suite";const text=diagnosticsData?.logs?.[key]||"No log data loaded.";setText("diagnosticLog",text);}
+function doctorClass(kind){return ["ok","warn","bad","info"].includes(kind)?kind:"info";}
+function doctorStatus(kind){if(kind==="ok")return"PASS";if(kind==="bad")return"FIX";if(kind==="warn")return"CHECK";return"INFO";}
+function doctorCheckHtml(kind,title,detail){const cls=doctorClass(kind);return '<div class="doctor-check '+cls+'"><span class="doctor-dot"></span><div><strong>'+esc(title)+'</strong><div class="subtle">'+esc(detail)+'</div></div><span class="doctor-status">'+doctorStatus(cls)+'</span></div>';}
+function doctorIssueHtml(issue){const cls=doctorClass(issue.kind);const found=issue.found?'<div class="subtle mt">Found: <span class="doctor-path">'+esc(issue.found)+'</span></div>':"";const cause=issue.cause?'<div class="subtle mt">'+esc(issue.cause)+'</div>':"";const fix=issue.fix?'<div class="doctor-fix">'+esc(issue.fix)+'</div>':"";const actions=(issue.actions||[]).length?'<div class="doctor-actions">'+issue.actions.map(action=>'<button type="button" onclick="'+esc(action.onclick)+'">'+esc(action.label)+'</button>').join("")+'</div>':"";return '<div class="doctor-issue '+cls+'"><div class="doctor-issue-head"><span class="doctor-dot"></span><div><strong>'+esc(issue.title)+'</strong><div class="subtle">'+esc(issue.summary||"")+'</div>'+found+cause+'</div></div>'+fix+actions+'</div>';}
+function localHostIssue(host){const value=String(host||"").trim();return value&&value!=="127.0.0.1"&&value.toLowerCase()!=="localhost";}
+function renderSetupDoctor(data={},cfg={},vmStatus={}){const vm=vmStatus?.vm||{};const dbOk=Boolean(data.database?.ok);const receiverOk=Boolean(data.receiver?.ok);const apiOk=data.api?.status==="Online"||data.ok===true;const serverOk=Boolean(data.server?.ok);const installStatus=cfg.serverInstallPathStatus||{};const awakeningStatus=cfg.awakeningServerPathStatus||{};const vmAccessBlocked=vm.errorCode==="access_denied"||/access denied|administrator|admin required/i.test(String(vm.error||"")+" "+String(vmStatus?.error||""));const checks=[{kind:dbOk?"ok":"bad",title:"Database connection",detail:dbOk?(data.database?.message||"PostgreSQL is reachable."):(data.database?.error||data.database?.message||"Database test failed.")},{kind:receiverOk?"ok":"warn",title:"Receiver service",detail:receiverOk?(data.receiver?.message||"Receiver health endpoint is reachable."):(data.receiver?.error||data.receiver?.message||"Receiver is offline or blocked.")},{kind:apiOk?"ok":"bad",title:"Suite API",detail:apiOk?"Local Suite API is online.":(data.error||"Suite API check failed.")},{kind:serverOk?"ok":"warn",title:"Server connection",detail:serverOk?(data.server?.message||"Server endpoint responded."):(data.server?.error||data.server?.message||"Server test needs attention.")},{kind:installStatus.valid?"ok":"warn",title:"DUNE_SERVER_INSTALL_PATH",detail:installStatus.valid?("Found "+(installStatus.path||cfg.serverInstallPath||"configured folder")):"Open Steam, browse local files, then copy that folder path into Setup."},{kind:awakeningStatus.valid?"ok":"warn",title:"Awakening server path",detail:awakeningStatus.valid?("Found "+(awakeningStatus.path||cfg.awakeningServerPath||"configured folder")):"Set the server setup folder path in Setup."},{kind:vmAccessBlocked?"bad":(vm.state||vm.status?"ok":"info"),title:"Hyper-V access",detail:vmAccessBlocked?"Suite backend cannot read Hyper-V even though Windows may look elevated. Restart the Suite after closing old non-admin processes.":(vm.state||vm.status||"VM check returned no state.")}];const issues=[];if(!dbOk)issues.push({kind:"bad",title:"Database is not reachable",summary:data.database?.message||"The Suite cannot complete database-backed features.",cause:data.database?.error||"Check the database tunnel, credentials, and local Postgres port.",fix:"For local Hyper-V setup, keep Database Host at 127.0.0.1 unless you intentionally configured a remote database.",actions:[{label:"Open Setup Wizard",onclick:"openSetupWizard()"},{label:"Test Database",onclick:"runConnectionTest('database','diagTestDb')"}]});if(localHostIssue(cfg.databaseHost))issues.push({kind:"warn",title:"Database host differs from local default",summary:"Most local Dune Suite installs should leave Database Host as 127.0.0.1.",found:cfg.databaseHost,cause:"Changing this is only expected for advanced remote database layouts.",fix:"Open Setup Wizard or Settings and set Database Host back to 127.0.0.1 for the normal local VM setup.",actions:[{label:"Open Setup Wizard",onclick:"openSetupWizard()"}]});if(!receiverOk)issues.push({kind:"warn",title:"Receiver is offline",summary:data.receiver?.message||"Live Give and receiver-backed actions may be unavailable.",cause:data.receiver?.error||"The receiver may not be running, may have the wrong host/port, or may be blocked by Windows firewall.",fix:"For local setup, keep Receiver Host at 127.0.0.1 and restart the receiver from this page.",actions:[{label:"Restart Receiver",onclick:"receiverAction('restart')"},{label:"Test Receiver",onclick:"runConnectionTest('receiver','diagTestReceiver')"}]});if(localHostIssue(cfg.receiverHost))issues.push({kind:"warn",title:"Receiver host differs from local default",summary:"Most installs should leave Receiver Host as 127.0.0.1.",found:cfg.receiverHost,cause:"Using the VM IP here can make the local receiver health check fail.",fix:"Open Setup Wizard or Settings and set Receiver Host back to 127.0.0.1 unless you are intentionally hosting the receiver elsewhere.",actions:[{label:"Open Setup Wizard",onclick:"openSetupWizard()"}]});if(!installStatus.valid||!awakeningStatus.valid)issues.push({kind:"warn",title:"Server setup folder needs a valid path",summary:"DUNE_SERVER_INSTALL_PATH must point to the Dune server local files folder.",found:cfg.serverInstallPath||"Not configured",cause:"If this path is empty or points at the wrong folder, server tools and .env generation can miss files.",fix:"In Steam, right-click the Dune server tool, choose Manage, Browse local files, then copy the folder path into Setup Wizard.",actions:[{label:"Open Setup Wizard",onclick:"openSetupWizard()"}]});if(vmAccessBlocked)issues.push({kind:"bad",title:"Hyper-V still reports access denied",summary:"The Suite is likely connected to an older backend process or the Windows account lacks Hyper-V rights.",cause:vm.error||vmStatus.error||"Hyper-V returned access denied.",fix:"Close all AlphaNine Dune Suite windows, end any old node/electron Suite process if needed, then start the Suite as Administrator. If it persists, add your Windows user to Hyper-V Administrators and sign out/in.",actions:[{label:"Refresh VM",onclick:"refreshVmStatus()"},{label:"Run Doctor",onclick:"refreshDiagnostics()"}]});if(!issues.length)issues.push({kind:"ok",title:"Setup looks ready",summary:"The core checks passed and the local defaults look sane.",fix:"Keep Database Host and Receiver Host at 127.0.0.1 for the normal local Hyper-V setup."});const bad=checks.filter(c=>c.kind==="bad").length+issues.filter(i=>i.kind==="bad").length;const warn=checks.filter(c=>c.kind==="warn").length+issues.filter(i=>i.kind==="warn").length;const score=Math.max(0,Math.min(100,100-(bad*18)-(warn*8)));const label=score>=90?"Setup ready":score>=70?"Mostly ready":"Needs attention";setText("doctorScore",String(score));setText("doctorScoreLabel",label);setText("doctorScoreDetail",bad||warn?(bad+" fix item(s), "+warn+" check item(s)."):"All core setup checks passed.");const checkList=document.getElementById("doctorCheckList");if(checkList)checkList.innerHTML=checks.map(c=>doctorCheckHtml(c.kind,c.title,c.detail)).join("");const issueList=document.getElementById("doctorIssueList");if(issueList)issueList.innerHTML=issues.map(doctorIssueHtml).join("");}
 const UI_SOUND_DEFAULTS={enabled:true,volume:100};
 let uiSoundPrefs={...UI_SOUND_DEFAULTS},uiSoundContext=null,lastHoverSound=0,uiSoundSaveTimer=null;
 function clampSoundVolume(value){return Math.max(0,Math.min(100,Number(value)||0));}
@@ -14768,6 +14866,7 @@ function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();
 renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
+if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{}));
 </script>
 </body>
 </html>`;
@@ -14777,6 +14876,14 @@ async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === "/" || url.pathname === "/index.html") {
     send(res, 200, "text/html", appPage());
+    return;
+  }
+  if (url.pathname === "/manifest.webmanifest") {
+    if (!serveStatic(res, __dirname, "manifest.webmanifest")) send(res, 404, "text/plain", "Not found");
+    return;
+  }
+  if (url.pathname === "/service-worker.js") {
+    if (!serveStatic(res, __dirname, "service-worker.js")) send(res, 404, "text/plain", "Not found");
     return;
   }
   if (url.pathname === "/assets/ui-overrides.css") {

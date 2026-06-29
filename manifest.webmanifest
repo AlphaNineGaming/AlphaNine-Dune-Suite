@@ -1,0 +1,48 @@
+{
+  "name": "AlphaNine Dune Suite",
+  "short_name": "Dune Suite",
+  "description": "Mobile control surface for AlphaNine Dune Suite server operations.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "browser"],
+  "orientation": "any",
+  "background_color": "#050604",
+  "theme_color": "#c98224",
+  "categories": ["utilities", "productivity"],
+  "icons": [
+    {
+      "src": "/assets/mobile-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/assets/alphanine-logo.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Live Map",
+      "short_name": "Map",
+      "url": "/#live-map",
+      "icons": [{ "src": "/assets/mobile-icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+    },
+    {
+      "name": "Give Item",
+      "short_name": "Give",
+      "url": "/#give",
+      "icons": [{ "src": "/assets/mobile-icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+    },
+    {
+      "name": "Gear Codex",
+      "short_name": "Codex",
+      "url": "/#codex",
+      "icons": [{ "src": "/assets/mobile-icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+    }
+  ]
+}

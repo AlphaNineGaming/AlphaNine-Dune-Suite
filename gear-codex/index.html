@@ -50,7 +50,7 @@
       border: 2px solid #070806;
     }
     *::-webkit-scrollbar-thumb:hover { background: rgba(240, 201, 106, .72); }
-    button, input, select, textarea { font: inherit; }
+    button, input, select, textarea { font: inherit; min-width: 0; }
     .wrap { width: min(1380px, calc(100% - 28px)); margin: 0 auto; }
     header {
       padding: 14px 0;
@@ -92,6 +92,8 @@
       text-transform: uppercase;
       letter-spacing: .06em;
       font-weight: 800;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
     .btn:hover {
       border-color: var(--line-strong);
@@ -329,6 +331,7 @@
       .side-body { grid-template-columns: 1fr 1fr; }
     }
     @media (max-width: 780px) {
+      body { min-width: 0; }
       header { position: static; }
       .top, .toolbar, .custom-form, .layout { grid-template-columns: 1fr; }
       .actions { justify-content: flex-start; }
@@ -337,6 +340,29 @@
       .detail-top { grid-template-columns: 1fr; }
       .detail-identity { justify-items: start; text-align: left; }
       .item-art { width: min(100%, 220px); }
+    }
+    @media (max-width: 520px) {
+      .wrap { width: min(1380px, calc(100% - 18px)); }
+      header { padding: 10px 0; }
+      main { padding: 10px 0 24px; }
+      .top { gap: 12px; }
+      .actions { width: 100%; }
+      .actions .btn { flex: 1 1 128px; }
+      .toolbar,
+      .custom-form { gap: 8px; margin-bottom: 10px; }
+      .panel-head { align-items: flex-start; flex-direction: column; }
+      .list { height: 300px; min-height: 300px; }
+      .item { grid-template-columns: 42px minmax(0, 1fr); padding: 11px; }
+      .item-thumb { width: 42px; }
+      .item-title { align-items: flex-start; flex-direction: column; gap: 3px; }
+      .details { padding: 14px; min-height: 0; }
+      .stat { min-height: 0; }
+      .mini { align-items: flex-start; flex-direction: column; }
+      .mini button { width: 100%; }
+      .field,
+      textarea,
+      select { min-height: 44px; width: 100%; }
+      .toast { left: 9px; right: 9px; bottom: 9px; }
     }
   </style>
 </head>

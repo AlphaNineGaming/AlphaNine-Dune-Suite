@@ -137,6 +137,77 @@ def bool_int(value):
     return "1" if bool(value) else "0"
 
 
+def landsraad_data(profile):
+    landsraad_enabled = bool(setting(profile, "landsraad", "isLandsraadEnabled", True))
+    player_voting = bool(setting(profile, "landsraad", "isPlayerVotingEnabled", True))
+    territory_control = bool(setting(profile, "landsraad", "isTerritoryControlEnabled", True))
+    term_retention = max(0, int(setting(profile, "landsraad", "numberOfWeeksTermRetention", 4)))
+    decrees_to_nominate = max(0, int(setting(profile, "landsraad", "numberOfDecreesToNominate", 3)))
+    highscore_guilds = max(0, int(setting(profile, "landsraad", "numberOfGuildsInHighscoreList", 5)))
+    voting_period = max(0, int(setting(profile, "landsraad", "votingPeriodDurationInSeconds", 118500)))
+    cycle_duration = max(0, int(setting(profile, "landsraad", "cycleDurationInSeconds", 604800)))
+    suspended_period = max(0, int(setting(profile, "landsraad", "suspendedPeriodDurationInSeconds", 300)))
+    first_task_reveal_delay = max(0, float(setting(profile, "landsraad", "firstTaskRevealDelayFromCompetitionStartInSeconds", 0)))
+    revealed_task_minute_difference = max(0, int(setting(profile, "landsraad", "revealedTaskTimestampMinuteDifference", 1)))
+    task_progress_frequency = max(0, float(setting(profile, "landsraad", "taskProgressUpdateFrequency", 15)))
+    task_daily_reveal_frequency = max(0, float(setting(profile, "landsraad", "taskDailyRevealFrequency", 25)))
+    contracts_per_voting_block = max(0, int(setting(profile, "landsraad", "contractsPerVotingBlock", 3)))
+    contracts_repeat_cooldown = max(0, int(setting(profile, "landsraad", "contractsRepeatCooldownSeconds", 57600)))
+    contracts_max_active = max(0, int(setting(profile, "landsraad", "contractsMaxActiveAmount", 3)))
+    contracts_abandon_cooldown = max(0, int(setting(profile, "landsraad", "contractsAbandonCooldownSeconds", 3600)))
+    contracts_daily_bonus = max(0, int(setting(profile, "landsraad", "contractsDailyBonusPerDay", 5)))
+    contracts_daily_bonus_max = max(0, int(setting(profile, "landsraad", "contractsDailyBonusMax", 35)))
+    contracts_daily_bonus_reference = max(0, int(setting(profile, "landsraad", "contractsDailyBonusReferenceTimestamp", 1760572800)))
+    contracts_daily_bonus_cycle = max(0, int(setting(profile, "landsraad", "contractsDailyBonusRefreshCycleLength", 86400)))
+    contract_reward_notice = max(0, float(setting(profile, "landsraad", "contractsTimeToShowRewardInteractiveNotification", 30)))
+    contract_error_notice = max(0, float(setting(profile, "landsraad", "contractsTimeToShowErrorNotification", 70)))
+    pending_claim_tutorial = max(0, int(setting(profile, "landsraad", "contractsTimeToShowPendingClaimRewardTutorial", 300)))
+    task_goal_amount = max(0, int(setting(profile, "landsraad", "taskGoalAmount", 70000)))
+    control_points_per_cycle = max(0, int(setting(profile, "landsraad", "controlPointsPerCycle", 2)))
+
+    data = (
+        f"m_NumberOfWeeksTermRetention={term_retention},"
+        f"m_NumberOfDecreesToNominate={decrees_to_nominate},"
+        f"m_NumberOfGuildsInHighscoreList={highscore_guilds},"
+        'm_TermStartedMessage=(Name="LandsraadTermStarted"),'
+        'm_VotingStartedMessage=(Name="LandsraadVotingStarted"),'
+        'm_TaskProgressedMessage=(Name="LandsraadProgressNotification"),'
+        'm_DecreeActivatedMessage=(Name="LandsraadDecreeActivated"),'
+        f"m_bIsPlayerVotingEnabled={bool_text(player_voting)},"
+        f"m_bIsTerritoryControlEnabled={bool_text(territory_control)},"
+        'm_BoardLayouts=(/Script/DuneSandbox.BoardLayoutDataAsset\'"/Game/Dune/Systems/Landsraad/BoardLayouts/DefaultLandsraadBoardLayout.DefaultLandsraadBoardLayout"\'),'
+        f"m_LandsraadVotingPeriodDurationInSec={voting_period},"
+        f"m_LandsraadCycleDurationInSeconds={cycle_duration},"
+        f"m_LandsraadSuspendedPeriodDurationInSeconds={suspended_period},"
+        f"m_FirstTaskRevealDelayFromCompetitionStartInSeconds={first_task_reveal_delay:.6f},"
+        f"m_LandsraadRevealedTaskTimestampMinuteDifference={revealed_task_minute_difference},"
+        f"m_LandsraadTaskProgressUpdateFrequency={task_progress_frequency:.6f},"
+        f"m_LandsraadTaskDailyRevealFrequency={task_daily_reveal_frequency:.6f},"
+        'm_LandsraadProgressFactionBalanceCurve=/Script/Engine.CurveFloat\'"/Game/Dune/Systems/Landsraad/Curve_LandsraadProgressFactionBalanceCurve.Curve_LandsraadProgressFactionBalanceCurve"\','
+        f"m_LandsraadContractsPerVotingBlock={contracts_per_voting_block},"
+        f"m_LandsraadContractsRepeatCooldownSeconds={contracts_repeat_cooldown},"
+        f"m_LandsraadContractsMaxActiveAmount={contracts_max_active},"
+        f"m_LandsraadContractsAbandonCooldownSeconds={contracts_abandon_cooldown},"
+        f"m_LandsraadContractsDailyBonusPerDay={contracts_daily_bonus},"
+        f"m_LandsraadContractsDailyBonusMax={contracts_daily_bonus_max},"
+        f"m_LandsraadContractsDailyBonusReferenceTimestamp={contracts_daily_bonus_reference},"
+        f"m_LandsraadContractsDailyBonusRefreshCycleLength={contracts_daily_bonus_cycle},"
+        f"m_LandsraadContractsTimeToShowRewardInteractiveNotification={contract_reward_notice:.6f},"
+        f"m_LandsraadContractsTimeToShowErrorNotification={contract_error_notice:.6f},"
+        f"m_LandsraadContractsTimeToShowPendingClaimRewardTutorial={pending_claim_tutorial},"
+        'm_LandsraadTaskRewardsData="/Game/Dune/Systems/Landsraad/DA_TaskRewardsDataAsset.DA_TaskRewardsDataAsset",'
+        'm_LandsraadHouseSelectContractDialogContentWidget="/Game/Dune/GUI/Widgets/Menus/Gameplay/PlayerMenu/Landsraad/W_LandsraadHouseSelectContractDialog.W_LandsraadHouseSelectContractDialog_C",'
+        'm_LandsraadContractReportDialogContentWidget="/Game/Dune/GUI/Widgets/Menus/Gameplay/PlayerMenu/Landsraad/W_LandsraadContractReportDialog.W_LandsraadContractReportDialog_C",'
+        'm_LandsraadClaimHouseRewardDialogWidget="/Game/Dune/GUI/Widgets/Menus/Gameplay/PlayerMenu/Landsraad/W_LandsraadHouseRewardClaimDialog.W_LandsraadHouseRewardClaimDialog_C",'
+        f"m_TaskGoalAmount={task_goal_amount},"
+        f"m_ControlPointsPerCycle={control_points_per_cycle},"
+        'm_LandsraadContractsUnlockGameplayTag=(TagName="Journey.LandsraadContractsUnlocked"),'
+        'm_LandsraadContractsNewMarkerGameplayTags=(GameplayTags=((TagName="DialogueFlags.Factions.LandsraadOnboardingActive"))),'
+        'm_ControlPointAreaMaterial="/Game/Dune/Systems/Landsraad/Materials/M_LandsRaadControlPointCapsule.M_LandsRaadControlPointCapsule"'
+    )
+    return landsraad_enabled, data
+
+
 def build_ini(profile):
     pvp_mode = setting(profile, "pvp", "pvpMode", "frontier_zones")
     force_pvp = pvp_mode == "always_on"
@@ -191,6 +262,7 @@ def build_ini(profile):
     max_claims = int(setting(profile, "clans", "baseClaimLimit", 6))
     build_ext = int(setting(profile, "clans", "buildHeightLimit", 4))
     restriction_limits = not bool(setting(profile, "clans", "publicBuildDamage", False))
+    landsraad_enabled, landsraad_config_data = landsraad_data(profile)
 
     user_game = f"""; Settings in these config files will be applied to every server in the battlegroup
 ; Generated by Dune Awakening Manager.
@@ -265,6 +337,11 @@ m_VehicleQuicksandDamage={vehicle_quicksand_damage:.1f}
 ; Player starting inventory defaults from server UserGame.ini.
 PlayerInventoryStartingSize={inventory_slots}
 PlayerInventoryStartingVolumeCapacity={inventory_volume:.1f}
+
+[/Script/DuneSandbox.LandsraadSettings]
+; Landsraad settings are emitted as the Data struct expected by DuneSandbox.LandsraadSettings.
+bIsLandsraadEnabled={bool_text(landsraad_enabled)}
+Data=({landsraad_config_data})
 """
 
     display_name = profile.get("profileName", "Dune Awakening Server").replace('"', "'").replace("|", "-")

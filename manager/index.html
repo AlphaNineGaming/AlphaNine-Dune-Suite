@@ -662,7 +662,7 @@
       background: var(--manager-chip-bg);
       color: var(--accent-bright);
       min-height: 34px;
-      padding: 0 10px;
+      padding: 0 8px;
       cursor: pointer;
       text-transform: uppercase;
       letter-spacing: 0.05em;
@@ -702,8 +702,8 @@
 
     .setting {
       display: grid;
-      grid-template-columns: minmax(150px, 1fr) minmax(160px, 240px) 78px 82px;
-      gap: 18px;
+      grid-template-columns: minmax(142px, 1fr) minmax(150px, 220px) minmax(96px, 112px) minmax(96px, 112px);
+      gap: 12px;
       align-items: center;
       padding: 13px 0;
       border-top: 1px solid var(--line-soft);
@@ -717,8 +717,8 @@
 
     .setting-head {
       display: grid;
-      grid-template-columns: minmax(150px, 1fr) minmax(160px, 240px) 78px 82px;
-      gap: 18px;
+      grid-template-columns: minmax(142px, 1fr) minmax(150px, 220px) minmax(96px, 112px) minmax(96px, 112px);
+      gap: 12px;
       color: var(--muted);
       font-size: 11px;
       text-transform: uppercase;
@@ -736,13 +736,18 @@
       color: var(--text);
       border: 1px solid var(--line);
       background: var(--manager-control-soft);
-      padding: 0 10px;
+      padding: 0 8px;
     }
 
     .value {
       display: flex;
       align-items: center;
       justify-content: center;
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      font-size: clamp(12px, 1vw, 18px);
+      letter-spacing: 0;
       font-variant-numeric: tabular-nums;
       color: var(--accent);
       font-weight: 700;
@@ -947,7 +952,7 @@
       color: var(--server-profile-text);
       border: 1px solid var(--server-profile-input-line);
       background: var(--server-profile-input-bg);
-      padding: 0 10px;
+      padding: 0 8px;
     }
 
     .setup-input {
@@ -1404,6 +1409,39 @@
           { key: "publicBuildDamage", label: "Public build damage", help: "Allow world structures to take non-raid damage.", type: "toggle", value: false },
           { key: "buildingDecayRateMultiplier", label: "Building decay rate", help: "Writes UserGame.ini m_BuildingDecayRateMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
           { key: "enableBuildingStability", label: "Building stability", help: "Writes UserGame.ini bEnableBuildingStability.", type: "toggle", value: true }
+        ]
+      },
+      {
+        id: "landsraad",
+        title: "Landsraad Settings",
+        description: "Configure Landsraad cycles, voting, contracts, task progress, and control points.",
+        settings: [
+          { key: "isLandsraadEnabled", label: "Landsraad enabled", help: "Writes UserGame.ini bIsLandsraadEnabled under LandsraadSettings.", type: "toggle", value: true },
+          { key: "isPlayerVotingEnabled", label: "Player voting", help: "Writes UserGame.ini Data.m_bIsPlayerVotingEnabled.", type: "toggle", value: true },
+          { key: "isTerritoryControlEnabled", label: "Territory control", help: "Writes UserGame.ini Data.m_bIsTerritoryControlEnabled.", type: "toggle", value: true },
+          { key: "numberOfWeeksTermRetention", label: "Term retention", help: "Writes UserGame.ini Data.m_NumberOfWeeksTermRetention.", type: "range", min: 0, max: 52, step: 1, value: 4, unit: "w" },
+          { key: "numberOfDecreesToNominate", label: "Decrees to nominate", help: "Writes UserGame.ini Data.m_NumberOfDecreesToNominate.", type: "range", min: 0, max: 20, step: 1, value: 3, unit: "" },
+          { key: "numberOfGuildsInHighscoreList", label: "Highscore guilds", help: "Writes UserGame.ini Data.m_NumberOfGuildsInHighscoreList.", type: "range", min: 0, max: 50, step: 1, value: 5, unit: "" },
+          { key: "votingPeriodDurationInSeconds", label: "Voting period", help: "Writes UserGame.ini Data.m_LandsraadVotingPeriodDurationInSec.", type: "range", min: 0, max: 604800, step: 300, value: 118500, unit: "s" },
+          { key: "cycleDurationInSeconds", label: "Cycle duration", help: "Writes UserGame.ini Data.m_LandsraadCycleDurationInSeconds.", type: "range", min: 3600, max: 2592000, step: 3600, value: 604800, unit: "s" },
+          { key: "suspendedPeriodDurationInSeconds", label: "Suspended period", help: "Writes UserGame.ini Data.m_LandsraadSuspendedPeriodDurationInSeconds.", type: "range", min: 0, max: 86400, step: 60, value: 300, unit: "s" },
+          { key: "firstTaskRevealDelayFromCompetitionStartInSeconds", label: "First task reveal delay", help: "Writes UserGame.ini Data.m_FirstTaskRevealDelayFromCompetitionStartInSeconds.", type: "range", min: 0, max: 86400, step: 60, value: 0, unit: "s" },
+          { key: "revealedTaskTimestampMinuteDifference", label: "Reveal timestamp offset", help: "Writes UserGame.ini Data.m_LandsraadRevealedTaskTimestampMinuteDifference.", type: "range", min: 0, max: 1440, step: 1, value: 1, unit: "m" },
+          { key: "taskProgressUpdateFrequency", label: "Task progress update", help: "Writes UserGame.ini Data.m_LandsraadTaskProgressUpdateFrequency.", type: "range", min: 0, max: 3600, step: 5, value: 15, unit: "s" },
+          { key: "taskDailyRevealFrequency", label: "Task reveal frequency", help: "Writes UserGame.ini Data.m_LandsraadTaskDailyRevealFrequency.", type: "range", min: 0, max: 86400, step: 5, value: 25, unit: "s" },
+          { key: "contractsPerVotingBlock", label: "Contracts per voting block", help: "Writes UserGame.ini Data.m_LandsraadContractsPerVotingBlock.", type: "range", min: 0, max: 20, step: 1, value: 3, unit: "" },
+          { key: "contractsRepeatCooldownSeconds", label: "Contract repeat cooldown", help: "Writes UserGame.ini Data.m_LandsraadContractsRepeatCooldownSeconds.", type: "range", min: 0, max: 604800, step: 300, value: 57600, unit: "s" },
+          { key: "contractsMaxActiveAmount", label: "Max active contracts", help: "Writes UserGame.ini Data.m_LandsraadContractsMaxActiveAmount.", type: "range", min: 0, max: 20, step: 1, value: 3, unit: "" },
+          { key: "contractsAbandonCooldownSeconds", label: "Abandon cooldown", help: "Writes UserGame.ini Data.m_LandsraadContractsAbandonCooldownSeconds.", type: "range", min: 0, max: 86400, step: 300, value: 3600, unit: "s" },
+          { key: "contractsDailyBonusPerDay", label: "Daily bonus per day", help: "Writes UserGame.ini Data.m_LandsraadContractsDailyBonusPerDay.", type: "range", min: 0, max: 100, step: 1, value: 5, unit: "" },
+          { key: "contractsDailyBonusMax", label: "Daily bonus max", help: "Writes UserGame.ini Data.m_LandsraadContractsDailyBonusMax.", type: "range", min: 0, max: 500, step: 1, value: 35, unit: "" },
+          { key: "contractsDailyBonusReferenceTimestamp", label: "Daily bonus reference", help: "Writes UserGame.ini Data.m_LandsraadContractsDailyBonusReferenceTimestamp as a Unix timestamp.", type: "range", min: 1700000000, max: 1900000000, step: 3600, value: 1760572800, unit: "" },
+          { key: "contractsDailyBonusRefreshCycleLength", label: "Daily bonus cycle", help: "Writes UserGame.ini Data.m_LandsraadContractsDailyBonusRefreshCycleLength.", type: "range", min: 0, max: 604800, step: 3600, value: 86400, unit: "s" },
+          { key: "contractsTimeToShowRewardInteractiveNotification", label: "Reward notice time", help: "Writes UserGame.ini Data.m_LandsraadContractsTimeToShowRewardInteractiveNotification.", type: "range", min: 0, max: 600, step: 5, value: 30, unit: "s" },
+          { key: "contractsTimeToShowErrorNotification", label: "Error notice time", help: "Writes UserGame.ini Data.m_LandsraadContractsTimeToShowErrorNotification.", type: "range", min: 0, max: 600, step: 5, value: 70, unit: "s" },
+          { key: "contractsTimeToShowPendingClaimRewardTutorial", label: "Pending claim tutorial", help: "Writes UserGame.ini Data.m_LandsraadContractsTimeToShowPendingClaimRewardTutorial.", type: "range", min: 0, max: 3600, step: 60, value: 300, unit: "s" },
+          { key: "taskGoalAmount", label: "Task goal amount", help: "Writes UserGame.ini Data.m_TaskGoalAmount.", type: "range", min: 0, max: 1000000, step: 1000, value: 70000, unit: "" },
+          { key: "controlPointsPerCycle", label: "Control points per cycle", help: "Writes UserGame.ini Data.m_ControlPointsPerCycle.", type: "range", min: 0, max: 20, step: 1, value: 2, unit: "" }
         ]
       },
       {

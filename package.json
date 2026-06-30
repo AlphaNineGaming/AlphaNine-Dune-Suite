@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -23,7 +23,7 @@
   "build": {
     "appId": "com.alphanine.dunesuite",
     "productName": "AlphaNine Dune Suite",
-    "artifactName": "AlphaNine Dune Suite ${version} Beta.${ext}",
+    "artifactName": "AlphaNine Dune Suite Setup ${version}.${ext}",
     "asar": true,
     "directories": {
       "output": "installer-output"

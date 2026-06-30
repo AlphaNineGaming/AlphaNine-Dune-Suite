@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.5.5-beta";
+const APP_VERSION = "0.5.6-beta";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -1597,10 +1597,11 @@ function readRecentLog(filePath, maxBytes = 90000) {
 }
 
 async function diagnosticsSnapshot() {
-  const [database, receiver, server] = await Promise.all([
+  const [database, receiver, server, vmIpCheck] = await Promise.all([
     connectionTest("database"),
     connectionTest("receiver"),
-    connectionTest("server")
+    connectionTest("server"),
+    vmIpMismatchStatus()
   ]);
   const logDir = APPDATA_DIR ? path.join(APPDATA_DIR, "logs") : __dirname;
   return {
@@ -1616,6 +1617,7 @@ async function diagnosticsSnapshot() {
     database,
     receiver,
     server,
+    vmIpCheck,
     api: { status: "Online", url: `http://127.0.0.1:${PORT}` },
     logs: {
       suite: readRecentLog(path.join(logDir, "suite.log")),
@@ -2690,6 +2692,44 @@ function serverControlConfigured() {
       serverInstallPathSet: Boolean(root),
       serverInstallPathExists: rootExists
     }
+  };
+}
+
+function normalizeIpv4(value) {
+  const text = String(value || "").trim();
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(text) ? text : "";
+}
+
+async function vmIpMismatchStatus() {
+  const cfg = loadConfig();
+  const serverType = String(cfg.serverType || "").trim().toLowerCase();
+  const localHyperV = !serverType || ["local-hyperv", "local-windows", "hyperv", "hyper-v", "local"].includes(serverType);
+  const savedFields = {
+    vmIp: normalizeIpv4(cfg.vmIp),
+    sshHost: normalizeIpv4(cfg.sshHost),
+    receiverSshHost: normalizeIpv4(cfg.receiverSshHost)
+  };
+  const savedIps = [...new Set(Object.values(savedFields).filter(Boolean))];
+  const vm = await vmInfo().catch((error) => ({ ok: false, error: error.message }));
+  const detectedIp = normalizeIpv4(vm?.ip);
+  const changedFields = Object.entries(savedFields)
+    .filter(([, value]) => value && detectedIp && value !== detectedIp)
+    .map(([field, value]) => ({ field, saved: value, detected: detectedIp }));
+  const changed = Boolean(localHyperV && detectedIp && changedFields.length);
+  return {
+    ok: true,
+    changed,
+    serverType: cfg.serverType || "local-hyperv",
+    localHyperV,
+    vmName: cfg.vmName || VM_NAME || "",
+    detectedIp,
+    savedIps,
+    savedFields,
+    changedFields,
+    vm,
+    message: changed
+      ? `Detected VM IP ${detectedIp}, but Suite settings still reference ${savedIps.join(", ")}. Review Setup before using database or receiver tools.`
+      : "Saved VM IP settings match the detected Hyper-V address."
   };
 }
 
@@ -14542,6 +14582,8 @@ function openAboutDialog(){document.getElementById("aboutDialog")?.classList.rem
 function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.add("hidden");playUiSound("click");}
 function openSupportDiscord(){window.open("https://discord.gg/tuUv3hYTv","_blank","noopener");playUiSound("click");}
 function openSupportKofi(){window.open("https://ko-fi.com/E1W220NMPA","_blank","noopener");playUiSound("click");}
+function applyDetectedVmIpToSetup(ip){if(!ip)return;setValue("setupVmIp",ip);setValue("setupSshHost",ip);setValue("setupReceiverSshHost",ip);setValue("settingsVmIp",ip);setValue("settingsSshHost",ip);setValue("settingsReceiverSshHost",ip);syncConnectionHostLocks("setup");syncConnectionHostLocks("settings");invalidateSetupDatabaseTest();}
+async function checkVmIpChangeOnStartup(){try{const data=await getJson("/api/setup/vm-ip-check",{timeoutMs:12000});if(!data?.changed||!data.detectedIp)return;const key="vm-ip-change:"+String(data.vmName||"")+":"+data.detectedIp+":"+String((data.savedIps||[]).join(","));if(sessionStorage.getItem(key)==="shown")return;sessionStorage.setItem(key,"shown");const message="Hyper-V reports a different VM IP than the Suite has saved.\\n\\nSaved: "+(data.savedIps||[]).join(", ")+"\\nDetected: "+data.detectedIp+"\\n\\nOpen Setup Wizard, review the connection settings, then test and save setup again.";const open=await appConfirm("VM IP changed",message,"Open Setup","Later");if(open){applyDetectedVmIpToSetup(data.detectedIp);openSetupWizard();}else{addActivity("warn","VM IP changed",data.message||("Detected "+data.detectedIp));}}catch(e){addActivity("warn","VM IP check skipped",betterError(e));}}
 async function initSetup(){try{const data=await getJson("/api/setup/status");const config=data.config||{};fillSetup(config);await loadSettings();if(!data.setupComplete)openSetupWizard();if(data.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(data.discovery,null,2);refreshReceiverStatus();}catch(e){addActivity("error","Setup status failed",e.message);}}
 async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.vmIp){setValue("setupVmIp",data.server.vmIp);setValue("setupSshHost",data.server.vmIp);setValue("setupReceiverSshHost",data.server.vmIp);}if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}syncConnectionHostLocks("setup");playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}
@@ -14863,7 +14905,7 @@ const giveAdminItemWithoutSentToast=giveAdminItem;
 giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");const notice=selectedAdminItem?giveItemSchematicNotice(selectedAdminItem):"";if(log&&notice&&text&&!text.includes(notice))log.textContent=text+"\\n\\nNote: "+notice;if(/Live Give (verified|published)/i.test(text))showToast(notice?"Research unlock sent":"Item sent","success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{}));
@@ -14965,6 +15007,11 @@ async function route(req, res) {
     const pathsValid = serverInstallPathStatus(current.serverInstallPath).valid
       && serverInstallPathStatus(current.awakeningServerPath).valid;
     await json(res, { ok: true, config: publicConfig(current), setupComplete: Boolean(current.setupComplete && pathsValid), discovery: await autoDiscovery() });
+    return;
+  }
+  if (url.pathname === "/api/setup/vm-ip-check" && req.method === "GET") {
+    try { await json(res, await vmIpMismatchStatus()); }
+    catch (error) { await json(res, { ok: false, changed: false, error: error.message }, 500); }
     return;
   }
   if (url.pathname === "/api/setup/save" && req.method === "POST") {

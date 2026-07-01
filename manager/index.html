@@ -1793,6 +1793,8 @@
         const profile = await response.json();
         const refreshed = flattenSettings(profile.settings);
         currentValues = { ...defaults, ...refreshed };
+        state = { ...defaults, ...refreshed };
+        profileName.value = profile.profileName || profileName.value;
         renderSettings();
         updateSummary();
         setServerStatus(profile.warning ? `Current values refreshed from local cache. ${profile.warning}` : "Current values refreshed.", profile.warning ? "warn" : "ok");

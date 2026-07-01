@@ -731,6 +731,13 @@
       accent-color: var(--accent);
     }
 
+    .range-control {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 104px;
+      gap: 8px;
+      align-items: center;
+    }
+
     .value, .select, .number {
       height: 38px;
       color: var(--text);
@@ -766,6 +773,13 @@
       content: "*";
       margin-left: 3px;
       color: var(--danger);
+    }
+
+    .number {
+      width: 100%;
+      min-width: 0;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
     }
 
     .unsupported-row {
@@ -1037,6 +1051,58 @@
 
     .server-status.ok { color: var(--ok); }
     .server-status.error { color: var(--danger); }
+    .server-status.warn { color: var(--warning); }
+
+    .weekly-patch {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--server-profile-input-line);
+    }
+
+    .weekly-patch-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .weekly-patch-title strong,
+    .weekly-patch label {
+      color: var(--server-profile-text);
+      font-weight: 750;
+    }
+
+    .weekly-patch-title small,
+    .weekly-patch label span {
+      display: block;
+      color: var(--server-profile-muted);
+      font-size: 11px;
+      line-height: 1.35;
+      margin-top: 3px;
+    }
+
+    .weekly-patch-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .weekly-patch-log {
+      min-height: 96px;
+      max-height: 220px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border: 1px solid var(--server-profile-input-line);
+      background: var(--server-profile-code-bg);
+      color: var(--server-profile-text);
+      padding: 10px;
+      font-family: "Cascadia Code", Consolas, monospace;
+      font-size: 11.5px;
+      line-height: 1.45;
+    }
 
     .score {
       display: grid;
@@ -1179,6 +1245,7 @@
       .server-action-row { grid-template-columns: 1fr; }
       .setup-grid { grid-template-columns: 1fr; }
       .setup-actions { grid-template-columns: 1fr; }
+      .weekly-patch-grid { grid-template-columns: 1fr; }
       .setting { padding: 15px 0; }
       .setting input[type="range"] { min-height: 34px; }
       .value,
@@ -1286,6 +1353,31 @@
             </button>
           </div>
           <div class="server-status" id="serverStatus">Ready to apply real self-hosted UserSettings. Applying restarts the battlegroup.</div>
+        </div>
+        <div class="server-panel weekly-patch">
+          <div class="weekly-patch-title">
+            <div>
+              <strong>Landsraad Weekly Rewards Patch</strong>
+              <small>Live DB patch for current weekly Landsraad task goal rows. Requires Progression Editing enabled in Suite Settings.</small>
+            </div>
+            <span class="badge">Live DB</span>
+          </div>
+          <div class="weekly-patch-grid">
+            <label>Win / payout points<input class="setup-input" id="landsraadRewardGoal" type="number" min="0" max="1000000" step="1" value="7000" aria-label="Landsraad weekly reward target points"><span>Sets current dune.landsraad_tasks goal_amount rows.</span></label>
+            <label>Confirmation<input class="setup-input" id="landsraadConfirmText" placeholder="APPLY LANDSRAAD" aria-label="Landsraad patch confirmation text"><span>Type APPLY LANDSRAAD after preview.</span></label>
+          </div>
+          <div class="server-row setup-actions">
+            <button class="btn" id="landsraadPreviewBtn" title="Preview Landsraad weekly patch and create backup">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16M4 12h16M4 19h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+              Preview + Backup
+            </button>
+            <button class="btn set-server" id="landsraadApplyBtn" title="Apply Landsraad weekly patch">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M5 12h9m0 0-4-4m4 4-4 4M16 5h3v14h-3" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Apply Patch
+            </button>
+          </div>
+          <div class="server-status" id="landsraadPatchStatus">No Landsraad patch preview generated.</div>
+          <div class="weekly-patch-log" id="landsraadPatchLog">Preview the current weekly rows before applying.</div>
         </div>
         <div class="summary-grid">
           <div>
@@ -1496,7 +1588,12 @@
     const setupVmIp = document.querySelector("#setupVmIp");
     const setupBattlegroup = document.querySelector("#setupBattlegroup");
     const setupSshKeyPath = document.querySelector("#setupSshKeyPath");
+    const landsraadRewardGoal = document.querySelector("#landsraadRewardGoal");
+    const landsraadConfirmText = document.querySelector("#landsraadConfirmText");
+    const landsraadPatchStatus = document.querySelector("#landsraadPatchStatus");
+    const landsraadPatchLog = document.querySelector("#landsraadPatchLog");
     const toast = document.querySelector("#toast");
+    let landsraadPatchPreview = null;
 
     function fmt(setting, value) {
       if (setting.type === "toggle") return value ? "On" : "Off";
@@ -1542,6 +1639,10 @@
       return `${localReceiverBase()}/manager-api${path}`;
     }
 
+    function suiteEndpoint(path) {
+      return `${localReceiverBase()}${path}`;
+    }
+
     function settingsEndpoint() {
       return endpointFor("/api/server/settings");
     }
@@ -1554,6 +1655,14 @@
       return endpointFor("/api/server/discover");
     }
 
+    function landsraadPreviewEndpoint() {
+      return suiteEndpoint("/api/landsraad/weekly-rewards/preview");
+    }
+
+    function landsraadApplyEndpoint() {
+      return suiteEndpoint("/api/landsraad/weekly-rewards/apply");
+    }
+
     function readableError(text, fallback = "Server request failed") {
       if (!text) return fallback;
       try {
@@ -1564,6 +1673,11 @@
       const messageMatch = text.match(/<p>Message:\s*([^<]+)<\/p>/i);
       if (messageMatch) return messageMatch[1].replace(/\.\.$/, ".");
       return text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim() || fallback;
+    }
+
+    function setLandsraadStatus(message, tone = "") {
+      landsraadPatchStatus.textContent = message;
+      landsraadPatchStatus.className = `server-status ${tone}`.trim();
     }
 
     function flattenSettings(settings) {
@@ -1613,7 +1727,7 @@
       const changed = JSON.stringify(value) !== JSON.stringify(current);
       let control = "";
       if (setting.type === "range") {
-        control = `<input type="range" min="${setting.min}" max="${setting.max}" step="${setting.step}" value="${value}" data-key="${setting.key}" aria-label="${setting.label}">`;
+        control = `<div class="range-control"><input type="range" min="${setting.min}" max="${setting.max}" step="${setting.step}" value="${value}" data-key="${setting.key}" data-control="range" aria-label="${setting.label} slider"><input class="number" type="number" min="${setting.min}" max="${setting.max}" step="${setting.step}" value="${value}" data-key="${setting.key}" data-control="number" aria-label="${setting.label} exact value"></div>`;
       } else if (setting.type === "toggle") {
         control = `<label class="switch"><input type="checkbox" data-key="${setting.key}" ${value ? "checked" : ""}><span class="track"></span><span>${value ? "Enabled" : "Disabled"}</span></label>`;
       } else {
@@ -1857,6 +1971,103 @@
       const setting = sections.flatMap(section => section.settings).find(item => item.key === key);
       const valueEl = document.querySelector(`[data-value="${key}"]`);
       if (valueEl) valueEl.textContent = fmt(setting, state[key]);
+      if (setting?.type === "range") {
+        document.querySelectorAll(`[data-key="${key}"]`).forEach(input => {
+          if (document.activeElement !== input) input.value = state[key];
+        });
+      }
+    }
+
+    function rangeValue(input, setting) {
+      if (input.value === "") return state[setting.key];
+      const numeric = Number(input.value);
+      if (!Number.isFinite(numeric)) return state[setting.key] ?? setting.value;
+      return Math.max(Number(setting.min), Math.min(Number(setting.max), numeric));
+    }
+
+    function inputValue(input, setting) {
+      if (setting.type === "toggle") return input.checked;
+      if (setting.type === "range") return rangeValue(input, setting);
+      return input.value;
+    }
+
+    async function previewLandsraadPatch() {
+      const targetGoalAmount = Number(landsraadRewardGoal.value);
+      if (!Number.isFinite(targetGoalAmount) || targetGoalAmount < 0) {
+        setLandsraadStatus("Enter a valid non-negative Landsraad point value.", "error");
+        return;
+      }
+      landsraadPatchPreview = null;
+      setLandsraadStatus("Generating Landsraad preview and backup...", "warn");
+      landsraadPatchLog.textContent = "Reading current dune.landsraad_tasks rows...";
+      try {
+        const response = await fetch(landsraadPreviewEndpoint(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targetGoalAmount })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.error || data.reason || `Server returned ${response.status}`);
+        landsraadPatchPreview = data;
+        const rows = data.oldValues?.rows || [];
+        const changed = data.newValues?.changedRowCount ?? 0;
+        setLandsraadStatus(`Preview ready. ${changed} of ${rows.length} rows will be set to ${data.newValues?.targetGoalAmount}.`, "ok");
+        landsraadPatchLog.textContent = [
+          "Backup created before any write:",
+          data.backupPath,
+          "",
+          "Current rows:",
+          JSON.stringify(rows, null, 2),
+          "",
+          "Operation:",
+          data.sqlPreview,
+          "",
+          "Type APPLY LANDSRAAD before applying."
+        ].join("\n");
+        showToast("Landsraad preview ready");
+      } catch (error) {
+        setLandsraadStatus(`Landsraad preview failed: ${error.message}`, "error");
+        landsraadPatchLog.textContent = error.message;
+        showToast("Landsraad preview failed");
+      }
+    }
+
+    async function applyLandsraadPatch() {
+      if (!landsraadPatchPreview) {
+        setLandsraadStatus("Generate Preview + Backup before applying.", "error");
+        return;
+      }
+      setLandsraadStatus("Applying Landsraad weekly patch...", "warn");
+      try {
+        const response = await fetch(landsraadApplyEndpoint(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ previewId: landsraadPatchPreview.previewId, confirmText: landsraadConfirmText.value })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.warning || data.error || `Server returned ${response.status}`);
+        const debug = data.debug || {};
+        setLandsraadStatus(`Landsraad patch applied. ${debug.changedRowCount ?? 0} rows changed; ${debug.totalRowCount ?? 0} rows verified.`, "ok");
+        landsraadPatchLog.textContent = [
+          "Patch applied and verified.",
+          "",
+          "Backup:",
+          data.backupPath,
+          "",
+          "Changed rows:",
+          JSON.stringify(debug.changedRows || [], null, 2),
+          "",
+          "Read-back rows:",
+          JSON.stringify(debug.readBackRows || [], null, 2)
+        ].join("\n");
+        landsraadPatchPreview = null;
+        landsraadConfirmText.value = "";
+        showToast("Landsraad patch applied");
+      } catch (error) {
+        setLandsraadStatus(`Landsraad apply failed: ${error.message}`, "error");
+        landsraadPatchLog.textContent = error.message;
+        showToast("Landsraad apply failed");
+      }
     }
 
     nav.addEventListener("click", event => {
@@ -1872,7 +2083,7 @@
       if (!input) return;
       const key = input.dataset.key;
       const setting = sections.flatMap(section => section.settings).find(item => item.key === key);
-      state[key] = setting.type === "toggle" ? input.checked : setting.type === "range" ? Number(input.value) : input.value;
+      state[key] = inputValue(input, setting);
       if (setting.type === "toggle") renderSettings();
       else updateValue(key);
       updateSummary();
@@ -1883,7 +2094,7 @@
       if (!input) return;
       const key = input.dataset.key;
       const setting = sections.flatMap(section => section.settings).find(item => item.key === key);
-      state[key] = setting.type === "toggle" ? input.checked : setting.type === "range" ? Number(input.value) : input.value;
+      state[key] = inputValue(input, setting);
       renderSettings();
       updateSummary();
     });
@@ -1930,6 +2141,8 @@
     document.querySelector("#refreshServerBtn").addEventListener("click", refreshServerSettings);
     document.querySelector("#saveSetupBtn").addEventListener("click", handleSaveSetup);
     document.querySelector("#detectBattlegroupBtn").addEventListener("click", detectBattlegroup);
+    document.querySelector("#landsraadPreviewBtn").addEventListener("click", previewLandsraadPatch);
+    document.querySelector("#landsraadApplyBtn").addEventListener("click", applyLandsraadPatch);
     document.querySelector("#importBtn").addEventListener("click", () => document.querySelector("#fileInput").click());
     document.querySelector("#fileInput").addEventListener("change", async event => {
       const file = event.target.files[0];

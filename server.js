@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.5.8-beta";
+const APP_VERSION = "0.5.9-beta";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -7085,6 +7085,8 @@ async function progressionTechKnowledgeScan(actorIds) {
 
 const progressionPreviews = new Map();
 const PROGRESSION_CONFIRM_TEXT = "APPLY PROGRESSION";
+const landsraadWeeklyPatchPreviews = new Map();
+const LANDSRAAD_WEEKLY_CONFIRM_TEXT = "APPLY LANDSRAAD";
 const CHARACTER_PROGRESSION_LIMITS = {
   TotalXPEarned: 999999999,
   TotalSkillPoints: 999,
@@ -7118,6 +7120,133 @@ function progressionBackupPath(playerId, action, id) {
   const safeAction = String(action || "progression").replace(/[^a-z0-9_-]/gi, "_");
   const safePlayer = String(playerId || "player").replace(/[^a-z0-9_-]/gi, "_");
   return path.join(PROGRESSION_BACKUP_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}-${safePlayer}-${safeAction}-${id}.json`);
+}
+
+async function landsraadWeeklyPatchInspect() {
+  const output = await dbQuery(`
+    select table_name, column_name
+    from information_schema.columns
+    where table_schema = 'dune'
+      and table_name = 'landsraad_tasks'
+      and column_name in ('id', 'goal_amount')
+    order by table_name, column_name;
+  `, 12000);
+  const columns = new Set(parseDbRows(output, ["table", "column"]).map((row) => row.column));
+  const supported = columns.has("id") && columns.has("goal_amount");
+  return {
+    ok: supported,
+    schema: "dune",
+    table: "landsraad_tasks",
+    columns: [...columns],
+    status: supported ? "detected" : "missing",
+    reason: supported ? "" : "dune.landsraad_tasks with id and goal_amount columns was not detected."
+  };
+}
+
+async function landsraadWeeklyPatchRows(limit = 500) {
+  const safeLimit = requireInteger(limit, "limit", 1, 1000);
+  const output = await dbQuery(`
+    select id::text, goal_amount::text
+    from dune.landsraad_tasks
+    order by id
+    limit ${safeLimit};
+  `, 15000);
+  return parseDbRows(output, ["id", "goal_amount"]);
+}
+
+async function landsraadWeeklyPatchPreview(payload) {
+  try {
+    const targetGoalAmount = progressionInteger(payload?.targetGoalAmount ?? 7000, "Target goal amount", 1000000);
+    const inspect = await landsraadWeeklyPatchInspect();
+    if (!inspect.ok) return { ok: false, status: "unsupported", inspect, error: inspect.reason };
+    const rows = await landsraadWeeklyPatchRows();
+    if (!rows.length) throw new Error("No rows were found in dune.landsraad_tasks.");
+    const previewId = crypto.randomBytes(16).toString("hex");
+    const oldValues = { rows };
+    const changedRows = rows.filter((row) => String(row.goal_amount) !== String(targetGoalAmount));
+    const newValues = {
+      targetGoalAmount,
+      rows: rows.map((row) => ({ id: row.id, goal_amount: targetGoalAmount })),
+      changedRowCount: changedRows.length,
+      totalRowCount: rows.length
+    };
+    const backupPath = progressionBackupPath("landsraad", "weekly_rewards", previewId);
+    fs.writeFileSync(backupPath, JSON.stringify({ createdAt: new Date().toISOString(), action: "landsraad_weekly_rewards", oldValues, newValues, source: "landsraad-weekly-preview", readOnlyBackup: true }, null, 2), "utf8");
+    const preview = {
+      ok: true,
+      status: "preview",
+      previewId,
+      action: "landsraad_weekly_rewards",
+      backupPath,
+      auditLogPath: PROGRESSION_AUDIT_LOG,
+      inspect,
+      oldValues,
+      newValues,
+      sqlPreview: `UPDATE dune.landsraad_tasks SET goal_amount = ${targetGoalAmount} WHERE goal_amount IS DISTINCT FROM ${targetGoalAmount};`,
+      warning: `This live database patch changes current weekly Landsraad task goal_amount rows. Type ${LANDSRAAD_WEEKLY_CONFIRM_TEXT} before applying.`
+    };
+    landsraadWeeklyPatchPreviews.set(previewId, { ...preview, createdAt: Date.now() });
+    progressionAudit("landsraad_weekly_preview_created", { oldValues, newValues, backupFilePath: backupPath });
+    return preview;
+  } catch (error) {
+    return { ok: false, status: "error", error: error.message, auditLogPath: PROGRESSION_AUDIT_LOG };
+  }
+}
+
+async function landsraadWeeklyPatchApply(payload) {
+  let preview = null;
+  try {
+    const configValue = loadConfig();
+    if (!configValue.progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+    const previewId = String(payload?.previewId || "").trim();
+    preview = landsraadWeeklyPatchPreviews.get(previewId);
+    if (!preview) throw new Error("Generate Preview + Backup first or refresh an expired preview.");
+    if (payload?.confirmText !== LANDSRAAD_WEEKLY_CONFIRM_TEXT) throw new Error(`Type ${LANDSRAAD_WEEKLY_CONFIRM_TEXT} before applying.`);
+    if (Date.now() - preview.createdAt > 1000 * 60 * 30) throw new Error("Preview expired. Generate a new preview.");
+    if (!fs.existsSync(preview.backupPath)) throw new Error("Matching backup file is missing.");
+    const inspect = await landsraadWeeklyPatchInspect();
+    if (!inspect.ok) throw new Error(inspect.reason);
+    const targetGoalAmount = requireInteger(preview.newValues?.targetGoalAmount, "targetGoalAmount", 0, 1000000);
+    const output = await dbQuery(`
+      with before_rows as (
+        select id, goal_amount as old_goal_amount
+        from dune.landsraad_tasks
+      ),
+      updated as (
+        update dune.landsraad_tasks target
+        set goal_amount = ${targetGoalAmount}
+        from before_rows before
+        where target.id = before.id
+          and target.goal_amount is distinct from ${targetGoalAmount}
+        returning target.id::text, before.old_goal_amount::text, target.goal_amount::text
+      )
+      select id, old_goal_amount, goal_amount
+      from updated
+      order by id;
+    `, 30000);
+    const changedRows = parseDbRows(output, ["id", "old_goal_amount", "goal_amount"]);
+    const readBackRows = await landsraadWeeklyPatchRows(1000);
+    const verified = readBackRows.length > 0 && readBackRows.every((row) => String(row.goal_amount) === String(targetGoalAmount));
+    const debug = {
+      changedRows,
+      readBackRows,
+      expectedGoalAmount: String(targetGoalAmount),
+      changedRowCount: changedRows.length,
+      totalRowCount: readBackRows.length
+    };
+    landsraadWeeklyPatchPreviews.delete(previewId);
+    if (!verified) {
+      progressionAudit("landsraad_weekly_apply_verification_failed", { oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: false, debug });
+      return { ok: false, status: "verification_failed", action: preview.action, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath, auditLogPath: PROGRESSION_AUDIT_LOG, debug, warning: "Database write completed, but Landsraad task read-back did not match the requested goal amount." };
+    }
+    progressionAudit("landsraad_weekly_apply_success", { oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: true, debug });
+    return { ok: true, status: "applied", action: preview.action, oldValues: preview.oldValues, newValues: preview.newValues, backupPath: preview.backupPath, auditLogPath: PROGRESSION_AUDIT_LOG, debug };
+  } catch (error) {
+    if (preview) {
+      try { progressionAudit("landsraad_weekly_apply_failure", { oldValues: preview.oldValues, newValues: preview.newValues, backupFilePath: preview.backupPath, success: false, error: error.message }); } catch {}
+    }
+    return { ok: false, status: "error", error: error.message, backupPath: preview?.backupPath || "", auditLogPath: PROGRESSION_AUDIT_LOG };
+  }
 }
 
 function sqlTextArrayPath(pathValue) {
@@ -15459,6 +15588,34 @@ async function route(req, res) {
   if (url.pathname === "/api/progression/skills" && req.method === "GET") {
     const catalog = loadDuneSkillsCatalog();
     await json(res, { ok: catalog.ok, skills: catalog.skills, generatedAt: catalog.generatedAt, treeCounts: catalog.treeCounts, typeCounts: catalog.typeCounts, report: catalog.report }, catalog.ok ? 200 : 500);
+    return;
+  }
+  if (url.pathname === "/api/landsraad/weekly-rewards/inspect" && req.method === "GET") {
+    try {
+      await json(res, await landsraadWeeklyPatchInspect());
+    } catch (error) {
+      await json(res, { ok: false, status: "error", error: error.message }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/landsraad/weekly-rewards/preview" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await landsraadWeeklyPatchPreview(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/landsraad/weekly-rewards/apply" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await landsraadWeeklyPatchApply(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/progression/skill-unlocks" && req.method === "POST") {

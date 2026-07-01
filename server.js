@@ -13083,7 +13083,7 @@ function appPage() {
         <button class="tab advanced-only" data-view="admin">Admin Tools</button>
         <button class="tab advanced-only" data-view="env">Env Setup</button>
         <button class="tab advanced-only" data-view="logs">Logs</button>
-        <button class="tab advanced-only" data-view="diagnostics">Setup Doctor</button>
+        <button class="tab" data-view="diagnostics">Setup Doctor</button>
       </div>
     </nav>
     <div class="sidebar-foot">
@@ -14296,7 +14296,7 @@ function renderWebPortalUrls(urls=WEB_PORTAL_URLS){const resolved=urls&&urls.len
 function openWebPortal(){const url=(WEB_PORTAL_URLS&&WEB_PORTAL_URLS[0])||location.origin;window.open(url,"_blank","noopener");setText("webPortalStatus","Opened "+url);playUiSound("click");}
 async function copyWebPortalUrl(){const text=portalUrlText(WEB_PORTAL_URLS);try{await navigator.clipboard.writeText(text);setText("webPortalStatus","Web portal URL copied.");showToast("Web Portal URL copied","success");playUiSound("success");}catch(error){setText("webPortalStatus",betterError(error));playUiSound("warning");}}
 function normalizeUiMode(value){return String(value||"").toLowerCase()==="advanced"?"advanced":"simple";}
-function applyUiMode(value){uiMode=normalizeUiMode(value);document.body.classList.toggle("simple-mode",uiMode==="simple");document.body.classList.toggle("advanced-mode",uiMode==="advanced");setValue("headerUiMode",uiMode);setValue("settingsUiMode",uiMode);if(appConfig)appConfig.uiMode=uiMode;if(uiMode==="simple"&&(document.getElementById("logs")?.classList.contains("active")||document.getElementById("diagnostics")?.classList.contains("active")))setView("dashboard");}
+function applyUiMode(value){uiMode=normalizeUiMode(value);document.body.classList.toggle("simple-mode",uiMode==="simple");document.body.classList.toggle("advanced-mode",uiMode==="advanced");setValue("headerUiMode",uiMode);setValue("settingsUiMode",uiMode);if(appConfig)appConfig.uiMode=uiMode;if(uiMode==="simple"&&document.getElementById("logs")?.classList.contains("active"))setView("dashboard");}
 async function changeUiMode(value){const previous=uiMode;applyUiMode(value);try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,uiMode})});appConfig=data.config||{...current,uiMode};applyUiMode(appConfig.uiMode);setText("settingsSaveStatus","UI mode saved.");playUiSound("click");}catch(error){applyUiMode(previous);setText("settingsSaveStatus","Could not save UI mode: "+betterError(error));playUiSound("warning");}}
 async function loadUiMode(){try{const config=await getJson("/api/config");appConfig=config;applyUiMode(config.uiMode);}catch{applyUiMode("simple");}}
 function normalizeTheme(value){const key=String(value||"").toLowerCase();return ["gold","command","purple","contrast","royal"].includes(key)?key:"gold";}

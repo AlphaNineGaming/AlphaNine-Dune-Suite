@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.5.9-beta";
+const APP_VERSION = "0.6.0-beta";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -1801,6 +1801,8 @@ function databaseTunnelSshSettings(configValue = loadConfig()) {
 }
 
 async function resolveDatabaseTunnelSshSettings(configValue = loadConfig(), options = {}) {
+  const sync = await autoSyncVmIpFromHyperV().catch(() => ({ config: configValue }));
+  configValue = sync.config || configValue;
   let settings = databaseTunnelSshSettings(configValue);
   if (settings.host) {
     if (!databaseTunnelRuntime.resolvedSshHost) {
@@ -2500,9 +2502,10 @@ async function vmConnectionMonitor() {
 }
 
 async function sshCommand(command, timeout = 180000, options = {}) {
-  const cfg = loadConfig();
-  const info = await vmInfo(cfg.vmName || configuredVmName());
-  const ip = info.ip || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
+  const sync = await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
+  const cfg = sync.config || loadConfig();
+  const info = sync.vm || await vmInfo(cfg.vmName || configuredVmName());
+  const ip = normalizeIpv4(info.ip) || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
   if (!info.exists && !ip) return { ok: false, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
   if (info.exists && info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running." };
   if (!ip) return { ok: false, stdout: "", stderr: "VM IP address was not found.", error: "VM IP address was not found." };
@@ -2700,18 +2703,68 @@ function normalizeIpv4(value) {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(text) ? text : "";
 }
 
-async function vmIpMismatchStatus() {
+function isLocalHyperVConfig(configValue = loadConfig()) {
+  const serverType = String(configValue.serverType || "").trim().toLowerCase();
+  return !serverType || ["local-hyperv", "local-windows", "hyperv", "hyper-v", "local"].includes(serverType);
+}
+
+function resetVmDependentRuntime(detectedIp = "") {
+  invalidateDatabaseQueryCache();
+  Object.assign(databaseTunnelRuntime, {
+    resolvedSshHost: detectedIp || "",
+    sshHostSource: detectedIp ? "auto-detected-vm-ip" : "",
+    hostDiscoveryAttempted: false,
+    lastError: "",
+    updatedAt: new Date().toISOString()
+  });
+}
+
+function syncedVmIpConfig(cfg, detectedIp) {
+  const oldIps = new Set([cfg.vmIp, cfg.sshHost, cfg.receiverSshHost].map(normalizeIpv4).filter(Boolean));
+  const next = { ...cfg, vmIp: detectedIp };
+  for (const field of ["sshHost", "receiverSshHost"]) {
+    const current = String(next[field] || "").trim();
+    const currentIp = normalizeIpv4(current);
+    if (!current || currentIp && oldIps.has(currentIp)) next[field] = detectedIp;
+  }
+  return next;
+}
+
+async function autoSyncVmIpFromHyperV(options = {}) {
   const cfg = loadConfig();
-  const serverType = String(cfg.serverType || "").trim().toLowerCase();
-  const localHyperV = !serverType || ["local-hyperv", "local-windows", "hyperv", "hyper-v", "local"].includes(serverType);
+  if (!isLocalHyperVConfig(cfg)) return { ok: true, synced: false, config: cfg, reason: "not-local-hyperv" };
+  const vm = await vmInfo(cfg.vmName || configuredVmName()).catch((error) => ({ ok: false, error: error.message }));
+  const detectedIp = normalizeIpv4(vm?.ip);
+  if (!detectedIp) return { ok: false, synced: false, config: cfg, vm, error: vm?.error || "Hyper-V did not report a VM IPv4 address." };
+  const savedFields = {
+    vmIp: normalizeIpv4(cfg.vmIp),
+    sshHost: normalizeIpv4(cfg.sshHost),
+    receiverSshHost: normalizeIpv4(cfg.receiverSshHost)
+  };
+  const changedFields = Object.entries(savedFields)
+    .filter(([, value]) => value && value !== detectedIp)
+    .map(([field, value]) => ({ field, saved: value, detected: detectedIp }));
+  const missingVmIp = !savedFields.vmIp;
+  if (!missingVmIp && !changedFields.length) return { ok: true, synced: false, config: cfg, detectedIp, savedFields, changedFields, vm };
+  const nextConfig = syncedVmIpConfig(cfg, detectedIp);
+  const saved = options.dryRun ? nextConfig : saveConfig(nextConfig);
+  resetVmDependentRuntime(detectedIp);
+  appendAdminAudit("vm_ip_auto_sync", { detectedIp, savedFields, changedFields, missingVmIp, vmName: cfg.vmName || configuredVmName(), dryRun: Boolean(options.dryRun) });
+  return { ok: true, synced: true, config: saved, detectedIp, savedFields, changedFields, vm };
+}
+
+async function vmIpMismatchStatus() {
+  const sync = await autoSyncVmIpFromHyperV().catch((error) => ({ ok: false, synced: false, error: error.message, config: loadConfig() }));
+  const cfg = sync.config || loadConfig();
+  const localHyperV = isLocalHyperVConfig(cfg);
   const savedFields = {
     vmIp: normalizeIpv4(cfg.vmIp),
     sshHost: normalizeIpv4(cfg.sshHost),
     receiverSshHost: normalizeIpv4(cfg.receiverSshHost)
   };
   const savedIps = [...new Set(Object.values(savedFields).filter(Boolean))];
-  const vm = await vmInfo().catch((error) => ({ ok: false, error: error.message }));
-  const detectedIp = normalizeIpv4(vm?.ip);
+  const vm = sync.vm || await vmInfo().catch((error) => ({ ok: false, error: error.message }));
+  const detectedIp = normalizeIpv4(sync.detectedIp || vm?.ip);
   const changedFields = Object.entries(savedFields)
     .filter(([, value]) => value && detectedIp && value !== detectedIp)
     .map(([field, value]) => ({ field, saved: value, detected: detectedIp }));
@@ -2719,6 +2772,7 @@ async function vmIpMismatchStatus() {
   return {
     ok: true,
     changed,
+    synced: Boolean(sync.synced),
     serverType: cfg.serverType || "local-hyperv",
     localHyperV,
     vmName: cfg.vmName || VM_NAME || "",
@@ -2727,9 +2781,11 @@ async function vmIpMismatchStatus() {
     savedFields,
     changedFields,
     vm,
-    message: changed
-      ? `Detected VM IP ${detectedIp}, but Suite settings still reference ${savedIps.join(", ")}. Review Setup before using database or receiver tools.`
-      : "Saved VM IP settings match the detected Hyper-V address."
+    message: sync.synced
+      ? `Detected VM IP ${detectedIp} and updated Suite settings automatically.`
+      : changed
+        ? `Detected VM IP ${detectedIp}, but Suite settings still reference ${savedIps.join(", ")}.`
+        : "Saved VM IP settings match the detected Hyper-V address."
   };
 }
 
@@ -2738,18 +2794,20 @@ function shQuote(value) {
 }
 
 async function setupSshCommand(command, body = {}, timeout = 30000, options = {}) {
-  const cfg = loadConfig();
+  const sync = await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
+  const cfg = sync.config || loadConfig();
   const vmName = String(body.vmName || cfg.vmName || configuredVmName()).trim();
   const typedHost = String(body.sshHost || body.vmIp || body.receiverSshHost || "").trim();
   const savedHost = String(cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "").trim();
-  let discoveredHost = "";
-  let info = null;
-  if (!typedHost && !savedHost && vmName) {
+  let discoveredHost = normalizeIpv4(sync.detectedIp || sync.vm?.ip);
+  let info = sync.vm || null;
+  if (!discoveredHost && vmName) {
     info = await vmInfo(vmName).catch((error) => ({ ok: false, exists: false, error: error.message }));
-    discoveredHost = String(info?.ip || "").trim();
-    if (info?.exists && info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running.", vm: info };
+    discoveredHost = normalizeIpv4(info?.ip);
   }
-  const host = typedHost || savedHost || discoveredHost;
+  if (info?.exists && info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running.", vm: info };
+  const typedIp = normalizeIpv4(typedHost);
+  const host = discoveredHost && (!typedHost || typedIp && typedIp !== discoveredHost) ? discoveredHost : (typedHost || savedHost || discoveredHost);
   if (!host) return { ok: false, stdout: "", stderr: info?.error || "VM IP or SSH host was not found.", error: info?.error || "VM IP or SSH host was not found.", vm: info };
   const key = sshKeyStatus(body.sshKey || body.receiverSshKey || cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
   if (!key.exists) return { ok: false, stdout: "", stderr: key.message, error: key.message, sshKey: key };

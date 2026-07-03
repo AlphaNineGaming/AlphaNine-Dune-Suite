@@ -2357,18 +2357,184 @@ function configuredPortFromUrl(value) {
   return null;
 }
 
+function monitorPortKey(row = {}) {
+  const protocol = String(row.protocol || "tcp").toLowerCase();
+  const host = String(row.host || "").toLowerCase();
+  const clusterScope = row.source === "Kubernetes ClusterIP" || row.statusLabel === "ClusterIP" ? `:${row.key || row.detail || row.source || ""}` : "";
+  return `${protocol}:${host}:${Number(row.port) || 0}${clusterScope}`;
+}
+
+function mergeMonitorPorts(rows = []) {
+  const merged = new Map();
+  for (const row of rows) {
+    const port = Number(row?.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
+    const normalized = { protocol: "tcp", ...row, port };
+    const key = monitorPortKey(normalized);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, normalized);
+      continue;
+    }
+    const sources = new Set([existing.source, normalized.source].filter(Boolean));
+    merged.set(key, {
+      ...existing,
+      ...normalized,
+      label: existing.label || normalized.label,
+      source: sources.size ? [...sources].join(" + ") : existing.source || normalized.source || "",
+      detail: existing.detail || normalized.detail || "",
+      open: existing.open === true || normalized.open === true ? true : (existing.open ?? normalized.open),
+      responseMs: existing.responseMs ?? normalized.responseMs ?? null,
+      error: existing.error || normalized.error || "",
+      probe: existing.probe === false || normalized.probe === false ? false : true,
+      statusLabel: existing.statusLabel || normalized.statusLabel || ""
+    });
+  }
+  return [...merged.values()];
+}
+
 function configuredMonitorPorts() {
   const receiver = receiverUrls();
   const ports = [
-    { key: "suite", label: "8810 (Suite Backend)", host: HOST, port: PORT },
-    { key: "receiver", label: `${receiver.port} (Live Give Receiver)`, host: receiver.host, port: receiver.port },
-    { key: "ssh", label: "22 (SSH)", port: 22 }
+    { key: "suite", label: "8810 (Suite Backend)", host: HOST, port: PORT, source: "Suite settings", probe: true },
+    { key: "receiver", label: `${receiver.port} (Live Give Receiver)`, host: receiver.host, port: receiver.port, source: "Suite settings", probe: true },
+    { key: "ssh", label: "22 (SSH)", port: 22, source: "Suite settings", probe: true }
   ];
   const rabbitPort = configuredPortFromUrl(LIVE_GIVE_ENV.rabbitHealthUrl || LIVE_GIVE_ENV.rabbitPublishUrl) || envNumber("DUNE_ADMIN_RABBITMQ_PORT", 0);
   const dbPort = envNumber("DUNE_ADMIN_DATABASE_PORT", 0) || envNumber("PGPORT", 0) || configuredPortFromUrl(process.env.DATABASE_URL || "");
-  if (rabbitPort) ports.push({ key: "rabbitmq", label: `${rabbitPort} (RabbitMQ)`, port: rabbitPort });
-  if (dbPort) ports.push({ key: "database", label: `${dbPort} (Database)`, port: dbPort });
+  if (rabbitPort) ports.push({ key: "rabbitmq", label: `${rabbitPort} (RabbitMQ)`, port: rabbitPort, source: "Suite settings", probe: true });
+  if (dbPort) ports.push({ key: "database", label: `${dbPort} (Database)`, port: dbPort, source: "Suite settings", probe: true });
   return ports;
+}
+
+function parseVmListeningPorts(output = "", host = "") {
+  const ports = [];
+  for (const line of String(output || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!/^(tcp|udp)\b/i.test(trimmed)) continue;
+    const protocol = trimmed.match(/^(tcp|udp)/i)?.[1]?.toLowerCase() || "tcp";
+    const address = trimmed.match(/(\S+):(\d+)\s+(?:\S+\s+)?(?:LISTEN|\*)/i);
+    if (!address) continue;
+    const bindAddress = address[1].replace(/^\[|\]$/g, "");
+    if (/^(127\.|::1|localhost$)/i.test(bindAddress)) continue;
+    const port = Number(address[2]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
+    ports.push({
+      key: `listener-${protocol}-${port}`,
+      label: `${port} (${protocol.toUpperCase()} VM Listener)`,
+      host,
+      port,
+      protocol,
+      source: "VM listener",
+      probe: false,
+      open: true,
+      statusLabel: "Listening",
+      detail: bindAddress
+    });
+  }
+  return ports;
+}
+
+function parseUserEnginePorts(output = "", host = "") {
+  const rows = [];
+  const seen = new Set();
+  for (const line of String(output || "").split(/\r?\n/)) {
+    const match = line.match(/(?:^|:)(Port|IGWPort)=(\d+)\s*$/i);
+    if (!match) continue;
+    const keyName = /^igwport$/i.test(match[1]) ? "IGWPort" : "Port";
+    const port = Number(match[2]);
+    const key = `userengine-${keyName}-${port}`;
+    if (seen.has(key) || !Number.isInteger(port) || port < 1 || port > 65535) continue;
+    seen.add(key);
+    rows.push({
+      key,
+      label: `${port} (${keyName === "IGWPort" ? "IGW Config Port" : "Game Config Port"})`,
+      host,
+      port,
+      protocol: "tcp",
+      source: "UserEngine.ini",
+      probe: false,
+      open: null,
+      statusLabel: "Configured",
+      detail: keyName
+    });
+  }
+  return rows;
+}
+
+function parseKubernetesServicePorts(output = "", host = "") {
+  let parsed = null;
+  try { parsed = JSON.parse(String(output || "").trim() || "{}"); } catch {}
+  const services = Array.isArray(parsed?.items) ? parsed.items : [];
+  const selected = normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup);
+  const selectedNamespace = String(selected?.namespace || "").trim();
+  const selectedName = String(selected?.name || "").trim();
+  const rows = [];
+  for (const svc of services) {
+    const namespace = svc?.metadata?.namespace || "";
+    const name = svc?.metadata?.name || "";
+    const labels = svc?.metadata?.labels || {};
+    const selectedMatch = !selectedNamespace
+      || namespace === selectedNamespace
+      || (selectedName && labels["igw.funcom.com/battlegroup-name"] === selectedName);
+    if (!selectedMatch) continue;
+    const type = svc?.spec?.type || "";
+    for (const entry of (svc?.spec?.ports || [])) {
+      const servicePort = Number(entry.port);
+      const targetPort = entry.targetPort || entry.port || "";
+      const nodePort = Number(entry.nodePort);
+      const protocol = String(entry.protocol || "TCP").toLowerCase();
+      if (Number.isInteger(nodePort) && nodePort > 0) {
+        rows.push({
+          key: `svc-${namespace}-${name}-${nodePort}`,
+          label: `${nodePort} (${name} -> ${servicePort})`,
+          host,
+          port: nodePort,
+          protocol,
+          source: "Kubernetes NodePort",
+          probe: protocol === "tcp",
+          statusLabel: "NodePort",
+          detail: `${namespace}/${name} ${servicePort}->${targetPort}`
+        });
+      } else if (type === "ClusterIP" && Number.isInteger(servicePort) && /db|database|tr-|router|monitor/i.test(name)) {
+        rows.push({
+          key: `svc-${namespace}-${name}-${servicePort}`,
+          label: `${servicePort} (${name})`,
+          host: "",
+          port: servicePort,
+          protocol,
+          source: "Kubernetes ClusterIP",
+          probe: false,
+          open: null,
+          statusLabel: "ClusterIP",
+          detail: `${namespace}/${name} -> ${targetPort}`
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+async function discoverVmMonitorPorts(host) {
+  const discovery = { ok: false, source: "ssh", checkedAt: new Date().toISOString(), ports: [], errors: [] };
+  if (!host) {
+    discovery.errors.push("VM address unavailable.");
+    return discovery;
+  }
+  const [listeners, services, userEngine] = await Promise.all([
+    sshCommand("(ss -lntu 2>/dev/null || netstat -lntu 2>/dev/null || true)", 12000, { maxBuffer: 1024 * 256 }),
+    sshCommand("sudo kubectl get svc -A -o json 2>/dev/null || true", 15000, { maxBuffer: 1024 * 1024 * 4 }),
+    sshCommand("sudo find /home/dune/.dune /var/lib/rancher/k3s/storage -path '*UserEngine.ini' -type f -print -exec grep -HEn '^(Port|IGWPort)=' {} \\; 2>/dev/null | head -n 120", 15000, { maxBuffer: 1024 * 512 })
+  ]);
+  if (listeners.ok) discovery.ports.push(...parseVmListeningPorts(listeners.stdout, host));
+  else discovery.errors.push(listeners.error || listeners.stderr || "VM listener discovery failed.");
+  if (services.ok) discovery.ports.push(...parseKubernetesServicePorts(services.stdout, host));
+  else discovery.errors.push(services.error || services.stderr || "Kubernetes service discovery failed.");
+  if (userEngine.ok) discovery.ports.push(...parseUserEnginePorts(userEngine.stdout, host));
+  else discovery.errors.push(userEngine.error || userEngine.stderr || "UserEngine.ini discovery failed.");
+  discovery.ports = mergeMonitorPorts(discovery.ports);
+  discovery.ok = discovery.ports.length > 0;
+  return discovery;
 }
 
 function checkPort(host, port, timeout = 1200) {
@@ -2463,8 +2629,11 @@ async function vmConnectionMonitor() {
   const host = vmMonitorHost(vm);
   const ping = await pingHost(host);
   const pingStats = recordVmPing(ping);
-  const portTargets = configuredMonitorPorts().map((row) => ({ ...row, host: row.host || host }));
+  const discovery = await discoverVmMonitorPorts(host).catch((error) => ({ ok: false, ports: [], errors: [error.message || String(error)] }));
+  const portTargets = mergeMonitorPorts([...configuredMonitorPorts(), ...(discovery.ports || [])]).map((row) => ({ ...row, host: row.host || (row.probe === false ? "" : host) }));
   const ports = await Promise.all(portTargets.map(async (target) => {
+    if (target.probe === false) return { ...target, open: target.open ?? null, responseMs: target.responseMs ?? null, error: target.error || "" };
+    if (String(target.protocol || "tcp").toLowerCase() !== "tcp") return { ...target, open: target.open ?? null, responseMs: null, error: target.error || "TCP probe not applicable" };
     if (!target.host) return { ...target, open: false, responseMs: null, error: "VM address unavailable" };
     const result = await checkPort(target.host, target.port);
     return { ...target, ...result };
@@ -2477,7 +2646,8 @@ async function vmConnectionMonitor() {
   const errors = [
     vm.error,
     ping.error,
-    ...ports.filter((port) => !port.open).map((port) => `${port.label}: ${port.error || "Closed"}`),
+    ...(discovery.errors || []),
+    ...ports.filter((port) => port.probe !== false && port.open === false).map((port) => `${port.label}: ${port.error || "Closed"}`),
     ...Object.values(services).filter((service) => service.reachable === false).map((service) => `${service.label}: ${service.error || "Unavailable"}`)
   ].filter(Boolean).slice(0, 8);
   if (online) vmMonitorLastSuccess = checkedAt;
@@ -2494,6 +2664,7 @@ async function vmConnectionMonitor() {
     },
     latency: pingStats,
     ports,
+    portDiscovery: discovery,
     services,
     healthScore: score,
     lastErrors: errors,
@@ -14821,12 +14992,12 @@ function vmDisplayMessage(data){const vm=data?.vm||data||{};const status=vmDispl
 function databaseHealthLabel(data){const health=data?.databaseHealth;if(health&&health.ok)return"DB reachable";if(health&&health.status==="unavailable")return"DB unavailable";const summary=data?.status?.summary||{};return summary.database||"Unknown";}
 async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const dbLabel=databaseHealthLabel(data);const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?((selected.title||"Title not found")+" / "+selected.namespace+" / "+selected.name):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",dbLabel);tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));badge("topDb",dbLabel);document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+dbLabel+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");badge("topDb","DB status unknown");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
-function monitorStatusLabel(open){if(open===null||open===undefined)return"Not Configured";return open?"Open":"Closed";}
+function monitorStatusLabel(row){if(row&&typeof row==="object"&&row.statusLabel)return row.statusLabel;const open=row&&typeof row==="object"?row.open:row;if(open===null||open===undefined)return"Discovered";return open?"Open":"Closed";}
 function monitorMs(value){return Number.isFinite(Number(value))?Math.round(Number(value))+" ms":"-- ms";}
-function renderMonitorRows(rows){return rows.length?rows.map(row=>'<div class="vm-row"><div><strong>'+esc(row.label)+'</strong><small>'+esc(row.host?row.host+":"+row.port:(row.responseMs!=null?monitorMs(row.responseMs):row.error||""))+'</small></div><span class="status-pill '+monitorKindClass(row.open?"ok":"bad")+'">'+esc(monitorStatusLabel(row.open))+'</span></div>').join(""):'<div class="empty">No configured ports.</div>';}
+function renderMonitorRows(rows){return rows.length?rows.map(row=>{const meta=[row.host?row.host+":"+row.port:"",row.source||"",row.detail||""].filter(Boolean).join(" / ")||(row.responseMs!=null?monitorMs(row.responseMs):row.error||"");const state=row.open===true?"ok":(row.open===false&&row.probe!==false?"bad":"warn");return '<div class="vm-row"><div><strong>'+esc(row.label)+'</strong><small>'+esc(meta)+'</small></div><span class="status-pill '+monitorKindClass(state)+'">'+esc(monitorStatusLabel(row))+'</span></div>';}).join(""):'<div class="empty">No configured ports.</div>';}
 function renderServiceRows(services){const rows=Object.values(services||{});return rows.length?rows.map(row=>'<div class="vm-row"><div><strong>'+esc(row.label)+'</strong><small>'+esc(row.responseMs!=null?monitorMs(row.responseMs):(row.error||""))+'</small></div><span class="status-pill '+monitorKindClass(row.reachable===null?"warn":row.reachable?"ok":"bad")+'">'+esc(row.reachable===null?"N/A":row.reachable?"Reachable":"Offline")+'</span></div>').join(""):'<div class="empty">No service checks.</div>';}
 function renderPingGraph(history){const graph=document.getElementById("vmPingGraph");if(!graph)return;const values=(history||[]).slice(-60);const max=Math.max(80,...values.map(row=>Number(row.ms)||0));graph.innerHTML=values.length?values.map(row=>{const ms=Number(row.ms);const ok=Number.isFinite(ms);const h=ok?Math.max(8,Math.round((ms/max)*64)):8;const kind=!ok?"bad":ms<120?"ok":ms<250?"warn":"bad";return '<span class="ping-bar '+kind+'" title="'+(ok?ms+' ms':'offline')+'" style="height:'+h+'px"></span>';}).join(""):'<div class="empty">Ping history will appear after checks.</div>';}
-async function refreshVmMonitor(){try{const data=await getJson("/api/vm-monitor");const kind=monitorKindClass(data.kind);setText("vmMonitorStatus",data.status||"Unknown");setText("vmMonitorAddress",data.vm?.address||"Unknown");setText("vmMonitorHost",data.vm?.hostname||"Unknown");setText("vmUptime",data.vm?.uptime||"Unknown");setText("vmHealthScore",Number.isFinite(Number(data.healthScore))?Math.round(Number(data.healthScore))+"%":"--");setText("vmPingCurrent",monitorMs(data.latency?.current));setText("vmPingAverage",monitorMs(data.latency?.average));setText("vmPingMin",monitorMs(data.latency?.min));setText("vmPingMax",monitorMs(data.latency?.max));setText("vmMonitorStamp","Last check "+new Date(data.checkedAt||Date.now()).toLocaleTimeString());setText("vmLastSuccess",data.lastSuccessfulConnection&&data.lastSuccessfulConnection!=="None yet"?new Date(data.lastSuccessfulConnection).toLocaleString():data.lastSuccessfulConnection||"None yet");["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card "+kind;});const ports=data.ports||[];const services=data.services||{};document.getElementById("vmPortList").innerHTML=renderMonitorRows(ports);document.getElementById("vmServiceList").innerHTML=renderServiceRows(services);document.getElementById("vmPortDetailList").innerHTML=ports.length?ports.map(row=>'<div>'+esc(row.label)+": "+esc(monitorStatusLabel(row.open))+" / "+esc(row.responseMs!=null?monitorMs(row.responseMs):row.error||"No response")+'</div>').join(""):'<div>No configured ports.</div>';document.getElementById("vmErrorList").innerHTML=(data.lastErrors||[]).length?data.lastErrors.map(error=>'<div>'+esc(error)+'</div>').join(""):'<div>No recent connection errors.</div>';renderPingGraph(data.latency?.history||[]);badge("topSsh",services.ssh?.reachable?"SSH reachable":"SSH offline");addActivity("vm","VM connection monitor",(data.status||"Unknown")+" / "+Math.round(Number(data.healthScore)||0)+"%");}catch(e){setText("vmMonitorStatus","Monitor error");setText("vmMonitorStamp",betterError(e));const card=document.getElementById("vmStatusCard");if(card)card.className="vm-status-card bad";addActivity("error","VM monitor failed",e.message);}}
+async function refreshVmMonitor(){try{const data=await getJson("/api/vm-monitor");const kind=monitorKindClass(data.kind);setText("vmMonitorStatus",data.status||"Unknown");setText("vmMonitorAddress",data.vm?.address||"Unknown");setText("vmMonitorHost",data.vm?.hostname||"Unknown");setText("vmUptime",data.vm?.uptime||"Unknown");setText("vmHealthScore",Number.isFinite(Number(data.healthScore))?Math.round(Number(data.healthScore))+"%":"--");setText("vmPingCurrent",monitorMs(data.latency?.current));setText("vmPingAverage",monitorMs(data.latency?.average));setText("vmPingMin",monitorMs(data.latency?.min));setText("vmPingMax",monitorMs(data.latency?.max));setText("vmMonitorStamp","Last check "+new Date(data.checkedAt||Date.now()).toLocaleTimeString());setText("vmLastSuccess",data.lastSuccessfulConnection&&data.lastSuccessfulConnection!=="None yet"?new Date(data.lastSuccessfulConnection).toLocaleString():data.lastSuccessfulConnection||"None yet");["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card "+kind;});const ports=data.ports||[];const services=data.services||{};document.getElementById("vmPortList").innerHTML=renderMonitorRows(ports);document.getElementById("vmServiceList").innerHTML=renderServiceRows(services);document.getElementById("vmPortDetailList").innerHTML=ports.length?ports.map(row=>{const info=[row.source||"",row.detail||"",row.responseMs!=null?monitorMs(row.responseMs):(row.error||"")].filter(Boolean).join(" / ")||"Discovered";return '<div>'+esc(row.label)+": "+esc(monitorStatusLabel(row))+" / "+esc(info)+'</div>';}).join(""):'<div>No configured ports.</div>';document.getElementById("vmErrorList").innerHTML=(data.lastErrors||[]).length?data.lastErrors.map(error=>'<div>'+esc(error)+'</div>').join(""):'<div>No recent connection errors.</div>';renderPingGraph(data.latency?.history||[]);badge("topSsh",services.ssh?.reachable?"SSH reachable":"SSH offline");addActivity("vm","VM connection monitor",(data.status||"Unknown")+" / "+Math.round(Number(data.healthScore)||0)+"%");}catch(e){setText("vmMonitorStatus","Monitor error");setText("vmMonitorStamp",betterError(e));const card=document.getElementById("vmStatusCard");if(card)card.className="vm-status-card bad";addActivity("error","VM monitor failed",e.message);}}
 function betterError(e){return e&&e.message?e.message:"Command failed. Check that the suite is running as Administrator and the Dune VM is reachable.";}
 async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status");renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
 async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!(await appConfirm("Confirm VM action","Are you sure you want to "+action+" the VM?","Run "+action,"Cancel")))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}

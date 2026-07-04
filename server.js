@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "0.6.0-beta";
+const APP_VERSION = "0.6.6-beta";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -144,6 +144,110 @@ function normalizeLocalConnectionHosts(configValue) {
   };
 }
 
+function uniqueExistingDirectories(candidates) {
+  const seen = new Set();
+  const dirs = [];
+  for (const candidate of candidates) {
+    const resolved = expandEnvPath(candidate);
+    if (!resolved || seen.has(resolved.toLowerCase())) continue;
+    seen.add(resolved.toLowerCase());
+    try {
+      if (fs.statSync(resolved).isDirectory()) dirs.push(resolved);
+    } catch {}
+  }
+  return dirs;
+}
+
+function detectServerInstallPath() {
+  const programFiles = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]].filter(Boolean);
+  const steamLibraries = [
+    ...programFiles.map((root) => path.join(root, "Steam", "steamapps", "common")),
+    process.env.SystemDrive ? path.join(process.env.SystemDrive, "SteamLibrary", "steamapps", "common") : "",
+    "C:\\SteamLibrary\\steamapps\\common"
+  ];
+  const candidates = [
+    process.env.DUNE_SERVER_INSTALL_PATH,
+    process.env.DUNE_AWAKENING_SERVER_PATH,
+    process.env.ALPHANINE_DUNE_SERVER_PATH,
+    process.env.ALPHANINE_SERVER_PATH,
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "DuneAwakeningServer") : "",
+    process.env.ProgramData ? path.join(process.env.ProgramData, "DuneAwakeningServer") : "",
+    "C:\\DuneAwakeningServer",
+    "C:\\DuneServer",
+    ...steamLibraries.flatMap((root) => [
+      path.join(root, "Dune Awakening Dedicated Server"),
+      path.join(root, "DuneAwakeningServer"),
+      path.join(root, "Dune Awakening Server")
+    ])
+  ];
+  return uniqueExistingDirectories(candidates).find((candidate) => serverInstallPathStatus(candidate).valid) || "";
+}
+
+function psSingleQuoteSync(value) {
+  return String(value || "").replace(/'/g, "''");
+}
+
+function detectVmIpSync(vmNameValue) {
+  if (process.platform !== "win32") return "";
+  const vmName = String(vmNameValue || "").trim();
+  if (!vmName) return "";
+  const script = `
+    try {
+      $cmd = Get-Command Get-VMNetworkAdapter -ErrorAction SilentlyContinue
+      if (-not $cmd) { exit 2 }
+      $ips = @(Get-VMNetworkAdapter -VMName '${psSingleQuoteSync(vmName)}' -ErrorAction Stop | Select-Object -ExpandProperty IPAddresses | Where-Object { $_ -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' -and $_ -notmatch '^169\\.254\\.' })
+      $ips | Select-Object -First 1
+    } catch { exit 1 }
+  `;
+  try {
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      windowsHide: true,
+      encoding: "utf8",
+      timeout: 10000
+    });
+    if (result.error || result.status !== 0) return "";
+    return String(result.stdout || "").trim().split(/\r?\n/).find((line) => /^\d+\.\d+\.\d+\.\d+$/.test(line.trim()))?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+function autoDetectInitialConfig(configValue) {
+  const next = { ...configValue };
+  let changed = false;
+  const setIfBlank = (key, value) => {
+    const text = String(value || "").trim();
+    if (!text || String(next[key] || "").trim()) return;
+    next[key] = text;
+    changed = true;
+  };
+
+  const needsSshKey = !String(next.sshKey || "").trim() || !String(next.receiverSshKey || "").trim();
+  const detectedSshKey = needsSshKey ? defaultSshKeyPath() : "";
+  if (needsSshKey && detectedSshKey && fs.existsSync(detectedSshKey)) {
+    setIfBlank("sshKey", detectedSshKey);
+    setIfBlank("receiverSshKey", detectedSshKey);
+  }
+
+  const needsServerPath = !String(next.serverInstallPath || "").trim() || !String(next.awakeningServerPath || "").trim();
+  const detectedServerPath = needsServerPath ? detectServerInstallPath() : "";
+  if (needsServerPath && detectedServerPath) {
+    setIfBlank("serverInstallPath", detectedServerPath);
+    setIfBlank("awakeningServerPath", detectedServerPath);
+  }
+
+  const needsVmIp = !String(next.vmIp || "").trim() || !String(next.sshHost || "").trim() || !String(next.receiverSshHost || "").trim();
+  const detectedVmIp = needsVmIp ? detectVmIpSync(next.vmName) : "";
+  if (needsVmIp && detectedVmIp) {
+    setIfBlank("vmIp", detectedVmIp);
+    setIfBlank("sshHost", detectedVmIp);
+    setIfBlank("receiverSshHost", detectedVmIp);
+  }
+
+  if (changed) next.autoDetectedAt = new Date().toISOString();
+  return { config: next, changed };
+}
+
 const MANAGED_ENV_PATH = APPDATA_DIR ? path.join(APPDATA_DIR, ".env") : path.join(__dirname, ".env");
 const MASKED_SECRET_VALUES = new Set(["********", "<set>"]);
 const INVALID_PATH_PLACEHOLDERS = new Set(["<set>", "set", "***", "********"]);
@@ -271,8 +375,9 @@ function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
     const token = generateReceiverToken();
     const generated = { ...defaultConfig, receiverToken: token, adminGiveItemToken: token, receiverTokenSource: "generated" };
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(generated, null, 2));
-    return generated;
+    const detected = autoDetectInitialConfig(generated).config;
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(detected, null, 2));
+    return detected;
   }
   const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, ""));
   const loaded = { ...defaultConfig, ...raw };
@@ -540,7 +645,8 @@ function expandEnvPath(value) {
 }
 
 function defaultSshKeyPath() {
-  return path.join(os.homedir(), "AppData", "Local", "DuneAwakeningServer", "sshKey");
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.resolve(localAppData, "DuneAwakeningServer", "sshKey");
 }
 
 function sshKeyStatus(value) {
@@ -2106,6 +2212,10 @@ async function ps(script, timeout = 120000) {
   return run("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { timeout });
 }
 
+function timeoutAfter(timeoutMs, message) {
+  return new Promise((resolve) => setTimeout(() => resolve({ timeout: true, message }), timeoutMs));
+}
+
 function psSingleQuote(value) {
   return String(value || "").replace(/'/g, "''");
 }
@@ -2158,6 +2268,32 @@ function vmUserError(message, context = {}) {
 
 function configuredVmName() {
   return String(loadConfig().vmName || VM_NAME || "").trim();
+}
+
+function vmConfigFallback(reason = "") {
+  const cfg = loadConfig();
+  const configuredIp = String(cfg.vmIp || cfg.sshHost || cfg.receiverSshHost || "").trim();
+  return {
+    ok: Boolean(configuredIp),
+    configured: Boolean(cfg.vmName),
+    exists: false,
+    name: String(cfg.vmName || VM_NAME || "").trim(),
+    state: "Unknown",
+    status: configuredIp ? "Configured" : "Unknown",
+    ip: configuredIp,
+    source: "config-fallback",
+    warning: reason || "Hyper-V status was not available quickly; using saved VM configuration.",
+    error: reason || ""
+  };
+}
+
+async function vmInfoFast(timeoutMs = 5000) {
+  const result = await Promise.race([
+    vmInfo(),
+    timeoutAfter(timeoutMs, `Hyper-V status timed out after ${timeoutMs} ms.`)
+  ]);
+  if (result?.timeout) return vmConfigFallback(result.message);
+  return result;
 }
 
 async function backendElevationStatus() {
@@ -12859,6 +12995,17 @@ function appPage() {
     .setup-step.active { color:var(--gold-bright); border-color:var(--line-strong); background:var(--wizard-step-active-bg); box-shadow:0 0 18px var(--theme-glow); }
     .setup-page { display:none; }
     .setup-page.active { display:block; }
+    .auto-setup-grid { display:grid; grid-template-columns:minmax(0,.9fr) minmax(320px,1.1fr); gap:14px; align-items:start; }
+    .auto-setup-list { display:grid; gap:8px; }
+    .auto-setup-item { display:grid; grid-template-columns:14px minmax(0,1fr); gap:10px; align-items:start; padding:10px 12px; border:1px solid rgba(214,166,69,.2); background:rgba(255,255,255,.025); }
+    .auto-setup-dot { width:10px; height:10px; margin-top:4px; border-radius:999px; background:var(--muted); box-shadow:0 0 10px rgba(255,255,255,.12); }
+    .auto-setup-item.ok .auto-setup-dot { background:var(--good); color:var(--good); box-shadow:0 0 14px currentColor; }
+    .auto-setup-item.warn .auto-setup-dot { background:var(--warn); color:var(--warn); box-shadow:0 0 14px currentColor; }
+    .auto-setup-item.bad .auto-setup-dot { background:var(--bad); color:var(--bad); box-shadow:0 0 14px currentColor; }
+    .auto-setup-item.working .auto-setup-dot { background:var(--gold-bright); color:var(--gold-bright); box-shadow:0 0 14px currentColor; animation:pulse 1.1s ease-in-out infinite; }
+    .auto-setup-item strong { display:block; color:var(--text); font-size:13px; }
+    .auto-setup-item span { display:block; margin-top:3px; color:var(--muted); font-size:12px; line-height:1.35; }
+    .setup-mode-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
     .path-picker-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; }
     .path-picker-row label { min-width:0; }
     .test-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
@@ -13209,7 +13356,7 @@ function appPage() {
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1350px) { .give-layout{grid-template-columns:minmax(260px,35fr) minmax(0,65fr);grid-template-areas:"form catalog" "presets presets"}.give-sidebar{position:static;max-height:none} }
     @media (max-width:800px) { .give-layout{grid-template-columns:1fr;grid-template-areas:"form" "catalog" "presets"}.give-primary-actions{grid-template-columns:1fr} }
-    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.topbar-actions{justify-content:flex-start}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid,.setup-doctor-grid,.setup-doctor-grid.secondary{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
+    @media (max-width:1050px) { .shell{grid-template-columns:1fr}.sidebar{position:relative;height:100vh}.content{padding:14px}.topbar{position:relative;margin:-14px -14px 14px;grid-template-columns:1fr}.topbar-actions{justify-content:flex-start}.status-strip{justify-content:flex-start}.grid,.grid.four,.layout-2,.layout-3,.dashboard-grid,.map-explorer,.live-map-layout,.map-intel-grid,.map-region-grid,.intel-stat-grid,.vm-status-grid,.vm-monitor-lists,.env-grid,.item-db-layout,.item-db-detail-grid,.setup-doctor-grid,.setup-doctor-grid.secondary,.auto-setup-grid{grid-template-columns:1fr}.path-picker-row{grid-template-columns:1fr}.live-map-layout{max-width:100%;justify-content:stretch}.live-map-stage{width:100%;max-width:100%}.live-map-panel{width:100%}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none}.hero h3{font-size:24px}.frame-wrap,iframe{min-height:620px}.world-map.full{min-height:640px} }
     @media (max-width:720px) { .env-var-row{grid-template-columns:1fr;gap:5px}.env-var-value{font-size:12px}.env-help{font-size:11.5px} }
     @media (max-width:640px) {
       :root{--panel-pad:12px;--panel-gap:10px;--font-body:13px;--font-button:11px}
@@ -13306,7 +13453,26 @@ function appPage() {
       <div class="setup-step">Finish</div>
     </div>
     <div id="setupPage0" class="setup-page active">
-      <div class="empty">This wizard stores settings in your Windows app data folder. You do not need Node.js, npm commands, PowerShell, SSH, JSON editing, or manual receiver launching for normal use.</div>
+      <div class="auto-setup-grid">
+        <div>
+          <div class="empty">Simple setup detects the local Dune server install, the game-created SSH key, Hyper-V VM IP, database password, and receiver settings, then writes them to config.json and the managed .env.</div>
+          <div class="setup-mode-actions">
+            <button id="setupAutoRunButton" type="button" class="primary" onclick="runSimpleSetup()">Run Auto Setup</button>
+            <button type="button" onclick="openAdvancedSetupWizard()">Advanced Setup</button>
+            <button type="button" onclick="closeSetupWizard();refreshAll();">Close Wizard</button>
+          </div>
+          <div id="setupAutoResult" class="test-result mt">Ready to detect local settings.</div>
+        </div>
+        <div class="auto-setup-list" id="setupAutoSteps">
+          <div class="auto-setup-item" data-step="config"><i class="auto-setup-dot"></i><div><strong>Load config</strong><span>Waiting.</span></div></div>
+          <div class="auto-setup-item" data-step="paths"><i class="auto-setup-dot"></i><div><strong>Server folders</strong><span>Waiting.</span></div></div>
+          <div class="auto-setup-item" data-step="ssh"><i class="auto-setup-dot"></i><div><strong>SSH key</strong><span>Waiting.</span></div></div>
+          <div class="auto-setup-item" data-step="vm"><i class="auto-setup-dot"></i><div><strong>VM IP</strong><span>Waiting.</span></div></div>
+          <div class="auto-setup-item" data-step="database-detect"><i class="auto-setup-dot"></i><div><strong>Database password</strong><span>Waiting.</span></div></div>
+          <div class="auto-setup-item" data-step="database-test"><i class="auto-setup-dot"></i><div><strong>Database test</strong><span>Waiting.</span></div></div>
+          <div class="auto-setup-item" data-step="save"><i class="auto-setup-dot"></i><div><strong>Save config</strong><span>Waiting.</span></div></div>
+        </div>
+      </div>
     </div>
     <div id="setupPage1" class="setup-page">
       <div class="field-grid">
@@ -13393,7 +13559,7 @@ function appPage() {
       </div>
       <div id="setupFinishResult" class="empty mt">Ready to save.</div>
     </div>
-    <div class="action-row mt">
+    <div id="setupNavActions" class="action-row mt">
       <button type="button" onclick="setupPrev()">Back</button>
       <button type="button" class="primary" onclick="setupNext()">Next</button>
     </div>
@@ -14620,7 +14786,7 @@ let managerFrameCheckTimer=null;
 function setView(name){tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -14932,10 +15098,19 @@ function renderBattlegroupSelection(){const select=document.getElementById("sett
 async function refreshBattlegroups(){const log=document.getElementById("battlegroupLog");try{setText("battlegroupStatus","Detecting battlegroups...");if(log)log.textContent="Running sudo kubectl get igwbg -A -o json ...";const data=await getJson("/api/battlegroups",{timeoutMs:35000});battlegroupData={battlegroups:data.battlegroups||[],selectedBattlegroup:data.selectedBattlegroup||null};renderBattlegroupSelection();setText("battlegroupStatus",data.requiresSelection?"Selection required":(data.selectedBattlegroup?"Selected: "+(data.selectedBattlegroup.title||data.selectedBattlegroup.name):"Detection complete"));if(log)log.textContent=JSON.stringify({message:data.message,selectedBattlegroup:data.selectedBattlegroup,requiresSelection:data.requiresSelection,autoSelected:data.autoSelected,command:data.command},null,2);addActivity("battlegroup","Battlegroups refreshed",(data.battlegroups||[]).length+" found");return data;}catch(e){setText("battlegroupStatus","Battlegroup detection failed");if(log)log.textContent=betterError(e);addActivity("error","Battlegroup refresh failed",e.message);return null;}}
 async function useSelectedBattlegroup(){const selected=selectedBattlegroupFromUi();const log=document.getElementById("battlegroupLog");try{if(!selected)throw new Error("Select a battlegroup first.");const data=await getJson("/api/battlegroups/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({namespace:selected.namespace,name:selected.name}),timeoutMs:35000});battlegroupData.selectedBattlegroup=data.selectedBattlegroup;battlegroupData.battlegroups=data.battlegroups||battlegroupData.battlegroups;appConfig={...(appConfig||{}),selectedBattlegroup:data.selectedBattlegroup};renderBattlegroupSelection();setText("battlegroupStatus","Selected: "+(data.selectedBattlegroup?.title||data.selectedBattlegroup?.name||"Battlegroup"));if(log)log.textContent="Saved selected battlegroup to config.json:\\n"+JSON.stringify(data.selectedBattlegroup,null,2);addActivity("battlegroup","Battlegroup selected",data.selectedBattlegroup?.namespace+"/"+data.selectedBattlegroup?.name);playUiSound("success");refresh();}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function saveBattlegroupTitle(){const selected=selectedBattlegroupFromUi()||battlegroupData.selectedBattlegroup;const title=getValue("settingsNewServerTitle");const log=document.getElementById("battlegroupLog");try{if(!selected)throw new Error("Select a battlegroup first.");if(!title.trim())throw new Error("Enter a new server title.");const data=await getJson("/api/battlegroups/title",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({namespace:selected.namespace,name:selected.name,title}),timeoutMs:45000});battlegroupData.selectedBattlegroup=data.selectedBattlegroup;battlegroupData.battlegroups=data.battlegroups||battlegroupData.battlegroups;appConfig={...(appConfig||{}),selectedBattlegroup:data.selectedBattlegroup};renderBattlegroupSelection();setText("battlegroupStatus","Title saved: "+(data.title||title));if(log)log.textContent="Title saved and refreshed. Backup: "+(data.backupPath||"--")+"\\nPatch path: "+(data.patchPath||"--");addActivity("battlegroup","Server title saved",data.title||title);playUiSound("success");refresh();}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
+function setAutoSetupStep(key,state,message){const row=document.querySelector('#setupAutoSteps [data-step="'+key+'"]');if(!row)return;row.className="auto-setup-item "+(state||"");const text=row.querySelector("span");if(text)text.textContent=String(message||"");}
+function resetAutoSetupSteps(){["config","paths","ssh","vm","database-detect","database-test","save"].forEach(key=>setAutoSetupStep(key,"","Waiting."));}
+function summarizePathStatus(status){return status?.valid?("Found "+(status.path||"configured folder")):(status?.message||"Folder not found.");}
+function summarizeKeyStatus(status){return status?.exists?("Found "+(status.path||"SSH key")):(status?.message||"SSH key file not found.");}
+function applySetupMode(){const simple=setupWizardMode==="simple";document.getElementById("setupSteps")?.classList.toggle("hidden",simple);document.getElementById("setupNavActions")?.classList.toggle("hidden",simple);if(simple)setupStep=0;updateSetupStep();}
+function vmLooksOffline(vm){const state=String(vm?.state||vm?.status||"").trim().toLowerCase();return !vm?.ip||["stopped","off","saved","offline"].includes(state)||/not running|stopped|offline|timed out|not available/i.test(String(vm?.error||vm?.warning||""));}
+async function promptVmOfflineBeforeSetup(vm){setAutoSetupStep("vm","warn","VM is offline or no IP was detected. Start the VM, then run Auto Setup again.");resultBox("setupAutoResult",{ok:false,message:"VM is offline. Turn it on, then run Auto Setup again."});playUiSound("warning");await appAlert("VM is offline","The Suite could not detect the Hyper-V VM IP. Turn on the Dune VM, wait until Windows shows it as Running, then click Run Auto Setup again. The wizard will stay open so you can continue from here.","OK");}
+async function runSimpleSetup(){if(setupAutoRunning)return;setupAutoRunning=true;const button=document.getElementById("setupAutoRunButton");if(button)button.disabled=true;resetAutoSetupSteps();resultBox("setupAutoResult",{ok:true,message:"Auto setup is running..."});try{setAutoSetupStep("config","working","Reading config.json and local defaults.");const status=await getJson("/api/setup/status",{timeoutMs:30000});const config=status.config||{};fillSetup(config);if(status.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(status.discovery,null,2);setAutoSetupStep("config","ok","Loaded config.json and current defaults.");setAutoSetupStep("paths",(config.serverInstallPathStatus?.valid&&config.awakeningServerPathStatus?.valid)?"ok":"warn",summarizePathStatus(config.serverInstallPathStatus)+" "+summarizePathStatus(config.awakeningServerPathStatus));setAutoSetupStep("ssh",(config.sshKeyStatus?.exists||config.receiverSshKeyStatus?.exists)?"ok":"warn",summarizeKeyStatus(config.sshKeyStatus||config.receiverSshKeyStatus));setAutoSetupStep("vm","working","Checking Hyper-V VM state and IP.");const vmData=await getJson("/api/vm/status",{timeoutMs:30000}).catch(error=>({ok:false,vm:{error:betterError(error)}}));const vm=vmData?.vm||{};if(vm.ip){setValue("setupVmIp",vm.ip);setValue("setupSshHost",vm.ip);setValue("setupReceiverSshHost",vm.ip);}if(!getValue("setupVmIp")||vmLooksOffline(vm)){await promptVmOfflineBeforeSetup(vm);return;}setAutoSetupStep("vm","ok","Detected VM IP "+getValue("setupVmIp")+".");setAutoSetupStep("database-detect","working","Detecting database credentials from the running VM.");const detected=await getJson("/api/setup/detect-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(setupDetectionPayload()),timeoutMs:60000});if(!detected.ok)throw new Error(detected.error||detected.message||"Database credential detection failed.");if(detected.databaseHost)setValue("setupDatabaseHost",detected.databaseHost);if(detected.databasePort)setValue("setupDatabasePort",detected.databasePort);if(detected.databaseName)setValue("setupDatabaseName",detected.databaseName);if(detected.databaseUser)setValue("setupDatabaseUser",detected.databaseUser);if(detected.databasePassword)setValue("setupDatabasePassword",detected.databasePassword);syncConnectionHostLocks("setup");setAutoSetupStep("database-detect","ok","Detected database credentials.");setAutoSetupStep("database-test","working","Testing database connection.");const tested=await testSetupDatabase("setupDatabaseResult");setAutoSetupStep("database-test",tested.ok?"ok":"bad",tested.message||tested.error||"Database test finished.");if(!tested.ok)throw new Error(tested.error||tested.message||"Database test failed.");setAutoSetupStep("save","working","Saving config.json and managed .env.");const payload={...configPayload("setup"),setupComplete:true};const saved=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:30000});if(!saved.verified||!saved.pathsVerified)throw new Error("Setup path save verification failed.");setAutoSetupStep("save","ok","Saved config.json and managed .env.");fillSetup(saved.config||payload);await loadSettings();resultBox("setupAutoResult",{ok:true,message:"Auto setup complete. Review the detected configuration here, open Advanced Setup for details, or click Close Wizard when ready."});refreshAll();playUiSound("success");}catch(e){resultBox("setupAutoResult",{ok:false,message:"Auto setup needs attention.",error:betterError(e)+"\nUse Advanced Setup to review or edit the detected values."});playUiSound("warning");}finally{setupAutoRunning=false;if(button)button.disabled=false;}}
 function updateSetupStep(){document.querySelectorAll(".setup-page").forEach((p,i)=>p.classList.toggle("active",i===setupStep));document.querySelectorAll(".setup-step").forEach((p,i)=>p.classList.toggle("active",i===setupStep));}
 function setupNext(){setupStep=Math.min(4,setupStep+1);updateSetupStep();}
 function setupPrev(){setupStep=Math.max(0,setupStep-1);updateSetupStep();}
-function openSetupWizard(){setupStep=0;updateSetupStep();document.getElementById("setupWizard")?.classList.remove("hidden");}
+function openSetupWizard(autoRun=false){setupWizardMode="simple";applySetupMode();document.getElementById("setupWizard")?.classList.remove("hidden");if(autoRun)window.setTimeout(()=>runSimpleSetup(),250);}
+function openAdvancedSetupWizard(){setupWizardMode="advanced";setupStep=1;applySetupMode();}
 function closeSetupWizard(){document.getElementById("setupWizard")?.classList.add("hidden");}
 function openAboutDialog(){document.getElementById("aboutDialog")?.classList.remove("hidden");playUiSound("click");}
 function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.add("hidden");playUiSound("click");}
@@ -14943,7 +15118,7 @@ function openSupportDiscord(){window.open("https://discord.gg/tuUv3hYTv","_blank
 function openSupportKofi(){window.open("https://ko-fi.com/E1W220NMPA","_blank","noopener");playUiSound("click");}
 function applyDetectedVmIpToSetup(ip){if(!ip)return;setValue("setupVmIp",ip);setValue("setupSshHost",ip);setValue("setupReceiverSshHost",ip);setValue("settingsVmIp",ip);setValue("settingsSshHost",ip);setValue("settingsReceiverSshHost",ip);syncConnectionHostLocks("setup");syncConnectionHostLocks("settings");invalidateSetupDatabaseTest();}
 async function checkVmIpChangeOnStartup(){try{const data=await getJson("/api/setup/vm-ip-check",{timeoutMs:12000});if(!data?.changed||!data.detectedIp)return;const key="vm-ip-change:"+String(data.vmName||"")+":"+data.detectedIp+":"+String((data.savedIps||[]).join(","));if(sessionStorage.getItem(key)==="shown")return;sessionStorage.setItem(key,"shown");const message="Hyper-V reports a different VM IP than the Suite has saved.\\n\\nSaved: "+(data.savedIps||[]).join(", ")+"\\nDetected: "+data.detectedIp+"\\n\\nOpen Setup Wizard, review the connection settings, then test and save setup again.";const open=await appConfirm("VM IP changed",message,"Open Setup","Later");if(open){applyDetectedVmIpToSetup(data.detectedIp);openSetupWizard();}else{addActivity("warn","VM IP changed",data.message||("Detected "+data.detectedIp));}}catch(e){addActivity("warn","VM IP check skipped",betterError(e));}}
-async function initSetup(){try{const data=await getJson("/api/setup/status");const config=data.config||{};fillSetup(config);await loadSettings();if(!data.setupComplete)openSetupWizard();if(data.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(data.discovery,null,2);refreshReceiverStatus();}catch(e){addActivity("error","Setup status failed",e.message);}}
+async function initSetup(){try{const data=await getJson("/api/setup/status");const config=data.config||{};fillSetup(config);await loadSettings();if(!data.setupComplete)openSetupWizard(true);if(data.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(data.discovery,null,2);refreshReceiverStatus();}catch(e){addActivity("error","Setup status failed",e.message);}}
 async function runDiscovery(){const log=document.getElementById("setupDiscoveryLog");if(log)log.textContent="Running discovery...";try{const data=await getJson("/api/discovery");if(log)log.textContent=JSON.stringify(data,null,2);if(data.localIps?.[0]&&!getValue("setupVmIp"))setValue("setupVmIp",data.localIps[0]);if(data.server?.vmIp){setValue("setupVmIp",data.server.vmIp);setValue("setupSshHost",data.server.vmIp);setValue("setupReceiverSshHost",data.server.vmIp);}if(data.server?.vmName)setValue("setupVmName",data.server.vmName);if(data.receiver){setValue("setupReceiverHost",data.receiver.host);setValue("setupReceiverPort",data.receiver.port);}syncConnectionHostLocks("setup");playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function runConnectionTest(target,resultId){resultBox(resultId,{ok:true,message:"Testing "+target+"..."});try{const data=await getJson("/api/test/"+target,{method:"POST"});resultBox(resultId,data);playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:target+" test failed",error:betterError(e)};resultBox(resultId,data);playUiSound("warning");return data;}}
 async function finishSetup(){try{if(!setupDatabaseTestSignature||setupDatabaseTestSignature!==currentSetupDatabaseSignature())throw new Error("Test the current database settings successfully before finishing setup.");const payload={...configPayload("setup"),setupComplete:true};const checks=await Promise.all([["serverInstallPath","setupServerInstallPathWarning"],["awakeningServerPath","setupAwakeningServerPathWarning"]].map(async([key,warningId])=>{const data=await getJson("/api/server-install-path/status?path="+encodeURIComponent(payload[key]||""));setServerInstallPathWarning(warningId,data.serverInstallPath);return data.serverInstallPath;}));if(checks.some(status=>!status?.valid))throw new Error("Both server paths must be valid folders on this machine. Use Browse to select each folder.");const data=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(!data.verified||!data.pathsVerified)throw new Error("Setup path save verification failed.");document.getElementById("setupFinishResult").textContent="Setup saved and verified in config.json and managed .env. Config: "+(data.configPath||"App data");fillSetup(data.config||payload);await loadSettings();closeSetupWizard();refreshAll();playUiSound("success");}catch(e){document.getElementById("setupFinishResult").textContent=betterError(e);playUiSound("warning");}}
@@ -14999,7 +15174,7 @@ function renderServiceRows(services){const rows=Object.values(services||{});retu
 function renderPingGraph(history){const graph=document.getElementById("vmPingGraph");if(!graph)return;const values=(history||[]).slice(-60);const max=Math.max(80,...values.map(row=>Number(row.ms)||0));graph.innerHTML=values.length?values.map(row=>{const ms=Number(row.ms);const ok=Number.isFinite(ms);const h=ok?Math.max(8,Math.round((ms/max)*64)):8;const kind=!ok?"bad":ms<120?"ok":ms<250?"warn":"bad";return '<span class="ping-bar '+kind+'" title="'+(ok?ms+' ms':'offline')+'" style="height:'+h+'px"></span>';}).join(""):'<div class="empty">Ping history will appear after checks.</div>';}
 async function refreshVmMonitor(){try{const data=await getJson("/api/vm-monitor");const kind=monitorKindClass(data.kind);setText("vmMonitorStatus",data.status||"Unknown");setText("vmMonitorAddress",data.vm?.address||"Unknown");setText("vmMonitorHost",data.vm?.hostname||"Unknown");setText("vmUptime",data.vm?.uptime||"Unknown");setText("vmHealthScore",Number.isFinite(Number(data.healthScore))?Math.round(Number(data.healthScore))+"%":"--");setText("vmPingCurrent",monitorMs(data.latency?.current));setText("vmPingAverage",monitorMs(data.latency?.average));setText("vmPingMin",monitorMs(data.latency?.min));setText("vmPingMax",monitorMs(data.latency?.max));setText("vmMonitorStamp","Last check "+new Date(data.checkedAt||Date.now()).toLocaleTimeString());setText("vmLastSuccess",data.lastSuccessfulConnection&&data.lastSuccessfulConnection!=="None yet"?new Date(data.lastSuccessfulConnection).toLocaleString():data.lastSuccessfulConnection||"None yet");["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card "+kind;});const ports=data.ports||[];const services=data.services||{};document.getElementById("vmPortList").innerHTML=renderMonitorRows(ports);document.getElementById("vmServiceList").innerHTML=renderServiceRows(services);document.getElementById("vmPortDetailList").innerHTML=ports.length?ports.map(row=>{const info=[row.source||"",row.detail||"",row.responseMs!=null?monitorMs(row.responseMs):(row.error||"")].filter(Boolean).join(" / ")||"Discovered";return '<div>'+esc(row.label)+": "+esc(monitorStatusLabel(row))+" / "+esc(info)+'</div>';}).join(""):'<div>No configured ports.</div>';document.getElementById("vmErrorList").innerHTML=(data.lastErrors||[]).length?data.lastErrors.map(error=>'<div>'+esc(error)+'</div>').join(""):'<div>No recent connection errors.</div>';renderPingGraph(data.latency?.history||[]);badge("topSsh",services.ssh?.reachable?"SSH reachable":"SSH offline");addActivity("vm","VM connection monitor",(data.status||"Unknown")+" / "+Math.round(Number(data.healthScore)||0)+"%");}catch(e){setText("vmMonitorStatus","Monitor error");setText("vmMonitorStamp",betterError(e));const card=document.getElementById("vmStatusCard");if(card)card.className="vm-status-card bad";addActivity("error","VM monitor failed",e.message);}}
 function betterError(e){return e&&e.message?e.message:"Command failed. Check that the suite is running as Administrator and the Dune VM is reachable.";}
-async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status");renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
+async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status",{timeoutMs:30000});renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
 async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!(await appConfirm("Confirm VM action","Are you sure you want to "+action+" the VM?","Run "+action,"Cancel")))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const data=await getJson("/api/action/"+action,{method:"POST"});let output=data.stdout||data.stderr||data.error||"Done.";if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
@@ -15303,7 +15478,7 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/status") {
-    const vm = await vmInfo();
+    const vm = await vmInfoFast(5000);
     let status = null;
     let raw = "";
     let statusResult = null;
@@ -15362,7 +15537,9 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/setup/status" && req.method === "GET") {
-    const current = loadConfig();
+    const loaded = loadConfig();
+    const detected = loaded.setupComplete ? { config: loaded, changed: false } : autoDetectInitialConfig(loaded);
+    const current = detected.changed ? saveConfig(detected.config) : loaded;
     const pathsValid = serverInstallPathStatus(current.serverInstallPath).valid
       && serverInstallPathStatus(current.awakeningServerPath).valid;
     await json(res, { ok: true, config: publicConfig(current), setupComplete: Boolean(current.setupComplete && pathsValid), discovery: await autoDiscovery() });
@@ -15971,8 +16148,11 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/vm/status" && req.method === "GET") {
-    const vm = await vmInfo();
-    const diagnostics = await backendDiagnostics();
+    const vm = await vmInfoFast(5000);
+    const diagnostics = await Promise.race([
+      backendDiagnostics(),
+      timeoutAfter(5000, "Backend diagnostics timed out after 5000 ms.")
+    ]);
     await json(res, { ok: Boolean(vm.ok || vm.exists), status: vm.state || "Unknown", vm, diagnostics });
     return;
   }

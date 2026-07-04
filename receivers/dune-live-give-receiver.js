@@ -364,8 +364,8 @@ function validateGiveItem(payload) {
     error.statusCode = 400;
     throw error;
   }
-  if (!Number.isInteger(qty) || qty < 1 || qty > 9999) {
-    const error = new Error("qty must be a whole number between 1 and 9999.");
+  if (!Number.isInteger(qty) || qty < 1 || qty > 50000) {
+    const error = new Error("qty must be a whole number between 1 and 50000.");
     error.statusCode = 400;
     throw error;
   }

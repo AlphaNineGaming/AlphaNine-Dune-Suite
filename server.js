@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "1.0.3";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -10607,6 +10607,337 @@ async function adminGiveItem(payload) {
   }
 }
 
+function marketPostingCatalogItem(template) {
+  const id = String(template || "").trim();
+  return gearCatalog().find((row) => row.id === id) || null;
+}
+
+function validateMarketListingPayload(payload) {
+  const template = String(payload?.template || "").trim();
+  const stackSize = requireInteger(payload?.stackSize ?? payload?.quantity ?? 1, "stack size", 1, 50000);
+  const price = requireInteger(payload?.price ?? 1, "price", 1, 999999999);
+  const quality = requireInteger(payload?.quality ?? 0, "grade", 0, 5);
+  const listingCount = requireInteger(payload?.listingCount ?? 1, "listing count", 1, 50);
+  if (!template || template.length > 240 || !/^[A-Za-z0-9_:.()+-]+$/.test(template)) throw new Error("Choose a valid item template.");
+  const item = marketPostingCatalogItem(template);
+  if (!item) throw new Error("Item template was not found in the local item catalog.");
+  if (isTechKnowledgeItem(item) || isRecipeSchematicItem(item)) throw new Error("Research and recipe unlock pseudo-items cannot be posted to the market.");
+  return {
+    template,
+    name: item.name || template,
+    stackSize,
+    price,
+    quality,
+    listingCount,
+    requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  };
+}
+
+async function marketPostingStatus() {
+  const started = Date.now();
+  const requiredTables = [
+    "actors",
+    "inventories",
+    "items",
+    "world_partition",
+    "dune_exchange_orders",
+    "dune_exchange_sell_orders",
+    "dune_exchange_users",
+    "dune_exchanges"
+  ];
+  const tableSql = `
+    select table_name, 'present'
+    from information_schema.tables
+    where table_schema = 'dune'
+      and table_name in (${requiredTables.map(sqlString).join(",")})
+    order by table_name
+  `;
+  const tableRows = await dbQuery(tableSql, 12000).then((output) => parseDbRows(output, ["name", "status"]));
+  const tableSet = new Set(tableRows.map((row) => row.name));
+  const missingTables = requiredTables.filter((name) => !tableSet.has(name));
+  const missingFunctions = [];
+  let exchange = null;
+  let botListings = 0;
+  if (!missingTables.length && !missingFunctions.length) {
+    const statsSql = `
+      with selected_exchange as (
+        select id::text as exchange_id, exchange_name
+        from dune.dune_exchanges
+        where exchange_name != 'Global'
+        order by id
+        limit 1
+      ),
+      market_actor as (
+        select id
+        from dune.actors
+        where class = 'AlphaNineMarket'
+        order by id
+        limit 1
+      )
+      select
+        coalesce((select exchange_id from selected_exchange), ''),
+        coalesce((select exchange_name from selected_exchange), ''),
+        coalesce((select count(*)::text from dune.dune_exchange_orders where owner_id = (select id from market_actor) and is_npc_order = true), '0')
+    `;
+    const rows = parseDbRows(await dbQuery(statsSql, 12000), ["exchangeId", "exchangeName", "botListings"]);
+    const row = rows[0] || {};
+    exchange = row.exchangeId ? { id: row.exchangeId, name: row.exchangeName || "Exchange" } : null;
+    botListings = Number(row.botListings || 0) || 0;
+  }
+  return {
+    ok: !missingTables.length && !missingFunctions.length,
+    status: !missingTables.length && !missingFunctions.length ? "ready" : "unsupported",
+    exchange,
+    botActorClass: "AlphaNineMarket",
+    botListings,
+    tables: requiredTables.map((name) => ({ name, status: tableSet.has(name) ? "present" : "missing" })),
+    functions: [],
+    missingTables,
+    missingFunctions,
+    durationMs: Date.now() - started
+  };
+}
+
+async function marketListings(payload = {}) {
+  const started = Date.now();
+  const limit = requireInteger(payload.limit ?? 100, "limit", 1, 250);
+  const q = String(payload.q || "").trim();
+  const where = q ? `where (o.template_id ilike ${sqlString(`%${q}%`)} or coalesce(e.exchange_name, '') ilike ${sqlString(`%${q}%`)} or coalesce(a.class, '') ilike ${sqlString(`%${q}%`)})` : "";
+  const sql = `
+    select
+      o.id::text,
+      coalesce(e.exchange_name, ''),
+      o.template_id,
+      coalesce(i.stack_size::text, ''),
+      coalesce(o.quality_level::text, ''),
+      coalesce(o.item_price::text, ''),
+      coalesce(s.initial_stack_size::text, ''),
+      coalesce(s.wear_normalized_price::text, ''),
+      coalesce(o.is_npc_order::text, ''),
+      coalesce(a.class, ''),
+      coalesce(o.owner_id::text, ''),
+      coalesce(o.expiration_time::text, ''),
+      coalesce(o.item_id::text, '')
+    from dune.dune_exchange_orders o
+    left join dune.dune_exchange_sell_orders s on s.order_id = o.id
+    left join dune.items i on i.id = o.item_id
+    left join dune.dune_exchanges e on e.id = o.exchange_id
+    left join dune.actors a on a.id = o.owner_id
+    ${where}
+    order by o.id desc
+    limit ${limit}
+  `;
+  const catalog = gearCatalog();
+  const byId = new Map(catalog.map((item) => [item.id, item]));
+  const rows = parseDbRows(await dbQuery(sql, 20000), ["orderId", "exchangeName", "template", "stackSize", "quality", "price", "initialStackSize", "normalizedPrice", "isNpcOrder", "ownerClass", "ownerId", "expirationTime", "itemId"]);
+  const listings = rows.map((row) => {
+    const item = byId.get(row.template);
+    return {
+      orderId: row.orderId,
+      itemId: row.itemId,
+      template: row.template,
+      name: item?.name || row.template,
+      exchangeName: row.exchangeName || "Exchange",
+      stackSize: Number(row.stackSize || row.initialStackSize || 0) || 0,
+      quality: Number(row.quality || 0) || 0,
+      price: Number(row.price || row.normalizedPrice || 0) || 0,
+      initialStackSize: Number(row.initialStackSize || row.stackSize || 0) || 0,
+      isNpcOrder: row.isNpcOrder === "t" || row.isNpcOrder === "true",
+      ownerClass: row.ownerClass || "",
+      ownerId: row.ownerId,
+      expirationTime: row.expirationTime
+    };
+  });
+  return { ok: true, listings, count: listings.length, durationMs: Date.now() - started };
+}
+
+async function postMarketListing(payload) {
+  const command = validateMarketListingPayload(payload);
+  if (payload?.confirmed !== true && payload?.confirmed !== "true") throw new Error("Confirm live market posting before writing to the exchange.");
+  const started = Date.now();
+  const statsJson = JSON.stringify({ FCustomizationStats: [[], {}], FItemStackAndDurabilityStats: [[], {}] });
+  const expiryTime = 999999999;
+  const sql = `
+    with selected_exchange as (
+      select id as exchange_id, inventory_id as exchange_inventory_id
+      from dune.dune_exchanges
+      where exchange_name != 'Global'
+      order by id
+      limit 1
+    ),
+    selected_access_point as (
+      select coalesce(
+        (select access_point_id from dune.dune_exchange_orders where exchange_id = (select exchange_id from selected_exchange) and access_point_id is not null limit 1),
+        1
+      )::bigint as access_point_id
+    ),
+    selected_inventory as (
+      select id as inventory_id
+      from dune.inventories
+      where id = (select exchange_inventory_id from selected_exchange)
+         or exchange_id = (select exchange_id from selected_exchange)
+      order by case when id = (select exchange_inventory_id from selected_exchange) then 0 else 1 end, id
+      limit 1
+    ),
+    created_inventory as (
+      insert into dune.inventories (exchange_id)
+      select (select exchange_id from selected_exchange)
+      where not exists (select 1 from selected_inventory)
+      returning id as inventory_id
+    ),
+    market_inventory as (
+      select inventory_id from selected_inventory
+      union all
+      select inventory_id from created_inventory
+      limit 1
+    ),
+    synced_exchange_inventory as (
+      update dune.dune_exchanges
+      set inventory_id = (select inventory_id from market_inventory)
+      where id = (select exchange_id from selected_exchange)
+        and inventory_id is null
+      returning id
+    ),
+    selected_partition as (
+      select partition_id
+      from dune.world_partition
+      order by partition_id
+      limit 1
+    ),
+    existing_actor as (
+      select id
+      from dune.actors
+      where class = 'AlphaNineMarket'
+      order by id
+      limit 1
+    ),
+    created_actor as (
+      insert into dune.actors (class, serial, gas_attributes, properties, dimension_index, partition_id)
+      select 'AlphaNineMarket', 0, '{}', '{}', 0, (select partition_id from selected_partition)
+      where not exists (select 1 from existing_actor)
+      returning id
+    ),
+    market_actor as (
+      select id from existing_actor
+      union all
+      select id from created_actor
+      limit 1
+    ),
+    exchange_user as (
+      insert into dune.dune_exchange_users (owner_id)
+      select id from market_actor
+      on conflict do nothing
+      returning id as user_id
+    ),
+    market_user as (
+      select user_id from exchange_user
+      union all
+      select id as user_id
+      from dune.dune_exchange_users
+      where owner_id = (select id from market_actor)
+      limit 1
+    ),
+    next_position as (
+      select coalesce(max(position_index), -1) + 1 as position_index
+      from dune.items
+      where inventory_id = (select inventory_id from market_inventory)
+    ),
+    source_rows as (
+      select generate_series(0, ${command.listingCount - 1}) as offset_index
+    ),
+    inserted_items as (
+      insert into dune.items (inventory_id, stack_size, position_index, template_id, quality_level, stats)
+      select
+        (select inventory_id from market_inventory),
+        ${command.stackSize},
+        (select position_index from next_position) + offset_index,
+        ${sqlString(command.template)},
+        ${command.quality},
+        ${sqlString(statsJson)}
+      from source_rows
+      returning id, position_index
+    ),
+    inserted_orders as (
+      insert into dune.dune_exchange_orders
+        (exchange_id, access_point_id, owner_id, is_npc_order, expiration_time,
+         template_id, durability_cur, durability_max, category_mask, category_depth,
+         item_price, quality_level, item_id)
+      select
+        (select exchange_id from selected_exchange),
+        (select access_point_id from selected_access_point),
+        (select id from market_actor),
+        true,
+        ${expiryTime},
+        ${sqlString(command.template)},
+        1.0,
+        1.0,
+        0,
+        0,
+        ${command.price},
+        ${command.quality},
+        id
+      from inserted_items
+      returning id, item_id
+    ),
+    inserted_sell_orders as (
+      insert into dune.dune_exchange_sell_orders (order_id, initial_stack_size, wear_normalized_price)
+      select id, ${command.stackSize}, ${command.price}
+      from inserted_orders
+      returning order_id
+    )
+    select
+      (select count(*)::text from inserted_sell_orders),
+      coalesce((select min(id)::text from inserted_orders), ''),
+      coalesce((select max(id)::text from inserted_orders), ''),
+      coalesce((select min(item_id)::text from inserted_orders), ''),
+      coalesce((select max(item_id)::text from inserted_orders), ''),
+      coalesce((select exchange_id::text from selected_exchange), ''),
+      coalesce((select inventory_id::text from market_inventory), ''),
+      coalesce((select id::text from market_actor), ''),
+      coalesce((select user_id::text from market_user), '')
+  `;
+  const output = await dbQuery(sql, 45000);
+  const row = parseDbRows(output, ["created", "firstOrderId", "lastOrderId", "firstItemId", "lastItemId", "exchangeId", "inventoryId", "actorId", "exchangeUserId"])[0] || {};
+  const created = Number(row.created || 0) || 0;
+  if (created !== command.listingCount) throw new Error(`Market posting returned ${created} created listing(s), expected ${command.listingCount}.`);
+  const result = {
+    ok: true,
+    status: "posted",
+    command,
+    market: {
+      exchangeId: row.exchangeId,
+      inventoryId: row.inventoryId,
+      actorId: row.actorId,
+      exchangeUserId: row.exchangeUserId,
+      firstOrderId: row.firstOrderId,
+      lastOrderId: row.lastOrderId,
+      firstItemId: row.firstItemId,
+      lastItemId: row.lastItemId
+    },
+    item: {
+      id: command.template,
+      name: command.name,
+      stackSize: command.stackSize,
+      price: command.price,
+      quality: command.quality,
+      listingCount: created
+    },
+    durationMs: Date.now() - started,
+    message: `Posted ${created} live market listing(s) for ${command.name} at ${command.price} Solari.`
+  };
+  appendAdminAudit("market_listing_posted", {
+    requestId: command.requestId,
+    template: command.template,
+    stackSize: command.stackSize,
+    price: command.price,
+    quality: command.quality,
+    listingCount: command.listingCount,
+    result: result.market,
+    durationMs: result.durationMs
+  });
+  return result;
+}
+
 function giveItemDisplayName(template) {
   if (/^recipe:/i.test(String(template || ""))) return recipeDisplayName(String(template || "").replace(/^recipe:/i, ""));
   if (/^tech:/i.test(String(template || ""))) return techKnowledgeDisplayName(techKnowledgeKeyFromTemplate(template));
@@ -12131,6 +12462,22 @@ function appPage() {
     .badge.ok { color:var(--good); border-color:rgba(86,214,143,.35); }
     .badge.warn { color:var(--warn); border-color:rgba(234,191,98,.35); }
     .badge.bad { color:var(--bad); border-color:rgba(255,102,102,.35); }
+    .startup-progress-overlay { position:fixed; inset:0; z-index:90; display:grid; place-items:center; padding:18px; background:rgba(8,6,4,.52); backdrop-filter:blur(8px); }
+    .startup-progress-overlay.hidden { display:none; }
+    .startup-progress { width:min(560px, calc(100vw - 36px)); max-width:100%; border:1px solid rgba(240,201,106,.42); border-radius:18px; background:linear-gradient(180deg, rgba(246,202,135,.16), var(--panel)); box-shadow:0 24px 70px rgba(0,0,0,.48), inset 0 1px 0 rgba(255,255,255,.06); padding:16px; overflow:hidden; }
+    .startup-progress.hidden { display:none; }
+    .startup-progress-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .startup-progress-head strong { color:var(--gold-bright); text-transform:uppercase; letter-spacing:.08em; font-size:13px; line-height:1.25; }
+    .startup-progress-head span { color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; }
+    .startup-progress-message { margin-top:4px; color:var(--muted); font-size:12px; line-height:1.35; }
+    .startup-progress-bar { position:relative; height:9px; margin-top:10px; border:1px solid rgba(240,201,106,.28); border-radius:999px; background:rgba(9,7,5,.56); overflow:hidden; }
+    .startup-progress-bar i { display:block; width:var(--startup-progress, 4%); min-width:4%; max-width:100%; height:100%; border-radius:999px; background:linear-gradient(90deg, var(--gold), var(--gold-bright), rgba(114,164,242,.82)); box-shadow:0 0 18px rgba(240,201,106,.28); transition:width .28s ease; }
+    .startup-progress-steps { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+    .startup-step { display:inline-flex; align-items:center; gap:6px; min-height:24px; border:1px solid rgba(224,173,99,.28); border-radius:999px; padding:4px 8px; color:var(--muted); background:rgba(255,255,255,.025); font-size:11px; font-weight:800; line-height:1.2; text-transform:uppercase; letter-spacing:.045em; }
+    .startup-step::before { content:""; width:7px; height:7px; border-radius:999px; background:currentColor; opacity:.72; }
+    .startup-step.working { color:var(--gold-bright); border-color:rgba(240,201,106,.46); }
+    .startup-step.ok { color:var(--good); border-color:rgba(89,213,139,.42); }
+    .startup-step.warn { color:var(--warn); border-color:rgba(255,189,94,.42); }
     .view { display:none; width:100%; max-width:var(--content-max); margin:0 auto; animation:fade .16s ease-out; }
     .view.active { display:block; }
     @keyframes fade { from { opacity:.2; transform:translateY(4px); } to { opacity:1; transform:none; } }
@@ -13600,6 +13947,7 @@ function appPage() {
         <div class="nav-group-title">Tools</div>
         <button class="tab" data-view="web-portal">Web Portal</button>
         <button class="tab" data-view="item-database">Item Database</button>
+        <button class="tab" data-view="market">Market Posting</button>
         <button class="tab" data-view="settings">Settings</button>
       </div>
       <div class="nav-group advanced-nav">
@@ -13645,6 +13993,17 @@ function appPage() {
           <span id="topPlayers" class="badge warn">Players 0</span>
           <span id="topSsh" class="badge warn advanced-only">SSH unknown</span>
         </div>
+      </div>
+    </div>
+    <div id="startupProgressOverlay" class="startup-progress-overlay" style="position:fixed;inset:0;z-index:9999;display:grid;place-items:center;padding:18px;background:rgba(8,6,4,.52);backdrop-filter:blur(8px);">
+      <div id="startupProgress" class="startup-progress" role="status" aria-live="polite" style="width:min(560px, calc(100vw - 36px));max-width:100%;margin:0;">
+        <div class="startup-progress-head">
+          <strong id="startupProgressTitle">Starting Suite</strong>
+          <span id="startupProgressCount">0 / 6</span>
+        </div>
+        <div id="startupProgressMessage" class="startup-progress-message">Preparing dashboard, VM monitor, battlegroup, players, map, and live tools.</div>
+        <div class="startup-progress-bar" aria-hidden="true"><i id="startupProgressFill"></i></div>
+        <div id="startupProgressSteps" class="startup-progress-steps"></div>
       </div>
     </div>
     <section id="dashboard" class="view active">
@@ -13730,6 +14089,7 @@ function appPage() {
           <div class="panel-head"><div class="label">Quick Actions</div><div class="micro">Command deck</div></div>
           <div class="action-row mt">
             <button class="primary" data-open="give">Give Item</button>
+            <button data-open="market">Market Posting</button>
             <button data-open="players">Players</button>
             <button data-open="server">Server Control</button>
             <button onclick="refreshAll()">Refresh All</button>
@@ -13963,6 +14323,69 @@ function appPage() {
           <div id="giveQueueSummary" class="empty mt">Progress: 0 / 0 · Succeeded: 0 · Failed: 0</div>
           <textarea id="giveQueueLog" class="mt" rows="10" readonly placeholder="Queue results will appear here."></textarea>
         </aside>
+      </div>
+    </section>
+
+    <section id="market" class="view">
+      <div class="layout-2">
+        <div class="panel pad">
+          <div class="panel-head">
+            <div>
+              <div class="label">Market Posting</div>
+              <div class="subtle">Create live NPC sell listings in the Dune Exchange.</div>
+            </div>
+            <button type="button" onclick="refreshMarketPanel()">Refresh Market</button>
+          </div>
+          <div id="marketSelectedItem" class="empty mt">Select a market item from the picker on the right.</div>
+          <div class="field-grid mt">
+            <label>Stack Size<input id="marketStackSize" type="number" min="1" max="50000" value="1" oninput="updateMarketSummary()"></label>
+            <label>Price Per Listing<input id="marketPrice" type="number" min="1" max="999999999" value="1000" oninput="updateMarketSummary()"></label>
+            <label>Grade<input id="marketQuality" type="number" min="0" max="5" value="0" oninput="updateMarketSummary()"></label>
+            <label>Listings<input id="marketListingCount" type="number" min="1" max="50" value="1" oninput="updateMarketSummary()"></label>
+          </div>
+          <div id="marketSummary" class="empty mt">Ready to configure a market listing.</div>
+          <div class="action-row mt">
+            <button id="marketPostButton" class="primary" type="button" onclick="postMarketListing()">Post Live Listing</button>
+            <button type="button" onclick="refreshMarketPanel()">Check Market</button>
+          </div>
+          <div class="warning mt">This writes live exchange orders using the AlphaNineMarket NPC actor. Use small listing counts while testing.</div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head">
+            <div>
+              <div class="label">Choose Market Item</div>
+              <div class="subtle">Pick the item template Suite will post into the exchange.</div>
+            </div>
+          </div>
+          <div class="give-catalog-filters mt">
+            <label>Search<input id="marketSearch" placeholder="Search item name or template" oninput="renderMarketItems()"></label>
+            <div class="give-filter-row">
+              <label>Category<select id="marketCategory" onchange="renderMarketItems()"><option value="">All items</option></select></label>
+              <label>Grade<select id="marketGradeFilter" onchange="renderMarketItems()"><option value="all">All grades</option><option>Common</option><option>Uncommon</option><option>Rare</option><option>Epic</option><option>Legendary</option><option>Unique</option><option>Unknown</option></select></label>
+              <label>Tier<select id="marketTier" onchange="renderMarketItems()"><option value="all">All tiers</option></select></label>
+            </div>
+          </div>
+          <div id="marketStatus" class="warning mt">Market status not checked.</div>
+          <div id="marketItems" class="admin-items mt"><div class="empty">Loading market item templates...</div></div>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div>
+            <div class="label">Live Market Listings</div>
+            <div class="subtle">Current exchange sell orders from the live database.</div>
+          </div>
+          <button type="button" onclick="refreshMarketListings()">Refresh Listings</button>
+        </div>
+        <div class="field-grid mt">
+          <label>Search Live Market<input id="marketListingsSearch" placeholder="Search template, exchange, or owner" oninput="refreshMarketListingsSoon()"></label>
+          <label>Rows<select id="marketListingsLimit" onchange="refreshMarketListings()"><option>50</option><option selected>100</option><option>150</option><option>250</option></select></label>
+        </div>
+        <div id="marketListings" class="detail-list mt"><div class="empty">Load live market listings.</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Market Result</div>
+        <pre id="marketLog" class="mt">No market posting has run.</pre>
       </div>
     </section>
 
@@ -14768,6 +15191,7 @@ const viewCopy={
   dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
   players:["Players","Search, inspect, and select characters for admin actions."],
   give:["Give Item","Live item grants through the configured receiver."],
+  market:["Market Posting","Suite market tool for posting live NPC sell listings into the Dune Exchange."],
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
   database:["Database","Battlegroup backup, import, and backup location management."],
@@ -14783,10 +15207,10 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market")startMarketPosting();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -15401,6 +15825,21 @@ function catalogItemByTemplate(template){const id=String(template||"");return ad
 function templateIsSchematic(template){const item=catalogItemByTemplate(template);return item?(isTechKnowledgeItem(item)||isRecipeSchematicItem(item)):/^tech:/i.test(String(template||""))||/_schematic$/i.test(String(template||""))||/schematic$/i.test(String(template||""));}
 function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select an item from the catalog below.";return;}const kind=giveItemGrantKind(selectedAdminItem);const notice=giveItemSchematicNotice(selectedAdminItem);selected.className=notice?"warning":"detail-row";selected.innerHTML='<span class="subtle">'+esc(kind)+'</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>'+(notice?'<div class="subtle mt">'+esc(notice)+'</div>':'');}
 function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();}
+function marketPostableItem(item){return item&&!isTechKnowledgeItem(item)&&!isRecipeSchematicItem(item);}
+function renderMarketItemFilters(){const cat=document.getElementById("marketCategory");if(cat){const current=normalizeUiItemCategory(cat.value);const categories=[...new Set(adminItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));cat.innerHTML='<option value="">All marketable items</option><option value="__schematics">Schematics and fragments</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");cat.value=[...categories,"","__unknown","__schematics"].includes(current)?current:"";}const tier=document.getElementById("marketTier");if(tier){const current=tier.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="all">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"all";}}
+function renderMarketItems(){const wrap=document.getElementById("marketItems");if(!wrap)return;const q=(document.getElementById("marketSearch")?.value||"").trim().toLowerCase();const category=normalizeUiItemCategory(document.getElementById("marketCategory")?.value||"");const grade=document.getElementById("marketGradeFilter")?.value||"all";const tier=document.getElementById("marketTier")?.value||"all";const rows=adminItems.filter(item=>{if(!marketPostableItem(item))return false;const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";if(category==="__unknown"){if(itemCategory&&item.hasDisplayName)return false;}else if(category==="__schematics"){if(!isSchematicItem(item))return false;}else if(String(category).toLowerCase()==="items"){if(isSchematicItem(item)||itemCategory!==category)return false;}else if(category&&itemCategory!==category)return false;if(grade&&grade!=="all"&&itemGrade!==grade)return false;if(tier&&tier!=="all"&&itemTier!==tier)return false;if(q){const text=[item.name,item.id,itemCategory,item.type,item.subtype,item.detail,itemGrade,itemTier,itemDisplayDisambiguator(item)].join(" ").toLowerCase();if(!text.includes(q))return false;}return true;});const duplicateNames=duplicatedItemNameSet(rows);wrap.innerHTML=rows.slice(0,140).map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">MK</span></span>':'<div class="avatar">MK</div>';return '<button type="button" class="admin-item '+(selectedMarketItem&&selectedMarketItem.id===item.id?'active':'')+'" data-market-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(itemCategory||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join("")||'<div class="empty">No marketable items match the current filters.</div>';wrap.querySelectorAll("[data-market-item-id]").forEach(el=>el.addEventListener("click",()=>selectMarketItem(el.dataset.marketItemId)));}
+function selectMarketItem(id){selectedMarketItem=adminItems.find(item=>item.id===id)||null;renderMarketItems();renderMarketSelectedItem();updateMarketSummary();}
+function renderMarketSelectedItem(){const el=document.getElementById("marketSelectedItem");if(!el)return;if(!selectedMarketItem){el.className="empty mt";el.textContent="Select a market item from the picker on the right.";return;}const itemGrade=normalizeUiGrade(selectedMarketItem.grade||selectedMarketItem.rarity||selectedMarketItem.quality||selectedMarketItem.tier||selectedMarketItem.itemGrade||selectedMarketItem.itemRarity);el.className="detail-list mt";el.innerHTML='<div class="detail-row"><span class="subtle">Market Item</span><strong>'+esc(selectedMarketItem.name||selectedMarketItem.id)+'</strong></div><div class="detail-row"><span class="subtle">Template</span><strong>'+esc(selectedMarketItem.id)+'</strong></div><div class="detail-row"><span class="subtle">Market Grade</span><strong>'+esc(itemGrade)+'</strong></div><div class="detail-row"><span class="subtle">Category</span><strong>'+esc(normalizeUiItemCategory(selectedMarketItem.category)||"Unknown")+'</strong></div>';}
+function marketListingPayload(){if(!selectedMarketItem)throw new Error("Choose an item first.");const stackSize=Number(document.getElementById("marketStackSize")?.value||1);const price=Number(document.getElementById("marketPrice")?.value||0);const quality=Number(document.getElementById("marketQuality")?.value||0);const listingCount=Number(document.getElementById("marketListingCount")?.value||1);if(!Number.isInteger(stackSize)||stackSize<1||stackSize>50000)throw new Error("Stack size must be a whole number from 1 to 50000.");if(!Number.isInteger(price)||price<1||price>999999999)throw new Error("Price must be a whole number from 1 to 999999999.");if(!Number.isInteger(quality)||quality<0||quality>5)throw new Error("Grade must be a whole number from 0 to 5.");if(!Number.isInteger(listingCount)||listingCount<1||listingCount>50)throw new Error("Listings must be a whole number from 1 to 50.");return{template:selectedMarketItem.id,stackSize,price,quality,listingCount};}
+function updateMarketSummary(){const el=document.getElementById("marketSummary");if(!el)return;try{const payload=marketListingPayload();el.className="empty mt";el.innerHTML='<strong>'+esc(String(payload.listingCount))+' listing(s) / '+esc(selectedMarketItem.name||payload.template)+'</strong><span>Stack '+esc(String(payload.stackSize))+' / Grade '+esc(String(payload.quality))+' / Price '+esc(String(payload.price))+' Solari each</span>';}catch(e){el.className="warning mt";el.textContent=e.message||"Configure a market listing.";}}
+function syncMarketPostingControls(){const button=document.getElementById("marketPostButton");if(button)button.disabled=marketPostingBusy;}
+async function refreshMarketStatus(){const status=document.getElementById("marketStatus");try{if(status){status.className="warning mt";status.textContent="Checking exchange schema...";}const data=await getJson("/api/market/status",{timeoutMs:20000});if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML=data.ok?('<strong>Ready</strong><div class="subtle">Exchange '+esc(data.exchange?.name||data.exchange?.id||"detected")+' / AlphaNineMarket listings: '+esc(data.botListings||0)+'</div>'):'<strong>Market unsupported</strong><div class="subtle">'+esc([...(data.missingTables||[]),...(data.missingFunctions||[])].join(", ")||data.error||"Required exchange schema missing.")+'</div>';}return data;}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}return null;}}
+function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[];wrap.innerHTML=listings.length?listings.map(row=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span><br><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+'</span></span><strong>'+esc(row.price)+' Solari<br><span class="subtle">Stack '+esc(row.stackSize||row.initialStackSize||0)+' / Grade '+esc(row.quality||0)+' / '+esc(row.isNpcOrder?"NPC":"Player")+'</span><br><span class="subtle">'+esc(row.ownerClass||("Owner "+(row.ownerId||"-")))+'</span></strong></div>').join(""):'<div class="empty">No live market listings found.</div>';}
+async function refreshMarketListings(){const wrap=document.getElementById("marketListings");try{if(wrap)wrap.innerHTML='<div class="warning">Loading live market listings...</div>';const q=document.getElementById("marketListingsSearch")?.value||"";const limit=document.getElementById("marketListingsLimit")?.value||100;const data=await getJson("/api/market/listings?limit="+encodeURIComponent(limit)+"&q="+encodeURIComponent(q),{timeoutMs:25000});renderMarketListings(data);return data;}catch(e){if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(e))+'</div>';return null;}}
+function refreshMarketListingsSoon(){clearTimeout(marketListingsTimer);marketListingsTimer=setTimeout(refreshMarketListings,350);}
+async function refreshMarketPanel(){await Promise.all([refreshMarketStatus(),refreshMarketListings()]);}
+async function startMarketPosting(){marketPostingBusy=false;syncMarketPostingControls();if(!adminItems.length)await refreshGiveItemsFast();renderMarketItemFilters();renderMarketItems();renderMarketSelectedItem();updateMarketSummary();syncMarketPostingControls();await refreshMarketPanel();}
+async function postMarketListing(){const log=document.getElementById("marketLog");try{if(marketPostingBusy)return;if(!selectedMarketItem){if(log)log.textContent="Choose a market item first, then click Post Live Listing.";const picker=document.getElementById("marketSearch");if(picker)picker.focus();playUiSound("warning");return;}const payload=marketListingPayload();const confirmed=await appConfirm("Post live market listing","Post "+payload.listingCount+" live exchange listing(s) for "+(selectedMarketItem.name||payload.template)+" at "+payload.price+" Solari each?","Post Live","Cancel");if(!confirmed)return;marketPostingBusy=true;syncMarketPostingControls();if(log)log.textContent="Posting live market listing...";const data=await getJson("/api/market/listing",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,confirmed:true}),timeoutMs:60000});if(log)log.textContent=(data.message||"Market listing posted.")+"\\n\\n"+JSON.stringify(data,null,2);addActivity("market","Market listing posted",(selectedMarketItem.name||payload.template)+" x"+payload.listingCount);playUiSound("success");await refreshMarketPanel();}catch(e){if(log)log.textContent=betterError(e);addActivity("error","Market posting failed",e.message);playUiSound("warning");}finally{marketPostingBusy=false;syncMarketPostingControls();}}
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;input.min=0;input.max=5;if(!supported)input.value=0;else{const grade=Number(input.value||0);if(Number.isFinite(grade)&&grade<0)input.value=0;if(Number.isFinite(grade)&&grade>5)input.value=5;}}if(warning){warning.classList.toggle("hidden",false);warning.textContent=supported?"Grade 1-5 uses a database-backed grant and may require relog or inventory refresh. Grade 0 uses the live receiver.":"Grade giving is not supported by the current receiver method.";}syncGiveItemControls();}
 function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(selectedAdminItem)};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
 function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Grade "+row.quality:"")+(row.grantKind?" / "+row.grantKind:"");}
@@ -15439,8 +15878,23 @@ async function giveAdminItem(){const log=document.getElementById("adminLog");con
 const giveAdminItemWithoutSentToast=giveAdminItem;
 giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");const notice=selectedAdminItem?giveItemSchematicNotice(selectedAdminItem):"";if(log&&notice&&text&&!text.includes(notice))log.textContent=text+"\\n\\nNote: "+notice;if(/Live Give (verified|published)/i.test(text))showToast(notice?"Research unlock sent":"Item sent","success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
+let startupProgressState=null;
+const STARTUP_TASKS=[
+  {key:"status",label:"Server / DB",detail:"Checking server, database, and battlegroup status.",run:refresh},
+  {key:"vm",label:"VM Monitor",detail:"Detecting VM address and connection health.",run:refreshVmMonitor},
+  {key:"maps",label:"Maps",detail:"Loading map deployments.",run:refreshMaps},
+  {key:"admin",label:"Players / Items",detail:"Loading players, item catalog, and admin capabilities.",run:refreshAdmin},
+  {key:"feed",label:"Player Feed",detail:"Loading live player feed.",run:refreshPlayerFeed},
+  {key:"receiver",label:"Receiver",detail:"Checking live receiver and give transport.",run:refreshReceiverStatus}
+];
+function mountStartupProgressPopup(){const overlay=document.getElementById("startupProgressOverlay");const panel=document.getElementById("startupProgress");if(!overlay||!panel)return{overlay,panel};if(overlay.parentElement!==document.body)document.body.appendChild(overlay);Object.assign(overlay.style,{position:"fixed",inset:"0",zIndex:"9999",display:startupProgressState?.hidden?"none":"grid",placeItems:"center",padding:"18px",background:"rgba(8,6,4,.52)",backdropFilter:"blur(8px)"});Object.assign(panel.style,{width:"min(560px, calc(100vw - 36px))",maxWidth:"100%",margin:"0"});return{overlay,panel};}
+function renderStartupProgress(){const mounted=mountStartupProgressPopup();const panel=mounted.panel;const overlay=mounted.overlay;if(!panel||!startupProgressState)return;const tasks=startupProgressState.tasks||[];const done=tasks.filter(task=>task.status==="ok"||task.status==="warn").length;const total=tasks.length||1;const percent=Math.max(4,Math.round((done/total)*100));panel.classList.toggle("hidden",startupProgressState.hidden===true);if(overlay){overlay.classList.toggle("hidden",startupProgressState.hidden===true);overlay.style.display=startupProgressState.hidden===true?"none":"grid";}panel.style.setProperty("--startup-progress",percent+"%");setText("startupProgressTitle",startupProgressState.complete?"Suite Ready":"Starting Suite");setText("startupProgressCount",done+" / "+total);setText("startupProgressMessage",startupProgressState.message||"Starting suite services...");const steps=document.getElementById("startupProgressSteps");if(steps)steps.innerHTML=tasks.map(task=>'<span class="startup-step '+esc(task.status||"pending")+'">'+esc(task.label)+'</span>').join("");}
+function updateStartupTask(key,status,message){if(!startupProgressState)return;const task=startupProgressState.tasks.find(row=>row.key===key);if(task)task.status=status;startupProgressState.message=message||startupProgressState.message;renderStartupProgress();}
+function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>resolve({timedOut:true,label}),ms));}
+async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
+async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();refreshAll();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{}));
@@ -16084,6 +16538,33 @@ async function route(req, res) {
       await json(res, result, result.ok || result.dryRun ? 200 : 409);
     } catch (error) {
       await json(res, { ok: false, error: error.message, timings: error.timings || {} }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market/status" && req.method === "GET") {
+    try {
+      await json(res, await marketPostingStatus());
+    } catch (error) {
+      await json(res, { ok: false, status: "unavailable", error: error.message }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market/listings" && req.method === "GET") {
+    try {
+      await json(res, await marketListings({ limit: url.searchParams.get("limit") || 100, q: url.searchParams.get("q") || "" }));
+    } catch (error) {
+      await json(res, { ok: false, status: "unavailable", error: error.message, listings: [] }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market/listing" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await postMarketListing(body);
+      await json(res, result);
+    } catch (error) {
+      appendAdminAudit("market_listing_failed", { error: error.message });
+      await json(res, { ok: false, status: "failed", error: error.message }, 400);
     }
     return;
   }

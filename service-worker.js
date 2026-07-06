@@ -1,4 +1,4 @@
-const CACHE_NAME = "alphanine-dune-suite-v1";
+const CACHE_NAME = "alphanine-dune-suite-v1-market-popup-1-0-3";
 const STATIC_ASSETS = [
   "/",
   "/manifest.webmanifest",

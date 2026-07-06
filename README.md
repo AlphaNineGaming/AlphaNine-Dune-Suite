@@ -25,6 +25,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.3
+
+- Added Market Posting for creating live NPC exchange sell listings from the Suite.
+- Added Live Market Listings so admins can see current exchange orders from the live database.
+- Added a startup progress popup while the Suite detects server, database, VM, maps, players, and receiver status.
+- Improved update packaging so the Windows installer filename matches updater metadata.
+- Bumped the service-worker cache for a clean app shell refresh after updating.
+
 ### 0.3.5-beta
 
 - Unified Live Map and Live Teleport coordinate handling.

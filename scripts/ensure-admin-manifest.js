@@ -6,7 +6,13 @@ const root = path.join(__dirname, "..");
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const outputDir = path.join(root, "installer-output");
 const appExe = path.join(outputDir, "win-unpacked", `${packageJson.build.productName}.exe`);
-const installerExe = path.join(outputDir, `${packageJson.build.productName} Setup ${packageJson.version}.exe`);
+function buildArtifactName(ext = "exe") {
+  return String(packageJson.build.artifactName || `${packageJson.build.productName} Setup ${packageJson.version}.${ext}`)
+    .replace(/\$\{productName\}/g, packageJson.build.productName)
+    .replace(/\$\{version\}/g, packageJson.version)
+    .replace(/\$\{ext\}/g, ext);
+}
+const installerExe = path.join(outputDir, buildArtifactName("exe"));
 const requiredLevel = "requireAdministrator";
 
 function findRcedit() {

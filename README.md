@@ -25,6 +25,12 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.4
+
+- Added a Give Item popup when admins select Grade 1-5, explaining that the player must relog before database-granted items appear in inventory.
+- Added the same relog warning before live Grade 1-5 grants and Give Queue runs that include graded items.
+- Bumped the service-worker cache for a clean app shell refresh after updating.
+
 ### 1.0.3
 
 - Added Market Posting for creating live NPC exchange sell listings from the Suite.

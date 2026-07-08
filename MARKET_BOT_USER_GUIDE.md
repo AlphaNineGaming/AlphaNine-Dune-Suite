@@ -5,19 +5,31 @@ The Market Bot page lets a private or small friend server keep a market economy 
 ## Requirements
 
 - AlphaNine Dune Suite must be open for Suite-side controls and monitoring.
-- The market bot service must be reachable from the Suite.
-- The Bot API URL and API token must be saved in the Market Bot page.
-- The game database must be reachable by the market bot service.
+- The server VM must be running and reachable by SSH from Suite.
+- A battlegroup must be detected or selected in Suite so the bot can connect to the correct game database.
+- The Suite can install or update the standalone AlphaNine Market Bot service from the Market Bot page.
+
+## Install or Update the Bot
+
+1. Open `Market Bot` from the left sidebar.
+2. Select `Install / Update Bot`.
+3. Confirm the prompt and wait for the install result.
+4. Select `Refresh Bot`.
+5. Review the editable config.
+6. Check `Bot Enabled` when you are ready for scheduled activity.
+7. Select `Save Bot Config`.
+
+The install action uploads the bundled Market Bot binary and item data to the VM, applies the Kubernetes service, creates the API token, and connects it to the selected battlegroup database.
+
+The bot installs with scheduled activity disabled by default. Manual buttons still work after the bot is online.
 
 ## Connect the Bot
 
-1. Open `Market Bot` from the left sidebar.
-2. Enter the Bot API URL, for example `http://VM-IP:8081`.
-3. Enter the API token if it is not already saved.
-4. Select `Save Connection`.
-5. Select `Refresh Bot` and confirm the status cards update.
+Most users do not need to enter an API token manually. Suite creates and saves it during install.
 
-If the page shows `fetch failed`, the Suite cannot reach the bot URL, the bot is offline, or the token is missing or wrong.
+Use `Save Connection` only if you need to point Suite at a custom bot URL or an already-deployed bot.
+
+If the page says the Market Bot pod was not found, select `Install / Update Bot`.
 
 ## Main Controls
 
@@ -76,7 +88,8 @@ For a quiet private server:
 ## Troubleshooting
 
 - `Bot API Offline`: Check that the market bot service is running and the URL is correct.
-- `fetch failed`: Usually a network, URL, service, or token problem.
+- `Market Bot pod not found`: Select `Install / Update Bot`.
+- `fetch failed`: Usually a network, URL, or service reachability problem. Suite will try the VM fallback automatically when possible.
 - Listings do not disappear after buyer simulation: Refresh the Market Bot page and check that simulation is enabled.
 - Too many items appear: Increase `LIST_INTERVAL`, reduce `SIM_INTENSITY`, and manually remove selected NPC listings.
 - No automatic activity: Confirm `Bot Enabled` is checked. Manual buttons still work even when scheduled bot activity is disabled.

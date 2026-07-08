@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.11";
+const APP_VERSION = "1.0.12";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -3205,6 +3205,16 @@ async function vmIpMismatchStatus() {
 
 function shQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function packagedPath(...parts) {
+  const direct = path.join(__dirname, ...parts);
+  const marker = `${path.sep}app.asar${path.sep}`;
+  if (direct.includes(marker)) {
+    const unpacked = direct.replace(marker, `${path.sep}app.asar.unpacked${path.sep}`);
+    if (fs.existsSync(unpacked)) return unpacked;
+  }
+  return direct;
 }
 
 async function setupSshCommand(command, body = {}, timeout = 30000, options = {}) {
@@ -12713,6 +12723,118 @@ async function saveMarketBotSettings(payload) {
   return await ensureMarketBotTokenConfigured(saved);
 }
 
+function yamlString(value) {
+  return `"${String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function setYamlKeyValue(manifest, key, value) {
+  const pattern = new RegExp(`(^\\s*${key}:\\s*).*$`, "m");
+  if (!pattern.test(manifest)) throw new Error(`Market Bot manifest is missing ${key}.`);
+  return manifest.replace(pattern, `$1${yamlString(value)}`);
+}
+
+async function marketBotSshTarget() {
+  const sync = await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
+  const cfg = sync.config || loadConfig();
+  const info = sync.vm || await vmInfo(cfg.vmName || configuredVmName());
+  const ip = normalizeIpv4(info.ip) || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
+  if (!info.exists && !ip) throw new Error(info.error || "VM not found.");
+  if (info.exists && info.state !== "Running") throw new Error("VM is not running.");
+  if (!ip) throw new Error("VM IP address was not found.");
+  const key = sshKeyStatus(cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
+  if (!key.exists) throw new Error(key.message);
+  const user = String(cfg.sshUser || cfg.receiverSshUser || "dune").trim();
+  return { ip, user, keyPath: key.path };
+}
+
+async function uploadMarketBotFile(localPath, remotePath, target) {
+  if (!fs.existsSync(localPath)) throw new Error(`Bundled Market Bot asset was not found: ${path.basename(localPath)}`);
+  const result = await runWithStdin("ssh", [
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "LogLevel=QUIET",
+    "-i", target.keyPath,
+    `${target.user}@${target.ip}`,
+    `cat > ${shQuote(remotePath)}`
+  ], localPath, { timeout: 180000, maxBuffer: 1024 * 1024 * 4 });
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || `Could not upload ${path.basename(localPath)}.`);
+  return { localPath, remotePath, size: fs.statSync(localPath).size };
+}
+
+async function installMarketBot() {
+  const binaryPath = packagedPath("assets", "market-bot", "market-bot-linux");
+  const itemDataPath = packagedPath("assets", "market-bot", "item-data.json");
+  const manifestPath = packagedPath("assets", "market-bot", "market-bot.yaml");
+  for (const filePath of [binaryPath, itemDataPath, manifestPath]) {
+    if (!fs.existsSync(filePath)) throw new Error(`Bundled Market Bot asset was not found: ${path.basename(filePath)}`);
+  }
+
+  const target = await databaseRuntimeTarget();
+  const passwordInfo = await cachedDatabasePassword(target, { ignoreConfig: true });
+  const apiToken = marketBotToken(loadConfig()) || generateMarketBotApiToken();
+  const sshTarget = await marketBotSshTarget();
+  const dbHost = `${target.dbSvc}.${target.namespace}.svc.cluster.local`;
+  const dbPort = "15432";
+  const dbUser = "postgres";
+  const dbName = "dune";
+  const remoteDir = "/opt/market-bot";
+  const steps = [];
+
+  const prepare = await sshCommand(`sudo mkdir -p ${remoteDir}/data ${remoteDir}/cache ${remoteDir}/bin && sudo chown -R ${shQuote(sshTarget.user)}:${shQuote(sshTarget.user)} ${remoteDir}`, 60000, { maxBuffer: 1024 * 128 });
+  if (!prepare.ok) throw new Error(prepare.stderr || prepare.stdout || prepare.error || "Could not prepare Market Bot directories on the VM.");
+  steps.push("prepared remote directories");
+
+  const binaryUpload = await uploadMarketBotFile(binaryPath, "/tmp/market-bot-new", sshTarget);
+  const itemUpload = await uploadMarketBotFile(itemDataPath, `${remoteDir}/data/item-data.json`, sshTarget);
+  steps.push(`uploaded binary (${binaryUpload.size} bytes)`);
+  steps.push(`uploaded item data (${itemUpload.size} bytes)`);
+
+  const promote = await sshCommand(`sudo mv /tmp/market-bot-new ${remoteDir}/bin/market-bot && sudo chmod +x ${remoteDir}/bin/market-bot`, 60000, { maxBuffer: 1024 * 128 });
+  if (!promote.ok) throw new Error(promote.stderr || promote.stdout || promote.error || "Could not install Market Bot binary on the VM.");
+  steps.push("installed binary");
+
+  let manifest = fs.readFileSync(manifestPath, "utf8");
+  manifest = setYamlKeyValue(manifest, "DB_HOST", dbHost);
+  manifest = setYamlKeyValue(manifest, "DB_PORT", dbPort);
+  manifest = setYamlKeyValue(manifest, "DB_USER", dbUser);
+  manifest = setYamlKeyValue(manifest, "DB_NAME", dbName);
+  manifest = setYamlKeyValue(manifest, "DB_PASS", passwordInfo.password);
+  manifest = setYamlKeyValue(manifest, "API_TOKEN", apiToken);
+  const manifestFile = path.join(os.tmpdir(), `alphanine-market-bot-${Date.now()}.yaml`);
+  fs.writeFileSync(manifestFile, manifest, "utf8");
+  try {
+    const clearDeployment = await sshCommand("sudo kubectl delete deployment/market-bot -n dune-market-bot --ignore-not-found=true", 60000, { maxBuffer: 1024 * 1024 });
+    if (!clearDeployment.ok) throw new Error(clearDeployment.stderr || clearDeployment.stdout || clearDeployment.error || "Could not clear the existing Market Bot deployment.");
+    const apply = await runWithStdin("ssh", [
+      "-o", "StrictHostKeyChecking=no",
+      "-o", "LogLevel=QUIET",
+      "-i", sshTarget.keyPath,
+      `${sshTarget.user}@${sshTarget.ip}`,
+      "sudo kubectl apply -f -"
+    ], manifestFile, { timeout: 120000, maxBuffer: 1024 * 1024 * 4 });
+    if (!apply.ok) throw new Error(apply.stderr || apply.stdout || apply.error || "Could not apply Market Bot Kubernetes manifest.");
+    steps.push("applied Kubernetes manifest");
+  } finally {
+    fs.rmSync(manifestFile, { force: true });
+  }
+
+  const rollout = await sshCommand("sudo kubectl rollout status deployment/market-bot -n dune-market-bot --timeout=120s", 150000, { maxBuffer: 1024 * 1024 });
+  if (!rollout.ok) throw new Error(rollout.stderr || rollout.stdout || rollout.error || "Market Bot deployment did not become ready.");
+  steps.push("deployment ready");
+
+  const saved = saveConfig({ ...loadConfig(), marketBotApiToken: apiToken });
+  appendAdminAudit("market_bot_installed", { namespace: "dune-market-bot", dbNamespace: target.namespace, dbService: target.dbSvc, binaryBytes: binaryUpload.size, itemDataBytes: itemUpload.size });
+  return {
+    ok: true,
+    status: "installed",
+    message: "AlphaNine Market Bot installed and running on the VM.",
+    namespace: "dune-market-bot",
+    deployment: "market-bot",
+    dbHost,
+    tokenConfigured: Boolean(marketBotToken(saved)),
+    steps
+  };
+}
+
 function appPage() {
   const portalUrls = webPortalUrls();
   return String.raw`<!doctype html>
@@ -14763,12 +14885,13 @@ function appPage() {
       </div>
       <div class="layout-3 mt">
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Market Bot Connection</div><div class="subtle">Suite controls the existing market bot API.</div></div><button onclick="refreshMarketBotPage()">Refresh Bot</button></div>
+          <div class="panel-head"><div><div class="label">Market Bot Connection</div><div class="subtle">Install or control the standalone AlphaNine Market Bot service on the VM.</div></div><button onclick="refreshMarketBotPage()">Refresh Bot</button></div>
           <div class="field-grid mt">
             <label>Bot API URL<input id="marketBotApiUrl" placeholder="http://VM-IP:8081"></label>
             <label>API Token<input id="marketBotApiToken" type="password" placeholder="Leave blank to keep saved token"></label>
           </div>
           <div class="action-row mt">
+            <button class="primary" onclick="installMarketBot()">Install / Update Bot</button>
             <button class="primary" onclick="saveMarketBotConnection()">Save Connection</button>
             <button onclick="refreshMarketBotLogs()">View Bot Logs</button>
           </div>
@@ -16015,6 +16138,7 @@ function renderMarketBotConfig(config){if(!config)return;setChecked("marketBotEn
 let marketBotLastOverview=null;const marketBotActionLabels={buy:"Buy Player Listings",list:"Restock Market",sim:"Simulate Buyers",all:"Run Full Cycle"};function renderMarketBotOverview(data){marketBotLastOverview=data||null;const status=data?.status||{};const config=data?.config||null;const label=marketBotHealthLabel(data||{});tone("marketBotApiState",label);setText("marketBotApiUrlLabel",data?.baseUrl||"Unknown API URL");setText("marketBotListingCount",formatMarketBotNumber(status.listing_count));setText("marketBotBoughtCount",formatMarketBotNumber(status.bought_orders));setText("marketBotLastBuy","Last buy: "+(status.last_buy_tick||"--"));setText("marketBotLastList","Last restock: "+(status.last_list_tick||"--"));setText("marketBotLastSim","Last buyer sim: "+(status.last_simulation_tick||"--"));tone("marketBotSimState",config?.simulation_enabled===false?"Disabled":(status.last_simulation_tick&&status.last_simulation_tick!=="never"?"Running":"Ready"));setText("marketBotUptime",status.uptime||"--");setText("marketBotBalance",formatMarketBotNumber(status.balance));setText("marketBotSimOrders",formatMarketBotNumber(status.simulated_orders));setText("marketBotSimUnits",formatMarketBotNumber(status.simulated_units));if(data?.configuredUrl)setValue("marketBotApiUrl",data.configuredUrl);if(config)renderMarketBotConfig(config);const errors=(data?.errors||[]).map(row=>row.target+": "+row.error).join(" / ");setText("marketBotConnectionResult",errors?("Partial connection: "+errors):("Connected to "+(data?.baseUrl||"market bot")));if(data?.tokenConfigured===false)setText("marketBotConnectionResult","Health endpoint answered, but token is not configured for status/config actions.");}
 async function refreshMarketBotPage(){try{setText("marketBotConnectionResult","Checking market bot...");const data=await getJson("/api/market-bot/overview",{timeoutMs:25000});renderMarketBotOverview(data);}catch(error){tone("marketBotApiState","Offline");setText("marketBotConnectionResult",betterError(error));}}
 async function saveMarketBotConnection(){try{const payload={apiUrl:document.getElementById("marketBotApiUrl")?.value||"",apiToken:document.getElementById("marketBotApiToken")?.value||""};const data=await getJson("/api/market-bot/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:15000});setText("marketBotConnectionResult","Saved connection: "+(data.baseUrl||"market bot"));setValue("marketBotApiToken","");showToast("Market bot connection saved.","success");await refreshMarketBotPage();}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
+async function installMarketBot(){try{const ok=await appConfirm("Install Market Bot","Install or update the standalone AlphaNine Market Bot service on the configured VM?","Install","Cancel");if(!ok)return;setText("marketBotConnectionResult","Installing Market Bot on the VM...");const data=await getJson("/api/market-bot/install",{method:"POST",timeoutMs:240000});setText("marketBotConnectionResult",(data.message||"Market Bot installed.")+" Steps: "+(data.steps||[]).join(", "));showToast("Market Bot installed.","success");await refreshMarketBotPage();await refreshMarketBotLogs();}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
 function collectMarketBotConfig(){return{enabled:document.getElementById("marketBotEnabled")?.checked===true,simulation_enabled:document.getElementById("marketBotSimulationEnabled")?.checked===true,buy_interval:document.getElementById("marketBotBuyInterval")?.value.trim()||"5m",list_interval:document.getElementById("marketBotListInterval")?.value.trim()||"30m",simulation_interval:document.getElementById("marketBotSimInterval")?.value.trim()||"10m",simulation_households:Number(document.getElementById("marketBotSimHouseholds")?.value||0),simulation_max_orders:Number(document.getElementById("marketBotSimMaxOrders")?.value||0),simulation_intensity:Number(document.getElementById("marketBotSimIntensity")?.value||0)};}
 async function saveMarketBotConfig(){try{setText("marketBotConfigResult","Saving bot config...");await getJson("/api/market-bot/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectMarketBotConfig()),timeoutMs:25000});setText("marketBotConfigResult","Bot config saved. Updated intervals apply on the next scheduler check.");showToast("Market bot config saved.","success");await refreshMarketBotPage();}catch(error){setText("marketBotConfigResult",betterError(error));showToast(betterError(error),"error");}}
 async function runMarketBotTick(kind){const label=marketBotActionLabels[kind]||kind;const listingCount=Number(marketBotLastOverview?.status?.listing_count||0);if((kind==="list"||kind==="all")&&listingCount>500&&!confirm("The bot already has "+formatMarketBotNumber(listingCount)+" NPC listings. Restocking can add more items. Continue?"))return;try{setText("marketBotActionResult","Running "+label+"...");const data=await getJson("/api/market-bot/tick/"+encodeURIComponent(kind),{method:"POST",timeoutMs:70000});setText("marketBotActionResult","Completed "+(marketBotActionLabels[data.tick]||label)+".");showToast(label+" completed.","success");await refreshMarketBotPage();await refreshMarketPanel();}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
@@ -17099,6 +17223,14 @@ async function route(req, res) {
       await json(res, { ok: true, baseUrl: marketBotBaseUrl(saved), tokenConfigured: Boolean(marketBotToken(saved)), config: publicConfig(saved) });
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/install" && req.method === "POST") {
+    try {
+      await json(res, await installMarketBot());
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 500);
     }
     return;
   }

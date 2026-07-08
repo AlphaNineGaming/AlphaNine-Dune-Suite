@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.7";
+const APP_VERSION = "1.0.8";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -129,7 +129,7 @@ const defaultConfig = {
   progressionEditingEnabled: false,
   databaseBackupLocation: DEFAULT_DATABASE_BACKUP_DIR,
   uiMode: "simple",
-  uiSoundsEnabled: true,
+  uiSoundsEnabled: false,
   uiSoundVolume: 100
 };
 
@@ -12473,6 +12473,10 @@ function marketBotToken(configValue = loadConfig()) {
     || usableSecretValue(process.env.API_TOKEN);
 }
 
+function generateMarketBotApiToken() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
 async function discoverMarketBotApiToken() {
   const command = "sudo kubectl get secret market-bot-secret -n dune-market-bot -o jsonpath='{.data.API_TOKEN}' 2>/dev/null";
   const result = await sshCommand(command, 15000, { maxBuffer: 1024 * 16 });
@@ -12487,47 +12491,89 @@ async function discoverMarketBotApiToken() {
   }
 }
 
-async function ensureMarketBotTokenConfigured(configValue = loadConfig()) {
-  if (marketBotToken(configValue)) return configValue;
-  const token = await discoverMarketBotApiToken();
+async function provisionMarketBotApiToken(token = generateMarketBotApiToken()) {
+  const safeToken = String(token || "").trim();
+  if (!safeToken || isMaskedSecretValue(safeToken)) throw new Error("Could not create a Market Bot API token.");
+  const command = [
+    "sudo kubectl create namespace dune-market-bot --dry-run=client -o yaml | sudo kubectl apply -f - >/dev/null",
+    `sudo kubectl create secret generic market-bot-secret -n dune-market-bot --from-literal=API_TOKEN=${shQuote(safeToken)} --dry-run=client -o yaml | sudo kubectl apply -f - >/dev/null`,
+    "sudo kubectl rollout restart deployment/market-bot -n dune-market-bot >/dev/null 2>&1 || true",
+    "sudo kubectl rollout status deployment/market-bot -n dune-market-bot --timeout=90s >/dev/null 2>&1 || true"
+  ].join("; ");
+  const result = await sshCommand(command, 120000, { maxBuffer: 1024 * 128 });
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Could not configure the Market Bot API token on the VM.");
+  appendAdminAudit("market_bot_token_provisioned", { source: "suite-generated", namespace: "dune-market-bot", secret: "market-bot-secret", tokenConfigured: true });
+  return safeToken;
+}
+
+async function ensureMarketBotTokenConfigured(configValue = loadConfig(), options = {}) {
+  const existingToken = marketBotToken(configValue);
+  if (existingToken && options.force !== true) {
+    if (!usableSecretValue(configValue.marketBotApiToken)) {
+      const saved = saveConfig({ ...configValue, marketBotApiToken: existingToken });
+      appendAdminAudit("market_bot_token_auto_configured", { source: "runtime-env", namespace: "dune-market-bot", secret: "market-bot-secret", tokenConfigured: true });
+      return saved;
+    }
+    return configValue;
+  }
+  let token = await discoverMarketBotApiToken();
+  let source = "kubernetes-secret";
+  if (!token && options.provision !== false) {
+    token = await provisionMarketBotApiToken();
+    source = "suite-generated";
+  }
   if (!token) return configValue;
   const next = { ...configValue, marketBotApiToken: token };
   const saved = saveConfig(next);
-  appendAdminAudit("market_bot_token_auto_configured", { source: "kubernetes-secret", namespace: "dune-market-bot", secret: "market-bot-secret", tokenConfigured: true });
+  appendAdminAudit("market_bot_token_auto_configured", { source, namespace: "dune-market-bot", secret: "market-bot-secret", tokenConfigured: true });
   return saved;
 }
 
 async function marketBotRequest(pathname, options = {}) {
-  const configValue = options.discoverToken === false ? loadConfig() : await ensureMarketBotTokenConfigured();
-  const baseUrl = marketBotBaseUrl(configValue);
-  const target = `${baseUrl}${pathname.startsWith("/") ? pathname : `/${pathname}`}`;
-  const headers = { ...(options.headers || {}) };
-  const token = marketBotToken(configValue);
-  if (options.auth !== false && token) headers.Authorization = `Bearer ${token}`;
+  const configValue = options.discoverToken === false ? loadConfig() : await ensureMarketBotTokenConfigured(loadConfig(), { provision: options.auth !== false });
   let body = options.body;
   if (body !== undefined && typeof body !== "string" && !Buffer.isBuffer(body)) {
-    headers["Content-Type"] = headers["Content-Type"] || "application/json";
     body = JSON.stringify(body);
   }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(options.timeoutMs || 15000));
+  const send = async (cfg) => {
+    const baseUrl = marketBotBaseUrl(cfg);
+    const target = `${baseUrl}${pathname.startsWith("/") ? pathname : `/${pathname}`}`;
+    const headers = { ...(options.headers || {}) };
+    if (body !== undefined && typeof body === "string") headers["Content-Type"] = headers["Content-Type"] || "application/json";
+    const token = marketBotToken(cfg);
+    if (options.auth !== false && token) headers.Authorization = `Bearer ${token}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Number(options.timeoutMs || 15000));
+    try {
+      const response = await fetch(target, { method: options.method || "GET", headers, body, signal: controller.signal });
+      const text = await response.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+      if (!response.ok) {
+        const error = new Error(data.error || data.message || text || `Market bot returned HTTP ${response.status}`);
+        error.status = response.status;
+        error.target = target;
+        throw error;
+      }
+      return data;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
   try {
-    const response = await fetch(target, { method: options.method || "GET", headers, body, signal: controller.signal });
-    const text = await response.text();
-    let data = {};
-    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-    if (!response.ok) throw new Error(data.error || data.message || text || `Market bot returned HTTP ${response.status}`);
-    return data;
+    return await send(configValue);
   } catch (error) {
-    if (error.name === "AbortError") throw new Error(`Market bot request timed out: ${target}`);
+    if (error.name === "AbortError") throw new Error(`Market bot request timed out: ${pathname}`);
+    if (options.auth !== false && options.retryToken !== false && /unauthorized|forbidden|HTTP 401|HTTP 403/i.test(String(error.message || ""))) {
+      const refreshed = await ensureMarketBotTokenConfigured(loadConfig(), { force: true, provision: true });
+      return await send(refreshed);
+    }
     throw error;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
 async function marketBotOverview() {
-  const configValue = await ensureMarketBotTokenConfigured();
+  const configValue = await ensureMarketBotTokenConfigured(loadConfig(), { provision: true });
   const overview = {
     ok: true,
     baseUrl: marketBotBaseUrl(configValue),

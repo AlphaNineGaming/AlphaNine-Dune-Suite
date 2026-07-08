@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.12";
+const APP_VERSION = "1.0.13";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -10785,12 +10785,23 @@ function marketPostingCatalogItem(template) {
   return gearCatalog().find((row) => row.id === id) || null;
 }
 
+const MARKET_EXPIRY_DAY_OPTIONS = [1, 3, 7, 14];
+
+function normalizeMarketExpiryDays(value) {
+  const days = Number(value ?? 3);
+  if (!Number.isInteger(days) || !MARKET_EXPIRY_DAY_OPTIONS.includes(days)) {
+    throw new Error("Expiration must be 1, 3, 7, or 14 days.");
+  }
+  return days;
+}
+
 function validateMarketListingPayload(payload) {
   const template = String(payload?.template || "").trim();
   const stackSize = requireInteger(payload?.stackSize ?? payload?.quantity ?? 1, "stack size", 1, 50000);
   const price = requireInteger(payload?.price ?? 1, "price", 1, 999999999);
   const quality = requireInteger(payload?.quality ?? 0, "grade", 0, 5);
   const listingCount = requireInteger(payload?.listingCount ?? 1, "listing count", 1, 50);
+  const expiryDays = normalizeMarketExpiryDays(payload?.expiryDays ?? payload?.expiry_days ?? 3);
   if (!template || template.length > 240 || !/^[A-Za-z0-9_:.()+-]+$/.test(template)) throw new Error("Choose a valid item template.");
   const item = marketPostingCatalogItem(template);
   if (!item) throw new Error("Item template was not found in the local item catalog.");
@@ -10802,8 +10813,33 @@ function validateMarketListingPayload(payload) {
     price,
     quality,
     listingCount,
+    expiryDays,
     requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`
   };
+}
+
+async function marketListingGameNow() {
+  try {
+    const sql = `
+      select coalesce(max(expiration_time)::text, '')
+      from dune.dune_exchange_orders
+      where is_npc_order = false
+        and item_id is not null
+        and expiration_time is not null
+        and expiration_time > 0
+        and expiration_time < 1000000000
+    `;
+    const row = parseDbRows(await dbQuery(sql, 12000), ["expirationTime"])[0] || {};
+    const ref = Number(row.expirationTime || 0) || 0;
+    return ref > 14 * 24 * 3600 ? ref - 14 * 24 * 3600 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function marketListingExpiryTime(expiryDays) {
+  const gameNow = await marketListingGameNow();
+  return Math.max(0, gameNow) + expiryDays * 24 * 3600;
 }
 
 async function marketPostingStatus() {
@@ -10936,7 +10972,7 @@ async function postMarketListing(payload) {
   if (payload?.confirmed !== true && payload?.confirmed !== "true") throw new Error("Confirm live market posting before writing to the exchange.");
   const started = Date.now();
   const statsJson = JSON.stringify({ FCustomizationStats: [[], {}], FItemStackAndDurabilityStats: [[], {}] });
-  const expiryTime = 999999999;
+  const expiryTime = await marketListingExpiryTime(command.expiryDays);
   const sql = `
     with selected_exchange as (
       select id as exchange_id, inventory_id as exchange_inventory_id
@@ -11100,7 +11136,9 @@ async function postMarketListing(payload) {
       stackSize: command.stackSize,
       price: command.price,
       quality: command.quality,
-      listingCount: created
+      listingCount: created,
+      expiryDays: command.expiryDays,
+      expirationTime: expiryTime
     },
     durationMs: Date.now() - started,
     message: `Posted ${created} live market listing(s) for ${command.name} at ${command.price} Solari.`
@@ -11112,6 +11150,8 @@ async function postMarketListing(payload) {
     price: command.price,
     quality: command.quality,
     listingCount: command.listingCount,
+    expiryDays: command.expiryDays,
+    expirationTime: expiryTime,
     result: result.market,
     durationMs: result.durationMs
   });
@@ -14947,6 +14987,7 @@ function appPage() {
             <label>Price Per Listing<input id="marketPrice" type="number" min="1" max="999999999" value="1000" oninput="updateMarketSummary()"></label>
             <label>Grade<input id="marketQuality" type="number" min="0" max="5" value="0" oninput="updateMarketSummary()"></label>
             <label>Listings<input id="marketListingCount" type="number" min="1" max="50" value="1" oninput="updateMarketSummary()"></label>
+            <label>Expiration<select id="marketExpiryDays" onchange="updateMarketSummary()"><option value="1">1 day</option><option value="3" selected>3 days</option><option value="7">7 days</option><option value="14">14 days</option></select></label>
           </div>
           <div id="marketSummary" class="empty mt">Ready to configure a market listing.</div>
           <div class="action-row mt">
@@ -16489,8 +16530,8 @@ function renderMarketItemFilters(){const cat=document.getElementById("marketCate
 function renderMarketItems(){const wrap=document.getElementById("marketItems");if(!wrap)return;const q=(document.getElementById("marketSearch")?.value||"").trim().toLowerCase();const category=normalizeUiItemCategory(document.getElementById("marketCategory")?.value||"");const grade=document.getElementById("marketGradeFilter")?.value||"all";const tier=document.getElementById("marketTier")?.value||"all";const rows=adminItems.filter(item=>{if(!marketPostableItem(item))return false;const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";if(category==="__unknown"){if(itemCategory&&item.hasDisplayName)return false;}else if(category==="__schematics"){if(!isSchematicItem(item))return false;}else if(String(category).toLowerCase()==="items"){if(isSchematicItem(item)||itemCategory!==category)return false;}else if(category&&itemCategory!==category)return false;if(grade&&grade!=="all"&&itemGrade!==grade)return false;if(tier&&tier!=="all"&&itemTier!==tier)return false;if(q){const text=[item.name,item.id,itemCategory,item.type,item.subtype,item.detail,itemGrade,itemTier,itemDisplayDisambiguator(item)].join(" ").toLowerCase();if(!text.includes(q))return false;}return true;});const duplicateNames=duplicatedItemNameSet(rows);wrap.innerHTML=rows.slice(0,140).map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">MK</span></span>':'<div class="avatar">MK</div>';return '<button type="button" class="admin-item '+(selectedMarketItem&&selectedMarketItem.id===item.id?'active':'')+'" data-market-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(itemCategory||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join("")||'<div class="empty">No marketable items match the current filters.</div>';wrap.querySelectorAll("[data-market-item-id]").forEach(el=>el.addEventListener("click",()=>selectMarketItem(el.dataset.marketItemId)));}
 function selectMarketItem(id){selectedMarketItem=adminItems.find(item=>item.id===id)||null;renderMarketItems();renderMarketSelectedItem();updateMarketSummary();}
 function renderMarketSelectedItem(){const el=document.getElementById("marketSelectedItem");if(!el)return;if(!selectedMarketItem){el.className="empty mt";el.textContent="Select a market item from the picker on the right.";return;}const itemGrade=normalizeUiGrade(selectedMarketItem.grade||selectedMarketItem.rarity||selectedMarketItem.quality||selectedMarketItem.tier||selectedMarketItem.itemGrade||selectedMarketItem.itemRarity);el.className="detail-list mt";el.innerHTML='<div class="detail-row"><span class="subtle">Market Item</span><strong>'+esc(selectedMarketItem.name||selectedMarketItem.id)+'</strong></div><div class="detail-row"><span class="subtle">Template</span><strong>'+esc(selectedMarketItem.id)+'</strong></div><div class="detail-row"><span class="subtle">Market Grade</span><strong>'+esc(itemGrade)+'</strong></div><div class="detail-row"><span class="subtle">Category</span><strong>'+esc(normalizeUiItemCategory(selectedMarketItem.category)||"Unknown")+'</strong></div>';}
-function marketListingPayload(){if(!selectedMarketItem)throw new Error("Choose an item first.");const stackSize=Number(document.getElementById("marketStackSize")?.value||1);const price=Number(document.getElementById("marketPrice")?.value||0);const quality=Number(document.getElementById("marketQuality")?.value||0);const listingCount=Number(document.getElementById("marketListingCount")?.value||1);if(!Number.isInteger(stackSize)||stackSize<1||stackSize>50000)throw new Error("Stack size must be a whole number from 1 to 50000.");if(!Number.isInteger(price)||price<1||price>999999999)throw new Error("Price must be a whole number from 1 to 999999999.");if(!Number.isInteger(quality)||quality<0||quality>5)throw new Error("Grade must be a whole number from 0 to 5.");if(!Number.isInteger(listingCount)||listingCount<1||listingCount>50)throw new Error("Listings must be a whole number from 1 to 50.");return{template:selectedMarketItem.id,stackSize,price,quality,listingCount};}
-function updateMarketSummary(){const el=document.getElementById("marketSummary");if(!el)return;try{const payload=marketListingPayload();el.className="empty mt";el.innerHTML='<strong>'+esc(String(payload.listingCount))+' listing(s) / '+esc(selectedMarketItem.name||payload.template)+'</strong><span>Stack '+esc(String(payload.stackSize))+' / Grade '+esc(String(payload.quality))+' / Price '+esc(String(payload.price))+' Solari each</span>';}catch(e){el.className="warning mt";el.textContent=e.message||"Configure a market listing.";}}
+function marketListingPayload(){if(!selectedMarketItem)throw new Error("Choose an item first.");const stackSize=Number(document.getElementById("marketStackSize")?.value||1);const price=Number(document.getElementById("marketPrice")?.value||0);const quality=Number(document.getElementById("marketQuality")?.value||0);const listingCount=Number(document.getElementById("marketListingCount")?.value||1);const expiryDays=Number(document.getElementById("marketExpiryDays")?.value||3);if(!Number.isInteger(stackSize)||stackSize<1||stackSize>50000)throw new Error("Stack size must be a whole number from 1 to 50000.");if(!Number.isInteger(price)||price<1||price>999999999)throw new Error("Price must be a whole number from 1 to 999999999.");if(!Number.isInteger(quality)||quality<0||quality>5)throw new Error("Grade must be a whole number from 0 to 5.");if(!Number.isInteger(listingCount)||listingCount<1||listingCount>50)throw new Error("Listings must be a whole number from 1 to 50.");if(![1,3,7,14].includes(expiryDays))throw new Error("Expiration must be 1, 3, 7, or 14 days.");return{template:selectedMarketItem.id,stackSize,price,quality,listingCount,expiryDays};}
+function updateMarketSummary(){const el=document.getElementById("marketSummary");if(!el)return;try{const payload=marketListingPayload();el.className="empty mt";el.innerHTML='<strong>'+esc(String(payload.listingCount))+' listing(s) / '+esc(selectedMarketItem.name||payload.template)+'</strong><span>Stack '+esc(String(payload.stackSize))+' / Grade '+esc(String(payload.quality))+' / Price '+esc(String(payload.price))+' Solari each / Expires '+esc(String(payload.expiryDays))+' day(s)</span>';}catch(e){el.className="warning mt";el.textContent=e.message||"Configure a market listing.";}}
 function syncMarketPostingControls(){const button=document.getElementById("marketPostButton");if(button)button.disabled=marketPostingBusy;}
 async function refreshMarketStatus(){const status=document.getElementById("marketStatus");try{if(status){status.className="warning mt";status.textContent="Checking exchange schema...";}const data=await getJson("/api/market/status",{timeoutMs:20000});if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML=data.ok?('<strong>Ready</strong><div class="subtle">Exchange '+esc(data.exchange?.name||data.exchange?.id||"detected")+' / AlphaNineMarket listings: '+esc(data.botListings||0)+'</div>'):'<strong>Market unsupported</strong><div class="subtle">'+esc([...(data.missingTables||[]),...(data.missingFunctions||[])].join(", ")||data.error||"Required exchange schema missing.")+'</div>';}return data;}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}return null;}}
 function syncMarketListingSelection(){const el=document.getElementById("marketListingsSelection");if(el)el.textContent=selectedMarketListingIds.size+" selected.";}
@@ -16505,7 +16546,7 @@ function clearSelectedMarketListings(){selectedMarketListingIds.clear();renderMa
 async function removeSelectedMarketListings(){const ids=[...selectedMarketListingIds];if(!ids.length){showToast("No NPC/manual listings selected.","warning");return;}try{const ok=await appConfirm("Remove selected listings","Remove "+ids.length+" selected NPC/manual listing(s) from the market?","Remove Selected","Cancel");if(!ok)return;let removed=0,failed=0;for(const id of ids){try{await getJson("/api/market/listing/"+encodeURIComponent(id)+"/remove",{method:"POST",timeoutMs:60000});removed++;}catch{failed++;}}selectedMarketListingIds.clear();showToast("Removed "+removed+" listing(s)"+(failed?"; "+failed+" failed.":"."),failed?"warning":"success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
 async function refreshMarketPanel(){await Promise.all([refreshMarketStatus(),refreshMarketListings()]);}
 async function startMarketPosting(){marketPostingBusy=false;syncMarketPostingControls();if(!adminItems.length)await refreshGiveItemsFast();renderMarketItemFilters();renderMarketItems();renderMarketSelectedItem();updateMarketSummary();syncMarketPostingControls();await refreshMarketPanel();}
-async function postMarketListing(){const log=document.getElementById("marketLog");const fold=document.getElementById("marketResultFold");try{if(marketPostingBusy)return;if(!selectedMarketItem){if(fold)fold.open=true;if(log)log.textContent="Choose a market item first, then click Post Live Listing.";const picker=document.getElementById("marketSearch");if(picker)picker.focus();playUiSound("warning");return;}const payload=marketListingPayload();const confirmed=await appConfirm("Post live market listing","Post "+payload.listingCount+" live exchange listing(s) for "+(selectedMarketItem.name||payload.template)+" at "+payload.price+" Solari each?","Post Live","Cancel");if(!confirmed)return;marketPostingBusy=true;syncMarketPostingControls();if(fold)fold.open=true;if(log)log.textContent="Posting live market listing...";const data=await getJson("/api/market/listing",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,confirmed:true}),timeoutMs:60000});if(log)log.textContent=(data.message||"Market listing posted.")+"\\n\\n"+JSON.stringify(data,null,2);addActivity("market","Market listing posted",(selectedMarketItem.name||payload.template)+" x"+payload.listingCount);playUiSound("success");await refreshMarketPanel();}catch(e){if(fold)fold.open=true;if(log)log.textContent=betterError(e);addActivity("error","Market posting failed",e.message);playUiSound("warning");}finally{marketPostingBusy=false;syncMarketPostingControls();}}
+async function postMarketListing(){const log=document.getElementById("marketLog");const fold=document.getElementById("marketResultFold");try{if(marketPostingBusy)return;if(!selectedMarketItem){if(fold)fold.open=true;if(log)log.textContent="Choose a market item first, then click Post Live Listing.";const picker=document.getElementById("marketSearch");if(picker)picker.focus();playUiSound("warning");return;}const payload=marketListingPayload();const confirmed=await appConfirm("Post live market listing","Post "+payload.listingCount+" live exchange listing(s) for "+(selectedMarketItem.name||payload.template)+" at "+payload.price+" Solari each for "+payload.expiryDays+" day(s)?","Post Live","Cancel");if(!confirmed)return;marketPostingBusy=true;syncMarketPostingControls();if(fold)fold.open=true;if(log)log.textContent="Posting live market listing...";const data=await getJson("/api/market/listing",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,confirmed:true}),timeoutMs:60000});if(log)log.textContent=(data.message||"Market listing posted.")+"\\n\\n"+JSON.stringify(data,null,2);addActivity("market","Market listing posted",(selectedMarketItem.name||payload.template)+" x"+payload.listingCount);playUiSound("success");await refreshMarketPanel();}catch(e){if(fold)fold.open=true;if(log)log.textContent=betterError(e);addActivity("error","Market posting failed",e.message);playUiSound("warning");}finally{marketPostingBusy=false;syncMarketPostingControls();}}
 let gradeRelogChoiceNoticeShown=false;
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;input.min=0;input.max=5;if(!supported)input.value=0;else{const grade=Number(input.value||0);if(Number.isFinite(grade)&&grade<0)input.value=0;if(Number.isFinite(grade)&&grade>5)input.value=5;if(usesRelogGrade(input.value)&&!gradeRelogChoiceNoticeShown){gradeRelogChoiceNoticeShown=true;setTimeout(()=>showGradeRelogPopup("items"),0);}}}if(warning){warning.classList.toggle("hidden",false);warning.textContent=supported?"Grade 1-5 uses a database-backed grant and may require relog or inventory refresh. Grade 0 uses the live receiver.":"Grade giving is not supported by the current receiver method.";}syncGiveItemControls();}
 function usesRelogGrade(value){const grade=Number(value||0);return Number.isFinite(grade)&&grade>=1&&grade<=5;}

@@ -58,9 +58,11 @@ The bot is tuned so each restock adds about 1 to 5 random listings, and each buy
 Use the manual listing section when you want to add a specific item yourself.
 
 1. Search or select an item.
-2. Pick the grade, tier, stack size, and price.
+2. Pick the grade, tier, stack size, price, and expiration.
 3. Add the listing.
 4. Check the Live Market Listings section to confirm it appeared.
+
+Manual listing expiration matches the game options: `1`, `3`, `7`, or `14` days.
 
 Manual and bot NPC listings can be removed from the Suite.
 

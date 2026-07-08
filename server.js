@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.9";
+const APP_VERSION = "1.0.10";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -12604,7 +12604,12 @@ async function marketBotRequestViaVm(pathname, options = {}, configValue = loadC
     "",
     bodyText
   ].join("\r\n");
-  const command = `printf %s ${shQuote(requestText)} | sudo kubectl exec -i -n dune-market-bot deploy/market-bot -- nc -w ${timeoutSeconds} 127.0.0.1 8081`;
+  const command = [
+    "pod=$(sudo kubectl get pods -n dune-market-bot -l app=market-bot --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)",
+    "if [ -z \"$pod\" ]; then pod=$(sudo kubectl get pods -n dune-market-bot --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); fi",
+    "if [ -z \"$pod\" ]; then echo 'Market Bot pod not found in namespace dune-market-bot.' >&2; exit 1; fi",
+    `printf %s ${shQuote(requestText)} | sudo kubectl exec -i -n dune-market-bot "$pod" -- nc -w ${timeoutSeconds} 127.0.0.1 8081`
+  ].join("; ");
   const result = await sshCommand(command, Number(options.timeoutMs || 15000) + 15000, { maxBuffer: 1024 * 1024 * 4 });
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot VM fallback failed.");
   return parseRawHttpResponse(result.stdout, `vm-ssh:${path}`);

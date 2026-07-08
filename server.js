@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.4";
+const APP_VERSION = "1.0.5";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -115,6 +115,9 @@ const defaultConfig = {
   updateRepo: "AlphaNineGaming/alphanine-dune-suite",
   panelTitle: "AlphaNine Dune Suite",
   panelSubtitle: "Unified local tools for your self-hosted server",
+  marketBotApiUrl: "",
+  marketBotApiToken: "",
+  pythonPath: "",
   serverInstallPath: "",
   awakeningServerPath: "",
   liveTeleportEnabled: true,
@@ -212,6 +215,95 @@ function detectVmIpSync(vmNameValue) {
   }
 }
 
+function pythonPathStatus(value) {
+  const configured = String(value || "").trim();
+  const resolved = expandEnvPath(configured);
+  const exists = Boolean(resolved && fs.existsSync(resolved));
+  const windowsAlias = isWindowsAppsAlias(resolved);
+  return {
+    configured,
+    path: resolved,
+    exists,
+    windowsAlias,
+    valid: Boolean(exists || windowsAlias),
+    message: exists ? "Python executable found." : (windowsAlias ? "Python WindowsApps alias found." : "Python executable not found.")
+  };
+}
+
+function commandPath(command) {
+  if (!command) return "";
+  if (process.platform === "win32") {
+    try {
+      const result = spawnSync("where.exe", [command], { windowsHide: true, encoding: "utf8", timeout: 5000 });
+      if (result.error || result.status !== 0) return "";
+      return String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
+    } catch {
+      return "";
+    }
+  }
+  try {
+    const result = spawnSync("which", [command], { encoding: "utf8", timeout: 5000 });
+    if (result.error || result.status !== 0) return "";
+    return String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
+  } catch {
+    return "";
+  }
+}
+
+function pythonCandidateWorks(candidate) {
+  const command = expandEnvPath(candidate);
+  if (!command) return false;
+  if (fs.existsSync(command) || isWindowsAppsAlias(command)) return true;
+  return commandAvailable(command);
+}
+
+function commonPythonCandidates() {
+  const roots = [
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs", "Python") : "",
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Python") : "",
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, "Python") : "",
+    process.env["ProgramFiles(x86)"] ? path.join(process.env["ProgramFiles(x86)"], "Python") : ""
+  ].filter(Boolean);
+  const candidates = [];
+  for (const root of roots) {
+    try {
+      if (!fs.existsSync(root)) continue;
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^Python/i.test(entry.name)) continue;
+        candidates.push(path.join(root, entry.name, "python.exe"));
+      }
+    } catch {}
+  }
+  if (process.env.LOCALAPPDATA) candidates.push(path.join(process.env.LOCALAPPDATA, "Python", "bin", "python.exe"));
+  return candidates;
+}
+
+function detectPythonPath(configValue = {}) {
+  const candidates = [
+    configValue.pythonPath,
+    process.env.PYTHON_PATH,
+    process.env.PYTHON_PATH_C,
+    commandPath("python"),
+    commandPath("py"),
+    ...commonPythonCandidates()
+  ];
+  const seen = new Set();
+  let aliasFallback = "";
+  for (const candidate of candidates) {
+    const resolved = normalizeExecutablePath(candidate || "");
+    const key = resolved.toLowerCase();
+    if (!resolved || seen.has(key)) continue;
+    seen.add(key);
+    if (!pythonCandidateWorks(resolved)) continue;
+    if (isWindowsAppsAlias(resolved)) {
+      if (!aliasFallback) aliasFallback = resolved;
+      continue;
+    }
+    return resolved;
+  }
+  return aliasFallback;
+}
+
 function autoDetectInitialConfig(configValue) {
   const next = { ...configValue };
   let changed = false;
@@ -243,6 +335,9 @@ function autoDetectInitialConfig(configValue) {
     setIfBlank("sshHost", detectedVmIp);
     setIfBlank("receiverSshHost", detectedVmIp);
   }
+
+  const detectedPythonPath = detectPythonPath(next);
+  if (detectedPythonPath) setIfBlank("pythonPath", detectedPythonPath);
 
   if (changed) next.autoDetectedAt = new Date().toISOString();
   return { config: next, changed };
@@ -329,6 +424,7 @@ function managedEnvValues(configValue = loadConfig()) {
   const databaseName = String(configValue.databaseName || "dune").trim();
   const databaseUser = String(configValue.databaseUser || "postgres").trim();
   const databasePassword = String(configValue.databasePassword || "");
+  const pythonPath = expandEnvPath(String(configValue.pythonPath || "").trim());
   const selected = normalizeSelectedBattlegroup(configValue.selectedBattlegroup);
   const values = {
     DUNE_RECEIVER_HOST: receiverHost,
@@ -351,7 +447,9 @@ function managedEnvValues(configValue = loadConfig()) {
     DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: configValue.liveTeleportEnabled ? "true" : "false",
     DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET: String(configValue.teleportSafeZOffset || 1000),
     DUNE_SERVER_INSTALL_PATH: serverInstallPathStatus(configValue.serverInstallPath).valid ? expandEnvPath(configValue.serverInstallPath) : "",
-    DUNE_AWAKENING_SERVER_PATH: serverInstallPathStatus(configValue.awakeningServerPath).valid ? expandEnvPath(configValue.awakeningServerPath) : ""
+    DUNE_AWAKENING_SERVER_PATH: serverInstallPathStatus(configValue.awakeningServerPath).valid ? expandEnvPath(configValue.awakeningServerPath) : "",
+    PYTHON_PATH: pythonPath,
+    PYTHON_PATH_C: pythonPath
   };
   if (selected) {
     values.DUNE_RECEIVER_BG_NAMESPACE = selected.namespace;
@@ -431,7 +529,7 @@ function normalizeSelectedBattlegroup(value) {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "dragTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "marketBotApiUrl", "marketBotApiToken", "pythonPath", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "dragTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
   const current = loadConfig();
   const clean = {};
   for (const key of allowed) {
@@ -477,6 +575,9 @@ function saveConfig(nextConfig) {
   clean.updateRepo = String(clean.updateRepo || "AlphaNineGaming/alphanine-dune-suite").trim();
   clean.panelTitle = String(clean.panelTitle || "AlphaNine Dune Suite").trim();
   clean.panelSubtitle = String(clean.panelSubtitle || "Unified local tools for your self-hosted server").trim();
+  clean.marketBotApiUrl = String(clean.marketBotApiUrl || "").trim().replace(/\/+$/, "");
+  clean.marketBotApiToken = String(clean.marketBotApiToken || "").trim();
+  clean.pythonPath = normalizeExecutablePath(clean.pythonPath || detectPythonPath(clean) || "");
   clean.serverInstallPath = String(clean.serverInstallPath || "").trim();
   clean.awakeningServerPath = String(clean.awakeningServerPath || "").trim();
   clean.liveTeleportEnabled = clean.liveTeleportEnabled === true || clean.liveTeleportEnabled === "true";
@@ -604,13 +705,16 @@ function publicConfig(configValue = loadConfig()) {
   copy.databasePasswordSet = Boolean(copy.databasePassword);
   copy.receiverTokenSet = Boolean(copy.receiverToken);
   copy.adminGiveItemTokenSet = Boolean(copy.adminGiveItemToken);
+  copy.marketBotApiTokenSet = Boolean(copy.marketBotApiToken);
   copy.sshKeyStatus = sshKeyStatus(copy.sshKey || defaultSshKeyPath());
   copy.receiverSshKeyStatus = sshKeyStatus(copy.receiverSshKey || copy.sshKey || defaultSshKeyPath());
   copy.serverInstallPathStatus = serverInstallPathStatus(copy.serverInstallPath);
   copy.awakeningServerPathStatus = serverInstallPathStatus(copy.awakeningServerPath);
+  copy.pythonPathStatus = pythonPathStatus(copy.pythonPath);
   copy.databasePassword = copy.databasePassword ? "********" : "";
   copy.receiverToken = copy.receiverToken ? "********" : "";
   copy.adminGiveItemToken = copy.adminGiveItemToken ? "********" : "";
+  copy.marketBotApiToken = copy.marketBotApiToken ? "********" : "";
   return copy;
 }
 
@@ -621,7 +725,8 @@ function configWithSshDiagnostics(configValue = loadConfig()) {
     sshKeyStatus: sshKeyStatus(configValue.sshKey || defaultSshKeyPath()),
     receiverSshKeyStatus: sshKeyStatus(configValue.receiverSshKey || configValue.sshKey || defaultSshKeyPath()),
     serverInstallPathStatus: serverInstallPathStatus(configValue.serverInstallPath),
-    awakeningServerPathStatus: serverInstallPathStatus(configValue.awakeningServerPath)
+    awakeningServerPathStatus: serverInstallPathStatus(configValue.awakeningServerPath),
+    pythonPathStatus: pythonPathStatus(configValue.pythonPath)
   };
 }
 
@@ -789,7 +894,9 @@ function configSourceForEnv(name, configValue = loadConfig()) {
     DUNE_RECEIVER_LIVE_TELEPORT_ENABLED: { key: "liveTeleportEnabled", value: () => configValue.liveTeleportEnabled ? "true" : "false" },
     DUNE_RECEIVER_TELEPORT_SAFE_Z_OFFSET: { key: "teleportSafeZOffset", value: () => String(configValue.teleportSafeZOffset || "") },
     DUNE_SERVER_INSTALL_PATH: { key: "serverInstallPath", value: () => expandEnvPath(configValue.serverInstallPath || "") },
-    DUNE_AWAKENING_SERVER_PATH: { key: "awakeningServerPath", value: () => expandEnvPath(configValue.awakeningServerPath || "") }
+    DUNE_AWAKENING_SERVER_PATH: { key: "awakeningServerPath", value: () => expandEnvPath(configValue.awakeningServerPath || "") },
+    PYTHON_PATH: { key: "pythonPath", value: () => expandEnvPath(configValue.pythonPath || "") },
+    PYTHON_PATH_C: { key: "pythonPath", value: () => expandEnvPath(configValue.pythonPath || "") }
   };
   const mapping = mappings[name];
   if (!mapping) return null;
@@ -10732,14 +10839,21 @@ async function marketListings(payload = {}) {
   const rows = parseDbRows(await dbQuery(sql, 20000), ["orderId", "exchangeName", "template", "stackSize", "quality", "price", "initialStackSize", "normalizedPrice", "isNpcOrder", "ownerClass", "ownerId", "expirationTime", "itemId"]);
   const listings = rows.map((row) => {
     const item = byId.get(row.template);
+    const quality = Number(row.quality || 0) || 0;
+    const catalogGrade = item ? normalizeItemGrade(item.grade, item.rarity, item.quality, item.tier, item.itemGrade, item.itemRarity) : "Unknown";
+    const displayGrade = catalogGrade && catalogGrade !== "Unknown" ? (quality > 0 ? `${catalogGrade} / Grade ${quality}` : catalogGrade) : `Grade ${quality}`;
+    const tier = item ? normalizeItemTier(item.tier, item.itemTier, item.level, item.itemLevel) : "Unknown";
     return {
       orderId: row.orderId,
       itemId: row.itemId,
       template: row.template,
       name: item?.name || row.template,
+      gradeLabel: displayGrade,
+      tier: tier && tier !== "Unknown" ? tier : "",
+      category: item ? normalizeItemCategory(item.category) : "",
       exchangeName: row.exchangeName || "Exchange",
       stackSize: Number(row.stackSize || row.initialStackSize || 0) || 0,
-      quality: Number(row.quality || 0) || 0,
+      quality,
       price: Number(row.price || row.normalizedPrice || 0) || 0,
       initialStackSize: Number(row.initialStackSize || row.stackSize || 0) || 0,
       isNpcOrder: row.isNpcOrder === "t" || row.isNpcOrder === "true",
@@ -12290,6 +12404,85 @@ async function proxyToManager(req, res, pathname) {
   }
 }
 
+function marketBotBaseUrl(configValue = loadConfig()) {
+  const explicit = String(configValue.marketBotApiUrl || process.env.MARKET_BOT_API_URL || "").trim().replace(/\/+$/, "");
+  if (explicit) return explicit;
+  const host = String(configValue.vmIp || configValue.sshHost || process.env.DUNE_VM_IP || "").trim();
+  return host ? `http://${host}:8081` : "http://127.0.0.1:8081";
+}
+
+function marketBotToken(configValue = loadConfig()) {
+  return usableSecretValue(configValue.marketBotApiToken)
+    || usableSecretValue(process.env.MARKET_BOT_API_TOKEN)
+    || usableSecretValue(process.env.API_TOKEN);
+}
+
+async function marketBotRequest(pathname, options = {}) {
+  const configValue = loadConfig();
+  const baseUrl = marketBotBaseUrl(configValue);
+  const target = `${baseUrl}${pathname.startsWith("/") ? pathname : `/${pathname}`}`;
+  const headers = { ...(options.headers || {}) };
+  const token = marketBotToken(configValue);
+  if (options.auth !== false && token) headers.Authorization = `Bearer ${token}`;
+  let body = options.body;
+  if (body !== undefined && typeof body !== "string" && !Buffer.isBuffer(body)) {
+    headers["Content-Type"] = headers["Content-Type"] || "application/json";
+    body = JSON.stringify(body);
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(options.timeoutMs || 15000));
+  try {
+    const response = await fetch(target, { method: options.method || "GET", headers, body, signal: controller.signal });
+    const text = await response.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (!response.ok) throw new Error(data.error || data.message || text || `Market bot returned HTTP ${response.status}`);
+    return data;
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error(`Market bot request timed out: ${target}`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function marketBotOverview() {
+  const configValue = loadConfig();
+  const overview = {
+    ok: true,
+    baseUrl: marketBotBaseUrl(configValue),
+    tokenConfigured: Boolean(marketBotToken(configValue)),
+    configuredUrl: String(configValue.marketBotApiUrl || ""),
+    health: null,
+    status: null,
+    config: null,
+    errors: []
+  };
+  for (const [key, pathname, auth, timeoutMs] of [
+    ["health", "/health", false, 5000],
+    ["status", "/status", true, 10000],
+    ["config", "/config", true, 10000]
+  ]) {
+    try { overview[key] = await marketBotRequest(pathname, { auth, timeoutMs }); }
+    catch (error) { overview.errors.push({ target: key, error: error.message }); }
+  }
+  overview.ok = Boolean(overview.health?.ok || overview.status || overview.config);
+  return overview;
+}
+
+function saveMarketBotSettings(payload) {
+  const current = loadConfig();
+  const next = { ...current };
+  if (Object.prototype.hasOwnProperty.call(payload || {}, "apiUrl")) {
+    next.marketBotApiUrl = String(payload.apiUrl || "").trim().replace(/\/+$/, "");
+  }
+  if (Object.prototype.hasOwnProperty.call(payload || {}, "apiToken")) {
+    const token = String(payload.apiToken || "").trim();
+    if (token && !isMaskedSecretValue(token)) next.marketBotApiToken = token;
+  }
+  return saveConfig(next);
+}
+
 function appPage() {
   const portalUrls = webPortalUrls();
   return String.raw`<!doctype html>
@@ -13114,6 +13307,9 @@ function appPage() {
     .admin-item img { width:46px; height:46px; object-fit:contain; border-radius:6px; background:#0b0e12; }
     .admin-item span, .player-card span { color:var(--muted); font-size:12px; display:block; overflow-wrap:anywhere; }
     .item-grade-badge { display:inline-flex !important; width:max-content; margin-top:5px; border:1px solid rgba(214,166,69,.28); padding:3px 7px; color:var(--gold-bright) !important; background:rgba(214,166,69,.08); font-size:10.5px !important; line-height:1.1; text-transform:uppercase; letter-spacing:.07em; }
+    .market-listing-check { width:13px; height:13px; margin:0 7px 0 0; vertical-align:-2px; accent-color:var(--gold); }
+    .market-listing-meta { display:flex; flex-wrap:wrap; gap:5px; align-items:center; margin-top:4px; justify-content:flex-end; }
+    .market-listing-meta .item-grade-badge { margin-top:0; }
     .item-db-layout { display:grid; grid-template-columns:minmax(300px,.42fr) minmax(0,1fr); gap:var(--panel-gap); align-items:start; }
     .item-db-list { display:grid; gap:8px; max-height:calc(100vh - 330px); min-height:420px; overflow:auto; padding-right:4px; }
     .item-db-card { display:grid; grid-template-columns:52px minmax(0,1fr); gap:11px; align-items:center; width:100%; border:1px solid rgba(214,166,69,.18); background:rgba(255,255,255,.022); color:var(--text); text-align:left; padding:10px; clip-path:polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
@@ -13802,7 +13998,7 @@ function appPage() {
     <div id="setupPage0" class="setup-page active">
       <div class="auto-setup-grid">
         <div>
-          <div class="empty">Simple setup detects the local Dune server install, the game-created SSH key, Hyper-V VM IP, database password, and receiver settings, then writes them to config.json and the managed .env.</div>
+          <div class="empty">Simple setup detects the local Dune server install, Python runtime, the game-created SSH key, Hyper-V VM IP, database password, and receiver settings, then writes them to config.json and the managed .env.</div>
           <div class="setup-mode-actions">
             <button id="setupAutoRunButton" type="button" class="primary" onclick="runSimpleSetup()">Run Auto Setup</button>
             <button type="button" onclick="openAdvancedSetupWizard()">Advanced Setup</button>
@@ -13813,6 +14009,7 @@ function appPage() {
         <div class="auto-setup-list" id="setupAutoSteps">
           <div class="auto-setup-item" data-step="config"><i class="auto-setup-dot"></i><div><strong>Load config</strong><span>Waiting.</span></div></div>
           <div class="auto-setup-item" data-step="paths"><i class="auto-setup-dot"></i><div><strong>Server folders</strong><span>Waiting.</span></div></div>
+          <div class="auto-setup-item" data-step="python"><i class="auto-setup-dot"></i><div><strong>Python runtime</strong><span>Waiting.</span></div></div>
           <div class="auto-setup-item" data-step="ssh"><i class="auto-setup-dot"></i><div><strong>SSH key</strong><span>Waiting.</span></div></div>
           <div class="auto-setup-item" data-step="vm"><i class="auto-setup-dot"></i><div><strong>VM IP</strong><span>Waiting.</span></div></div>
           <div class="auto-setup-item" data-step="database-detect"><i class="auto-setup-dot"></i><div><strong>Database password</strong><span>Waiting.</span></div></div>
@@ -13834,6 +14031,7 @@ function appPage() {
           <button type="button" onclick="browseServerInstallPath('setupAwakeningServerPath','setupAwakeningServerPathWarning')">Browse...</button>
         </div>
         <div id="setupAwakeningServerPathWarning" class="warning">Dune Awakening server path not checked.</div>
+        <label>PYTHON_PATH<input id="setupPythonPath" placeholder="Auto-detected Python executable"></label>
         <label>VM Name<input id="setupVmName" placeholder="dune-awakening"></label>
         <label>VM / Server IP<input id="setupVmIp" placeholder="192.168.1.50"></label>
         <label>SSH Host<input id="setupSshHost" placeholder="192.168.1.50"></label>
@@ -13947,7 +14145,7 @@ function appPage() {
         <div class="nav-group-title">Tools</div>
         <button class="tab" data-view="web-portal">Web Portal</button>
         <button class="tab" data-view="item-database">Item Database</button>
-        <button class="tab" data-view="market">Market Posting</button>
+        <button class="tab" data-view="market">Market Bot</button>
         <button class="tab" data-view="settings">Settings</button>
       </div>
       <div class="nav-group advanced-nav">
@@ -14089,7 +14287,7 @@ function appPage() {
           <div class="panel-head"><div class="label">Quick Actions</div><div class="micro">Command deck</div></div>
           <div class="action-row mt">
             <button class="primary" data-open="give">Give Item</button>
-            <button data-open="market">Market Posting</button>
+            <button data-open="market">Market Bot</button>
             <button data-open="players">Players</button>
             <button data-open="server">Server Control</button>
             <button onclick="refreshAll()">Refresh All</button>
@@ -14327,6 +14525,60 @@ function appPage() {
     </section>
 
     <section id="market" class="view">
+      <div class="grid four">
+        <div class="panel pad metric-tile"><div class="label">Bot API</div><div id="marketBotApiState" class="value">Checking...</div><div id="marketBotApiUrlLabel" class="subtle">Waiting for refresh.</div></div>
+        <div class="panel pad metric-tile"><div class="label">NPC Listings</div><div id="marketBotListingCount" class="value">--</div><div id="marketBotLastList" class="subtle">Last list: --</div></div>
+        <div class="panel pad metric-tile"><div class="label">Player Buys</div><div id="marketBotBoughtCount" class="value">--</div><div id="marketBotLastBuy" class="subtle">Last buy: --</div></div>
+        <div class="panel pad metric-tile"><div class="label">Simulation</div><div id="marketBotSimState" class="value">--</div><div id="marketBotLastSim" class="subtle">Last sim: --</div></div>
+      </div>
+      <div class="layout-3 mt">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Market Bot Connection</div><div class="subtle">Suite controls the existing market bot API.</div></div><button onclick="refreshMarketBotPage()">Refresh Bot</button></div>
+          <div class="field-grid mt">
+            <label>Bot API URL<input id="marketBotApiUrl" placeholder="http://VM-IP:8081"></label>
+            <label>API Token<input id="marketBotApiToken" type="password" placeholder="Leave blank to keep saved token"></label>
+          </div>
+          <div class="action-row mt">
+            <button class="primary" onclick="saveMarketBotConnection()">Save Connection</button>
+            <button onclick="refreshMarketBotLogs()">View Bot Logs</button>
+          </div>
+          <div id="marketBotConnectionResult" class="empty mt">Connection not checked.</div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Economy Controls</div><div class="subtle">Run bot work immediately without waiting for the next interval.</div></div></div>
+          <div class="action-row mt">
+            <button onclick="runMarketBotTick('buy')">Buy Player Listings</button>
+            <button onclick="runMarketBotTick('list')">Restock Market</button>
+            <button onclick="runMarketBotTick('sim')">Simulate Buyers</button>
+            <button class="primary" onclick="runMarketBotTick('all')">Run Full Cycle</button>
+          </div>
+          <div id="marketBotActionResult" class="empty mt">No manual tick run yet.</div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Runtime</div><div class="subtle">Current counters from the bot.</div></div></div>
+          <div class="detail-list">
+            <div class="detail-row"><span class="subtle">Uptime</span><strong id="marketBotUptime">--</strong></div>
+            <div class="detail-row"><span class="subtle">Solari Balance</span><strong id="marketBotBalance">--</strong></div>
+            <div class="detail-row"><span class="subtle">Simulation Orders</span><strong id="marketBotSimOrders">--</strong></div>
+            <div class="detail-row"><span class="subtle">Simulation Units</span><strong id="marketBotSimUnits">--</strong></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Editable Bot Config</div><div class="subtle">Intervals use Go duration format such as 5m, 10m, 30m, or 1h.</div></div><button class="primary" onclick="saveMarketBotConfig()">Save Bot Config</button></div>
+        <div class="field-grid mt">
+          <label class="check-row"><input id="marketBotEnabled" type="checkbox">Bot Enabled</label>
+          <label class="check-row"><input id="marketBotSimulationEnabled" type="checkbox">Simulation Enabled</label>
+          <label>BUY_INTERVAL<input id="marketBotBuyInterval" placeholder="5m"></label>
+          <label>LIST_INTERVAL<input id="marketBotListInterval" placeholder="30m"></label>
+          <label>SIM_INTERVAL<input id="marketBotSimInterval" placeholder="10m"></label>
+          <label>SIM_HOUSEHOLDS<input id="marketBotSimHouseholds" type="number" min="0" step="1" placeholder="80"></label>
+          <label>SIM_MAX_ORDERS<input id="marketBotSimMaxOrders" type="number" min="0" step="1" placeholder="120"></label>
+          <label>SIM_INTENSITY<input id="marketBotSimIntensity" type="number" min="0" step="0.1" placeholder="1.0"></label>
+        </div>
+        <div id="marketBotConfigResult" class="empty mt">Load the bot config to edit simulation settings.</div>
+        <pre id="marketBotLog" class="mt">Bot logs not loaded.</pre>
+      </div>
       <div class="layout-2">
         <div class="panel pad">
           <div class="panel-head">
@@ -14381,11 +14633,19 @@ function appPage() {
           <label>Search Live Market<input id="marketListingsSearch" placeholder="Search template, exchange, or owner" oninput="refreshMarketListingsSoon()"></label>
           <label>Rows<select id="marketListingsLimit" onchange="refreshMarketListings()"><option>50</option><option selected>100</option><option>150</option><option>250</option></select></label>
         </div>
+        <div class="action-row mt">
+          <button type="button" onclick="selectVisibleNpcMarketListings()">Select Visible NPC</button>
+          <button type="button" onclick="clearSelectedMarketListings()">Clear Selection</button>
+          <button type="button" class="danger" onclick="removeSelectedMarketListings()">Remove Selected</button>
+          <span id="marketListingsSelection" class="subtle">0 selected.</span>
+        </div>
         <div id="marketListings" class="detail-list mt"><div class="empty">Load live market listings.</div></div>
       </div>
       <div class="panel pad mt">
-        <div class="label">Market Result</div>
-        <pre id="marketLog" class="mt">No market posting has run.</pre>
+        <details id="marketResultFold" class="vm-details">
+          <summary>Market Result</summary>
+          <pre id="marketLog" class="mt">No market posting has run.</pre>
+        </details>
       </div>
     </section>
 
@@ -15046,6 +15306,10 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div id="settingsReceiverTest" class="test-result">Receiver not tested.</div>
             <div id="settingsServerTest" class="test-result">Server not tested.</div>
           </div>
+          <div class="field-grid mt">
+            <label>PYTHON_PATH<input id="settingsPythonPath" placeholder="Auto-detected Python executable"></label>
+          </div>
+          <div id="settingsPythonPathWarning" class="warning mt">Python path not checked.</div>
         </div>
         <div class="panel pad">
           <div class="panel-head"><div><div class="label">Battlegroup Selection</div><div id="battlegroupStatus" class="micro">Not refreshed</div></div><button type="button" onclick="refreshBattlegroups()">Refresh Battlegroups</button></div>
@@ -15191,7 +15455,7 @@ const viewCopy={
   dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
   players:["Players","Search, inspect, and select characters for admin actions."],
   give:["Give Item","Live item grants through the configured receiver."],
-  market:["Market Posting","Suite market tool for posting live NPC sell listings into the Dune Exchange."],
+  market:["Market Bot","Automated economy simulation plus manual live NPC sell listings."],
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
   database:["Database","Battlegroup backup, import, and backup location management."],
@@ -15207,10 +15471,10 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market")startMarketPosting();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -15240,6 +15504,7 @@ registerSuiteTooltips();
 function registerActionFeedback(){document.addEventListener("click",event=>{const button=event.target.closest("button");if(!button||button.disabled||button.dataset.feedbackIgnore==="true"||button.closest("#suiteConfirmDialog")||button.closest("#aboutDialog"))return;const onclick=String(button.getAttribute("onclick")||"");if(/openAboutDialog|openSupportDiscord|openSupportKofi/i.test(onclick))return;const label=buttonActionLabel(button);if(!label)return;setUxText("uxLastAction",label);setActionCenter("Action received",label+" — working now.","working");button.classList.remove("action-done","action-failed");button.classList.add("action-working");window.setTimeout(()=>{button.classList.remove("action-working");},1400);},true);}
 registerActionFeedback();
 function esc(value){return String(value||"").replace(/[&<>"']/g,ch=>{if(ch==="&")return"&amp;";if(ch==="<")return"&lt;";if(ch===">")return"&gt;";if(ch==='"')return"&quot;";return"&#39;";});}
+function escAttr(value){return esc(value).replace(/\\/g,"\\\\");}
 function portalUrlText(urls=WEB_PORTAL_URLS){return (urls&&urls.length?urls:WEB_PORTAL_URLS).join(" / ");}
 function renderWebPortalUrls(urls=WEB_PORTAL_URLS){const resolved=urls&&urls.length?urls:WEB_PORTAL_URLS;setText("diagPortal",portalUrlText(resolved));setText("settingsWebPortalUrl",portalUrlText(resolved));setText("webPortalPrimaryUrl",resolved[0]||"");setText("webPortalAllUrls",portalUrlText(resolved));}
 function openWebPortal(){const url=(WEB_PORTAL_URLS&&WEB_PORTAL_URLS[0])||location.origin;window.open(url,"_blank","noopener");setText("webPortalStatus","Opened "+url);playUiSound("click");}
@@ -15491,6 +15756,16 @@ async function executeLiveTeleport(requireExactPreview=false){const payload={...
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
+function formatMarketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"--";}
+function marketBotHealthLabel(data){if(data?.health?.ok)return data.tokenConfigured?"Online":"Token Needed";if(data?.status||data?.config)return"Online";return"Offline";}
+function renderMarketBotConfig(config){if(!config)return;setChecked("marketBotEnabled",config.enabled!==false);setChecked("marketBotSimulationEnabled",config.simulation_enabled===true);setValue("marketBotBuyInterval",config.buy_interval||"");setValue("marketBotListInterval",config.list_interval||"");setValue("marketBotSimInterval",config.simulation_interval||"");setValue("marketBotSimHouseholds",config.simulation_households??"");setValue("marketBotSimMaxOrders",config.simulation_max_orders??"");setValue("marketBotSimIntensity",config.simulation_intensity??"");setText("marketBotConfigResult","Loaded bot config. Changes apply on the next tick after saving.");}
+let marketBotLastOverview=null;const marketBotActionLabels={buy:"Buy Player Listings",list:"Restock Market",sim:"Simulate Buyers",all:"Run Full Cycle"};function renderMarketBotOverview(data){marketBotLastOverview=data||null;const status=data?.status||{};const config=data?.config||null;const label=marketBotHealthLabel(data||{});tone("marketBotApiState",label);setText("marketBotApiUrlLabel",data?.baseUrl||"Unknown API URL");setText("marketBotListingCount",formatMarketBotNumber(status.listing_count));setText("marketBotBoughtCount",formatMarketBotNumber(status.bought_orders));setText("marketBotLastBuy","Last buy: "+(status.last_buy_tick||"--"));setText("marketBotLastList","Last restock: "+(status.last_list_tick||"--"));setText("marketBotLastSim","Last buyer sim: "+(status.last_simulation_tick||"--"));tone("marketBotSimState",config?.simulation_enabled===false?"Disabled":(status.last_simulation_tick&&status.last_simulation_tick!=="never"?"Running":"Ready"));setText("marketBotUptime",status.uptime||"--");setText("marketBotBalance",formatMarketBotNumber(status.balance));setText("marketBotSimOrders",formatMarketBotNumber(status.simulated_orders));setText("marketBotSimUnits",formatMarketBotNumber(status.simulated_units));if(data?.configuredUrl)setValue("marketBotApiUrl",data.configuredUrl);if(config)renderMarketBotConfig(config);const errors=(data?.errors||[]).map(row=>row.target+": "+row.error).join(" / ");setText("marketBotConnectionResult",errors?("Partial connection: "+errors):("Connected to "+(data?.baseUrl||"market bot")));if(data?.tokenConfigured===false)setText("marketBotConnectionResult","Health endpoint answered, but token is not configured for status/config actions.");}
+async function refreshMarketBotPage(){try{setText("marketBotConnectionResult","Checking market bot...");const data=await getJson("/api/market-bot/overview",{timeoutMs:25000});renderMarketBotOverview(data);}catch(error){tone("marketBotApiState","Offline");setText("marketBotConnectionResult",betterError(error));}}
+async function saveMarketBotConnection(){try{const payload={apiUrl:document.getElementById("marketBotApiUrl")?.value||"",apiToken:document.getElementById("marketBotApiToken")?.value||""};const data=await getJson("/api/market-bot/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:15000});setText("marketBotConnectionResult","Saved connection: "+(data.baseUrl||"market bot"));setValue("marketBotApiToken","");showToast("Market bot connection saved.","success");await refreshMarketBotPage();}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
+function collectMarketBotConfig(){return{enabled:document.getElementById("marketBotEnabled")?.checked===true,simulation_enabled:document.getElementById("marketBotSimulationEnabled")?.checked===true,buy_interval:document.getElementById("marketBotBuyInterval")?.value.trim()||"5m",list_interval:document.getElementById("marketBotListInterval")?.value.trim()||"30m",simulation_interval:document.getElementById("marketBotSimInterval")?.value.trim()||"10m",simulation_households:Number(document.getElementById("marketBotSimHouseholds")?.value||0),simulation_max_orders:Number(document.getElementById("marketBotSimMaxOrders")?.value||0),simulation_intensity:Number(document.getElementById("marketBotSimIntensity")?.value||0)};}
+async function saveMarketBotConfig(){try{setText("marketBotConfigResult","Saving bot config...");await getJson("/api/market-bot/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectMarketBotConfig()),timeoutMs:25000});setText("marketBotConfigResult","Bot config saved. Updated intervals apply on the next scheduler check.");showToast("Market bot config saved.","success");await refreshMarketBotPage();}catch(error){setText("marketBotConfigResult",betterError(error));showToast(betterError(error),"error");}}
+async function runMarketBotTick(kind){const label=marketBotActionLabels[kind]||kind;const listingCount=Number(marketBotLastOverview?.status?.listing_count||0);if((kind==="list"||kind==="all")&&listingCount>500&&!confirm("The bot already has "+formatMarketBotNumber(listingCount)+" NPC listings. Restocking can add more items. Continue?"))return;try{setText("marketBotActionResult","Running "+label+"...");const data=await getJson("/api/market-bot/tick/"+encodeURIComponent(kind),{method:"POST",timeoutMs:70000});setText("marketBotActionResult","Completed "+(marketBotActionLabels[data.tick]||label)+".");showToast(label+" completed.","success");await refreshMarketBotPage();await refreshMarketPanel();}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
+async function refreshMarketBotLogs(){try{setText("marketBotLog","Loading logs...");const data=await getJson("/api/market-bot/logs",{timeoutMs:50000});setText("marketBotLog",(data.stdout||data.stderr||"No log output.").trim());}catch(error){setText("marketBotLog",betterError(error));}}
 function setValue(id,value){const el=document.getElementById(id);if(el)el.value=value==null?"":String(value);}
 function getValue(id){return document.getElementById(id)?.value||"";}
 function setChecked(id,value){const el=document.getElementById(id);if(el)el.checked=Boolean(value);}
@@ -15505,16 +15780,16 @@ function syncSetupFinishButtons(){const enabled=Boolean(setupDatabaseTestSignatu
 function invalidateSetupDatabaseTest(){setupDatabaseTestSignature="";syncSetupFinishButtons();for(const id of ["setupDatabaseResult","finishDbResult"]){const box=document.getElementById(id);if(box){box.className="test-result mt";box.textContent="Database values changed. Test again before finishing.";}}}
 async function testSetupDatabase(resultId){syncConnectionHostLocks("setup");const payload=setupDatabaseFormPayload();setupDatabaseTestSignature="";syncSetupFinishButtons();resultBox(resultId,{ok:true,message:"Running authenticated SELECT 1..."});try{const data=await getJson("/api/setup/test-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:12000});if(data.ok)setupDatabaseTestSignature=currentSetupDatabaseSignature();resultBox(resultId,data);syncSetupFinishButtons();playUiSound(data.ok?"success":"warning");return data;}catch(e){const data={ok:false,message:"Database authentication failed.",error:betterError(e)};resultBox(resultId,data);syncSetupFinishButtons();playUiSound("warning");return data;}}
 async function detectSetupDatabaseCredentials(resultId){setupDatabaseTestSignature="";syncSetupFinishButtons();resultBox(resultId,{ok:true,message:"Detecting database credentials from VM..."});try{const data=await getJson("/api/setup/detect-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(setupDetectionPayload()),timeoutMs:45000});if(!data.ok)throw new Error(data.error||data.message||"Database credential detection failed.");if(data.databaseHost)setValue("setupDatabaseHost",data.databaseHost);if(data.databasePort)setValue("setupDatabasePort",data.databasePort);if(data.databaseName)setValue("setupDatabaseName",data.databaseName);if(data.databaseUser)setValue("setupDatabaseUser",data.databaseUser);if(data.databasePassword)setValue("setupDatabasePassword",data.databasePassword);syncConnectionHostLocks("setup");invalidateSetupDatabaseTest();resultBox(resultId,{ok:true,message:"Detected DB credentials. Testing database now...",detail:data.battlegroup?data.battlegroup.name:""});const tested=await testSetupDatabase(resultId);if(tested.ok)resultBox(resultId,{...tested,message:"Detected and verified database credentials."});return tested;}catch(e){const data={ok:false,message:"Database credential detection failed.",error:betterError(e)+"\\nMake sure SSH settings are correct and the Dune VM is running."};resultBox(resultId,data);syncSetupFinishButtons();playUiSound("warning");return data;}}
-function configPayload(prefix){syncConnectionHostLocks(prefix);const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),sshHost:getValue(prefix+"SshHost"),sshUser:getValue(prefix+"SshUser"),sshKey:getValue(prefix+"SshKey"),serverInstallPath:getValue(prefix+"ServerInstallPath"),awakeningServerPath:getValue(prefix+"AwakeningServerPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey"),mapDefault:getValue(prefix+"MapDefault"),logLevel:getValue(prefix+"LogLevel"),updateRepo:getValue(prefix+"UpdateRepo"),teleportEndpointPath:getValue(prefix+"TeleportEndpointPath"),teleportSafeZOffset:getValue(prefix+"TeleportSafeZOffset"),progressionEditingEnabled:document.getElementById(prefix+"ProgressionEditingEnabled")?.checked===true};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");const adminToken=getValue(prefix+"AdminGiveItemToken");if(dbPass&&!isMaskedSecretPlaceholder(dbPass))payload.databasePassword=dbPass;if(token&&!isMaskedSecretPlaceholder(token))payload.receiverToken=token;if(adminToken&&!isMaskedSecretPlaceholder(adminToken))payload.adminGiveItemToken=adminToken;return payload;}
+function configPayload(prefix){syncConnectionHostLocks(prefix);const payload={serverType:getValue(prefix+"ServerType"),vmName:getValue(prefix+"VmName"),vmIp:getValue(prefix+"VmIp"),sshHost:getValue(prefix+"SshHost"),sshUser:getValue(prefix+"SshUser"),sshKey:getValue(prefix+"SshKey"),pythonPath:getValue(prefix+"PythonPath"),serverInstallPath:getValue(prefix+"ServerInstallPath"),awakeningServerPath:getValue(prefix+"AwakeningServerPath"),databaseHost:getValue(prefix+"DatabaseHost"),databasePort:getValue(prefix+"DatabasePort"),databaseName:getValue(prefix+"DatabaseName"),databaseUser:getValue(prefix+"DatabaseUser"),receiverHost:getValue(prefix+"ReceiverHost"),receiverPort:getValue(prefix+"ReceiverPort"),receiverSshHost:getValue(prefix+"ReceiverSshHost"),receiverSshUser:getValue(prefix+"ReceiverSshUser"),receiverSshKey:getValue(prefix+"ReceiverSshKey"),mapDefault:getValue(prefix+"MapDefault"),logLevel:getValue(prefix+"LogLevel"),updateRepo:getValue(prefix+"UpdateRepo"),teleportEndpointPath:getValue(prefix+"TeleportEndpointPath"),teleportSafeZOffset:getValue(prefix+"TeleportSafeZOffset"),progressionEditingEnabled:document.getElementById(prefix+"ProgressionEditingEnabled")?.checked===true};const dbPass=getValue(prefix+"DatabasePassword");const token=getValue(prefix+"ReceiverToken");const adminToken=getValue(prefix+"AdminGiveItemToken");if(dbPass&&!isMaskedSecretPlaceholder(dbPass))payload.databasePassword=dbPass;if(token&&!isMaskedSecretPlaceholder(token))payload.receiverToken=token;if(adminToken&&!isMaskedSecretPlaceholder(adminToken))payload.adminGiveItemToken=adminToken;return payload;}
 function fillSecretInput(id,isSet){const input=document.getElementById(id);if(!input)return;if(!input.dataset.emptyPlaceholder)input.dataset.emptyPlaceholder=input.placeholder||"";input.value="";input.placeholder=isSet?"********":input.dataset.emptyPlaceholder;}
-function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupAwakeningServerPath",config.awakeningServerPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("setupSshUser",config.sshUser||"dune");setValue("setupSshKey",config.sshKey||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");fillSecretInput("setupDatabasePassword",config.databasePasswordSet);setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);fillSecretInput("setupReceiverToken",config.receiverTokenSet);fillSecretInput("setupAdminGiveItemToken",config.adminGiveItemTokenSet);setValue("setupReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("setupMapDefault",config.mapDefault||"HaggaBasin");setValue("setupLogLevel",config.logLevel||"info");setValue("setupUpdateRepo",config.updateRepo||"AlphaNineGaming/alphanine-dune-suite");setValue("setupTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("setupTeleportSafeZOffset",config.teleportSafeZOffset||1000);setChecked("setupProgressionEditingEnabled",config.progressionEditingEnabled===true);setSshKeyWarning("setupSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("setupReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("setupServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("setupAwakeningServerPathWarning",config.awakeningServerPathStatus);syncConnectionHostLocks("setup");invalidateSetupDatabaseTest();}
+function fillSetup(config){setValue("setupServerType",config.serverType||"local-hyperv");setValue("setupServerInstallPath",config.serverInstallPath||"");setValue("setupAwakeningServerPath",config.awakeningServerPath||"");setValue("setupPythonPath",config.pythonPath||"");setValue("setupVmName",config.vmName||"");setValue("setupVmIp",config.vmIp||"");setValue("setupSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("setupSshUser",config.sshUser||"dune");setValue("setupSshKey",config.sshKey||"");setValue("setupDatabaseHost",config.databaseHost||"");setValue("setupDatabasePort",config.databasePort||15432);setValue("setupDatabaseName",config.databaseName||"dune");setValue("setupDatabaseUser",config.databaseUser||"postgres");fillSecretInput("setupDatabasePassword",config.databasePasswordSet);setValue("setupReceiverHost",config.receiverHost||"127.0.0.1");setValue("setupReceiverPort",config.receiverPort||5055);fillSecretInput("setupReceiverToken",config.receiverTokenSet);fillSecretInput("setupAdminGiveItemToken",config.adminGiveItemTokenSet);setValue("setupReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("setupReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("setupReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("setupMapDefault",config.mapDefault||"HaggaBasin");setValue("setupLogLevel",config.logLevel||"info");setValue("setupUpdateRepo",config.updateRepo||"AlphaNineGaming/alphanine-dune-suite");setValue("setupTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("setupTeleportSafeZOffset",config.teleportSafeZOffset||1000);setChecked("setupProgressionEditingEnabled",config.progressionEditingEnabled===true);setSshKeyWarning("setupSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("setupReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("setupServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("setupAwakeningServerPathWarning",config.awakeningServerPathStatus);syncConnectionHostLocks("setup");invalidateSetupDatabaseTest();}
 function setSshKeyWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.exists);el.className=ok?"empty mt":"warning mt";el.textContent=status?.message||"SSH key file not found.";if(status?.path)el.textContent+=" "+status.path;}
 async function refreshSshKeyWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/ssh-key/status?path="+encodeURIComponent(path));setSshKeyWarning(warningId,data.sshKey);}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
 async function browseSshKey(inputId,warningId){try{if(!window.alphaNineSuite?.chooseSshKey)throw new Error("File picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseSshKey();if(result?.filePath){setValue(inputId,result.filePath);await refreshSshKeyWarning(inputId,warningId);}}catch(e){setSshKeyWarning(warningId,{exists:false,message:betterError(e)});}}
 function setServerInstallPathWarning(id,status){const el=document.getElementById(id);if(!el)return;const ok=Boolean(status?.valid);el.className=ok?"empty mt":"warning mt";let text=status?.message||"Selected folder does not appear to be a valid Dune Awakening server installation.";if(status?.path)text+=" "+status.path;const checks=(status?.checks||[]).filter(item=>item.ok).map(item=>item.name);if(checks.length)text+="\nDetected: "+checks.join(", ");el.textContent=text;}
 async function refreshServerInstallPathWarning(inputId,warningId){try{const path=getValue(inputId);const data=await getJson("/api/server-install-path/status?path="+encodeURIComponent(path));setServerInstallPathWarning(warningId,data.serverInstallPath);}catch(e){setServerInstallPathWarning(warningId,{valid:false,message:betterError(e)});}}
 async function browseServerInstallPath(inputId,warningId){try{if(!window.alphaNineSuite?.chooseServerInstallFolder)throw new Error("Folder picker is not available in this desktop build.");const result=await window.alphaNineSuite.chooseServerInstallFolder();if(result?.folderPath){setValue(inputId,result.folderPath);await refreshServerInstallPathWarning(inputId,warningId);}}catch(e){setServerInstallPathWarning(warningId,{valid:false,message:betterError(e)});}}
-function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsAwakeningServerPath",config.awakeningServerPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");fillSecretInput("settingsDatabasePassword",config.databasePasswordSet||Boolean(config.databasePassword));setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);fillSecretInput("settingsReceiverToken",config.receiverTokenSet||Boolean(config.receiverToken));fillSecretInput("settingsAdminGiveItemToken",config.adminGiveItemTokenSet||Boolean(config.adminGiveItemToken));setValue("settingsReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("settingsReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportSafeZOffset",config.teleportSafeZOffset||1000);setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setChecked("settingsProgressionEditingEnabled",config.progressionEditingEnabled===true);setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("settingsServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("settingsAwakeningServerPathWarning",config.awakeningServerPathStatus);syncConnectionHostLocks("settings");}
+function fillSettings(config){appConfig=config;setValue("settingsServerType",config.serverType||"local-hyperv");setValue("settingsVmName",config.vmName||"");setValue("settingsVmIp",config.vmIp||"");setValue("settingsSshHost",config.sshHost||config.vmIp||config.receiverSshHost||"");setValue("settingsSshUser",config.sshUser||"dune");setValue("settingsSshKey",config.sshKey||"");setValue("settingsPythonPath",config.pythonPath||"");setText("settingsPythonPathWarning",config.pythonPathStatus?.message||"Python path not checked.");document.getElementById("settingsPythonPathWarning")?.classList.toggle("warning",!config.pythonPathStatus?.valid);setValue("settingsServerInstallPath",config.serverInstallPath||"");setValue("settingsAwakeningServerPath",config.awakeningServerPath||"");setValue("settingsDatabaseHost",config.databaseHost||"");setValue("settingsDatabasePort",config.databasePort||15432);setValue("settingsDatabaseName",config.databaseName||"dune");setValue("settingsDatabaseUser",config.databaseUser||"postgres");fillSecretInput("settingsDatabasePassword",config.databasePasswordSet||Boolean(config.databasePassword));setValue("settingsReceiverHost",config.receiverHost||"127.0.0.1");setValue("settingsReceiverPort",config.receiverPort||5055);fillSecretInput("settingsReceiverToken",config.receiverTokenSet||Boolean(config.receiverToken));fillSecretInput("settingsAdminGiveItemToken",config.adminGiveItemTokenSet||Boolean(config.adminGiveItemToken));setValue("settingsReceiverSshHost",config.receiverSshHost||config.sshHost||config.vmIp||"");setValue("settingsReceiverSshUser",config.receiverSshUser||config.sshUser||"dune");setValue("settingsReceiverSshKey",config.receiverSshKey||config.sshKey||"");setValue("settingsMapDefault",config.mapDefault||"HaggaBasin");setValue("settingsLogLevel",config.logLevel||"info");setValue("settingsUpdateRepo",config.updateRepo||"");setChecked("settingsLiveTeleportEnabled",config.liveTeleportEnabled===true);setValue("settingsTeleportEndpointPath",config.teleportEndpointPath||"/api/v1/players/teleport-coords");setValue("settingsTeleportSafeZOffset",config.teleportSafeZOffset||1000);setValue("settingsTeleportCommandTemplate",config.teleportCommandTemplate||"");setValue("settingsTeleportPayloadTemplate",config.teleportPayloadTemplate||"");setChecked("settingsProgressionEditingEnabled",config.progressionEditingEnabled===true);setText("settingsConfigPath",config.configPath||"App data");setSshKeyWarning("settingsSshKeyWarning",config.sshKeyStatus);setSshKeyWarning("settingsReceiverSshKeyWarning",config.receiverSshKeyStatus);setServerInstallPathWarning("settingsServerInstallPathWarning",config.serverInstallPathStatus);setServerInstallPathWarning("settingsAwakeningServerPathWarning",config.awakeningServerPathStatus);syncConnectionHostLocks("settings");}
 function collectSettings(){const payload=configPayload("settings");payload.sshHost=getValue("settingsSshHost");payload.sshUser=getValue("settingsSshUser");payload.sshKey=getValue("settingsSshKey");payload.mapDefault=getValue("settingsMapDefault");payload.logLevel=getValue("settingsLogLevel");payload.updateRepo=getValue("settingsUpdateRepo");payload.liveTeleportEnabled=document.getElementById("settingsLiveTeleportEnabled")?.checked===true;payload.teleportEndpointPath=getValue("settingsTeleportEndpointPath");payload.teleportSafeZOffset=getValue("settingsTeleportSafeZOffset");payload.teleportCommandTemplate=getValue("settingsTeleportCommandTemplate");payload.teleportPayloadTemplate=getValue("settingsTeleportPayloadTemplate");payload.progressionEditingEnabled=document.getElementById("settingsProgressionEditingEnabled")?.checked===true;payload.setupComplete=true;return payload;}
 function battlegroupKey(row){return row?String(row.namespace||"")+"/"+String(row.name||""):"";}
 function selectedBattlegroupFromUi(){const key=getValue("settingsBattlegroupSelect");return (battlegroupData.battlegroups||[]).find(row=>battlegroupKey(row)===key)||null;}
@@ -15523,13 +15798,13 @@ async function refreshBattlegroups(){const log=document.getElementById("battlegr
 async function useSelectedBattlegroup(){const selected=selectedBattlegroupFromUi();const log=document.getElementById("battlegroupLog");try{if(!selected)throw new Error("Select a battlegroup first.");const data=await getJson("/api/battlegroups/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({namespace:selected.namespace,name:selected.name}),timeoutMs:35000});battlegroupData.selectedBattlegroup=data.selectedBattlegroup;battlegroupData.battlegroups=data.battlegroups||battlegroupData.battlegroups;appConfig={...(appConfig||{}),selectedBattlegroup:data.selectedBattlegroup};renderBattlegroupSelection();setText("battlegroupStatus","Selected: "+(data.selectedBattlegroup?.title||data.selectedBattlegroup?.name||"Battlegroup"));if(log)log.textContent="Saved selected battlegroup to config.json:\\n"+JSON.stringify(data.selectedBattlegroup,null,2);addActivity("battlegroup","Battlegroup selected",data.selectedBattlegroup?.namespace+"/"+data.selectedBattlegroup?.name);playUiSound("success");refresh();}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 async function saveBattlegroupTitle(){const selected=selectedBattlegroupFromUi()||battlegroupData.selectedBattlegroup;const title=getValue("settingsNewServerTitle");const log=document.getElementById("battlegroupLog");try{if(!selected)throw new Error("Select a battlegroup first.");if(!title.trim())throw new Error("Enter a new server title.");const data=await getJson("/api/battlegroups/title",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({namespace:selected.namespace,name:selected.name,title}),timeoutMs:45000});battlegroupData.selectedBattlegroup=data.selectedBattlegroup;battlegroupData.battlegroups=data.battlegroups||battlegroupData.battlegroups;appConfig={...(appConfig||{}),selectedBattlegroup:data.selectedBattlegroup};renderBattlegroupSelection();setText("battlegroupStatus","Title saved: "+(data.title||title));if(log)log.textContent="Title saved and refreshed. Backup: "+(data.backupPath||"--")+"\\nPatch path: "+(data.patchPath||"--");addActivity("battlegroup","Server title saved",data.title||title);playUiSound("success");refresh();}catch(e){if(log)log.textContent=betterError(e);playUiSound("warning");}}
 function setAutoSetupStep(key,state,message){const row=document.querySelector('#setupAutoSteps [data-step="'+key+'"]');if(!row)return;row.className="auto-setup-item "+(state||"");const text=row.querySelector("span");if(text)text.textContent=String(message||"");}
-function resetAutoSetupSteps(){["config","paths","ssh","vm","database-detect","database-test","save"].forEach(key=>setAutoSetupStep(key,"","Waiting."));}
+function resetAutoSetupSteps(){["config","paths","python","ssh","vm","database-detect","database-test","save"].forEach(key=>setAutoSetupStep(key,"","Waiting."));}
 function summarizePathStatus(status){return status?.valid?("Found "+(status.path||"configured folder")):(status?.message||"Folder not found.");}
 function summarizeKeyStatus(status){return status?.exists?("Found "+(status.path||"SSH key")):(status?.message||"SSH key file not found.");}
 function applySetupMode(){const simple=setupWizardMode==="simple";document.getElementById("setupSteps")?.classList.toggle("hidden",simple);document.getElementById("setupNavActions")?.classList.toggle("hidden",simple);if(simple)setupStep=0;updateSetupStep();}
 function vmLooksOffline(vm){const state=String(vm?.state||vm?.status||"").trim().toLowerCase();return !vm?.ip||["stopped","off","saved","offline"].includes(state)||/not running|stopped|offline|timed out|not available/i.test(String(vm?.error||vm?.warning||""));}
 async function promptVmOfflineBeforeSetup(vm){setAutoSetupStep("vm","warn","VM is offline or no IP was detected. Start the VM, then run Auto Setup again.");resultBox("setupAutoResult",{ok:false,message:"VM is offline. Turn it on, then run Auto Setup again."});playUiSound("warning");await appAlert("VM is offline","The Suite could not detect the Hyper-V VM IP. Turn on the Dune VM, wait until Windows shows it as Running, then click Run Auto Setup again. The wizard will stay open so you can continue from here.","OK");}
-async function runSimpleSetup(){if(setupAutoRunning)return;setupAutoRunning=true;const button=document.getElementById("setupAutoRunButton");if(button)button.disabled=true;resetAutoSetupSteps();resultBox("setupAutoResult",{ok:true,message:"Auto setup is running..."});try{setAutoSetupStep("config","working","Reading config.json and local defaults.");const status=await getJson("/api/setup/status",{timeoutMs:30000});const config=status.config||{};fillSetup(config);if(status.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(status.discovery,null,2);setAutoSetupStep("config","ok","Loaded config.json and current defaults.");setAutoSetupStep("paths",(config.serverInstallPathStatus?.valid&&config.awakeningServerPathStatus?.valid)?"ok":"warn",summarizePathStatus(config.serverInstallPathStatus)+" "+summarizePathStatus(config.awakeningServerPathStatus));setAutoSetupStep("ssh",(config.sshKeyStatus?.exists||config.receiverSshKeyStatus?.exists)?"ok":"warn",summarizeKeyStatus(config.sshKeyStatus||config.receiverSshKeyStatus));setAutoSetupStep("vm","working","Checking Hyper-V VM state and IP.");const vmData=await getJson("/api/vm/status",{timeoutMs:30000}).catch(error=>({ok:false,vm:{error:betterError(error)}}));const vm=vmData?.vm||{};if(vm.ip){setValue("setupVmIp",vm.ip);setValue("setupSshHost",vm.ip);setValue("setupReceiverSshHost",vm.ip);}if(!getValue("setupVmIp")||vmLooksOffline(vm)){await promptVmOfflineBeforeSetup(vm);return;}setAutoSetupStep("vm","ok","Detected VM IP "+getValue("setupVmIp")+".");setAutoSetupStep("database-detect","working","Detecting database credentials from the running VM.");const detected=await getJson("/api/setup/detect-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(setupDetectionPayload()),timeoutMs:60000});if(!detected.ok)throw new Error(detected.error||detected.message||"Database credential detection failed.");if(detected.databaseHost)setValue("setupDatabaseHost",detected.databaseHost);if(detected.databasePort)setValue("setupDatabasePort",detected.databasePort);if(detected.databaseName)setValue("setupDatabaseName",detected.databaseName);if(detected.databaseUser)setValue("setupDatabaseUser",detected.databaseUser);if(detected.databasePassword)setValue("setupDatabasePassword",detected.databasePassword);syncConnectionHostLocks("setup");setAutoSetupStep("database-detect","ok","Detected database credentials.");setAutoSetupStep("database-test","working","Testing database connection.");const tested=await testSetupDatabase("setupDatabaseResult");setAutoSetupStep("database-test",tested.ok?"ok":"bad",tested.message||tested.error||"Database test finished.");if(!tested.ok)throw new Error(tested.error||tested.message||"Database test failed.");setAutoSetupStep("save","working","Saving config.json and managed .env.");const payload={...configPayload("setup"),setupComplete:true};const saved=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:30000});if(!saved.verified||!saved.pathsVerified)throw new Error("Setup path save verification failed.");setAutoSetupStep("save","ok","Saved config.json and managed .env.");fillSetup(saved.config||payload);await loadSettings();resultBox("setupAutoResult",{ok:true,message:"Auto setup complete. Review the detected configuration here, open Advanced Setup for details, or click Close Wizard when ready."});refreshAll();playUiSound("success");}catch(e){resultBox("setupAutoResult",{ok:false,message:"Auto setup needs attention.",error:betterError(e)+"\nUse Advanced Setup to review or edit the detected values."});playUiSound("warning");}finally{setupAutoRunning=false;if(button)button.disabled=false;}}
+async function runSimpleSetup(){if(setupAutoRunning)return;setupAutoRunning=true;const button=document.getElementById("setupAutoRunButton");if(button)button.disabled=true;resetAutoSetupSteps();resultBox("setupAutoResult",{ok:true,message:"Auto setup is running..."});try{setAutoSetupStep("config","working","Reading config.json and local defaults.");const status=await getJson("/api/setup/status",{timeoutMs:30000});const config=status.config||{};fillSetup(config);if(status.discovery)document.getElementById("setupDiscoveryLog").textContent=JSON.stringify(status.discovery,null,2);setAutoSetupStep("config","ok","Loaded config.json and current defaults.");setAutoSetupStep("paths",(config.serverInstallPathStatus?.valid&&config.awakeningServerPathStatus?.valid)?"ok":"warn",summarizePathStatus(config.serverInstallPathStatus)+" "+summarizePathStatus(config.awakeningServerPathStatus));setAutoSetupStep("python",config.pythonPathStatus?.valid?"ok":"warn",config.pythonPathStatus?.valid?("Found "+(config.pythonPathStatus.path||config.pythonPath||"Python")):(config.pythonPathStatus?.message||"Python was not detected."));setAutoSetupStep("ssh",(config.sshKeyStatus?.exists||config.receiverSshKeyStatus?.exists)?"ok":"warn",summarizeKeyStatus(config.sshKeyStatus||config.receiverSshKeyStatus));setAutoSetupStep("vm","working","Checking Hyper-V VM state and IP.");const vmData=await getJson("/api/vm/status",{timeoutMs:30000}).catch(error=>({ok:false,vm:{error:betterError(error)}}));const vm=vmData?.vm||{};if(vm.ip){setValue("setupVmIp",vm.ip);setValue("setupSshHost",vm.ip);setValue("setupReceiverSshHost",vm.ip);}if(!getValue("setupVmIp")||vmLooksOffline(vm)){await promptVmOfflineBeforeSetup(vm);return;}setAutoSetupStep("vm","ok","Detected VM IP "+getValue("setupVmIp")+".");setAutoSetupStep("database-detect","working","Detecting database credentials from the running VM.");const detected=await getJson("/api/setup/detect-database",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(setupDetectionPayload()),timeoutMs:60000});if(!detected.ok)throw new Error(detected.error||detected.message||"Database credential detection failed.");if(detected.databaseHost)setValue("setupDatabaseHost",detected.databaseHost);if(detected.databasePort)setValue("setupDatabasePort",detected.databasePort);if(detected.databaseName)setValue("setupDatabaseName",detected.databaseName);if(detected.databaseUser)setValue("setupDatabaseUser",detected.databaseUser);if(detected.databasePassword)setValue("setupDatabasePassword",detected.databasePassword);syncConnectionHostLocks("setup");setAutoSetupStep("database-detect","ok","Detected database credentials.");setAutoSetupStep("database-test","working","Testing database connection.");const tested=await testSetupDatabase("setupDatabaseResult");setAutoSetupStep("database-test",tested.ok?"ok":"bad",tested.message||tested.error||"Database test finished.");if(!tested.ok)throw new Error(tested.error||tested.message||"Database test failed.");setAutoSetupStep("save","working","Saving config.json and managed .env.");const payload={...configPayload("setup"),setupComplete:true};const saved=await getJson("/api/setup/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:30000});if(!saved.verified||!saved.pathsVerified)throw new Error("Setup path save verification failed.");setAutoSetupStep("save","ok","Saved config.json and managed .env.");fillSetup(saved.config||payload);await loadSettings();resultBox("setupAutoResult",{ok:true,message:"Auto setup complete. Review the detected configuration here, open Advanced Setup for details, or click Close Wizard when ready."});refreshAll();playUiSound("success");}catch(e){resultBox("setupAutoResult",{ok:false,message:"Auto setup needs attention.",error:betterError(e)+"\nUse Advanced Setup to review or edit the detected values."});playUiSound("warning");}finally{setupAutoRunning=false;if(button)button.disabled=false;}}
 function updateSetupStep(){document.querySelectorAll(".setup-page").forEach((p,i)=>p.classList.toggle("active",i===setupStep));document.querySelectorAll(".setup-step").forEach((p,i)=>p.classList.toggle("active",i===setupStep));}
 function setupNext(){setupStep=Math.min(4,setupStep+1);updateSetupStep();}
 function setupPrev(){setupStep=Math.max(0,setupStep-1);updateSetupStep();}
@@ -15834,12 +16109,19 @@ function marketListingPayload(){if(!selectedMarketItem)throw new Error("Choose a
 function updateMarketSummary(){const el=document.getElementById("marketSummary");if(!el)return;try{const payload=marketListingPayload();el.className="empty mt";el.innerHTML='<strong>'+esc(String(payload.listingCount))+' listing(s) / '+esc(selectedMarketItem.name||payload.template)+'</strong><span>Stack '+esc(String(payload.stackSize))+' / Grade '+esc(String(payload.quality))+' / Price '+esc(String(payload.price))+' Solari each</span>';}catch(e){el.className="warning mt";el.textContent=e.message||"Configure a market listing.";}}
 function syncMarketPostingControls(){const button=document.getElementById("marketPostButton");if(button)button.disabled=marketPostingBusy;}
 async function refreshMarketStatus(){const status=document.getElementById("marketStatus");try{if(status){status.className="warning mt";status.textContent="Checking exchange schema...";}const data=await getJson("/api/market/status",{timeoutMs:20000});if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML=data.ok?('<strong>Ready</strong><div class="subtle">Exchange '+esc(data.exchange?.name||data.exchange?.id||"detected")+' / AlphaNineMarket listings: '+esc(data.botListings||0)+'</div>'):'<strong>Market unsupported</strong><div class="subtle">'+esc([...(data.missingTables||[]),...(data.missingFunctions||[])].join(", ")||data.error||"Required exchange schema missing.")+'</div>';}return data;}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}return null;}}
-function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[];wrap.innerHTML=listings.length?listings.map(row=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span><br><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+'</span></span><strong>'+esc(row.price)+' Solari<br><span class="subtle">Stack '+esc(row.stackSize||row.initialStackSize||0)+' / Grade '+esc(row.quality||0)+' / '+esc(row.isNpcOrder?"NPC":"Player")+'</span><br><span class="subtle">'+esc(row.ownerClass||("Owner "+(row.ownerId||"-")))+'</span></strong></div>').join(""):'<div class="empty">No live market listings found.</div>';}
+function syncMarketListingSelection(){const el=document.getElementById("marketListingsSelection");if(el)el.textContent=selectedMarketListingIds.size+" selected.";}
+function toggleMarketListingSelection(orderId,checked){orderId=Number(orderId)||0;if(!orderId)return;if(checked)selectedMarketListingIds.add(orderId);else selectedMarketListingIds.delete(orderId);syncMarketListingSelection();}
+function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[];marketListingRows=listings;const visibleIds=new Set(listings.map(row=>Number(row.orderId)||0));selectedMarketListingIds=new Set([...selectedMarketListingIds].filter(id=>visibleIds.has(id)&&listings.some(row=>(Number(row.orderId)||0)===id&&row.isNpcOrder)));wrap.innerHTML=listings.length?listings.map(row=>{const orderId=Number(row.orderId)||0;const checkbox=row.isNpcOrder?'<input class="market-listing-check" type="checkbox" '+(selectedMarketListingIds.has(orderId)?"checked":"")+' onchange="toggleMarketListingSelection('+orderId+',this.checked)">':'';const action=row.isNpcOrder?'<button type="button" onclick="removeMarketListing('+orderId+')">Remove</button>':'<button type="button" onclick="buyMarketListing('+orderId+')">Buy</button>';const grade=row.gradeLabel||("Grade "+(row.quality||0));const tier=row.tier||"Tier --";const owner=row.ownerClass||("Owner "+(row.ownerId||"-"));return '<div class="detail-row"><span>'+checkbox+'<strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span><br><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+(row.category?' / '+esc(row.category):'')+'</span></span><strong>'+esc(row.price)+' Solari<br><span class="market-listing-meta"><span class="item-grade-badge">'+esc(grade)+'</span><span class="subtle">'+esc(tier)+'</span><span class="subtle">Stack '+esc(row.stackSize||row.initialStackSize||0)+'</span><span class="subtle">'+esc(row.isNpcOrder?"NPC":"Player")+'</span></span><span class="subtle">'+esc(owner)+'</span><br>'+action+'</strong></div>';}).join(""):'<div class="empty">No live market listings found.</div>';syncMarketListingSelection();}
 async function refreshMarketListings(){const wrap=document.getElementById("marketListings");try{if(wrap)wrap.innerHTML='<div class="warning">Loading live market listings...</div>';const q=document.getElementById("marketListingsSearch")?.value||"";const limit=document.getElementById("marketListingsLimit")?.value||100;const data=await getJson("/api/market/listings?limit="+encodeURIComponent(limit)+"&q="+encodeURIComponent(q),{timeoutMs:25000});renderMarketListings(data);return data;}catch(e){if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(e))+'</div>';return null;}}
 function refreshMarketListingsSoon(){clearTimeout(marketListingsTimer);marketListingsTimer=setTimeout(refreshMarketListings,350);}
+async function buyMarketListing(orderId){try{const ok=await appConfirm("Buy player listing","Buy selected player listing order "+orderId+" with the market bot?","Buy","Cancel");if(!ok)return;await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",timeoutMs:60000});showToast("Player listing bought.","success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
+async function removeMarketListing(orderId){try{const ok=await appConfirm("Remove NPC/manual listing","Remove selected NPC or manual listing order "+orderId+" from the market?","Remove","Cancel");if(!ok)return;await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/remove",{method:"POST",timeoutMs:60000});showToast("Listing removed.","success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
+function selectVisibleNpcMarketListings(){for(const row of marketListingRows){const id=Number(row.orderId)||0;if(id&&row.isNpcOrder)selectedMarketListingIds.add(id);}renderMarketListings({listings:marketListingRows});}
+function clearSelectedMarketListings(){selectedMarketListingIds.clear();renderMarketListings({listings:marketListingRows});}
+async function removeSelectedMarketListings(){const ids=[...selectedMarketListingIds];if(!ids.length){showToast("No NPC/manual listings selected.","warning");return;}try{const ok=await appConfirm("Remove selected listings","Remove "+ids.length+" selected NPC/manual listing(s) from the market?","Remove Selected","Cancel");if(!ok)return;let removed=0,failed=0;for(const id of ids){try{await getJson("/api/market/listing/"+encodeURIComponent(id)+"/remove",{method:"POST",timeoutMs:60000});removed++;}catch{failed++;}}selectedMarketListingIds.clear();showToast("Removed "+removed+" listing(s)"+(failed?"; "+failed+" failed.":"."),failed?"warning":"success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
 async function refreshMarketPanel(){await Promise.all([refreshMarketStatus(),refreshMarketListings()]);}
 async function startMarketPosting(){marketPostingBusy=false;syncMarketPostingControls();if(!adminItems.length)await refreshGiveItemsFast();renderMarketItemFilters();renderMarketItems();renderMarketSelectedItem();updateMarketSummary();syncMarketPostingControls();await refreshMarketPanel();}
-async function postMarketListing(){const log=document.getElementById("marketLog");try{if(marketPostingBusy)return;if(!selectedMarketItem){if(log)log.textContent="Choose a market item first, then click Post Live Listing.";const picker=document.getElementById("marketSearch");if(picker)picker.focus();playUiSound("warning");return;}const payload=marketListingPayload();const confirmed=await appConfirm("Post live market listing","Post "+payload.listingCount+" live exchange listing(s) for "+(selectedMarketItem.name||payload.template)+" at "+payload.price+" Solari each?","Post Live","Cancel");if(!confirmed)return;marketPostingBusy=true;syncMarketPostingControls();if(log)log.textContent="Posting live market listing...";const data=await getJson("/api/market/listing",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,confirmed:true}),timeoutMs:60000});if(log)log.textContent=(data.message||"Market listing posted.")+"\\n\\n"+JSON.stringify(data,null,2);addActivity("market","Market listing posted",(selectedMarketItem.name||payload.template)+" x"+payload.listingCount);playUiSound("success");await refreshMarketPanel();}catch(e){if(log)log.textContent=betterError(e);addActivity("error","Market posting failed",e.message);playUiSound("warning");}finally{marketPostingBusy=false;syncMarketPostingControls();}}
+async function postMarketListing(){const log=document.getElementById("marketLog");const fold=document.getElementById("marketResultFold");try{if(marketPostingBusy)return;if(!selectedMarketItem){if(fold)fold.open=true;if(log)log.textContent="Choose a market item first, then click Post Live Listing.";const picker=document.getElementById("marketSearch");if(picker)picker.focus();playUiSound("warning");return;}const payload=marketListingPayload();const confirmed=await appConfirm("Post live market listing","Post "+payload.listingCount+" live exchange listing(s) for "+(selectedMarketItem.name||payload.template)+" at "+payload.price+" Solari each?","Post Live","Cancel");if(!confirmed)return;marketPostingBusy=true;syncMarketPostingControls();if(fold)fold.open=true;if(log)log.textContent="Posting live market listing...";const data=await getJson("/api/market/listing",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,confirmed:true}),timeoutMs:60000});if(log)log.textContent=(data.message||"Market listing posted.")+"\\n\\n"+JSON.stringify(data,null,2);addActivity("market","Market listing posted",(selectedMarketItem.name||payload.template)+" x"+payload.listingCount);playUiSound("success");await refreshMarketPanel();}catch(e){if(fold)fold.open=true;if(log)log.textContent=betterError(e);addActivity("error","Market posting failed",e.message);playUiSound("warning");}finally{marketPostingBusy=false;syncMarketPostingControls();}}
 let gradeRelogChoiceNoticeShown=false;
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;input.min=0;input.max=5;if(!supported)input.value=0;else{const grade=Number(input.value||0);if(Number.isFinite(grade)&&grade<0)input.value=0;if(Number.isFinite(grade)&&grade>5)input.value=5;if(usesRelogGrade(input.value)&&!gradeRelogChoiceNoticeShown){gradeRelogChoiceNoticeShown=true;setTimeout(()=>showGradeRelogPopup("items"),0);}}}if(warning){warning.classList.toggle("hidden",false);warning.textContent=supported?"Grade 1-5 uses a database-backed grant and may require relog or inventory refresh. Grade 0 uses the live receiver.":"Grade giving is not supported by the current receiver method.";}syncGiveItemControls();}
 function usesRelogGrade(value){const grade=Number(value||0);return Number.isFinite(grade)&&grade>=1&&grade<=5;}
@@ -15996,7 +16278,9 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/setup/status" && req.method === "GET") {
     const loaded = loadConfig();
-    const detected = loaded.setupComplete ? { config: loaded, changed: false } : autoDetectInitialConfig(loaded);
+    const detected = loaded.setupComplete && String(loaded.pythonPath || "").trim()
+      ? { config: loaded, changed: false }
+      : autoDetectInitialConfig(loaded);
     const current = detected.changed ? saveConfig(detected.config) : loaded;
     const pathsValid = serverInstallPathStatus(current.serverInstallPath).valid
       && serverInstallPathStatus(current.awakeningServerPath).valid;
@@ -16544,6 +16828,49 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === "/api/market-bot/overview" && req.method === "GET") {
+    try { await json(res, await marketBotOverview()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/settings" && req.method === "POST") {
+    try {
+      const saved = saveMarketBotSettings(JSON.parse(await readBody(req) || "{}"));
+      await json(res, { ok: true, baseUrl: marketBotBaseUrl(saved), tokenConfigured: Boolean(marketBotToken(saved)), config: publicConfig(saved) });
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/config" && req.method === "GET") {
+    try { await json(res, await marketBotRequest("/config")); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 502); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/config" && req.method === "PUT") {
+    try { await json(res, await marketBotRequest("/config", { method: "PUT", body: JSON.parse(await readBody(req) || "{}"), timeoutMs: 20000 })); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 502); }
+    return;
+  }
+  if (url.pathname.startsWith("/api/market-bot/tick/") && req.method === "POST") {
+    try {
+      const tick = url.pathname.replace(/^\/api\/market-bot\/tick\//, "");
+      if (!["buy", "list", "sim", "all"].includes(tick)) throw new Error("Unsupported market bot tick.");
+      await json(res, await marketBotRequest(`/tick/${tick}`, { method: "POST", timeoutMs: 60000 }));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 502);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/logs" && req.method === "GET") {
+    try {
+      const result = await sshCommand("sudo kubectl logs -n dune-market-bot -l app=market-bot --tail=160 2>&1", 45000, { maxBuffer: 1024 * 1024 });
+      await json(res, { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr, code: result.code });
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 500);
+    }
+    return;
+  }
   if (url.pathname === "/api/market/status" && req.method === "GET") {
     try {
       await json(res, await marketPostingStatus());
@@ -16559,6 +16886,26 @@ async function route(req, res) {
       await json(res, { ok: false, status: "unavailable", error: error.message, listings: [] }, 500);
     }
     return;
+  }
+  {
+    const buyMatch = url.pathname.match(/^\/api\/market\/listing\/(\d+)\/buy$/);
+    if (buyMatch && req.method === "POST") {
+      try {
+        await json(res, await marketBotRequest(`/manual/buy/${buyMatch[1]}`, { method: "POST", timeoutMs: 60000 }));
+      } catch (err) {
+        await json(res, { ok: false, error: err.message }, 500);
+      }
+      return;
+    }
+    const removeMatch = url.pathname.match(/^\/api\/market\/listing\/(\d+)\/remove$/);
+    if (removeMatch && req.method === "POST") {
+      try {
+        await json(res, await marketBotRequest(`/manual/listing/${removeMatch[1]}`, { method: "DELETE", timeoutMs: 60000 }));
+      } catch (err) {
+        await json(res, { ok: false, error: err.message }, 500);
+      }
+      return;
+    }
   }
   if (url.pathname === "/api/market/listing" && req.method === "POST") {
     try {

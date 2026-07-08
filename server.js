@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.8";
+const APP_VERSION = "1.0.9";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -12529,6 +12529,87 @@ async function ensureMarketBotTokenConfigured(configValue = loadConfig(), option
   return saved;
 }
 
+function decodeChunkedHttpBody(body) {
+  let offset = 0;
+  const chunks = [];
+  while (offset < body.length) {
+    const lineEnd = body.indexOf("\r\n", offset);
+    if (lineEnd === -1) break;
+    const sizeText = body.slice(offset, lineEnd).split(";", 1)[0].trim();
+    const size = Number.parseInt(sizeText, 16);
+    if (!Number.isFinite(size)) break;
+    offset = lineEnd + 2;
+    if (size === 0) break;
+    chunks.push(body.slice(offset, offset + size));
+    offset += size + 2;
+  }
+  return chunks.join("");
+}
+
+function parseRawHttpResponse(raw, target) {
+  const text = String(raw || "");
+  const splitAt = text.indexOf("\r\n\r\n");
+  const headerText = splitAt >= 0 ? text.slice(0, splitAt) : "";
+  let bodyText = splitAt >= 0 ? text.slice(splitAt + 4) : text;
+  const headerLines = headerText.split(/\r?\n/).filter(Boolean);
+  const statusMatch = String(headerLines.shift() || "").match(/^HTTP\/\S+\s+(\d+)/i);
+  const status = statusMatch ? Number(statusMatch[1]) : 0;
+  const headers = {};
+  for (const line of headerLines) {
+    const index = line.indexOf(":");
+    if (index > 0) headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim();
+  }
+  if (/chunked/i.test(headers["transfer-encoding"] || "")) bodyText = decodeChunkedHttpBody(bodyText);
+  let data = {};
+  try { data = bodyText ? JSON.parse(bodyText) : {}; } catch { data = { raw: bodyText }; }
+  if (status < 200 || status >= 300) {
+    const error = new Error(data.error || data.message || bodyText || `Market bot returned HTTP ${status || "unknown"}`);
+    error.status = status;
+    error.target = target;
+    throw error;
+  }
+  if (data && typeof data === "object" && !Array.isArray(data)) data.transport = data.transport || "vm-ssh";
+  return data;
+}
+
+function marketBotNetworkError(error) {
+  const message = String(error?.message || error || "");
+  return error?.name === "AbortError" || /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|network|timed out/i.test(message);
+}
+
+function marketBotAuthError(error) {
+  return /unauthorized|forbidden|HTTP 401|HTTP 403/i.test(String(error?.message || error || ""));
+}
+
+async function marketBotRequestViaVm(pathname, options = {}, configValue = loadConfig(), body = undefined) {
+  const method = String(options.method || "GET").toUpperCase();
+  const path = pathname.startsWith("/") ? pathname : `/${pathname}`;
+  const token = marketBotToken(configValue);
+  const bodyText = body === undefined ? "" : String(body);
+  const timeoutSeconds = Math.max(5, Math.ceil(Number(options.timeoutMs || 15000) / 1000));
+  const headers = [
+    `Host: 127.0.0.1:8081`,
+    `User-Agent: AlphaNine-Dune-Suite/${APP_VERSION}`,
+    "Accept: application/json",
+    "Connection: close"
+  ];
+  if (options.auth !== false && token) headers.push(`Authorization: Bearer ${token}`);
+  if (body !== undefined) {
+    headers.push(`Content-Type: ${options.headers?.["Content-Type"] || options.headers?.["content-type"] || "application/json"}`);
+    headers.push(`Content-Length: ${Buffer.byteLength(bodyText)}`);
+  }
+  const requestText = [
+    `${method} ${path} HTTP/1.1`,
+    ...headers,
+    "",
+    bodyText
+  ].join("\r\n");
+  const command = `printf %s ${shQuote(requestText)} | sudo kubectl exec -i -n dune-market-bot deploy/market-bot -- nc -w ${timeoutSeconds} 127.0.0.1 8081`;
+  const result = await sshCommand(command, Number(options.timeoutMs || 15000) + 15000, { maxBuffer: 1024 * 1024 * 4 });
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot VM fallback failed.");
+  return parseRawHttpResponse(result.stdout, `vm-ssh:${path}`);
+}
+
 async function marketBotRequest(pathname, options = {}) {
   const configValue = options.discoverToken === false ? loadConfig() : await ensureMarketBotTokenConfigured(loadConfig(), { provision: options.auth !== false });
   let body = options.body;
@@ -12563,10 +12644,25 @@ async function marketBotRequest(pathname, options = {}) {
   try {
     return await send(configValue);
   } catch (error) {
-    if (error.name === "AbortError") throw new Error(`Market bot request timed out: ${pathname}`);
-    if (options.auth !== false && options.retryToken !== false && /unauthorized|forbidden|HTTP 401|HTTP 403/i.test(String(error.message || ""))) {
+    if (marketBotNetworkError(error)) {
+      try {
+        return await marketBotRequestViaVm(pathname, options, configValue, body);
+      } catch (fallbackError) {
+        if (options.auth !== false && options.retryToken !== false && marketBotAuthError(fallbackError)) {
+          const refreshed = await ensureMarketBotTokenConfigured(loadConfig(), { force: true, provision: true });
+          return await marketBotRequestViaVm(pathname, { ...options, retryToken: false }, refreshed, body);
+        }
+        throw new Error(`Market bot API unreachable from this PC and VM fallback failed: ${fallbackError.message}`);
+      }
+    }
+    if (options.auth !== false && options.retryToken !== false && marketBotAuthError(error)) {
       const refreshed = await ensureMarketBotTokenConfigured(loadConfig(), { force: true, provision: true });
-      return await send(refreshed);
+      try {
+        return await send(refreshed);
+      } catch (retryError) {
+        if (marketBotNetworkError(retryError)) return await marketBotRequestViaVm(pathname, options, refreshed, body);
+        throw retryError;
+      }
     }
     throw error;
   }

@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.18";
+const APP_VERSION = "1.0.19";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -12654,12 +12654,19 @@ async function marketBotRequestViaVm(pathname, options = {}, configValue = loadC
     "",
     bodyText
   ].join("\r\n");
+  const curlHeaderArgs = headers.map((header) => `-H ${shQuote(header)}`).join(" ");
+  const curlDataArg = body !== undefined ? "--data-binary @-" : "";
+  const curlUrl = `http://127.0.0.1:8081${path}`;
   const command = [
+    "curlBody=$(mktemp)",
+    `printf %s ${shQuote(bodyText)} > "$curlBody"`,
+    `if command -v curl >/dev/null 2>&1 && curl -i -sS --max-time ${timeoutSeconds} -X ${shQuote(method)} ${curlHeaderArgs} ${curlDataArg} ${shQuote(curlUrl)} < "$curlBody"; then rm -f "$curlBody"; exit 0; fi`,
+    "rm -f \"$curlBody\"",
     "tmp=$(mktemp)",
     `if command -v nc >/dev/null 2>&1 && printf %s ${shQuote(requestText)} | nc -w ${timeoutSeconds} 127.0.0.1 8081 > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then cat "$tmp"; rm -f "$tmp"; exit 0; fi`,
     "rm -f \"$tmp\"",
-    "line=$(sudo kubectl get pods -A -l app=market-bot --field-selector=status.phase=Running --no-headers 2>/dev/null | awk 'NR==1{print $1\" \"$2}')",
-    "if [ -z \"$line\" ]; then line=$(sudo kubectl get pods -A --field-selector=status.phase=Running --no-headers 2>/dev/null | awk 'tolower($2) ~ /market[-]?bot|marketbot/ {print $1\" \"$2; exit}'); fi",
+    "line=$(sudo kubectl get pods -A -l app=market-bot --field-selector=status.phase=Running --no-headers 2>/dev/null | awk '$4==\"Running\"{print $1\" \"$2; exit}')",
+    "if [ -z \"$line\" ]; then line=$(sudo kubectl get pods -A --field-selector=status.phase=Running --no-headers 2>/dev/null | awk '$4==\"Running\" && tolower($2) ~ /market[-]?bot|marketbot/ {print $1\" \"$2; exit}'); fi",
     "if [ -z \"$line\" ]; then echo 'AlphaNine Market Bot pod not found in Kubernetes. Deploy or start the Market Bot first.' >&2; exit 1; fi",
     "ns=${line%% *}",
     "pod=${line#* }",

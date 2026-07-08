@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.14";
+const APP_VERSION = "1.0.15";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -12660,7 +12660,9 @@ async function marketBotRequestViaVm(pathname, options = {}, configValue = loadC
     "if [ -z \"$line\" ]; then echo 'AlphaNine Market Bot pod not found in Kubernetes. Deploy or start the Market Bot first.' >&2; exit 1; fi",
     "ns=${line%% *}",
     "pod=${line#* }",
-    `printf %s ${shQuote(requestText)} | sudo kubectl exec -i -n "$ns" "$pod" -- nc -w ${timeoutSeconds} 127.0.0.1 8081`
+    "container=$(sudo kubectl get pod -n \"$ns\" \"$pod\" -o jsonpath='{.spec.containers[0].name}' 2>/dev/null)",
+    "if [ -z \"$container\" ]; then echo \"AlphaNine Market Bot container not found in pod $ns/$pod.\" >&2; exit 1; fi",
+    `printf %s ${shQuote(requestText)} | sudo kubectl exec -i -n "$ns" "$pod" -c "$container" -- nc -w ${timeoutSeconds} 127.0.0.1 8081`
   ].join("; ");
   const result = await sshCommand(command, Number(options.timeoutMs || 15000) + 15000, { maxBuffer: 1024 * 1024 * 4 });
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot VM fallback failed.");

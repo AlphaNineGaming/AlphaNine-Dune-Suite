@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.20";
+const APP_VERSION = "1.0.21";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -12658,6 +12658,7 @@ async function marketBotRequestViaVm(pathname, options = {}, configValue = loadC
   const curlDataArg = body !== undefined ? "--data-binary @-" : "";
   const curlUrl = `http://127.0.0.1:8081${path}`;
   const command = [
+    `pfPath=${shQuote(path)}`,
     "curlBody=$(mktemp)",
     `printf %s ${shQuote(bodyText)} > "$curlBody"`,
     `if command -v curl >/dev/null 2>&1 && curl -i -sS --max-time ${timeoutSeconds} -X ${shQuote(method)} ${curlHeaderArgs} ${curlDataArg} ${shQuote(curlUrl)} < "$curlBody"; then rm -f "$curlBody"; exit 0; fi`,
@@ -12667,12 +12668,14 @@ async function marketBotRequestViaVm(pathname, options = {}, configValue = loadC
     "rm -f \"$tmp\"",
     "pfLog=$(mktemp)",
     "pfOut=$(mktemp)",
-    "sudo kubectl -n dune-market-bot port-forward svc/market-bot 18081:8081 > \"$pfLog\" 2>&1 & pfPid=$!",
+    "pfPort=$((18081 + ($$ % 1000)))",
+    "sudo kubectl -n dune-market-bot port-forward svc/market-bot ${pfPort}:8081 > \"$pfLog\" 2>&1 & pfPid=$!",
     "for i in 1 2 3 4 5 6 7 8 9 10; do grep -q 'Forwarding from' \"$pfLog\" && break; kill -0 \"$pfPid\" 2>/dev/null || break; sleep 0.3; done",
-    `if kill -0 "$pfPid" 2>/dev/null && command -v nc >/dev/null 2>&1 && printf %s ${shQuote(requestText)} | nc -w ${timeoutSeconds} 127.0.0.1 18081 > "$pfOut" 2>/dev/null && [ -s "$pfOut" ]; then cat "$pfOut"; kill "$pfPid" 2>/dev/null || true; rm -f "$pfLog" "$pfOut"; exit 0; fi`,
+    `if kill -0 "$pfPid" 2>/dev/null && command -v curl >/dev/null 2>&1 && curl -i -sS --max-time ${timeoutSeconds} -X ${shQuote(method)} ${curlHeaderArgs} ${curlDataArg} "http://127.0.0.1:$pfPort$pfPath" < "$curlBody"; then kill "$pfPid" 2>/dev/null || true; rm -f "$pfLog" "$pfOut" "$curlBody"; exit 0; fi`,
+    `if kill -0 "$pfPid" 2>/dev/null && command -v nc >/dev/null 2>&1 && printf %s ${shQuote(requestText)} | nc -w ${timeoutSeconds} 127.0.0.1 "$pfPort" > "$pfOut" 2>/dev/null && [ -s "$pfOut" ]; then cat "$pfOut"; kill "$pfPid" 2>/dev/null || true; rm -f "$pfLog" "$pfOut" "$curlBody"; exit 0; fi`,
     "kill \"$pfPid\" 2>/dev/null || true",
     "pfError=$(cat \"$pfLog\" 2>/dev/null)",
-    "rm -f \"$pfLog\" \"$pfOut\"",
+    "rm -f \"$pfLog\" \"$pfOut\" \"$curlBody\"",
     "line=$(sudo kubectl get pods -A -l app=market-bot --field-selector=status.phase=Running --no-headers 2>/dev/null | awk '$4==\"Running\"{print $1\" \"$2; exit}')",
     "if [ -z \"$line\" ]; then line=$(sudo kubectl get pods -A --field-selector=status.phase=Running --no-headers 2>/dev/null | awk '$4==\"Running\" && tolower($2) ~ /market[-]?bot|marketbot/ {print $1\" \"$2; exit}'); fi",
     "if [ -z \"$line\" ]; then echo 'AlphaNine Market Bot pod not found in Kubernetes. Deploy or start the Market Bot first.' >&2; exit 1; fi",
@@ -12885,7 +12888,26 @@ async function installMarketBot() {
   steps.push("restarted deployment");
 
   const rollout = await sshCommand("sudo kubectl rollout status deployment/market-bot -n dune-market-bot --timeout=120s", 150000, { maxBuffer: 1024 * 1024 });
-  if (!rollout.ok) throw new Error(rollout.stderr || rollout.stdout || rollout.error || "Market Bot deployment did not become ready.");
+  if (!rollout.ok) {
+    const diagCommand = [
+      "echo 'Pods:'",
+      "sudo kubectl get pods -n dune-market-bot -o wide 2>&1",
+      "echo ''",
+      "echo 'Service/endpoints:'",
+      "sudo kubectl get svc,endpoints -n dune-market-bot -o wide 2>&1",
+      "echo ''",
+      "echo 'Recent pod describe:'",
+      "pod=$(sudo kubectl get pods -n dune-market-bot -l app=market-bot --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null | tail -n 1 | awk '{print $1}')",
+      "if [ -n \"$pod\" ]; then sudo kubectl describe pod -n dune-market-bot \"$pod\" 2>&1 | tail -n 120; fi",
+      "echo ''",
+      "echo 'Recent logs:'",
+      "sudo kubectl logs -n dune-market-bot -l app=market-bot --all-containers=true --tail=120 2>&1"
+    ].join("; ");
+    const diag = await sshCommand(diagCommand, 60000, { maxBuffer: 1024 * 1024 * 2 });
+    const base = rollout.stderr || rollout.stdout || rollout.error || "Market Bot deployment did not become ready.";
+    const detail = diag.stdout || diag.stderr || diag.error || "";
+    throw new Error(`${base}${detail ? `\n\n${detail}` : ""}`);
+  }
   steps.push("deployment ready");
 
   const saved = saveConfig({ ...loadConfig(), marketBotApiToken: apiToken });

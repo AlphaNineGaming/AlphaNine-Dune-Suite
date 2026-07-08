@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.16";
+const APP_VERSION = "1.0.17";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -12844,20 +12844,29 @@ async function installMarketBot() {
   const manifestFile = path.join(os.tmpdir(), `alphanine-market-bot-${Date.now()}.yaml`);
   fs.writeFileSync(manifestFile, manifest, "utf8");
   try {
-    const clearDeployment = await sshCommand("sudo kubectl delete deployment/market-bot -n dune-market-bot --ignore-not-found=true", 60000, { maxBuffer: 1024 * 1024 });
-    if (!clearDeployment.ok) throw new Error(clearDeployment.stderr || clearDeployment.stdout || clearDeployment.error || "Could not clear the existing Market Bot deployment.");
-    const apply = await runWithStdin("ssh", [
+    const applyManifest = () => runWithStdin("ssh", [
       "-o", "StrictHostKeyChecking=no",
       "-o", "LogLevel=QUIET",
       "-i", sshTarget.keyPath,
       `${sshTarget.user}@${sshTarget.ip}`,
       "sudo kubectl apply -f -"
     ], manifestFile, { timeout: 120000, maxBuffer: 1024 * 1024 * 4 });
+    let apply = await applyManifest();
+    if (!apply.ok && /immutable|object has been deleted|object is being deleted/i.test(String(apply.stderr || apply.stdout || apply.error || ""))) {
+      const recreate = await sshCommand("sudo kubectl delete deployment/market-bot -n dune-market-bot --ignore-not-found=true --wait=true", 120000, { maxBuffer: 1024 * 1024 });
+      if (!recreate.ok) throw new Error(recreate.stderr || recreate.stdout || recreate.error || "Could not recreate the existing Market Bot deployment.");
+      apply = await applyManifest();
+      steps.push("recreated Kubernetes deployment");
+    }
     if (!apply.ok) throw new Error(apply.stderr || apply.stdout || apply.error || "Could not apply Market Bot Kubernetes manifest.");
     steps.push("applied Kubernetes manifest");
   } finally {
     fs.rmSync(manifestFile, { force: true });
   }
+
+  const restart = await sshCommand("sudo kubectl rollout restart deployment/market-bot -n dune-market-bot", 60000, { maxBuffer: 1024 * 1024 });
+  if (!restart.ok) throw new Error(restart.stderr || restart.stdout || restart.error || "Could not restart the Market Bot deployment.");
+  steps.push("restarted deployment");
 
   const rollout = await sshCommand("sudo kubectl rollout status deployment/market-bot -n dune-market-bot --timeout=120s", 150000, { maxBuffer: 1024 * 1024 });
   if (!rollout.ok) throw new Error(rollout.stderr || rollout.stdout || rollout.error || "Market Bot deployment did not become ready.");

@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.6";
+const APP_VERSION = "1.0.7";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -12473,8 +12473,32 @@ function marketBotToken(configValue = loadConfig()) {
     || usableSecretValue(process.env.API_TOKEN);
 }
 
+async function discoverMarketBotApiToken() {
+  const command = "sudo kubectl get secret market-bot-secret -n dune-market-bot -o jsonpath='{.data.API_TOKEN}' 2>/dev/null";
+  const result = await sshCommand(command, 15000, { maxBuffer: 1024 * 16 });
+  if (!result.ok) return "";
+  const encoded = String(result.stdout || "").trim();
+  if (!encoded) return "";
+  try {
+    const token = Buffer.from(encoded, "base64").toString("utf8").trim();
+    return isMaskedSecretValue(token) ? "" : token;
+  } catch {
+    return "";
+  }
+}
+
+async function ensureMarketBotTokenConfigured(configValue = loadConfig()) {
+  if (marketBotToken(configValue)) return configValue;
+  const token = await discoverMarketBotApiToken();
+  if (!token) return configValue;
+  const next = { ...configValue, marketBotApiToken: token };
+  const saved = saveConfig(next);
+  appendAdminAudit("market_bot_token_auto_configured", { source: "kubernetes-secret", namespace: "dune-market-bot", secret: "market-bot-secret", tokenConfigured: true });
+  return saved;
+}
+
 async function marketBotRequest(pathname, options = {}) {
-  const configValue = loadConfig();
+  const configValue = options.discoverToken === false ? loadConfig() : await ensureMarketBotTokenConfigured();
   const baseUrl = marketBotBaseUrl(configValue);
   const target = `${baseUrl}${pathname.startsWith("/") ? pathname : `/${pathname}`}`;
   const headers = { ...(options.headers || {}) };
@@ -12503,7 +12527,7 @@ async function marketBotRequest(pathname, options = {}) {
 }
 
 async function marketBotOverview() {
-  const configValue = loadConfig();
+  const configValue = await ensureMarketBotTokenConfigured();
   const overview = {
     ok: true,
     baseUrl: marketBotBaseUrl(configValue),
@@ -12526,7 +12550,7 @@ async function marketBotOverview() {
   return overview;
 }
 
-function saveMarketBotSettings(payload) {
+async function saveMarketBotSettings(payload) {
   const current = loadConfig();
   const next = { ...current };
   if (Object.prototype.hasOwnProperty.call(payload || {}, "apiUrl")) {
@@ -12536,7 +12560,8 @@ function saveMarketBotSettings(payload) {
     const token = String(payload.apiToken || "").trim();
     if (token && !isMaskedSecretValue(token)) next.marketBotApiToken = token;
   }
-  return saveConfig(next);
+  const saved = saveConfig(next);
+  return await ensureMarketBotTokenConfigured(saved);
 }
 
 function appPage() {
@@ -16921,7 +16946,7 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/market-bot/settings" && req.method === "POST") {
     try {
-      const saved = saveMarketBotSettings(JSON.parse(await readBody(req) || "{}"));
+      const saved = await saveMarketBotSettings(JSON.parse(await readBody(req) || "{}"));
       await json(res, { ok: true, baseUrl: marketBotBaseUrl(saved), tokenConfigured: Boolean(marketBotToken(saved)), config: publicConfig(saved) });
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 400);

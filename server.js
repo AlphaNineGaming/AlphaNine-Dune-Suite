@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.5";
+const APP_VERSION = "1.0.6";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -6399,6 +6399,62 @@ function parseDbRows(output, columns) {
     columns.forEach((column, index) => { row[column] = parts[index] || ""; });
     return row;
   });
+}
+
+function sqlTextLiteral(value) {
+  return `'${String(value ?? "").replace(/'/g, "''")}'`;
+}
+
+function sanitizeSietchLabel(value) {
+  const label = String(value || "").trim().replace(/\s+/g, " ");
+  if (!label) throw new Error("Sietch name is required.");
+  if (label.length > 48) throw new Error("Sietch name must be 48 characters or less.");
+  if (/[\r\n\t]/.test(label)) throw new Error("Sietch name cannot contain tabs or line breaks.");
+  return label;
+}
+
+async function listSietchPartitions() {
+  const sql = `
+    SELECT partition_id::text,
+           server_id,
+           map,
+           dimension_index::text,
+           blocked::text,
+           COALESCE(label, '') AS label
+    FROM dune.world_partition
+    ORDER BY map, dimension_index, partition_id
+    LIMIT 500;
+  `;
+  const rows = parseDbRows(await dbQuery(sql, 20000), ["partitionId", "serverId", "map", "dimensionIndex", "blocked", "label"]);
+  return { ok: true, rows };
+}
+
+async function renameSietchPartition(body = {}) {
+  const partitionId = Number(body.partitionId);
+  if (!Number.isSafeInteger(partitionId) || partitionId <= 0) throw new Error("A valid partition is required.");
+  const previousLabel = sanitizeSietchLabel(body.previousLabel || "");
+  const nextLabel = sanitizeSietchLabel(body.nextLabel || "");
+  if (previousLabel === nextLabel) throw new Error("New sietch name is the same as the current name.");
+  const readSql = `
+    SELECT partition_id::text, server_id, map, dimension_index::text, blocked::text, COALESCE(label, '') AS label
+    FROM dune.world_partition
+    WHERE partition_id = ${partitionId}
+    LIMIT 1;
+  `;
+  const before = parseDbRows(await dbQuery(readSql, 20000), ["partitionId", "serverId", "map", "dimensionIndex", "blocked", "label"])[0];
+  if (!before) throw new Error(`World partition ${partitionId} was not found.`);
+  if (before.label !== previousLabel) throw new Error(`Sietch label changed from "${previousLabel}" to "${before.label}". Refresh and try again.`);
+  const updateSql = `
+    UPDATE dune.world_partition
+    SET label = ${sqlTextLiteral(nextLabel)}
+    WHERE partition_id = ${partitionId}
+      AND label = ${sqlTextLiteral(previousLabel)}
+    RETURNING partition_id::text, server_id, map, dimension_index::text, blocked::text, COALESCE(label, '') AS label;
+  `;
+  const updated = parseDbRows(await dbQuery(updateSql, 20000), ["partitionId", "serverId", "map", "dimensionIndex", "blocked", "label"])[0];
+  if (!updated) throw new Error("Rename did not update any row. Refresh and try again.");
+  appendAdminAudit("sietch_partition_renamed", { partitionId, previousLabel, nextLabel, before, updated });
+  return { ok: true, previousLabel, nextLabel, row: updated, note: "Players may need to relog or the map may need a restart if the game cached the old label." };
 }
 
 function inspectStatus(condition, unavailable = false) {
@@ -15038,6 +15094,29 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="subtle mt advanced-only"><a href="https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/manage/manage-hyper-v-hosts" target="_blank" rel="noopener">How to fix Hyper-V permissions</a></div>
         <pre id="vmControlLog" class="mt advanced-only">Ready.</pre>
       </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div>
+            <div class="label">Sietch Rename</div>
+            <div class="subtle">Rename world partition labels such as Abbir. Create a backup before changing live server names.</div>
+          </div>
+          <button onclick="refreshSietches()">Refresh Sietches</button>
+        </div>
+        <div class="layout-2 mt">
+          <div class="field-grid">
+            <label>Sietch / Partition<select id="sietchPartitionSelect" onchange="syncSelectedSietch()"></select></label>
+            <label>New Sietch Name<input id="sietchNewLabel" maxlength="48" placeholder="New name"></label>
+            <div class="action-row">
+              <button onclick="refreshSietches()">Refresh</button>
+              <button class="primary" onclick="renameSelectedSietch()">Rename Sietch</button>
+            </div>
+          </div>
+          <div>
+            <div class="detail-list" id="sietchDetails"><div class="empty">Load sietches to inspect current labels.</div></div>
+            <div id="sietchRenameResult" class="test-result mt">No rename run yet.</div>
+          </div>
+        </div>
+      </div>
       <details class="progression-fold map-deployment-panel advanced-only mt">
         <summary>Map Deployment</summary>
         <div class="progression-fold-body">
@@ -15864,6 +15943,13 @@ function vmDisplayStatus(vm){const raw=String(vm?.state||vm?.status||vm?.label||
 function renderVmStatus(vm){const status=vmDisplayStatus(vm);tone("vm",status);tone("dashboardVmStatus",status);setText("vmControlStatus",status);}
 function vmDisplayMessage(data){const vm=data?.vm||data||{};const status=vmDisplayStatus(vm);return vm?.error?status+": "+vm.error:status;}
 function databaseHealthLabel(data){const health=data?.databaseHealth;if(health&&health.ok)return"DB reachable";if(health&&health.status==="unavailable")return"DB unavailable";const summary=data?.status?.summary||{};return summary.database||"Unknown";}
+let sietchRows=[];
+function sietchOptionLabel(row){return (row.label||"(unnamed)")+" / "+(row.map||"Unknown map")+" / D"+(row.dimensionIndex||"0")+" / #"+(row.partitionId||"--");}
+function selectedSietchRow(){const select=document.getElementById("sietchPartitionSelect");const id=select?.value||"";return sietchRows.find(row=>String(row.partitionId)===String(id))||null;}
+function renderSietchDetails(row){const box=document.getElementById("sietchDetails");if(!box)return;if(!row){box.innerHTML='<div class="empty">No sietch selected.</div>';return;}box.innerHTML=['<div class="detail-row"><span class="subtle">Current Label</span><strong>'+esc(row.label||"(unnamed)")+'</strong></div>','<div class="detail-row"><span class="subtle">Partition ID</span><strong>'+esc(row.partitionId)+'</strong></div>','<div class="detail-row"><span class="subtle">Map</span><strong>'+esc(row.map||"Unknown")+'</strong></div>','<div class="detail-row"><span class="subtle">Dimension</span><strong>'+esc(row.dimensionIndex||"0")+'</strong></div>','<div class="detail-row advanced-only"><span class="subtle">Server ID</span><strong>'+esc(row.serverId||"")+'</strong></div>','<div class="detail-row"><span class="subtle">Blocked</span><strong>'+esc(row.blocked==="true"?"Yes":"No")+'</strong></div>'].join("");}
+function syncSelectedSietch(){const row=selectedSietchRow();if(row)setValue("sietchNewLabel",row.label||"");renderSietchDetails(row);}
+async function refreshSietches(){const select=document.getElementById("sietchPartitionSelect");const result=document.getElementById("sietchRenameResult");try{if(result)result.textContent="Loading sietches...";const data=await getJson("/api/sietches",{timeoutMs:30000});sietchRows=data.rows||[];if(select){const current=select.value;select.innerHTML=sietchRows.length?sietchRows.map(row=>'<option value="'+esc(row.partitionId)+'">'+esc(sietchOptionLabel(row))+'</option>').join(""):'<option value="">No world partitions found</option>';if(current&&sietchRows.some(row=>String(row.partitionId)===String(current)))select.value=current;}syncSelectedSietch();if(result)result.textContent=sietchRows.length?("Loaded "+sietchRows.length+" sietch/world partition label(s)."):"No world partition labels found.";addActivity("server","Sietches refreshed",sietchRows.length+" partition labels");}catch(e){if(select)select.innerHTML='<option value="">Failed to load sietches</option>';renderSietchDetails(null);if(result)result.textContent=betterError(e);addActivity("error","Sietch refresh failed",e.message);}}
+async function renameSelectedSietch(){const row=selectedSietchRow();const result=document.getElementById("sietchRenameResult");try{if(!row)throw new Error("Select a sietch first.");const nextLabel=getValue("sietchNewLabel").trim().replace(/\\s+/g," ");if(!nextLabel)throw new Error("Enter the new sietch name.");if(nextLabel===row.label)throw new Error("The new name is the same as the current name.");const confirmed=await appConfirm("Rename Sietch","Rename "+(row.label||"(unnamed)")+" to "+nextLabel+"?\\n\\nCreate a database backup first if players are active.","Rename","Cancel");if(!confirmed)return;if(result)result.textContent="Renaming sietch...";const data=await getJson("/api/sietches/rename",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({partitionId:row.partitionId,previousLabel:row.label,nextLabel}),timeoutMs:30000});if(result)result.textContent="Renamed "+data.previousLabel+" to "+data.nextLabel+". "+(data.note||"");showToast("Sietch renamed.","success");addActivity("server","Sietch renamed",data.previousLabel+" -> "+data.nextLabel);await refreshSietches();}catch(e){if(result)result.textContent=betterError(e);showToast(betterError(e),"error");addActivity("error","Sietch rename failed",e.message);}}
 async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const dbLabel=databaseHealthLabel(data);const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?((selected.title||"Title not found")+" / "+selected.namespace+" / "+selected.name):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",dbLabel);tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));badge("topDb",dbLabel);document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+dbLabel+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");badge("topDb","DB status unknown");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(row){if(row&&typeof row==="object"&&row.statusLabel)return row.statusLabel;const open=row&&typeof row==="object"?row.open:row;if(open===null||open===undefined)return"Discovered";return open?"Open":"Closed";}
@@ -16973,6 +17059,24 @@ async function route(req, res) {
       result.dbTunnel = await startDatabaseTunnel().catch((error) => ({ ok: false, error: error.message }));
     }
     await json(res, result, result.ok ? 200 : 500);
+    return;
+  }
+  if (url.pathname === "/api/sietches" && req.method === "GET") {
+    try {
+      await json(res, await listSietchPartitions());
+    } catch (error) {
+      await json(res, { ok: false, rows: [], error: error.message }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/sietches/rename" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await renameSietchPartition(body));
+    } catch (error) {
+      appendAdminAudit("sietch_partition_rename_failed", { error: error.message });
+      await json(res, { ok: false, error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/backend/diagnostics" && req.method === "GET") {

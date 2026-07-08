@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.22";
+const APP_VERSION = "1.0.23";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -10967,6 +10967,212 @@ async function marketListings(payload = {}) {
   return { ok: true, listings, count: listings.length, durationMs: Date.now() - started };
 }
 
+async function buyMarketListingAsAdmin(orderIdValue) {
+  const started = Date.now();
+  const orderId = requireInteger(orderIdValue, "order id", 1, 999999999999);
+  const expiryTime = await marketListingExpiryTime(14);
+  const sql = `
+    with target as materialized (
+      select
+        o.id as order_id,
+        o.exchange_id,
+        coalesce(o.access_point_id, 1) as access_point_id,
+        o.owner_id as seller_actor_id,
+        o.template_id,
+        o.item_id,
+        o.item_price,
+        coalesce(i.stack_size, s.initial_stack_size, 1) as stack_size,
+        coalesce(o.quality_level, 0) as quality_level
+      from dune.dune_exchange_orders o
+      join dune.dune_exchange_sell_orders s on s.order_id = o.id
+      left join dune.items i on i.id = o.item_id
+      where o.id = ${orderId}
+        and o.is_npc_order = false
+      limit 1
+    ),
+    selected_partition as (
+      select partition_id
+      from dune.world_partition
+      order by partition_id
+      limit 1
+    ),
+    existing_actor as (
+      select id
+      from dune.actors
+      where class = 'AlphaNineMarket'
+      order by id
+      limit 1
+    ),
+    created_actor as (
+      insert into dune.actors (class, serial, gas_attributes, properties, dimension_index, partition_id)
+      select 'AlphaNineMarket', 0, '{}', '{}', 0, (select partition_id from selected_partition)
+      where exists (select 1 from target)
+        and not exists (select 1 from existing_actor)
+      returning id
+    ),
+    market_actor as (
+      select id from existing_actor
+      union all
+      select id from created_actor
+      limit 1
+    ),
+    exchange_user as (
+      insert into dune.dune_exchange_users (owner_id)
+      select id from market_actor
+      where exists (select 1 from target)
+      on conflict do nothing
+      returning id as user_id
+    ),
+    market_user as (
+      select user_id from exchange_user
+      union all
+      select id as user_id
+      from dune.dune_exchange_users
+      where owner_id = (select id from market_actor)
+      limit 1
+    ),
+    payment_order as (
+      insert into dune.dune_exchange_orders
+        (exchange_id, access_point_id, owner_id, template_id, expiration_time,
+         durability_cur, durability_max, item_price, category_mask, category_depth, is_npc_order)
+      select
+        exchange_id,
+        access_point_id,
+        seller_actor_id,
+        template_id,
+        ${expiryTime},
+        1.0,
+        1.0,
+        item_price * stack_size,
+        0,
+        0,
+        false
+      from target
+      returning id
+    ),
+    fulfilled as (
+      insert into dune.dune_exchange_fulfilled_orders
+        (order_id, source_order_id, completion_type, stack_size, original_order_id)
+      select
+        (select id from payment_order),
+        null,
+        4,
+        stack_size,
+        order_id
+      from target
+      returning order_id
+    ),
+    buyer_debit as (
+      update dune.dune_exchange_users
+      set solari_balance = solari_balance - (select item_price * stack_size from target)
+      where id = (select user_id from market_user)
+      returning owner_id, id as user_id
+    ),
+    deleted_sell as (
+      delete from dune.dune_exchange_sell_orders
+      where order_id = (select order_id from target)
+      returning order_id
+    ),
+    deleted_order as (
+      delete from dune.dune_exchange_orders
+      where id = (select order_id from target)
+      returning id
+    ),
+    deleted_item as (
+      delete from dune.items
+      where id = (select item_id from target)
+        and (select item_id from target) is not null
+      returning id
+    )
+    select
+      coalesce((select order_id::text from target), ''),
+      coalesce((select template_id from target), ''),
+      coalesce((select seller_actor_id::text from target), ''),
+      coalesce((select item_price::text from target), ''),
+      coalesce((select stack_size::text from target), ''),
+      coalesce((select (item_price * stack_size)::text from target), ''),
+      coalesce((select id::text from payment_order), ''),
+      coalesce((select owner_id::text from buyer_debit), ''),
+      coalesce((select user_id::text from buyer_debit), ''),
+      coalesce((select id::text from deleted_item), '')
+  `;
+  const row = parseDbRows(await dbQuery(sql, 45000), ["orderId", "template", "sellerActorId", "price", "stackSize", "totalPaid", "paymentOrderId", "buyerActorId", "buyerExchangeUserId", "deletedItemId"])[0] || {};
+  if (!row.orderId) throw new Error(`Player market listing ${orderId} was not found or is not a player sell listing.`);
+  const result = {
+    ok: true,
+    status: "bought",
+    orderId,
+    template: row.template,
+    sellerActorId: row.sellerActorId,
+    price: Number(row.price || 0) || 0,
+    stackSize: Number(row.stackSize || 0) || 0,
+    totalPaid: Number(row.totalPaid || 0) || 0,
+    paymentOrderId: row.paymentOrderId,
+    buyerActorId: row.buyerActorId,
+    buyerExchangeUserId: row.buyerExchangeUserId,
+    deletedItemId: row.deletedItemId,
+    durationMs: Date.now() - started,
+    message: `Bought player listing ${orderId} and created seller payout for ${row.totalPaid || 0} Solari.`
+  };
+  appendAdminAudit("market_listing_bought_by_admin", result);
+  return result;
+}
+
+async function removeMarketListingAsAdmin(orderIdValue) {
+  const started = Date.now();
+  const orderId = requireInteger(orderIdValue, "order id", 1, 999999999999);
+  const sql = `
+    with target as materialized (
+      select
+        o.id as order_id,
+        o.template_id,
+        o.item_id,
+        o.owner_id,
+        o.is_npc_order
+      from dune.dune_exchange_orders o
+      left join dune.dune_exchange_sell_orders s on s.order_id = o.id
+      where o.id = ${orderId}
+        and o.is_npc_order = true
+      limit 1
+    ),
+    deleted_sell as (
+      delete from dune.dune_exchange_sell_orders
+      where order_id = (select order_id from target)
+      returning order_id
+    ),
+    deleted_order as (
+      delete from dune.dune_exchange_orders
+      where id = (select order_id from target)
+      returning id
+    ),
+    deleted_item as (
+      delete from dune.items
+      where id = (select item_id from target)
+        and (select item_id from target) is not null
+      returning id
+    )
+    select
+      coalesce((select order_id::text from target), ''),
+      coalesce((select template_id from target), ''),
+      coalesce((select owner_id::text from target), ''),
+      coalesce((select id::text from deleted_item), '')
+  `;
+  const row = parseDbRows(await dbQuery(sql, 30000), ["orderId", "template", "ownerId", "deletedItemId"])[0] || {};
+  if (!row.orderId) throw new Error(`NPC/manual market listing ${orderId} was not found or is not removable.`);
+  const result = {
+    ok: true,
+    status: "removed",
+    orderId,
+    template: row.template,
+    ownerId: row.ownerId,
+    deletedItemId: row.deletedItemId,
+    durationMs: Date.now() - started,
+    message: `Removed NPC/manual listing ${orderId} from the market.`
+  };
+  appendAdminAudit("market_listing_removed_by_admin", result);
+  return result;
+}
+
 async function postMarketListing(payload) {
   const command = validateMarketListingPayload(payload);
   if (payload?.confirmed !== true && payload?.confirmed !== "true") throw new Error("Confirm live market posting before writing to the exchange.");
@@ -12924,6 +13130,42 @@ async function installMarketBot() {
   };
 }
 
+async function uninstallMarketBot() {
+  const sshTarget = await marketBotSshTarget();
+  const steps = [];
+  const commands = [
+    ["stopped deployment", "sudo kubectl scale deployment/market-bot -n dune-market-bot --replicas=0 2>/dev/null || true"],
+    ["removed deployment", "sudo kubectl delete deployment/market-bot -n dune-market-bot --ignore-not-found=true --wait=true"],
+    ["removed service", "sudo kubectl delete service/market-bot -n dune-market-bot --ignore-not-found=true"],
+    ["removed config", "sudo kubectl delete configmap/market-bot-config -n dune-market-bot --ignore-not-found=true"],
+    ["removed secret", "sudo kubectl delete secret/market-bot-secret -n dune-market-bot --ignore-not-found=true"],
+    ["removed namespace", "sudo kubectl delete namespace dune-market-bot --ignore-not-found=true --wait=false"],
+    ["removed VM files", "sudo rm -rf /opt/market-bot"]
+  ];
+  for (const [label, command] of commands) {
+    const result = await run("ssh", [
+      "-o", "StrictHostKeyChecking=no",
+      "-o", "LogLevel=QUIET",
+      "-i", sshTarget.keyPath,
+      `${sshTarget.user}@${sshTarget.ip}`,
+      command
+    ], { timeout: 120000, maxBuffer: 1024 * 1024 });
+    if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || `Could not ${label}.`);
+    steps.push(label);
+  }
+  const saved = saveConfig({ ...loadConfig(), marketBotApiToken: "" });
+  appendAdminAudit("market_bot_uninstalled", { namespace: "dune-market-bot", deployment: "market-bot" });
+  return {
+    ok: true,
+    status: "uninstalled",
+    message: "AlphaNine Market Bot was removed from the VM. Existing market listings were not deleted.",
+    namespace: "dune-market-bot",
+    deployment: "market-bot",
+    tokenConfigured: Boolean(marketBotToken(saved)),
+    steps
+  };
+}
+
 function appPage() {
   const portalUrls = webPortalUrls();
   return String.raw`<!doctype html>
@@ -14736,7 +14978,7 @@ function appPage() {
           <div class="sound-widget advanced-only" aria-label="UI sound controls">
             <div class="sound-widget-head">
               <div class="label">Interface Audio</div>
-              <button id="dashboardSoundToggle" class="sound-toggle" type="button">🔊 Sounds ON</button>
+              <button id="dashboardSoundToggle" class="sound-toggle" type="button">🔇 Sounds OFF</button>
             </div>
             <label class="sound-slider">Volume <input id="dashboardSoundVolume" type="range" min="0" max="100" value="100"><span id="dashboardSoundVolumeLabel" class="sound-volume-readout">100%</span></label>
           </div>
@@ -14981,6 +15223,7 @@ function appPage() {
           </div>
           <div class="action-row mt">
             <button class="primary" onclick="installMarketBot()">Install / Update Bot</button>
+            <button onclick="uninstallMarketBot()">Uninstall Bot</button>
             <button class="primary" onclick="saveMarketBotConnection()">Save Connection</button>
             <button onclick="refreshMarketBotLogs()">View Bot Logs</button>
           </div>
@@ -15897,7 +16140,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <label>Theme<select id="settingsTheme" onchange="changeTheme(this.value)"><option value="gold">AlphaNine Gold</option><option value="command">Command Console</option><option value="purple">Purple Desert</option><option value="contrast">High Contrast</option><option value="royal">Royal Desert</option></select></label>
             <label class="check-row"><input id="uiSoundsEnabled" type="checkbox">Enable UI Sounds</label>
             <label>UI Sound Volume <span id="uiSoundVolumeLabel" class="micro">100%</span><input id="uiSoundVolume" type="range" min="0" max="100" value="100"></label>
-            <div id="uiSoundStatus" class="empty">Sounds ON. Volume 100%.</div>
+            <div id="uiSoundStatus" class="warning">Sounds OFF. Volume 100%.</div>
           </div>
         </div>
         <div class="panel pad advanced-only">
@@ -16229,6 +16472,7 @@ let marketBotLastOverview=null;const marketBotActionLabels={buy:"Buy Player List
 async function refreshMarketBotPage(){try{setText("marketBotConnectionResult","Checking market bot...");const data=await getJson("/api/market-bot/overview",{timeoutMs:25000});renderMarketBotOverview(data);}catch(error){tone("marketBotApiState","Offline");setText("marketBotConnectionResult",betterError(error));}}
 async function saveMarketBotConnection(){try{const payload={apiUrl:document.getElementById("marketBotApiUrl")?.value||"",apiToken:document.getElementById("marketBotApiToken")?.value||""};const data=await getJson("/api/market-bot/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:15000});setText("marketBotConnectionResult","Saved connection: "+(data.baseUrl||"market bot"));setValue("marketBotApiToken","");showToast("Market bot connection saved.","success");await refreshMarketBotPage();}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
 async function installMarketBot(){try{const ok=await appConfirm("Install Market Bot","Install or update the standalone AlphaNine Market Bot service on the configured VM?","Install","Cancel");if(!ok)return;setText("marketBotConnectionResult","Installing Market Bot on the VM...");const data=await getJson("/api/market-bot/install",{method:"POST",timeoutMs:240000});const installMessage=(data.message||"Market Bot installed.")+" Steps: "+(data.steps||[]).join(", ");setText("marketBotConnectionResult",installMessage);showToast("Market Bot installed.","success");try{await refreshMarketBotPage();await refreshMarketBotLogs();}catch(refreshError){tone("marketBotApiState","Online");setText("marketBotConnectionResult",installMessage+" Refresh after install failed: "+betterError(refreshError));showToast("Market Bot installed; refresh failed.","warning");}}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
+async function uninstallMarketBot(){try{const ok=await appConfirm("Uninstall Market Bot","Remove the AlphaNine Market Bot service and /opt/market-bot files from the configured VM? Existing market listings are not deleted.","Uninstall","Cancel");if(!ok)return;setText("marketBotConnectionResult","Uninstalling Market Bot from the VM...");const data=await getJson("/api/market-bot/uninstall",{method:"POST",timeoutMs:180000});const message=(data.message||"Market Bot uninstalled.")+" Steps: "+(data.steps||[]).join(", ");setText("marketBotConnectionResult",message);tone("marketBotApiState","Offline");showToast("Market Bot uninstalled.","success");try{await refreshMarketBotLogs();}catch{}}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
 function collectMarketBotConfig(){return{enabled:document.getElementById("marketBotEnabled")?.checked===true,simulation_enabled:document.getElementById("marketBotSimulationEnabled")?.checked===true,buy_interval:document.getElementById("marketBotBuyInterval")?.value.trim()||"5m",list_interval:document.getElementById("marketBotListInterval")?.value.trim()||"30m",simulation_interval:document.getElementById("marketBotSimInterval")?.value.trim()||"10m",simulation_households:Number(document.getElementById("marketBotSimHouseholds")?.value||0),simulation_max_orders:Number(document.getElementById("marketBotSimMaxOrders")?.value||0),simulation_intensity:Number(document.getElementById("marketBotSimIntensity")?.value||0)};}
 async function saveMarketBotConfig(){try{setText("marketBotConfigResult","Saving bot config...");await getJson("/api/market-bot/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectMarketBotConfig()),timeoutMs:25000});setText("marketBotConfigResult","Bot config saved. Updated intervals apply on the next scheduler check.");showToast("Market bot config saved.","success");await refreshMarketBotPage();}catch(error){setText("marketBotConfigResult",betterError(error));showToast(betterError(error),"error");}}
 async function runMarketBotTick(kind){const label=marketBotActionLabels[kind]||kind;const listingCount=Number(marketBotLastOverview?.status?.listing_count||0);if((kind==="list"||kind==="all")&&listingCount>500&&!confirm("The bot already has "+formatMarketBotNumber(listingCount)+" NPC listings. Restocking can add more items. Continue?"))return;try{setText("marketBotActionResult","Running "+label+"...");const data=await getJson("/api/market-bot/tick/"+encodeURIComponent(kind),{method:"POST",timeoutMs:70000});setText("marketBotActionResult","Completed "+(marketBotActionLabels[data.tick]||label)+".");showToast(label+" completed.","success");await refreshMarketBotPage();await refreshMarketPanel();}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
@@ -16312,7 +16556,7 @@ function doctorCheckHtml(kind,title,detail){const cls=doctorClass(kind);return '
 function doctorIssueHtml(issue){const cls=doctorClass(issue.kind);const found=issue.found?'<div class="subtle mt">Found: <span class="doctor-path">'+esc(issue.found)+'</span></div>':"";const cause=issue.cause?'<div class="subtle mt">'+esc(issue.cause)+'</div>':"";const fix=issue.fix?'<div class="doctor-fix">'+esc(issue.fix)+'</div>':"";const actions=(issue.actions||[]).length?'<div class="doctor-actions">'+issue.actions.map(action=>'<button type="button" onclick="'+esc(action.onclick)+'">'+esc(action.label)+'</button>').join("")+'</div>':"";return '<div class="doctor-issue '+cls+'"><div class="doctor-issue-head"><span class="doctor-dot"></span><div><strong>'+esc(issue.title)+'</strong><div class="subtle">'+esc(issue.summary||"")+'</div>'+found+cause+'</div></div>'+fix+actions+'</div>';}
 function localHostIssue(host){const value=String(host||"").trim();return value&&value!=="127.0.0.1"&&value.toLowerCase()!=="localhost";}
 function renderSetupDoctor(data={},cfg={},vmStatus={}){const vm=vmStatus?.vm||{};const dbOk=Boolean(data.database?.ok);const receiverOk=Boolean(data.receiver?.ok);const apiOk=data.api?.status==="Online"||data.ok===true;const serverOk=Boolean(data.server?.ok);const installStatus=cfg.serverInstallPathStatus||{};const awakeningStatus=cfg.awakeningServerPathStatus||{};const vmAccessBlocked=vm.errorCode==="access_denied"||/access denied|administrator|admin required/i.test(String(vm.error||"")+" "+String(vmStatus?.error||""));const checks=[{kind:dbOk?"ok":"bad",title:"Database connection",detail:dbOk?(data.database?.message||"PostgreSQL is reachable."):(data.database?.error||data.database?.message||"Database test failed.")},{kind:receiverOk?"ok":"warn",title:"Receiver service",detail:receiverOk?(data.receiver?.message||"Receiver health endpoint is reachable."):(data.receiver?.error||data.receiver?.message||"Receiver is offline or blocked.")},{kind:apiOk?"ok":"bad",title:"Suite API",detail:apiOk?"Local Suite API is online.":(data.error||"Suite API check failed.")},{kind:serverOk?"ok":"warn",title:"Server connection",detail:serverOk?(data.server?.message||"Server endpoint responded."):(data.server?.error||data.server?.message||"Server test needs attention.")},{kind:installStatus.valid?"ok":"warn",title:"DUNE_SERVER_INSTALL_PATH",detail:installStatus.valid?("Found "+(installStatus.path||cfg.serverInstallPath||"configured folder")):"Open Steam, browse local files, then copy that folder path into Setup."},{kind:awakeningStatus.valid?"ok":"warn",title:"Awakening server path",detail:awakeningStatus.valid?("Found "+(awakeningStatus.path||cfg.awakeningServerPath||"configured folder")):"Set the server setup folder path in Setup."},{kind:vmAccessBlocked?"bad":(vm.state||vm.status?"ok":"info"),title:"Hyper-V access",detail:vmAccessBlocked?"Suite backend cannot read Hyper-V even though Windows may look elevated. Restart the Suite after closing old non-admin processes.":(vm.state||vm.status||"VM check returned no state.")}];const issues=[];if(!dbOk)issues.push({kind:"bad",title:"Database is not reachable",summary:data.database?.message||"The Suite cannot complete database-backed features.",cause:data.database?.error||"Check the database tunnel, credentials, and local Postgres port.",fix:"For local Hyper-V setup, keep Database Host at 127.0.0.1 unless you intentionally configured a remote database.",actions:[{label:"Open Setup Wizard",onclick:"openSetupWizard()"},{label:"Test Database",onclick:"runConnectionTest('database','diagTestDb')"}]});if(localHostIssue(cfg.databaseHost))issues.push({kind:"warn",title:"Database host differs from local default",summary:"Most local Dune Suite installs should leave Database Host as 127.0.0.1.",found:cfg.databaseHost,cause:"Changing this is only expected for advanced remote database layouts.",fix:"Open Setup Wizard or Settings and set Database Host back to 127.0.0.1 for the normal local VM setup.",actions:[{label:"Open Setup Wizard",onclick:"openSetupWizard()"}]});if(!receiverOk)issues.push({kind:"warn",title:"Receiver is offline",summary:data.receiver?.message||"Live Give and receiver-backed actions may be unavailable.",cause:data.receiver?.error||"The receiver may not be running, may have the wrong host/port, or may be blocked by Windows firewall.",fix:"For local setup, keep Receiver Host at 127.0.0.1 and restart the receiver from this page.",actions:[{label:"Restart Receiver",onclick:"receiverAction('restart')"},{label:"Test Receiver",onclick:"runConnectionTest('receiver','diagTestReceiver')"}]});if(localHostIssue(cfg.receiverHost))issues.push({kind:"warn",title:"Receiver host differs from local default",summary:"Most installs should leave Receiver Host as 127.0.0.1.",found:cfg.receiverHost,cause:"Using the VM IP here can make the local receiver health check fail.",fix:"Open Setup Wizard or Settings and set Receiver Host back to 127.0.0.1 unless you are intentionally hosting the receiver elsewhere.",actions:[{label:"Open Setup Wizard",onclick:"openSetupWizard()"}]});if(!installStatus.valid||!awakeningStatus.valid)issues.push({kind:"warn",title:"Server setup folder needs a valid path",summary:"DUNE_SERVER_INSTALL_PATH must point to the Dune server local files folder.",found:cfg.serverInstallPath||"Not configured",cause:"If this path is empty or points at the wrong folder, server tools and .env generation can miss files.",fix:"In Steam, right-click the Dune server tool, choose Manage, Browse local files, then copy the folder path into Setup Wizard.",actions:[{label:"Open Setup Wizard",onclick:"openSetupWizard()"}]});if(vmAccessBlocked)issues.push({kind:"bad",title:"Hyper-V still reports access denied",summary:"The Suite is likely connected to an older backend process or the Windows account lacks Hyper-V rights.",cause:vm.error||vmStatus.error||"Hyper-V returned access denied.",fix:"Close all AlphaNine Dune Suite windows, end any old node/electron Suite process if needed, then start the Suite as Administrator. If it persists, add your Windows user to Hyper-V Administrators and sign out/in.",actions:[{label:"Refresh VM",onclick:"refreshVmStatus()"},{label:"Run Doctor",onclick:"refreshDiagnostics()"}]});if(!issues.length)issues.push({kind:"ok",title:"Setup looks ready",summary:"The core checks passed and the local defaults look sane.",fix:"Keep Database Host and Receiver Host at 127.0.0.1 for the normal local Hyper-V setup."});const bad=checks.filter(c=>c.kind==="bad").length+issues.filter(i=>i.kind==="bad").length;const warn=checks.filter(c=>c.kind==="warn").length+issues.filter(i=>i.kind==="warn").length;const score=Math.max(0,Math.min(100,100-(bad*18)-(warn*8)));const label=score>=90?"Setup ready":score>=70?"Mostly ready":"Needs attention";setText("doctorScore",String(score));setText("doctorScoreLabel",label);setText("doctorScoreDetail",bad||warn?(bad+" fix item(s), "+warn+" check item(s)."):"All core setup checks passed.");const checkList=document.getElementById("doctorCheckList");if(checkList)checkList.innerHTML=checks.map(c=>doctorCheckHtml(c.kind,c.title,c.detail)).join("");const issueList=document.getElementById("doctorIssueList");if(issueList)issueList.innerHTML=issues.map(doctorIssueHtml).join("");}
-const UI_SOUND_DEFAULTS={enabled:true,volume:100};
+const UI_SOUND_DEFAULTS={enabled:false,volume:100};
 let uiSoundPrefs={...UI_SOUND_DEFAULTS},uiSoundContext=null,lastHoverSound=0,uiSoundSaveTimer=null;
 function clampSoundVolume(value){return Math.max(0,Math.min(100,Number(value)||0));}
 function uiSoundGain(scale=1){return Math.min(.18,(clampSoundVolume(uiSoundPrefs.volume)/100)*scale);}
@@ -16588,7 +16832,7 @@ function toggleMarketListingSelection(orderId,checked){orderId=Number(orderId)||
 function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[];marketListingRows=listings;const visibleIds=new Set(listings.map(row=>Number(row.orderId)||0));selectedMarketListingIds=new Set([...selectedMarketListingIds].filter(id=>visibleIds.has(id)&&listings.some(row=>(Number(row.orderId)||0)===id&&row.isNpcOrder)));wrap.innerHTML=listings.length?listings.map(row=>{const orderId=Number(row.orderId)||0;const checkbox=row.isNpcOrder?'<input class="market-listing-check" type="checkbox" '+(selectedMarketListingIds.has(orderId)?"checked":"")+' onchange="toggleMarketListingSelection('+orderId+',this.checked)">':'';const action=row.isNpcOrder?'<button type="button" onclick="removeMarketListing('+orderId+')">Remove</button>':'<button type="button" onclick="buyMarketListing('+orderId+')">Buy</button>';const grade=row.gradeLabel||("Grade "+(row.quality||0));const tier=row.tier||"Tier --";const owner=row.ownerClass||("Owner "+(row.ownerId||"-"));return '<div class="detail-row"><span>'+checkbox+'<strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span><br><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+(row.category?' / '+esc(row.category):'')+'</span></span><strong>'+esc(row.price)+' Solari<br><span class="market-listing-meta"><span class="item-grade-badge">'+esc(grade)+'</span><span class="subtle">'+esc(tier)+'</span><span class="subtle">Stack '+esc(row.stackSize||row.initialStackSize||0)+'</span><span class="subtle">'+esc(row.isNpcOrder?"NPC":"Player")+'</span></span><span class="subtle">'+esc(owner)+'</span><br>'+action+'</strong></div>';}).join(""):'<div class="empty">No live market listings found.</div>';syncMarketListingSelection();}
 async function refreshMarketListings(){const wrap=document.getElementById("marketListings");try{if(wrap)wrap.innerHTML='<div class="warning">Loading live market listings...</div>';const q=document.getElementById("marketListingsSearch")?.value||"";const limit=document.getElementById("marketListingsLimit")?.value||100;const data=await getJson("/api/market/listings?limit="+encodeURIComponent(limit)+"&q="+encodeURIComponent(q),{timeoutMs:25000});renderMarketListings(data);return data;}catch(e){if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(e))+'</div>';return null;}}
 function refreshMarketListingsSoon(){clearTimeout(marketListingsTimer);marketListingsTimer=setTimeout(refreshMarketListings,350);}
-async function buyMarketListing(orderId){try{const ok=await appConfirm("Buy player listing","Buy selected player listing order "+orderId+" with the market bot?","Buy","Cancel");if(!ok)return;await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",timeoutMs:60000});showToast("Player listing bought.","success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
+async function buyMarketListing(orderId){try{const ok=await appConfirm("Buy player listing","Buy player listing order "+orderId+", remove it from the market, and create the seller Solari payout?","Buy & Pay","Cancel");if(!ok)return;const data=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",timeoutMs:60000});showToast(data?.message||"Player listing bought and seller payout created.","success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
 async function removeMarketListing(orderId){try{const ok=await appConfirm("Remove NPC/manual listing","Remove selected NPC or manual listing order "+orderId+" from the market?","Remove","Cancel");if(!ok)return;await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/remove",{method:"POST",timeoutMs:60000});showToast("Listing removed.","success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
 function selectVisibleNpcMarketListings(){for(const row of marketListingRows){const id=Number(row.orderId)||0;if(id&&row.isNpcOrder)selectedMarketListingIds.add(id);}renderMarketListings({listings:marketListingRows});}
 function clearSelectedMarketListings(){selectedMarketListingIds.clear();renderMarketListings({listings:marketListingRows});}
@@ -17324,6 +17568,14 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === "/api/market-bot/uninstall" && req.method === "POST") {
+    try {
+      await json(res, await uninstallMarketBot());
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 500);
+    }
+    return;
+  }
   if (url.pathname === "/api/market-bot/config" && req.method === "GET") {
     try { await json(res, await marketBotRequest("/config")); }
     catch (error) { await json(res, { ok: false, error: error.message }, 502); }
@@ -17373,7 +17625,7 @@ async function route(req, res) {
     const buyMatch = url.pathname.match(/^\/api\/market\/listing\/(\d+)\/buy$/);
     if (buyMatch && req.method === "POST") {
       try {
-        await json(res, await marketBotRequest(`/manual/buy/${buyMatch[1]}`, { method: "POST", timeoutMs: 60000 }));
+        await json(res, await buyMarketListingAsAdmin(buyMatch[1]));
       } catch (err) {
         await json(res, { ok: false, error: err.message }, 500);
       }
@@ -17382,7 +17634,7 @@ async function route(req, res) {
     const removeMatch = url.pathname.match(/^\/api\/market\/listing\/(\d+)\/remove$/);
     if (removeMatch && req.method === "POST") {
       try {
-        await json(res, await marketBotRequest(`/manual/listing/${removeMatch[1]}`, { method: "DELETE", timeoutMs: 60000 }));
+        await json(res, await removeMarketListingAsAdmin(removeMatch[1]));
       } catch (err) {
         await json(res, { ok: false, error: err.message }, 500);
       }

@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.25";
+const APP_VERSION = "1.0.26";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -10842,8 +10842,80 @@ async function marketListingExpiryTime(expiryDays) {
   return Math.max(0, gameNow) + expiryDays * 24 * 3600;
 }
 
+async function cleanupExpiredMarketListings(options = {}) {
+  const started = Date.now();
+  const gameNow = Number.isFinite(Number(options.gameNow)) ? Number(options.gameNow) : await marketListingGameNow();
+  const expiryClause = gameNow > 0
+    ? `(o.expiration_time is null or o.expiration_time <= 0 or o.expiration_time <= ${Math.floor(gameNow)})`
+    : `(o.expiration_time is null or o.expiration_time <= 0)`;
+  const sql = `
+    with target as materialized (
+      select
+        o.id as order_id,
+        o.item_id,
+        o.template_id,
+        o.expiration_time
+      from dune.dune_exchange_orders o
+      left join dune.actors a on a.id = o.owner_id
+      where (o.is_npc_order = true or a.class = 'AlphaNineMarket')
+        and ${expiryClause}
+      limit 1000
+    ),
+    deleted_sell as (
+      delete from dune.dune_exchange_sell_orders
+      where order_id in (select order_id from target)
+      returning order_id
+    ),
+    deleted_orders as (
+      delete from dune.dune_exchange_orders
+      where id in (select order_id from target)
+      returning id
+    ),
+    deleted_items as (
+      delete from dune.items
+      where id in (select item_id from target where item_id is not null)
+      returning id
+    )
+    select
+      coalesce((select count(*)::text from target), '0'),
+      coalesce((select count(*)::text from deleted_orders), '0'),
+      coalesce((select count(*)::text from deleted_items), '0'),
+      coalesce((select string_agg(order_id::text, ',' order by order_id) from target), '')
+  `;
+  const row = parseDbRows(await dbQuery(sql, 30000), ["matched", "removedOrders", "removedItems", "orderIds"])[0] || {};
+  const result = {
+    ok: true,
+    status: "cleanup-complete",
+    source: String(options.source || "manual"),
+    gameNow: Math.floor(Math.max(0, gameNow || 0)),
+    matched: Number(row.matched || 0) || 0,
+    removedOrders: Number(row.removedOrders || 0) || 0,
+    removedItems: Number(row.removedItems || 0) || 0,
+    orderIds: row.orderIds ? String(row.orderIds).split(",").filter(Boolean).slice(0, 40) : [],
+    durationMs: Date.now() - started
+  };
+  if (result.removedOrders > 0) appendAdminAudit("market_expired_listings_cleaned", result);
+  return result;
+}
+
+let marketExpiredCleanupRunning = false;
+
+async function runMarketExpiredCleanupBackground(source = "timer") {
+  if (marketExpiredCleanupRunning) return { ok: false, skipped: true, reason: "cleanup already running" };
+  marketExpiredCleanupRunning = true;
+  try {
+    return await cleanupExpiredMarketListings({ source });
+  } catch (error) {
+    appendAdminAudit("market_expired_listing_cleanup_failed", { source, error: error.message });
+    return { ok: false, source, error: error.message };
+  } finally {
+    marketExpiredCleanupRunning = false;
+  }
+}
+
 async function marketPostingStatus() {
   const started = Date.now();
+  const expiredCleanup = await cleanupExpiredMarketListings({ source: "status" }).catch((error) => ({ ok: false, error: error.message }));
   const requiredTables = [
     "actors",
     "inventories",
@@ -10899,6 +10971,7 @@ async function marketPostingStatus() {
     exchange,
     botActorClass: "AlphaNineMarket",
     botListings,
+    expiredCleanup,
     tables: requiredTables.map((name) => ({ name, status: tableSet.has(name) ? "present" : "missing" })),
     functions: [],
     missingTables,
@@ -10909,6 +10982,7 @@ async function marketPostingStatus() {
 
 async function marketListings(payload = {}) {
   const started = Date.now();
+  const expiredCleanup = await cleanupExpiredMarketListings({ source: "listings" }).catch((error) => ({ ok: false, error: error.message }));
   const limit = requireInteger(payload.limit ?? 100, "limit", 1, 250);
   const q = String(payload.q || "").trim();
   const where = q ? `where (o.template_id ilike ${sqlString(`%${q}%`)} or coalesce(e.exchange_name, '') ilike ${sqlString(`%${q}%`)} or coalesce(a.class, '') ilike ${sqlString(`%${q}%`)})` : "";
@@ -10964,7 +11038,7 @@ async function marketListings(payload = {}) {
       expirationTime: row.expirationTime
     };
   });
-  return { ok: true, listings, count: listings.length, durationMs: Date.now() - started };
+  return { ok: true, listings, count: listings.length, expiredCleanup, durationMs: Date.now() - started };
 }
 
 async function buyMarketListingAsAdmin(orderIdValue) {
@@ -16474,7 +16548,7 @@ async function installMarketBot(){try{const ok=await appConfirm("Install Market 
 async function uninstallMarketBot(){try{const ok=await appConfirm("Uninstall Market Bot","Remove the AlphaNine Market Bot service and /opt/market-bot files from the configured VM? Existing market listings are not deleted.","Uninstall","Cancel");if(!ok)return;setText("marketBotConnectionResult","Uninstalling Market Bot from the VM...");const data=await getJson("/api/market-bot/uninstall",{method:"POST",timeoutMs:180000});const message=(data.message||"Market Bot uninstalled.")+" Steps: "+(data.steps||[]).join(", ");setText("marketBotConnectionResult",message);tone("marketBotApiState","Offline");showToast("Market Bot uninstalled.","success");try{await refreshMarketBotLogs();}catch{}}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
 function collectMarketBotConfig(){return{enabled:document.getElementById("marketBotEnabled")?.checked===true,simulation_enabled:document.getElementById("marketBotSimulationEnabled")?.checked===true,buy_interval:document.getElementById("marketBotBuyInterval")?.value.trim()||"5m",list_interval:document.getElementById("marketBotListInterval")?.value.trim()||"30m",simulation_interval:document.getElementById("marketBotSimInterval")?.value.trim()||"10m",simulation_households:Number(document.getElementById("marketBotSimHouseholds")?.value||0),simulation_max_orders:Number(document.getElementById("marketBotSimMaxOrders")?.value||0),simulation_intensity:Number(document.getElementById("marketBotSimIntensity")?.value||0)};}
 async function saveMarketBotConfig(){try{setText("marketBotConfigResult","Saving bot config...");await getJson("/api/market-bot/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectMarketBotConfig()),timeoutMs:25000});setText("marketBotConfigResult","Bot config saved. Updated intervals apply on the next scheduler check.");showToast("Market bot config saved.","success");await refreshMarketBotPage();}catch(error){setText("marketBotConfigResult",betterError(error));showToast(betterError(error),"error");}}
-async function runMarketBotTick(kind){const label=marketBotActionLabels[kind]||kind;const listingCount=Number(marketBotLastOverview?.status?.listing_count||0);if((kind==="list"||kind==="all")&&listingCount>500&&!confirm("The bot already has "+formatMarketBotNumber(listingCount)+" NPC listings. Restocking can add more items. Continue?"))return;try{setText("marketBotActionResult","Running "+label+"...");const data=await getJson("/api/market-bot/tick/"+encodeURIComponent(kind),{method:"POST",timeoutMs:70000});setText("marketBotActionResult","Completed "+(marketBotActionLabels[data.tick]||label)+".");showToast(label+" completed.","success");await refreshMarketBotPage();await refreshMarketPanel();}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
+async function runMarketBotTick(kind){const label=marketBotActionLabels[kind]||kind;const listingCount=Number(marketBotLastOverview?.status?.listing_count||0);if((kind==="list"||kind==="all")&&listingCount>500&&!confirm("The bot already has "+formatMarketBotNumber(listingCount)+" NPC listings. Restocking can add more items. Continue?"))return;try{setText("marketBotActionResult","Running "+label+"...");const data=await getJson("/api/market-bot/tick/"+encodeURIComponent(kind),{method:"POST",timeoutMs:70000});const cleaned=(Number(data?.expiredCleanup?.before?.removedOrders||0)||0)+(Number(data?.expiredCleanup?.after?.removedOrders||0)||0);setText("marketBotActionResult","Completed "+(marketBotActionLabels[data.tick]||label)+"."+(cleaned?" Cleaned "+cleaned+" expired listing(s).":""));showToast(label+" completed.","success");await refreshMarketBotPage();await refreshMarketPanel();}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
 async function refreshMarketBotLogs(){try{setText("marketBotLog","Loading logs...");const data=await getJson("/api/market-bot/logs",{timeoutMs:50000});setText("marketBotLog",(data.stdout||data.stderr||"No log output.").trim());}catch(error){setText("marketBotLog",betterError(error));}}
 function setValue(id,value){const el=document.getElementById(id);if(el)el.value=value==null?"":String(value);}
 function getValue(id){return document.getElementById(id)?.value||"";}
@@ -17589,7 +17663,10 @@ async function route(req, res) {
     try {
       const tick = url.pathname.replace(/^\/api\/market-bot\/tick\//, "");
       if (!["buy", "list", "sim", "all"].includes(tick)) throw new Error("Unsupported market bot tick.");
-      await json(res, await marketBotRequest(`/tick/${tick}`, { method: "POST", timeoutMs: 60000 }));
+      const cleanupBefore = await cleanupExpiredMarketListings({ source: `tick-${tick}-before` }).catch((error) => ({ ok: false, error: error.message }));
+      const result = await marketBotRequest(`/tick/${tick}`, { method: "POST", timeoutMs: 60000 });
+      const cleanupAfter = await cleanupExpiredMarketListings({ source: `tick-${tick}-after` }).catch((error) => ({ ok: false, error: error.message }));
+      await json(res, { ...result, expiredCleanup: { before: cleanupBefore, after: cleanupAfter } });
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 502);
     }
@@ -17817,6 +17894,8 @@ server.listen(PORT, HOST, async () => {
     });
   }, 1200);
   logLiveGiveStartupValidation();
+  setTimeout(() => runMarketExpiredCleanupBackground("startup"), 30000);
+  setInterval(() => runMarketExpiredCleanupBackground("timer"), 10 * 60 * 1000);
 });
 
 process.on("exit", () => {

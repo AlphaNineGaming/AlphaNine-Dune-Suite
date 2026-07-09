@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.26";
+const APP_VERSION = "1.0.27";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -12213,6 +12213,261 @@ async function adminCreateAccessCode(payload) {
   };
 }
 
+function normalizeBaseCleanupRow(line) {
+  const [
+    actorId = "",
+    actorName = "",
+    actorType = "",
+    buildingIds = "",
+    buildingCount = "0",
+    instanceCount = "0",
+    ownerEntityIds = "",
+    refCount = "0",
+    matchedRefCount = "0",
+    missingRefCount = "0",
+    playerRefs = "",
+    missingRefs = "",
+    status = "unknown"
+  ] = String(line || "").split("\t");
+  return {
+    actorId,
+    actorName: actorName || `Base ${actorId || "unknown"}`,
+    actorType,
+    buildingIds: buildingIds ? buildingIds.split(",").filter(Boolean) : [],
+    buildingCount: Number(buildingCount) || 0,
+    instanceCount: Number(instanceCount) || 0,
+    ownerEntityIds: ownerEntityIds ? ownerEntityIds.split(",").filter(Boolean) : [],
+    ownerReferenceCount: Number(refCount) || 0,
+    matchedPlayerReferenceCount: Number(matchedRefCount) || 0,
+    missingPlayerReferenceCount: Number(missingRefCount) || 0,
+    playerRefs,
+    missingRefs,
+    status,
+    orphaned: status === "orphaned",
+    deletable: status === "orphaned" && Boolean(actorId)
+  };
+}
+
+function baseCleanupBaseSql(actorWhere = "") {
+  return `
+    with base_links as (
+      select
+        b.id as building_id,
+        b.owner_id,
+        bi.owner_entity_id,
+        bi.instance_id,
+        afe.actor_id,
+        pa.actor_name,
+        pa.actor_type,
+        a.owner_account_id
+      from dune.buildings b
+      left join dune.building_instances bi on bi.building_id = b.id
+      left join dune.actor_fgl_entities afe on afe.entity_id = bi.owner_entity_id
+      left join dune.actors a on a.id = afe.actor_id
+      left join dune.permission_actor pa on pa.actor_id = afe.actor_id
+      where afe.actor_id is not null
+        ${actorWhere}
+    ),
+    base_summary as (
+      select
+        actor_id,
+        coalesce(nullif(max(actor_name), ''), 'Base ' || actor_id::text) as actor_name,
+        coalesce(max(actor_type)::text, '') as actor_type,
+        string_agg(distinct building_id::text, ',' order by building_id::text) as building_ids,
+        count(distinct building_id) as building_count,
+        count(distinct (building_id::text || ':' || coalesce(instance_id::text, ''))) as instance_count,
+        string_agg(distinct owner_entity_id::text, ',' order by owner_entity_id::text) filter (where owner_entity_id is not null) as owner_entity_ids
+      from base_links
+      group by actor_id
+    ),
+    owner_refs as (
+      select distinct actor_id, owner_id as player_ref, 'buildings.owner_id' as source
+      from base_links
+      where owner_id is not null
+      union
+      select distinct actor_id, owner_account_id as player_ref, 'actors.owner_account_id' as source
+      from base_links
+      where owner_account_id is not null
+      union
+      select distinct bl.actor_id, par.player_id as player_ref, 'permission_actor_rank.player_id' as source
+      from base_links bl
+      join dune.permission_actor_rank par on par.permission_actor_id = bl.actor_id
+      where par.player_id is not null
+    ),
+    ref_matches as (
+      select
+        refs.actor_id,
+        refs.player_ref,
+        refs.source,
+        ps.account_id,
+        ps.player_controller_id,
+        ps.player_state_id,
+        ps.player_pawn_id,
+        ps.character_name,
+        ps.online_status
+      from owner_refs refs
+      left join dune.player_state ps
+        on ps.account_id = refs.player_ref
+        or ps.player_controller_id = refs.player_ref
+        or ps.player_state_id = refs.player_ref
+        or ps.player_pawn_id = refs.player_ref
+    ),
+    ref_summary as (
+      select
+        actor_id,
+        count(distinct source || ':' || player_ref::text) as ref_count,
+        count(distinct source || ':' || player_ref::text) filter (where account_id is not null) as matched_ref_count,
+        count(distinct source || ':' || player_ref::text) filter (where account_id is null) as missing_ref_count,
+        string_agg(distinct source || '=' || player_ref::text || ' -> ' || coalesce(character_name, 'missing') || ' (' || coalesce(online_status::text, 'unknown') || ')', '; ' order by source || '=' || player_ref::text || ' -> ' || coalesce(character_name, 'missing') || ' (' || coalesce(online_status::text, 'unknown') || ')') as player_refs,
+        string_agg(distinct source || '=' || player_ref::text, '; ' order by source || '=' || player_ref::text) filter (where account_id is null) as missing_refs
+      from ref_matches
+      group by actor_id
+    )
+  `;
+}
+
+async function adminBaseCleanupScan() {
+  const sql = `
+    ${baseCleanupBaseSql()}
+    select
+      bs.actor_id::text,
+      replace(bs.actor_name, E'\\t', ' '),
+      bs.actor_type,
+      coalesce(bs.building_ids, ''),
+      bs.building_count::text,
+      bs.instance_count::text,
+      coalesce(bs.owner_entity_ids, ''),
+      coalesce(rs.ref_count, 0)::text,
+      coalesce(rs.matched_ref_count, 0)::text,
+      coalesce(rs.missing_ref_count, 0)::text,
+      replace(coalesce(rs.player_refs, ''), E'\\t', ' '),
+      replace(coalesce(rs.missing_refs, ''), E'\\t', ' '),
+      case
+        when coalesce(rs.ref_count, 0) = 0 then 'unknown-owner'
+        when coalesce(rs.matched_ref_count, 0) = 0 then 'orphaned'
+        when coalesce(rs.missing_ref_count, 0) > 0 then 'partial-missing'
+        else 'owned'
+      end as status
+    from base_summary bs
+    left join ref_summary rs on rs.actor_id = bs.actor_id
+    order by
+      case
+        when coalesce(rs.ref_count, 0) > 0 and coalesce(rs.matched_ref_count, 0) = 0 then 0
+        when coalesce(rs.missing_ref_count, 0) > 0 then 1
+        when coalesce(rs.ref_count, 0) = 0 then 2
+        else 3
+      end,
+      bs.actor_id
+    limit 500
+  `;
+  const output = await dbQuery(sql, 45000);
+  const bases = output ? output.split(/\r?\n/).filter(Boolean).map(normalizeBaseCleanupRow) : [];
+  const summary = {
+    totalBases: bases.length,
+    orphanedBases: bases.filter((row) => row.orphaned).length,
+    unknownOwnerBases: bases.filter((row) => row.status === "unknown-owner").length,
+    partialMissingBases: bases.filter((row) => row.status === "partial-missing").length,
+    ownedBases: bases.filter((row) => row.status === "owned").length,
+    buildingRecordsAtRisk: bases.filter((row) => row.orphaned).reduce((sum, row) => sum + row.buildingCount, 0),
+    buildingInstancesAtRisk: bases.filter((row) => row.orphaned).reduce((sum, row) => sum + row.instanceCount, 0)
+  };
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    mode: "dry-run",
+    bases,
+    summary,
+    policy: "A base is deletable only when it has at least one owner/rank/player reference and none of those references match dune.player_state."
+  };
+}
+
+async function adminDeleteOrphanBase(payload = {}) {
+  const actorId = requireInteger(payload.actorId, "actor_id", 0);
+  requireConfirmed(payload.confirmed);
+  const sql = `
+    begin;
+    ${baseCleanupBaseSql(`and afe.actor_id = ${actorId}`)}
+    , orphan_target as (
+      select bs.actor_id
+      from base_summary bs
+      left join ref_summary rs on rs.actor_id = bs.actor_id
+      where bs.actor_id = ${actorId}
+        and coalesce(rs.ref_count, 0) > 0
+        and coalesce(rs.matched_ref_count, 0) = 0
+    ),
+    target_buildings as (
+      select distinct b.id as building_id, bi.owner_entity_id
+      from dune.buildings b
+      join dune.building_instances bi on bi.building_id = b.id
+      join dune.actor_fgl_entities afe on afe.entity_id = bi.owner_entity_id
+      join orphan_target t on t.actor_id = afe.actor_id
+    ),
+    deleted_ranks as (
+      delete from dune.permission_actor_rank par
+      using orphan_target t
+      where par.permission_actor_id = t.actor_id
+      returning 1
+    ),
+    deleted_permission as (
+      delete from dune.permission_actor pa
+      using orphan_target t
+      where pa.actor_id = t.actor_id
+      returning 1
+    ),
+    deleted_instances as (
+      delete from dune.building_instances bi
+      using target_buildings tb
+      where bi.building_id = tb.building_id
+      returning 1
+    ),
+    deleted_buildings as (
+      delete from dune.buildings b
+      using target_buildings tb
+      where b.id = tb.building_id
+      returning 1
+    ),
+    deleted_fgl as (
+      delete from dune.actor_fgl_entities afe
+      using orphan_target t
+      where afe.actor_id = t.actor_id
+      returning 1
+    ),
+    deleted_actor as (
+      delete from dune.actors a
+      using orphan_target t
+      where a.id = t.actor_id
+      returning 1
+    )
+    select 'deleted',
+      (select count(*) from orphan_target)::text,
+      (select count(*) from deleted_ranks)::text,
+      (select count(*) from deleted_permission)::text,
+      (select count(*) from deleted_instances)::text,
+      (select count(*) from deleted_buildings)::text,
+      (select count(*) from deleted_fgl)::text,
+      (select count(*) from deleted_actor)::text;
+    commit;
+  `;
+  const output = await dbQuery(sql, 45000);
+  const row = output.split(/\r?\n/).find((line) => line.startsWith("deleted\t"));
+  const parts = row ? row.split("\t") : [];
+  const matchedTargets = Number(parts[1] || 0);
+  if (!matchedTargets) throw new Error("Base was not deleted because it is no longer orphaned or was not found.");
+  const result = {
+    ok: true,
+    actorId: String(actorId),
+    deletedRanks: Number(parts[2] || 0),
+    deletedPermissionActors: Number(parts[3] || 0),
+    deletedBuildingInstances: Number(parts[4] || 0),
+    deletedBuildings: Number(parts[5] || 0),
+    deletedFglLinks: Number(parts[6] || 0),
+    deletedActors: Number(parts[7] || 0),
+    message: `Deleted orphaned base actor ${actorId}.`
+  };
+  appendAdminAudit("orphan_base_deleted", result);
+  return result;
+}
+
 // Legacy progression helpers are intentionally kept out of the active UI/API.
 // Phase 1 uses /api/progression/inspect for read-only metadata discovery only.
 const SPECIALIZATION_TRACKS = ["Crafting", "Gathering", "Exploration", "Combat", "Sabotage"];
@@ -14895,6 +15150,7 @@ function appPage() {
         <div class="nav-group-title">Server</div>
         <button class="tab" data-view="server">Server Control</button>
         <button class="tab" data-view="database">Database</button>
+        <button class="tab" data-view="cleanup">Server Cleanup</button>
         <button class="tab" data-view="management">Server Management</button>
       </div>
       <div class="nav-group">
@@ -15545,6 +15801,47 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <thead><tr><th>Account</th><th>Selected Channel</th><th>Channel</th><th>Tuned</th></tr></thead>
           <tbody id="adminChannels"><tr><td colspan="4">Loading tuned channels...</td></tr></tbody>
         </table>
+      </div>
+    </section>
+
+    <section id="cleanup" class="view">
+      <div class="grid four">
+        <div class="panel pad metric-tile"><div class="label">Bases Checked</div><div id="baseCleanupTotal" class="value">--</div><div class="subtle">Last scan result.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Orphaned</div><div id="baseCleanupOrphaned" class="value">--</div><div class="subtle">Safe candidates only.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Unknown Owner</div><div id="baseCleanupUnknown" class="value">--</div><div class="subtle">Protected from delete.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Pieces At Risk</div><div id="baseCleanupPieces" class="value">--</div><div class="subtle">Only orphaned instances.</div></div>
+      </div>
+      <div class="layout-2 mt">
+        <div class="panel pad">
+          <div class="panel-head">
+            <div>
+              <div class="label">Base / Fief Cleanup</div>
+              <div class="subtle">Compare fief/base console ownership against the live player list before any delete is allowed.</div>
+            </div>
+            <button type="button" class="primary" onclick="refreshBaseCleanup()">Scan Bases</button>
+          </div>
+          <div id="baseCleanupStatus" class="empty mt">Run a scan before deleting anything. Unknown-owner bases are shown for review but are not deletable.</div>
+          <div class="warning mt">Delete buttons appear only for bases with owner/rank references that no longer match any row in dune.player_state. The backend re-checks the same rule before deleting.</div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Cleanup Policy</div>
+          <div class="detail-list mt">
+            <div class="detail-row"><span class="subtle">Scan mode</span><strong>Dry-run first</strong></div>
+            <div class="detail-row"><span class="subtle">Delete rule</span><strong>Owner missing from player_state</strong></div>
+            <div class="detail-row"><span class="subtle">Unknown owner</span><strong>Protected</strong></div>
+            <div class="detail-row"><span class="subtle">Audit</span><strong>admin-audit.log</strong></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div>
+            <div class="label">Scan Results</div>
+            <div class="subtle">Review each base actor, owner reference, and deletion state.</div>
+          </div>
+          <button type="button" onclick="refreshBaseCleanup()">Refresh Scan</button>
+        </div>
+        <div id="baseCleanupRows" class="detail-list mt"><div class="empty">No base cleanup scan has run.</div></div>
       </div>
     </section>
 
@@ -16241,6 +16538,7 @@ const viewCopy={
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
   database:["Database","Battlegroup backup, import, and backup location management."],
+  cleanup:["Server Cleanup","Dry-run first cleanup tools for orphaned bases, fiefs, and future stale server data."],
   server:["Server Control","Battlegroup controls, maps, and live server telemetry."],
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
@@ -16253,10 +16551,10 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,baseCleanupState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -16748,6 +17046,10 @@ function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getE
 function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
 function permissionQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
 async function refreshPermissions(){const summary=document.getElementById("permissionSummary");if(summary)summary.textContent="Loading permission views...";try{permissionState=await getJson("/api/admin/permissions"+permissionQuery());renderPermissions();addActivity("permissions","Permission views refreshed",permissionState.playerControllerId?("controller "+permissionState.playerControllerId):"all players");}catch(e){if(summary)summary.textContent=betterError(e);addActivity("error","Permission refresh failed",e.message);}}
+function baseCleanupStatusLabel(row){if(row.status==="orphaned")return"Orphaned";if(row.status==="partial-missing")return"Partial missing";if(row.status==="owned")return"Owned";if(row.status==="unknown-owner")return"Unknown owner";return row.status||"Unknown";}
+function renderBaseCleanup(){const data=baseCleanupState||{};const summary=data.summary||{};tone("baseCleanupTotal",summary.totalBases??"--");tone("baseCleanupOrphaned",summary.orphanedBases??"--");tone("baseCleanupUnknown",summary.unknownOwnerBases??"--");tone("baseCleanupPieces",summary.buildingInstancesAtRisk??"--");const status=document.getElementById("baseCleanupStatus");if(status){status.className=(summary.orphanedBases?"warning mt":"empty mt");status.textContent=data.generatedAt?("Dry-run scan complete. Orphaned bases: "+(summary.orphanedBases||0)+". Building instances at risk: "+(summary.buildingInstancesAtRisk||0)+"."):"Run a scan before deleting anything.";}const wrap=document.getElementById("baseCleanupRows");if(!wrap)return;const rows=data.bases||[];if(!rows.length){wrap.innerHTML='<div class="empty">No bases returned by the cleanup scan.</div>';return;}wrap.innerHTML=rows.map(row=>{const label=baseCleanupStatusLabel(row);const detail='Actor '+esc(row.actorId||"-")+' / Buildings '+esc((row.buildingIds||[]).join(", ")||"-")+' / Instances '+esc(row.instanceCount||0);const refs=row.playerRefs||row.missingRefs||"No owner reference found.";const action=row.deletable?'<button type="button" class="danger" onclick="deleteOrphanBase('+Number(row.actorId)+')">Delete Base</button>':'<button type="button" disabled>Protected</button>';return '<div class="detail-row"><span><strong>'+esc(row.actorName||("Base "+row.actorId))+'</strong><br><span class="subtle">'+detail+'</span><br><span class="subtle">'+esc(refs)+'</span></span><strong>'+esc(label)+'<br><span class="action-row">'+action+'</span></strong></div>';}).join("");}
+async function refreshBaseCleanup(){const status=document.getElementById("baseCleanupStatus");try{if(status){status.className="empty mt";status.textContent="Scanning base ownership against live players...";}baseCleanupState=await getJson("/api/admin/base-cleanup/orphans",{timeoutMs:60000});renderBaseCleanup();addActivity("cleanup","Base cleanup scan completed",(baseCleanupState.summary?.orphanedBases||0)+" orphaned base(s)");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Base cleanup scan failed",e.message);}}
+async function deleteOrphanBase(actorId){const row=(baseCleanupState?.bases||[]).find(item=>String(item.actorId)===String(actorId));try{if(!row)throw new Error("Base row is not loaded. Run Scan Bases again.");const ok=await appConfirm("Delete orphaned base","Delete base actor "+actorId+" ("+(row.actorName||"Base")+") and "+(row.instanceCount||0)+" building instance(s)? This is allowed only if the owner still does not exist in player_state.","Delete Base","Cancel");if(!ok)return;const data=await getJson("/api/admin/base-cleanup/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({actorId,confirmed:true}),timeoutMs:60000});setText("baseCleanupStatus",(data.message||"Base deleted.")+" Removed buildings: "+(data.deletedBuildings||0)+", instances: "+(data.deletedBuildingInstances||0)+".");showToast("Orphaned base deleted.","success");addActivity("cleanup","Orphaned base deleted","Actor "+actorId);await refreshBaseCleanup();}catch(e){setText("baseCleanupStatus",betterError(e));showToast(betterError(e),"error");addActivity("error","Base delete failed",e.message);}}
 function renderPermissions(){const data=permissionState||{};const summary=document.getElementById("permissionSummary");if(summary){summary.className=data.isGuildAdmin?"warning mt":"empty mt";summary.innerHTML=data.playerControllerId?('Controller '+esc(data.playerControllerId)+' / Guild admin: <strong>'+esc(data.isGuildAdmin?"yes":"no")+'</strong>'):'All permission rows. Select a player for focused views.';}const guild=document.getElementById("guildRows");if(guild)guild.innerHTML=(data.guildMembers||[]).length?(data.guildMembers||[]).map(row=>'<tr><td>'+esc(row.player_id)+'</td><td>'+esc(row.guild_id)+'</td><td>'+esc(row.role_id)+'</td><td><span class="badge '+(row.is_guild_admin?'ok':'warn')+'">'+esc(row.is_guild_admin?'role_id 100':'no')+'</span></td></tr>').join(""):'<tr><td colspan="4">No guild member rows found for this selection.</td></tr>';const perms=document.getElementById("permissionRows");if(perms)perms.innerHTML=(data.objectPermissions||[]).length?(data.objectPermissions||[]).map(row=>'<tr><td>'+esc(row.actor_id)+'</td><td>'+esc(row.actor_name||"-")+'</td><td>'+esc(row.player_id)+'</td><td>'+esc(row.rank)+'</td></tr>').join(""):'<tr><td colspan="4">No object permission rows found for this selection.</td></tr>';const codes=document.getElementById("accessCodeRows");if(codes)codes.innerHTML=(data.accessCodes||[]).length?(data.accessCodes||[]).map(row=>'<tr><td>'+esc(row.account_id)+'</td><td>'+esc(row.access_code)+'</td><td>'+esc(row.access_code_type)+'</td><td>'+esc(row.is_resettable)+'</td></tr>').join(""):'<tr><td colspan="4">No access codes found for this selection.</td></tr>';syncPermissionForms();}
 function updatePermissionPreviews(){const actor=document.getElementById("permActorId")?.value||"actor_id";const ctrl=document.getElementById("permControllerId")?.value||"player_controller_id";const rank=document.getElementById("permRank")?.value||"rank";const map=document.getElementById("permMapId")?.value||"map_id";const p1=document.getElementById("permRankPreview");if(p1)p1.textContent="select dune.permission_set_player_rank("+actor+", "+ctrl+", "+rank+", '"+map.replace(/'/g,"''")+"');";const account=document.getElementById("accessAccountId")?.value||"account_id";const code=document.getElementById("accessCodeValue")?.value||"access_code";const type=document.getElementById("accessCodeType")?.value||"access_code_type";const reset=document.getElementById("accessResettable")?.checked?"true":"false";const p2=document.getElementById("accessCodePreview");if(p2)p2.textContent="select dune.create_server_player_access_codes("+account+", "+code+", "+type+", "+reset+");";}
 ["permActorId","permControllerId","permRank","permMapId","accessAccountId","accessCodeValue","accessCodeType","accessResettable"].forEach(id=>setTimeout(()=>{const el=document.getElementById(id);if(el)el.addEventListener("input",updatePermissionPreviews);if(el)el.addEventListener("change",updatePermissionPreviews);},0));
@@ -17510,6 +17812,20 @@ async function route(req, res) {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
       await json(res, await adminCreateAccessCode(body));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/base-cleanup/orphans" && req.method === "GET") {
+    try { await json(res, await adminBaseCleanupScan()); }
+    catch (error) { await json(res, { ok: false, bases: [], summary: {}, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/base-cleanup/delete" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await adminDeleteOrphanBase(body));
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 400);
     }

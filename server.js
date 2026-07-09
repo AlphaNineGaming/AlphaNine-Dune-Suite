@@ -10,7 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 
-const APP_VERSION = "1.0.24";
+const APP_VERSION = "1.0.25";
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8810);
 const MANAGER_PORT = 8812;
@@ -14635,7 +14635,7 @@ function appPage() {
     </div>
     <div class="support-links">
       <strong>Community &amp; Support</strong>
-      <div>Discord: <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">https://discord.gg/tuUv3hYTv</a></div>
+      <div>Discord: <a href="https://discord.gg/RQsVw2vyg" target="_blank" rel="noopener">https://discord.gg/RQsVw2vyg</a></div>
       <div>YouTube: <a href="https://www.youtube.com/@AlphanineGaming" target="_blank" rel="noopener">https://www.youtube.com/@AlphanineGaming</a></div>
       <div>Twitch: <a href="https://www.twitch.tv/alphanine_gaming" target="_blank" rel="noopener">https://www.twitch.tv/alphanine_gaming</a></div>
     </div>
@@ -14841,7 +14841,7 @@ function appPage() {
     <div class="sidebar-foot">
       <button type="button" data-feedback-ignore="true" onclick="openAboutDialog()">About</button>
       <div class="sidebar-links" aria-label="Community links">
-        <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">Discord Support</a>
+        <a href="https://discord.gg/RQsVw2vyg" target="_blank" rel="noopener">Discord Support</a>
         <a class="donate-link" href="https://ko-fi.com/E1W220NMPA" target="_blank" rel="noopener">Buy Me a Coffee</a>
       </div>
       <div class="legal-notice">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
@@ -14983,7 +14983,7 @@ function appPage() {
           </div>
           <pre id="dashboardLog" class="mt advanced-only">Awaiting telemetry.</pre>
           <div class="dashboard-footer">
-            <span>Need help? Join our Discord: <a href="https://discord.gg/tuUv3hYTv" target="_blank" rel="noopener">https://discord.gg/tuUv3hYTv</a></span>
+            <span>Need help? Join our Discord: <a href="https://discord.gg/RQsVw2vyg" target="_blank" rel="noopener">https://discord.gg/RQsVw2vyg</a></span>
           </div>
         </div>
       </div>
@@ -16523,7 +16523,7 @@ function openAdvancedSetupWizard(){setupWizardMode="advanced";setupStep=1;applyS
 function closeSetupWizard(){document.getElementById("setupWizard")?.classList.add("hidden");}
 function openAboutDialog(){document.getElementById("aboutDialog")?.classList.remove("hidden");playUiSound("click");}
 function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.add("hidden");playUiSound("click");}
-function openSupportDiscord(){window.open("https://discord.gg/tuUv3hYTv","_blank","noopener");playUiSound("click");}
+function openSupportDiscord(){window.open("https://discord.gg/RQsVw2vyg","_blank","noopener");playUiSound("click");}
 function openSupportKofi(){window.open("https://ko-fi.com/E1W220NMPA","_blank","noopener");playUiSound("click");}
 function applyDetectedVmIpToSetup(ip){if(!ip)return;setValue("setupVmIp",ip);setValue("setupSshHost",ip);setValue("setupReceiverSshHost",ip);setValue("settingsVmIp",ip);setValue("settingsSshHost",ip);setValue("settingsReceiverSshHost",ip);syncConnectionHostLocks("setup");syncConnectionHostLocks("settings");invalidateSetupDatabaseTest();}
 async function checkVmIpChangeOnStartup(){try{const data=await getJson("/api/setup/vm-ip-check",{timeoutMs:12000});if(!data?.changed||!data.detectedIp)return;const key="vm-ip-change:"+String(data.vmName||"")+":"+data.detectedIp+":"+String((data.savedIps||[]).join(","));if(sessionStorage.getItem(key)==="shown")return;sessionStorage.setItem(key,"shown");const message="Hyper-V reports a different VM IP than the Suite has saved.\\n\\nSaved: "+(data.savedIps||[]).join(", ")+"\\nDetected: "+data.detectedIp+"\\n\\nOpen Setup Wizard, review the connection settings, then test and save setup again.";const open=await appConfirm("VM IP changed",message,"Open Setup","Later");if(open){applyDetectedVmIpToSetup(data.detectedIp);openSetupWizard();}else{addActivity("warn","VM IP changed",data.message||("Detected "+data.detectedIp));}}catch(e){addActivity("warn","VM IP check skipped",betterError(e));}}

@@ -209,7 +209,7 @@ Need help with AlphaNine Dune Suite?
 
 Join the AlphaNine Gaming Discord community:
 
-[https://discord.gg/tuUv3hYTv](https://discord.gg/tuUv3hYTv)
+[https://discord.gg/RQsVw2vyg](https://discord.gg/RQsVw2vyg)
 
 Support includes:
 

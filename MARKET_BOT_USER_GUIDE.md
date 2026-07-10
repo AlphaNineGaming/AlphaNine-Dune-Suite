@@ -137,16 +137,20 @@ Shows market rows and allows selecting, buying, or removing listings.
 
 These buttons run immediately. They do not wait for the configured interval.
 
-### Buy Player Listings
+### Run Buyer Cycle
 
-The bot scans player listings and buys a small number of listings that pass its pricing checks.
+The bot performs two kinds of market demand in one cycle:
+
+- It buys eligible player listings and creates the normal Solari claim for each seller.
+- It removes 1-2 random bot-owned NPC listings as simulated sales. NPC sales do not create a payment.
 
 Use this when:
 
 - Players listed items and you want the bot to create demand.
+- You want some NPC stock to sell instead of remaining unchanged.
 - You want to test buying without waiting for `BUY_TIMER`.
 
-Default behavior is conservative, usually around 1 to 2 buys per cycle depending on available listings and config.
+Player purchases remain limited by `MAX_PLAYER_ORDER_BUYS`. NPC demand always removes only 1-2 listings per buyer cycle. The stock cycle refills the market later when NPC inventory drops below `AI_ORDER_MIN`.
 
 ### Restock Market
 
@@ -162,7 +166,7 @@ With the defaults, the bot maintains a random total between 30 and 60 NPC listin
 
 ### Run Full Cycle
 
-Buys eligible player listings, then enforces the configured NPC stock range.
+Runs the buyer cycle, including 1-2 simulated NPC sales, then enforces the configured NPC stock range.
 
 Use this for testing or for a quick manual economy pass. For normal use, let the scheduler handle the cycles after the bot is configured.
 
@@ -182,7 +186,7 @@ Do not enter plain numbers for interval fields unless the UI specifically expect
 | Setting | What it controls | Recommended private-server value |
 | --- | --- | --- |
 | `Bot Enabled` | Turns automatic scheduled bot cycles on or off. | Off until tested, then On |
-| `BUY_TIMER` | How often the bot checks player listings to buy. | `20m` |
+| `BUY_TIMER` | How often the bot runs demand: buying eligible player listings and removing 1-2 NPC listings. | `20m` |
 | `LIST_TIMER` | How often the bot checks and corrects NPC stock. | `30m` |
 | `AI_ORDER_MIN` | Refill NPC stock when it falls below this count. | `30` |
 | `AI_ORDER_MAX` | Never keep more bot-owned NPC listings than this count. | `60` |

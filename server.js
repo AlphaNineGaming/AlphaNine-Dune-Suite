@@ -9,6 +9,12 @@ const crypto = require("crypto");
 const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
+const {
+  PLAYER_RENAME_MAX_LENGTH,
+  sanitizePlayerRenameName,
+  isOfflinePlayerStatus,
+  playerRenamePreviewExpired
+} = require("./lib/player-rename");
 
 const { version: APP_VERSION } = require("./package.json");
 const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
@@ -29,6 +35,7 @@ const PROGRESSION_DATA_DIR = process.env.APPDATA
   : __dirname;
 const PROGRESSION_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "progression-backups");
 const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progression-audit.log");
+const PLAYER_RENAME_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "player-rename-backups");
 const DATABASE_TUNNEL_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "database-tunnel.log");
 let databaseTunnelStartPromise = null;
 const DB_QUERY_CACHE_TTL_MS = 120000;
@@ -9022,7 +9029,7 @@ async function liveGiveEnvStatus() {
 }
 
 function normalizeAdminPlayerRow(line) {
-  const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", playerPawnId = "", onlineStatus = "", map = "", characterName = "", resolved = "false", matchedColumn = ""] = String(line || "").split("\t");
+  const [accountId = "", flsId = "", funcomId = "", playerControllerId = "", characterId = "", playerPawnId = "", onlineStatus = "", map = "", characterName = "", resolved = "false", playerStateRowId = "", matchedColumn = ""] = String(line || "").split("\t");
   return {
     id: accountId,
     name: characterName || accountId || "Unknown",
@@ -9036,8 +9043,243 @@ function normalizeAdminPlayerRow(line) {
     map,
     character_name: characterName || accountId || "Unknown",
     characterNameResolved: /^true$/i.test(resolved),
+    player_state_row_id: playerStateRowId,
     matched_column: matchedColumn
   };
+}
+
+const playerRenamePreviews = new Map();
+
+function playerRenameBackupPath(rowId, previewId) {
+  fs.mkdirSync(PLAYER_RENAME_BACKUP_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return path.join(PLAYER_RENAME_BACKUP_DIR, `${stamp}-player-${rowId}-${previewId}.json`);
+}
+
+async function playerRenameTarget(playerStateRowId) {
+  const rowId = requireInteger(playerStateRowId, "player_state_row_id", 1);
+  const output = await dbQuery(`
+    select id::text,
+      account_id::text,
+      coalesce(player_state_id::text, ''),
+      coalesce(player_controller_id::text, ''),
+      coalesce(player_pawn_id::text, ''),
+      coalesce(dune.decrypt_user_data(encrypted_character_name), ''),
+      encode(encrypted_character_name, 'hex'),
+      online_status::text,
+      character_state::text
+    from dune.encrypted_player_state
+    where id = ${rowId}
+    limit 1;
+  `, 15000);
+  const row = parseDbRows(output, ["rowId", "accountId", "playerStateId", "playerControllerId", "playerPawnId", "characterName", "encryptedCharacterNameHex", "onlineStatus", "characterState"])[0];
+  if (!row) throw new Error("The selected player-state record was not found. Refresh Players and try again.");
+  if (String(row.characterState).toLowerCase() !== "active") throw new Error("Only the active character record can be renamed.");
+  return row;
+}
+
+async function playerRenameDuplicate(newName, excludedRowId) {
+  const output = await dbQuery(`
+    select id::text, account_id::text, coalesce(dune.decrypt_user_data(encrypted_character_name), '')
+    from dune.encrypted_player_state
+    where lower(character_state::text) = 'active'
+      and id <> ${requireInteger(excludedRowId, "player_state_row_id", 1)}
+      and lower(dune.decrypt_user_data(encrypted_character_name)) = lower(${sqlTextLiteral(newName)})
+    limit 1;
+  `, 15000);
+  return parseDbRows(output, ["rowId", "accountId", "characterName"])[0] || null;
+}
+
+function prunePlayerRenamePreviews() {
+  for (const [previewId, preview] of playerRenamePreviews.entries()) {
+    if (playerRenamePreviewExpired(preview.createdAt)) playerRenamePreviews.delete(previewId);
+  }
+}
+
+async function previewPlayerRename(body = {}) {
+  prunePlayerRenamePreviews();
+  const rowId = requireInteger(body.playerStateRowId, "player_state_row_id", 1);
+  const newName = sanitizePlayerRenameName(body.newName);
+  const target = await playerRenameTarget(rowId);
+  if (!isOfflinePlayerStatus(target.onlineStatus)) throw new Error("The player must be offline before creating a rename preview.");
+  if (target.characterName === newName) throw new Error("The new character name is the same as the current name.");
+  const duplicate = await playerRenameDuplicate(newName, rowId);
+  if (duplicate) throw new Error(`The character name "${newName}" is already in use.`);
+
+  const previewId = crypto.randomBytes(16).toString("hex");
+  const createdAt = Date.now();
+  const backupPath = playerRenameBackupPath(rowId, previewId);
+  const backup = {
+    createdAt: new Date(createdAt).toISOString(),
+    action: "player_rename",
+    source: "player-rename-preview",
+    row: {
+      id: target.rowId,
+      accountId: target.accountId,
+      playerStateId: target.playerStateId,
+      playerControllerId: target.playerControllerId,
+      playerPawnId: target.playerPawnId,
+      characterName: target.characterName,
+      encryptedCharacterNameHex: target.encryptedCharacterNameHex,
+      onlineStatus: target.onlineStatus,
+      characterState: target.characterState
+    },
+    requestedName: newName
+  };
+  fs.writeFileSync(backupPath, JSON.stringify(backup, null, 2), "utf8");
+  const preview = { previewId, createdAt, backupPath, rowId, currentName: target.characterName, newName, target };
+  playerRenamePreviews.set(previewId, preview);
+  appendAdminAudit("player_rename_preview_created", {
+    previewId,
+    playerStateRowId: rowId,
+    accountId: target.accountId,
+    previousName: target.characterName,
+    requestedName: newName,
+    backupPath
+  });
+  return {
+    ok: true,
+    status: "preview",
+    previewId,
+    currentName: target.characterName,
+    newName,
+    playerStateRowId: target.rowId,
+    accountId: target.accountId,
+    onlineStatus: target.onlineStatus,
+    backupPath,
+    expiresAt: new Date(createdAt + 15 * 60 * 1000).toISOString(),
+    message: `Ready to rename ${target.characterName} to ${newName}. The player is offline and the name is available.`
+  };
+}
+
+async function applyPlayerRename(body = {}) {
+  prunePlayerRenamePreviews();
+  const previewId = String(body.previewId || "").trim();
+  const preview = playerRenamePreviews.get(previewId);
+  if (!preview) throw new Error("Rename preview was not found or has expired. Generate a new preview.");
+  if (body.confirmed !== true) throw new Error("Confirm the player rename before applying it.");
+  if (playerRenamePreviewExpired(preview.createdAt)) {
+    playerRenamePreviews.delete(previewId);
+    throw new Error("Rename preview expired. Generate a new preview.");
+  }
+  if (!fs.existsSync(preview.backupPath)) throw new Error("The encrypted player-state backup is missing. Generate a new preview.");
+
+  const rowId = requireInteger(preview.rowId, "player_state_row_id", 1);
+  const previousName = String(preview.currentName || "");
+  const newName = sanitizePlayerRenameName(preview.newName);
+  try {
+    let output = "";
+    let queryError = null;
+    try {
+      output = await dbQuery(`
+        begin;
+        do $player_rename$
+        declare
+          current_name text;
+          current_status text;
+          current_state text;
+        begin
+          perform pg_advisory_xact_lock(hashtextextended(lower(${sqlTextLiteral(newName)}), 0));
+          select dune.decrypt_user_data(encrypted_character_name), online_status::text, character_state::text
+            into current_name, current_status, current_state
+          from dune.encrypted_player_state
+          where id = ${rowId}
+          for update;
+          if not found then
+            raise exception 'The selected player-state record no longer exists.';
+          end if;
+          if lower(coalesce(current_state, '')) <> 'active' then
+            raise exception 'Only the active character record can be renamed.';
+          end if;
+          if not (lower(coalesce(current_status, '')) = any(array['offline','disconnected','inactive','false','f','0','no'])) then
+            raise exception 'The player is online or has an unknown connection state. Rename cancelled.';
+          end if;
+          if current_name is distinct from ${sqlTextLiteral(previousName)} then
+            raise exception 'The character name changed after preview. Refresh Players and try again.';
+          end if;
+          if exists (
+            select 1
+            from dune.encrypted_player_state duplicate
+            where duplicate.id <> ${rowId}
+              and lower(duplicate.character_state::text) = 'active'
+              and lower(dune.decrypt_user_data(duplicate.encrypted_character_name)) = lower(${sqlTextLiteral(newName)})
+          ) then
+            raise exception 'The requested character name is already in use.';
+          end if;
+          update dune.encrypted_player_state
+          set encrypted_character_name = dune.encrypt_user_data(${sqlTextLiteral(newName)})
+          where id = ${rowId};
+          select dune.decrypt_user_data(encrypted_character_name)
+            into current_name
+          from dune.encrypted_player_state
+          where id = ${rowId};
+          if current_name is distinct from ${sqlTextLiteral(newName)} then
+            raise exception 'Rename verification failed. The transaction was rolled back.';
+          end if;
+        end
+        $player_rename$;
+        select 'RENAMED', id::text, account_id::text, coalesce(player_state_id::text, ''),
+          dune.decrypt_user_data(encrypted_character_name), online_status::text, character_state::text
+        from dune.encrypted_player_state
+        where id = ${rowId};
+        commit;
+      `, 30000);
+    } catch (error) {
+      queryError = error;
+    }
+    let verified = parseDbRows(output, ["kind", "rowId", "accountId", "playerStateId", "characterName", "onlineStatus", "characterState"])
+      .find((row) => row.kind === "RENAMED");
+    if (!verified || verified.characterName !== newName) {
+      const readBack = await playerRenameTarget(rowId).catch(() => null);
+      if (readBack?.characterName === newName) {
+        verified = {
+          rowId: readBack.rowId,
+          accountId: readBack.accountId,
+          playerStateId: readBack.playerStateId,
+          characterName: readBack.characterName,
+          onlineStatus: readBack.onlineStatus,
+          characterState: readBack.characterState
+        };
+      } else if (queryError) {
+        throw queryError;
+      } else {
+        throw new Error("Rename completed without a matching read-back result. Check the player record before retrying.");
+      }
+    }
+    playerRenamePreviews.delete(previewId);
+    appendAdminAudit("player_renamed", {
+      previewId,
+      playerStateRowId: rowId,
+      accountId: verified.accountId,
+      previousName,
+      newName,
+      backupPath: preview.backupPath,
+      verified: true
+    });
+    return {
+      ok: true,
+      status: "applied",
+      previousName,
+      newName,
+      playerStateRowId: verified.rowId,
+      accountId: verified.accountId,
+      onlineStatus: verified.onlineStatus,
+      backupPath: preview.backupPath,
+      auditLogPath: ADMIN_AUDIT_LOG,
+      message: `Player renamed from ${previousName} to ${newName}.`
+    };
+  } catch (error) {
+    appendAdminAudit("player_rename_failed", {
+      previewId,
+      playerStateRowId: rowId,
+      accountId: preview.target.accountId,
+      previousName,
+      requestedName: newName,
+      backupPath: preview.backupPath,
+      error: error.message
+    });
+    throw error;
+  }
 }
 
 async function adminPlayers(options = {}) {
@@ -9088,7 +9330,8 @@ async function adminPlayers(options = {}) {
       coalesce(ps.online_status::text, 'unknown') as online_status,
       '' as map,
       coalesce(nullif(ps.character_name, ''), nullif(ac."user", ''), a.account_id::text) as character_name,
-      case when coalesce(nullif(ps.character_name, ''), nullif(ac."user", '')) is null then 'false' else 'true' end as resolved`;
+      case when coalesce(nullif(ps.character_name, ''), nullif(ac."user", '')) is null then 'false' else 'true' end as resolved,
+      coalesce(ps.id::text, '') as player_state_row_id`;
   const queriedPlayerSql = (partial = false) => {
     const value = partial ? sqlString(`%${query}%`) : sqlString(query);
     const op = partial ? "ilike" : "=";
@@ -14355,6 +14598,8 @@ function appPage() {
     .item-db-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:10px; }
     .detail-list { display:grid; gap:6px; margin-top:10px; }
     .detail-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:8px; padding:7px 0; border-bottom:1px solid rgba(255,255,255,.06); }
+    .player-rename-panel { border-top:1px solid rgba(214,166,69,.24); padding-top:12px; }
+    .player-rename-panel #playerRenameStatus { white-space:pre-wrap; overflow-wrap:anywhere; }
     .env-stack { display:grid; gap:var(--panel-gap); max-width:var(--content-max); margin:0 auto; }
     .env-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
     .env-card { min-width:0; border:1px solid rgba(214,166,69,.18); background:rgba(255,255,255,.022); padding:10px 12px; }
@@ -15461,9 +15706,20 @@ function appPage() {
         <div class="panel pad">
           <div class="label">Selected Player Details</div>
           <div id="playerDetails" class="empty mt">Select a player to inspect account and character details.</div>
+          <div id="playerRenamePanel" class="player-rename-panel hidden mt">
+            <div class="label">Rename Character</div>
+            <label class="mt">New Character Name<input id="playerRenameName" maxlength="${PLAYER_RENAME_MAX_LENGTH}" placeholder="Enter a new character name" oninput="invalidatePlayerRenamePreview()"></label>
+            <div class="action-row mt">
+              <button id="playerRenamePreviewButton" type="button" onclick="previewSelectedPlayerRename()">Preview Rename</button>
+              <button id="playerRenameApplyButton" type="button" class="primary" onclick="applySelectedPlayerRename()" disabled>Apply Rename</button>
+              <button type="button" onclick="closePlayerRename()">Cancel</button>
+            </div>
+            <div id="playerRenameStatus" class="empty mt">Preview checks that the player is offline and the new name is available.</div>
+          </div>
           <div class="label mt">Quick Actions</div>
           <div class="action-row mt">
             <button class="primary" onclick="jumpToGive()">Give Item</button>
+            <button id="playerRenameOpenButton" onclick="openPlayerRename()">Rename Player</button>
             <button onclick="refreshAdmin()">Refresh Players</button>
             <button data-open="logs">View Diagnostics</button>
           </div>
@@ -16575,7 +16831,7 @@ let managerFrameCheckTimer=null;
 function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",permissionState=null,baseCleanupState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",playerRenamePreviewState=null,permissionState=null,baseCleanupState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -17060,10 +17316,17 @@ async function refreshGivePlayersFast(){const select=document.getElementById("ad
 async function refreshGiveItemsFast(){const status=document.getElementById("gearDiscoveryStatus");if(status&&!adminItems.length){status.className="warning mt";status.textContent="Loading bundled item catalog...";}try{const data=await getJson("/api/admin/items",{timeoutMs:20000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderSelectedGiveItem();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Give Item catalog loaded",adminItems.length+" items");return data;}catch(e){renderAdminItems();if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Give Item catalog failed",e.message);return null;}}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
-function selectPlayer(id){selectedPlayerId=String(id||"");const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div>'+hydrationDetailRow(p.hydration)+'<div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
+function resetPlayerRename(hide=true){playerRenamePreviewState=null;const panel=document.getElementById("playerRenamePanel");const input=document.getElementById("playerRenameName");const apply=document.getElementById("playerRenameApplyButton");const preview=document.getElementById("playerRenamePreviewButton");const status=document.getElementById("playerRenameStatus");if(panel)panel.classList.toggle("hidden",hide);if(input)input.value="";if(apply)apply.disabled=true;if(preview)preview.disabled=false;if(status){status.className="empty mt";status.textContent="Preview checks that the player is offline and the new name is available.";}}
+function closePlayerRename(){resetPlayerRename(true);}
+function openPlayerRename(){const p=selectedPlayer();if(!p){showToast("Select a player first.","warning");return;}resetPlayerRename(false);const status=document.getElementById("playerRenameStatus");if(!p.player_state_row_id){if(status){status.className="warning mt";status.textContent="This player does not have an active encrypted player-state record. Refresh Players and try again.";}return;}const input=document.getElementById("playerRenameName");if(status){status.className=/^(offline|disconnected|inactive)$/i.test(String(p.online_status||""))?"empty mt":"warning mt";status.textContent=/^(offline|disconnected|inactive)$/i.test(String(p.online_status||""))?"Player is offline. Enter the new name and generate a protected preview.":"Player status is "+(p.online_status||"unknown")+". The rename preview will remain blocked until the player is offline.";}input?.focus();}
+function invalidatePlayerRenamePreview(){playerRenamePreviewState=null;const apply=document.getElementById("playerRenameApplyButton");if(apply)apply.disabled=true;const status=document.getElementById("playerRenameStatus");if(status){status.className="empty mt";status.textContent="Name changed. Generate a new preview before applying.";}}
+async function previewSelectedPlayerRename(){const p=selectedPlayer();const status=document.getElementById("playerRenameStatus");const previewButton=document.getElementById("playerRenamePreviewButton");const applyButton=document.getElementById("playerRenameApplyButton");try{if(!p)throw new Error("Select a player first.");if(!p.player_state_row_id)throw new Error("The selected player does not have an active player-state record.");const newName=document.getElementById("playerRenameName")?.value||"";playerRenamePreviewState=null;if(applyButton)applyButton.disabled=true;if(previewButton)previewButton.disabled=true;if(status){status.className="warning mt";status.textContent="Checking player status, name availability, and creating the encrypted-row backup...";}const data=await getJson("/api/admin/players/rename/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerStateRowId:p.player_state_row_id,newName}),timeoutMs:45000});playerRenamePreviewState=data;if(status){status.className="empty mt";status.textContent=(data.message||"Rename preview ready.")+"\nBackup: "+(data.backupPath||"created")+"\nPreview expires: "+new Date(data.expiresAt).toLocaleTimeString();}if(applyButton)applyButton.disabled=false;showToast("Player rename preview ready.","success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}showToast(betterError(e),"error");}finally{if(previewButton)previewButton.disabled=false;}}
+async function refreshPlayersAfterRename(accountId){const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:15000});adminPlayers=data.players||[];const preferred=String(accountId||selectedPlayerId||"");selectedPlayerId=adminPlayers.some(row=>String(row.id)===preferred)?preferred:(adminPlayers[0]?.id||"");renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();syncPermissionForms();progressionPlayerState=null;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);if(liveMap)refreshLiveMap().catch(()=>{});}
+async function applySelectedPlayerRename(){const p=selectedPlayer();const preview=playerRenamePreviewState;const status=document.getElementById("playerRenameStatus");const applyButton=document.getElementById("playerRenameApplyButton");try{if(!p||!preview)throw new Error("Generate a rename preview first.");if(String(p.player_state_row_id)!==String(preview.playerStateRowId))throw new Error("The selected player changed. Generate a new rename preview.");const confirmed=await appConfirm("Rename Player","Rename "+preview.currentName+" to "+preview.newName+"?\n\nThe player must remain offline. Account ID, inventory, bases, guild, and progression IDs will not be changed.","Rename Player","Cancel");if(!confirmed)return;if(applyButton)applyButton.disabled=true;if(status){status.className="warning mt";status.textContent="Applying encrypted character-name update and verifying the database read-back...";}const data=await getJson("/api/admin/players/rename/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:preview.previewId,confirmed:true}),timeoutMs:45000});playerRenamePreviewState=null;if(status){status.className="empty mt";status.textContent=(data.message||"Player renamed.")+"\nBackup: "+(data.backupPath||"created")+"\nAudit: "+(data.auditLogPath||"admin-audit.log");}showToast(data.message||"Player renamed.","success");addActivity("players","Player renamed",data.previousName+" -> "+data.newName);try{await refreshPlayersAfterRename(data.accountId);closePlayerRename();}catch(refreshError){if(status){status.className="warning mt";status.textContent=(data.message||"Player renamed.")+"\nThe database update was verified, but the Players page could not refresh: "+betterError(refreshError)+"\nUse Refresh Players before making another change.";}showToast("Player renamed; refresh Players before continuing.","warning");}playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}if(applyButton)applyButton.disabled=!playerRenamePreviewState;showToast(betterError(e),"error");addActivity("error","Player rename failed",e.message);playUiSound("warning");}}
+function selectPlayer(id){selectedPlayerId=String(id||"");resetPlayerRename(true);const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;resetPlayerRename(true);const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;resetPlayerRename(true);const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");const renameButton=document.getElementById("playerRenameOpenButton");if(renameButton)renameButton.disabled=!p||!p.player_state_row_id;if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Connection</span><strong>'+esc(p.online_status||"unknown")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div>'+hydrationDetailRow(p.hydration)+'<div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
 function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
 function permissionQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
 async function refreshPermissions(){const summary=document.getElementById("permissionSummary");if(summary)summary.textContent="Loading permission views...";try{permissionState=await getJson("/api/admin/permissions"+permissionQuery());renderPermissions();addActivity("permissions","Permission views refreshed",permissionState.playerControllerId?("controller "+permissionState.playerControllerId):"all players");}catch(e){if(summary)summary.textContent=betterError(e);addActivity("error","Permission refresh failed",e.message);}}
@@ -17748,6 +18011,19 @@ async function route(req, res) {
   if (url.pathname === "/api/admin/players" && req.method === "GET") {
     try { await json(res, await adminPlayers({ query: url.searchParams.get("query"), limit: url.searchParams.get("limit"), hydration: !/^(0|false|no)$/i.test(String(url.searchParams.get("hydration") || "true")) })); }
     catch (error) { await json(res, { ok: false, players: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/players/rename/preview" && req.method === "POST") {
+    try { await json(res, await previewPlayerRename(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) {
+      appendAdminAudit("player_rename_preview_failed", { error: error.message });
+      await json(res, { ok: false, status: "blocked", error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/players/rename/apply" && req.method === "POST") {
+    try { await json(res, await applyPlayerRename(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) { await json(res, { ok: false, status: "blocked", error: error.message }, 400); }
     return;
   }
   if (url.pathname === "/api/players/feed" && req.method === "GET") {

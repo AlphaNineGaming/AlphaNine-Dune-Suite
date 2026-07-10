@@ -3122,6 +3122,21 @@ function isLocalHyperVConfig(configValue = loadConfig()) {
   return !serverType || ["local-hyperv", "local-windows", "hyperv", "hyper-v", "local"].includes(serverType);
 }
 
+function syncedMarketBotApiUrl(configValue, detectedIp) {
+  const current = String(configValue?.marketBotApiUrl || "").trim().replace(/\/+$/, "");
+  const nextIp = normalizeIpv4(detectedIp);
+  if (!current || !nextIp || !isLocalHyperVConfig(configValue)) return { url: current, changed: false, savedIp: "" };
+  try {
+    const parsed = new URL(current);
+    const savedIp = normalizeIpv4(parsed.hostname);
+    if (!savedIp || savedIp === nextIp) return { url: current, changed: false, savedIp };
+    parsed.hostname = nextIp;
+    return { url: parsed.toString().replace(/\/+$/, ""), changed: true, savedIp };
+  } catch {
+    return { url: current, changed: false, savedIp: "" };
+  }
+}
+
 function resetVmDependentRuntime(detectedIp = "") {
   invalidateDatabaseQueryCache();
   Object.assign(databaseTunnelRuntime, {
@@ -3141,6 +3156,8 @@ function syncedVmIpConfig(cfg, detectedIp) {
     const currentIp = normalizeIpv4(current);
     if (!current || currentIp && oldIps.has(currentIp)) next[field] = detectedIp;
   }
+  const marketBotUrl = syncedMarketBotApiUrl(cfg, detectedIp);
+  if (marketBotUrl.changed) next.marketBotApiUrl = marketBotUrl.url;
   return next;
 }
 
@@ -3158,6 +3175,10 @@ async function autoSyncVmIpFromHyperV(options = {}) {
   const changedFields = Object.entries(savedFields)
     .filter(([, value]) => value && value !== detectedIp)
     .map(([field, value]) => ({ field, saved: value, detected: detectedIp }));
+  const marketBotUrl = syncedMarketBotApiUrl(cfg, detectedIp);
+  if (marketBotUrl.changed) {
+    changedFields.push({ field: "marketBotApiUrl", saved: cfg.marketBotApiUrl, detected: marketBotUrl.url });
+  }
   const missingVmIp = !savedFields.vmIp;
   if (!missingVmIp && !changedFields.length) return { ok: true, synced: false, config: cfg, detectedIp, savedFields, changedFields, vm };
   const nextConfig = syncedVmIpConfig(cfg, detectedIp);
@@ -13046,8 +13067,11 @@ async function proxyToManager(req, res, pathname) {
 
 function marketBotBaseUrl(configValue = loadConfig()) {
   const explicit = String(configValue.marketBotApiUrl || process.env.MARKET_BOT_API_URL || "").trim().replace(/\/+$/, "");
-  if (explicit) return explicit;
   const host = String(configValue.vmIp || configValue.sshHost || process.env.DUNE_VM_IP || "").trim();
+  if (explicit) {
+    const synced = syncedMarketBotApiUrl({ ...configValue, marketBotApiUrl: explicit }, host);
+    return synced.url || explicit;
+  }
   return host ? `http://${host}:8081` : "http://127.0.0.1:8081";
 }
 
@@ -18188,7 +18212,16 @@ server.listen(PORT, HOST, async () => {
   console.log(`AlphaNine Dune Suite desktop: http://127.0.0.1:${PORT}`);
   console.log(`AlphaNine Dune Suite web portal: ${webPortalUrls().join(" ")}`);
   console.log(`Expected server install: ${DEFAULT_SERVER_ROOT}`);
-  setTimeout(startDatabaseTunnelOnStartup, 250);
+  const startupVmSync = autoSyncVmIpFromHyperV()
+    .then((result) => {
+      if (result.synced) console.log(`VM address updated to ${result.detectedIp}; dependent Suite connections were refreshed.`);
+      return result;
+    })
+    .catch((error) => {
+      console.log(`VM address startup detection did not complete: ${error.message}`);
+      return { ok: false, synced: false, error: error.message };
+    });
+  setTimeout(() => startupVmSync.finally(startDatabaseTunnelOnStartup), 250);
   try {
     await updateRuntimeGiveTransport(null, "startup");
   } catch (error) {

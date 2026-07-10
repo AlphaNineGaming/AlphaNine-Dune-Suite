@@ -375,6 +375,21 @@ Common causes:
 - VM cannot mount `/opt/market-bot` files.
 - Bot process starts and exits because config is invalid.
 
+### Waiting For Game Exchange
+
+This means the bot is installed, connected to PostgreSQL, and running, but the game database does not yet contain a usable non-Global Exchange.
+
+The bot will not create or guess an Exchange record. It stays online, blocks buy/list writes, and retries discovery automatically every minute. Once the game creates a usable Exchange, the bot connects and normal scheduling starts without another reinstall.
+
+What to do:
+
+1. Start the battlegroup and the map that provides the in-game Exchange.
+2. Have a player open and use the Exchange normally; creating one ordinary player listing is the clearest initialization test.
+3. Wait up to one minute, then click `Refresh Bot`.
+4. Confirm the status changes from `Waiting for Exchange` to `Online` before running a cycle.
+
+Do not repeatedly reinstall the bot while this status is shown. The missing object belongs to the game database, not the Suite deployment.
+
 ### Exec Format Error
 
 If logs show:
@@ -422,15 +437,16 @@ Fix:
 
 For a new server:
 
-1. Install/update the bot.
-2. Keep `Bot Enabled` off.
-3. Run `Restock Market` once.
-4. Confirm listings appear in game.
-5. Create a test player listing and run `Buy Player Listings` once.
-6. Confirm the seller receives the completed-market Solari claim.
-7. Turn on `Bot Enabled`.
-8. Save config.
-9. Let it run for a few hours before increasing intensity.
+1. Start the battlegroup and confirm a player can open the in-game Exchange.
+2. Install/update the bot.
+3. Keep `Bot Enabled` off.
+4. Confirm the bot status is `Online`, not `Waiting for Exchange`.
+5. Run `Restock Market` once.
+6. Confirm listings appear in game.
+7. Create a test player listing and run `Buy Player Listings` once.
+8. Confirm the seller receives the completed-market Solari claim.
+9. Turn on `Bot Enabled` and save config.
+10. Let it run for a few hours before increasing activity.
 
 ## Support Checklist
 

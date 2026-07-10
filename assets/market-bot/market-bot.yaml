@@ -25,12 +25,14 @@ data:
   BOT_ENABLED: "false"
   BUY_INTERVAL: 20m
   MAX_BUYS: "2"
-  LIST_INTERVAL: 2h
+  LIST_INTERVAL: 30m
+  AI_ORDER_MIN: "30"
+  AI_ORDER_MAX: "60"
   LISTINGS_PER_GRADE: "1"
-  SIM_INTERVAL: 10m
-  SIMULATE_ECONOMY: "true"
+  SIM_INTERVAL: 30m
+  SIMULATE_ECONOMY: "false"
   SIM_HOUSEHOLDS: "10"
-  SIM_MAX_ORDERS: "40"
+  SIM_MAX_ORDERS: "2"
   SIM_INTENSITY: "0.35"
 
 ---
@@ -82,6 +84,8 @@ spec:
             - -buyinterval=$(BUY_INTERVAL)
             - -maxbuys=$(MAX_BUYS)
             - -listinterval=$(LIST_INTERVAL)
+            - -aiordermin=$(AI_ORDER_MIN)
+            - -aiordermax=$(AI_ORDER_MAX)
             - -listingspergrade=$(LISTINGS_PER_GRADE)
             - -enabled=$(BOT_ENABLED)
             - -siminterval=$(SIM_INTERVAL)
@@ -164,6 +168,16 @@ spec:
                 configMapKeyRef:
                   name: market-bot-config
                   key: LIST_INTERVAL
+            - name: AI_ORDER_MIN
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: AI_ORDER_MIN
+            - name: AI_ORDER_MAX
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: AI_ORDER_MAX
             - name: LISTINGS_PER_GRADE
               valueFrom:
                 configMapKeyRef:

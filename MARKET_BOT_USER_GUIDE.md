@@ -113,13 +113,13 @@ Shows how many bot/NPC listings exist and when the bot last restocked.
 
 Shows how many player listings the bot has bought and when the last buy cycle ran.
 
-### Simulation
+### NPC Stock Range
 
-Shows whether simulated buyer demand is ready, running, or disabled.
+Shows whether bot-owned NPC listings are inside the configured minimum and maximum.
 
 ### Runtime
 
-Shows live bot counters, including uptime, Solari balance, simulation orders, and simulation units.
+Shows uptime, Solari balance, the configured NPC order range, and the player-buy limit.
 
 ### Editable Bot Config
 
@@ -144,35 +144,25 @@ The bot scans player listings and buys a small number of listings that pass its 
 Use this when:
 
 - Players listed items and you want the bot to create demand.
-- You want to test buying without waiting for `BUY_INTERVAL`.
+- You want to test buying without waiting for `BUY_TIMER`.
 
 Default behavior is conservative, usually around 1 to 2 buys per cycle depending on available listings and config.
 
 ### Restock Market
 
-The bot adds random NPC sell listings.
+The bot checks NPC stock and adds random listings when the count is below the configured minimum.
 
 Use this when:
 
 - The market is empty.
-- You want to add a small amount of supply immediately.
+- You want to refill supply to the configured range immediately.
 - You are testing whether listings appear in the game.
 
-The bot is tuned to add a small random batch rather than flooding the market.
-
-### Simulate Buyers
-
-The bot simulates player demand against market listings.
-
-Use this when:
-
-- NPC listings are sitting too long.
-- You want the economy to move even without real players buying.
-- You want to reduce market clutter naturally.
+With the defaults, the bot maintains a random total between 30 and 60 NPC listings.
 
 ### Run Full Cycle
 
-Runs buy, restock, and simulation together.
+Buys eligible player listings, then enforces the configured NPC stock range.
 
 Use this for testing or for a quick manual economy pass. For normal use, let the scheduler handle the cycles after the bot is configured.
 
@@ -192,19 +182,17 @@ Do not enter plain numbers for interval fields unless the UI specifically expect
 | Setting | What it controls | Recommended private-server value |
 | --- | --- | --- |
 | `Bot Enabled` | Turns automatic scheduled bot cycles on or off. | Off until tested, then On |
-| `Simulation Enabled` | Enables simulated buyer demand. | On |
-| `BUY_INTERVAL` | How often the bot checks player listings to buy. | `20m` |
-| `LIST_INTERVAL` | How often the bot restocks NPC market listings. | `2h` |
-| `SIM_INTERVAL` | How often simulated buyers run. | `10m` |
-| `SIM_HOUSEHOLDS` | Size of the simulated buyer population. Higher means more demand attempts. | `10` to `80` |
-| `SIM_MAX_ORDERS` | Maximum simulated purchases/orders per simulation tick. | `40` to `120` |
-| `SIM_INTENSITY` | Demand strength multiplier. Higher means more aggressive simulated buying. | `0.35` to `1.0` |
+| `BUY_TIMER` | How often the bot checks player listings to buy. | `20m` |
+| `LIST_TIMER` | How often the bot checks and corrects NPC stock. | `30m` |
+| `AI_ORDER_MIN` | Refill NPC stock when it falls below this count. | `30` |
+| `AI_ORDER_MAX` | Never keep more bot-owned NPC listings than this count. | `60` |
+| `MAX_PLAYER_ORDER_BUYS` | Maximum player listings bought during each buy cycle. | `2` |
 
 Some internal settings may also exist in the bot config:
 
 | Setting | What it does |
 | --- | --- |
-| `MAX_BUYS` | Maximum player listings the bot may buy in one buy cycle. |
+| `MAX_BUYS` | Internal API name for `MAX_PLAYER_ORDER_BUYS`. |
 | `LISTINGS_PER_GRADE` | How many listings the bot can create per grade/category pass. |
 
 ## Recommended Configs
@@ -214,26 +202,22 @@ Some internal settings may also exist in the bot config:
 Use this when there are only a few players and you want the market to move slowly.
 
 - `Bot Enabled`: On
-- `Simulation Enabled`: On
-- `BUY_INTERVAL`: `20m`
-- `LIST_INTERVAL`: `2h`
-- `SIM_INTERVAL`: `10m`
-- `SIM_HOUSEHOLDS`: `10`
-- `SIM_MAX_ORDERS`: `40`
-- `SIM_INTENSITY`: `0.35`
+- `BUY_TIMER`: `20m`
+- `LIST_TIMER`: `30m`
+- `AI_ORDER_MIN`: `30`
+- `AI_ORDER_MAX`: `60`
+- `MAX_PLAYER_ORDER_BUYS`: `2`
 
 ### Medium Private Server
 
 Use this when there are regular players but not enough trading activity.
 
 - `Bot Enabled`: On
-- `Simulation Enabled`: On
-- `BUY_INTERVAL`: `10m`
-- `LIST_INTERVAL`: `1h`
-- `SIM_INTERVAL`: `10m`
-- `SIM_HOUSEHOLDS`: `40`
-- `SIM_MAX_ORDERS`: `80`
-- `SIM_INTENSITY`: `0.6`
+- `BUY_TIMER`: `10m`
+- `LIST_TIMER`: `20m`
+- `AI_ORDER_MIN`: `50`
+- `AI_ORDER_MAX`: `100`
+- `MAX_PLAYER_ORDER_BUYS`: `4`
 
 ### Testing Only
 
@@ -242,7 +226,7 @@ Use this only while checking that the bot works.
 - Keep `Bot Enabled` off.
 - Use `Restock Market` once.
 - Check the in-game exchange.
-- Use `Simulate Buyers` once.
+- Use `Buy Player Listings` once if a test player has listed an item.
 - Refresh Suite and confirm counts changed.
 
 Avoid very short intervals for normal use. They can make the market noisy and harder to review.
@@ -323,9 +307,10 @@ The Suite installer/update process itself should not clear the market.
 
 When `Bot Enabled` is on, the VM bot service checks its schedule and runs cycles based on the configured intervals.
 
-- `BUY_INTERVAL` controls automatic player listing buys.
-- `LIST_INTERVAL` controls automatic NPC restocks.
-- `SIM_INTERVAL` controls simulated buyer demand.
+- `BUY_TIMER` controls automatic player-listing buy cycles.
+- `LIST_TIMER` controls automatic NPC stock checks.
+- `AI_ORDER_MIN` and `AI_ORDER_MAX` define the NPC stock range.
+- `MAX_PLAYER_ORDER_BUYS` caps player listings bought per cycle.
 
 The scheduler reads live config, so changes apply on the next scheduler check after saving config.
 
@@ -335,9 +320,8 @@ Manual buttons ignore the interval timer and run immediately.
 
 If the bot is adding too many listings:
 
-- Increase `LIST_INTERVAL`.
-- Keep `SIM_INTENSITY` low.
-- Lower `SIM_MAX_ORDERS` if simulation is too aggressive.
+- Lower `AI_ORDER_MAX`.
+- Increase `LIST_TIMER` if you want less frequent stock correction.
 - Use `Remove Selected` to clean old NPC/manual listings.
 - Avoid repeatedly pressing `Run Full Cycle` unless testing.
 
@@ -415,22 +399,22 @@ Check:
 - The game UI was refreshed or reopened.
 - You are checking the same battlegroup database Suite is connected to.
 
-### Simulate Buyers Runs But Listings Stay The Same
+### NPC Stock Does Not Refill
 
 Possible reasons:
 
-- Simulation is disabled.
-- `SIM_INTENSITY` is too low.
-- `SIM_MAX_ORDERS` is too low.
-- Listings are priced above what simulated demand will buy.
+- `Bot Enabled` is off.
+- The current NPC listing count is already at or above `AI_ORDER_MIN`.
+- `LIST_TIMER` has not elapsed yet.
+- The catalog or database connection returned an error.
 - You need to refresh the market list after the action.
 
 ### Too Many Listings
 
 Fix:
 
-- Set `LIST_INTERVAL` to `2h` or longer.
-- Lower `SIM_INTENSITY` to `0.35`.
+- Lower `AI_ORDER_MAX`.
+- Set `AI_ORDER_MIN` to the minimum stock you actually want.
 - Avoid repeated manual `Restock Market` or `Run Full Cycle` clicks.
 - Use checkboxes and `Remove Selected` to clean up.
 
@@ -442,8 +426,8 @@ For a new server:
 2. Keep `Bot Enabled` off.
 3. Run `Restock Market` once.
 4. Confirm listings appear in game.
-5. Run `Simulate Buyers` once.
-6. Confirm some activity changes in Suite.
+5. Create a test player listing and run `Buy Player Listings` once.
+6. Confirm the seller receives the completed-market Solari claim.
 7. Turn on `Bot Enabled`.
 8. Save config.
 9. Let it run for a few hours before increasing intensity.
@@ -457,18 +441,17 @@ When reporting a Market Bot issue, include:
 - Screenshot or text of the Market Bot connection result.
 - Output from `View Bot Logs` if available.
 - Whether `Install / Update Bot` completed.
-- Current values for `BUY_INTERVAL`, `LIST_INTERVAL`, `SIM_INTERVAL`, `SIM_HOUSEHOLDS`, `SIM_MAX_ORDERS`, and `SIM_INTENSITY`.
+- Current values for `BUY_TIMER`, `LIST_TIMER`, `AI_ORDER_MIN`, `AI_ORDER_MAX`, and `MAX_PLAYER_ORDER_BUYS`.
 - What button was clicked before the issue appeared.
 
 ## Quick Defaults
 
 Good starting defaults for most small private servers:
 
-- `BUY_INTERVAL`: `20m`
-- `LIST_INTERVAL`: `2h`
-- `SIM_INTERVAL`: `10m`
-- `SIM_HOUSEHOLDS`: `10`
-- `SIM_MAX_ORDERS`: `40`
-- `SIM_INTENSITY`: `0.35`
+- `BUY_TIMER`: `20m`
+- `LIST_TIMER`: `30m`
+- `AI_ORDER_MIN`: `30`
+- `AI_ORDER_MAX`: `60`
+- `MAX_PLAYER_ORDER_BUYS`: `2`
 
 Start conservative. Increase only when the market feels too empty.

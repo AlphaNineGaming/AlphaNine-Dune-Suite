@@ -3786,6 +3786,29 @@ function gearCatalog() {
   return cache.items || [];
 }
 
+let storageItemMetadataCache = null;
+function storageItemMetadata(template) {
+  if (!storageItemMetadataCache) {
+    try {
+      const source = JSON.parse(fs.readFileSync(packagedPath("assets", "market-bot", "item-data.json"), "utf8"));
+      const items = source?.items && typeof source.items === "object" ? source.items : {};
+      storageItemMetadataCache = {};
+      for (const [id, row] of Object.entries(items)) {
+        storageItemMetadataCache[id] = row;
+        storageItemMetadataCache[id.toLowerCase()] = row;
+      }
+    } catch {
+      storageItemMetadataCache = {};
+    }
+  }
+  const key = String(template || "");
+  const row = storageItemMetadataCache[key] || storageItemMetadataCache[key.toLowerCase()] || {};
+  return {
+    stackMax: Math.max(1, Number(row.stack_max) || 1),
+    volume: Math.max(0, Number(row.volume) || 0)
+  };
+}
+
 function firstItemText(...values) {
   for (const value of values) {
     if (value === null || value === undefined) continue;
@@ -13160,6 +13183,186 @@ function defaultManagerConfig() {
   return { vmIp: "", sshKeyPath, sshUser: "dune", battlegroup: "", namespace: "", source: "" };
 }
 
+function storageDisplayName(actorClass) {
+  const match = String(actorClass || "").match(/\/([^/.]+)\.[^/.]+_C$/);
+  return String(match?.[1] || "Storage")
+    .replace(/^BP_/, "")
+    .replace(/_CHOAM$/i, "")
+    .replace(/_/g, " ")
+    .replace(/\bMediumStorageContainer\b/i, "Medium Storage Container")
+    .replace(/\bItemContainerBase\b/i, "Storage Container")
+    .replace(/\bSpiceSiloContainer\b/i, "Spice Silo")
+    .replace(/\bContainerVehicle\b/i, "Carrier Cargo Vehicle")
+    .trim();
+}
+
+async function adminStorageTargets() {
+  const sql = `
+    select
+      a.id::text,
+      i.id::text,
+      coalesce(i.inventory_type::text, ''),
+      coalesce(i.max_item_count::text, '0'),
+      coalesce(i.max_item_volume::text, '0'),
+      (select count(*)::text from dune.items it where it.inventory_id=i.id),
+      (select coalesce(max(it.position_index), -1)::text from dune.items it where it.inventory_id=i.id),
+      a.class,
+      coalesce(a.map, ''),
+      coalesce(a.partition_id::text, ''),
+      coalesce(a.dimension_index::text, ''),
+      coalesce(((a.transform).location).x::text, ''),
+      coalesce(((a.transform).location).y::text, ''),
+      coalesce(((a.transform).location).z::text, ''),
+      coalesce((select jsonb_object_agg(stacks.template_id, stacks.total) from (
+        select it.template_id, sum(it.stack_size) total from dune.items it where it.inventory_id=i.id group by it.template_id
+      ) stacks), '{}'::jsonb)::text
+    from dune.actors a
+    join dune.inventories i on i.actor_id = a.id
+    where (
+      (i.inventory_type = 4 and a.class ilike '%Container%')
+      or (i.inventory_type = 0 and coalesce(i.max_item_count, 0) > 0 and a.class ilike '%Vehicles%')
+    )
+      and a.class not ilike '%PlayerCharacter%'
+    order by a.map, a.partition_id, a.dimension_index, a.class, a.id
+  `;
+  const output = await dbQuery(sql, 20000);
+  const rows = parseDbRows(output, ["actorId", "inventoryId", "inventoryType", "maxItemCount", "maxItemVolume", "itemCount", "maxPosition", "actorClass", "map", "partitionId", "dimensionIndex", "x", "y", "z", "items"]);
+  return {
+    ok: true,
+    storages: rows.map((row) => {
+      let storedItems = {};
+      try { storedItems = JSON.parse(row.items || "{}"); } catch {}
+      const usedVolume = Object.entries(storedItems).reduce((sum, [template, count]) => sum + storageItemMetadata(template).volume * Math.max(0, Number(count) || 0), 0);
+      return {
+        actorId: row.actorId,
+        inventoryId: row.inventoryId,
+        inventoryType: Number(row.inventoryType),
+        name: storageDisplayName(row.actorClass),
+        kind: Number(row.inventoryType) === 4 ? "Placeable Storage" : "Vehicle Cargo",
+        actorClass: row.actorClass,
+        map: row.map,
+        partitionId: row.partitionId,
+        dimensionIndex: Number(row.dimensionIndex || 0),
+        position: { x: Number(row.x), y: Number(row.y), z: Number(row.z) },
+        itemCount: Number(row.itemCount || 0),
+        maxItemCount: Number(row.maxItemCount || 0),
+        usedVolume: Math.round(usedVolume * 100) / 100,
+        maxItemVolume: Number(row.maxItemVolume || 0),
+        volumeVerified: Object.keys(storedItems).every((template) => storageItemMetadata(template).volume > 0)
+      };
+    })
+  };
+}
+
+async function adminGiveItemToStorage(payload = {}) {
+  const playerId = String(payload.playerId || "").trim();
+  const template = String(payload.template || "").trim();
+  const inventoryId = requireInteger(payload.inventoryId, "storage inventory", 1);
+  const actorId = requireInteger(payload.actorId, "storage actor", 1);
+  const qty = requireInteger(payload.qty, "quantity", 1, 50000);
+  const grade = requireInteger(payload.quality ?? 0, "grade", 0, 5);
+  const mode = String(payload.mode || "dry-run").toLowerCase();
+  const dryRun = mode !== "execute";
+  if (!playerId) throw new Error("Choose the player associated with this storage deposit.");
+  if (!template || !/^[A-Za-z0-9_:.()+-]+$/.test(template)) throw new Error("Choose a valid item template.");
+  if (!dryRun && payload.confirmed !== true) throw new Error("Confirm the storage deposit before writing to the database.");
+  const playerPredicate = [
+    `ps.account_id::text = ${sqlString(playerId)}`,
+    `ps.player_controller_id::text = ${sqlString(playerId)}`,
+    `ps.player_pawn_id::text = ${sqlString(playerId)}`,
+    `ps.player_state_id::text = ${sqlString(playerId)}`,
+    `lower(ps.character_name) = lower(${sqlString(playerId)})`
+  ].join(" or ");
+  const precheckSql = `
+    with target_player as (
+      select ps.account_id::text account_id, coalesce(ps.character_name, ps.account_id::text) character_name,
+             coalesce(ps.online_status::text, 'unknown') online_status
+      from dune.player_state ps where ${playerPredicate}
+      order by ps.last_avatar_activity desc nulls last limit 1
+    ), target_storage as (
+      select i.id inventory_id, i.actor_id, i.inventory_type, coalesce(i.max_item_count, 0) max_item_count,
+             coalesce(i.max_item_volume, 0) max_item_volume, a.class, a.map, a.partition_id, a.dimension_index,
+             (select count(*)::int from dune.items it where it.inventory_id=i.id) item_count,
+             (select coalesce(max(it.position_index), -1)::bigint from dune.items it where it.inventory_id=i.id) max_position,
+             coalesce((select jsonb_object_agg(stacks.template_id, stacks.total) from (
+               select it.template_id, sum(it.stack_size) total from dune.items it where it.inventory_id=i.id group by it.template_id
+             ) stacks), '{}'::jsonb)::text item_stacks
+      from dune.inventories i join dune.actors a on a.id=i.actor_id
+      where i.id=${inventoryId} and i.actor_id=${actorId}
+        and (((i.inventory_type=4) and a.class ilike '%Container%') or (i.inventory_type=0 and coalesce(i.max_item_count,0)>0 and a.class ilike '%Vehicles%'))
+        and a.class not ilike '%PlayerCharacter%'
+    )
+    select case when not exists(select 1 from target_player) then 'player_not_found'
+                when lower((select online_status from target_player)) not in ('offline','disconnected','inactive') then 'player_not_offline'
+                when not exists(select 1 from target_storage) then 'storage_not_found'
+                else 'ready' end,
+           coalesce((select account_id from target_player),''), coalesce((select character_name from target_player),''),
+           coalesce((select online_status from target_player),''), coalesce((select class from target_storage),''),
+           coalesce((select map from target_storage),''), coalesce((select partition_id::text from target_storage),''),
+           coalesce((select dimension_index::text from target_storage),''), coalesce((select max_item_count::text from target_storage),'0'),
+           coalesce((select max_item_volume::text from target_storage),'0'), coalesce((select item_count::text from target_storage),'0'),
+           coalesce((select max_position::text from target_storage),'-1'), coalesce((select item_stacks from target_storage),'{}')
+  `;
+  const precheck = parseDbRows(await dbQuery(precheckSql, 15000), ["status", "accountId", "characterName", "onlineStatus", "actorClass", "map", "partitionId", "dimensionIndex", "maxItemCount", "maxItemVolume", "itemCount", "maxPosition", "itemStacks"])[0] || {};
+  if (precheck.status === "player_not_found") throw new Error("The selected player was not found.");
+  if (precheck.status === "player_not_offline") throw new Error(`${precheck.characterName || "Selected player"} must be offline before depositing items into storage. Current status: ${precheck.onlineStatus || "unknown"}.`);
+  if (precheck.status === "storage_not_found") throw new Error("The selected storage actor or inventory no longer exists. Refresh storage containers.");
+  if (precheck.status !== "ready") throw new Error(`Storage deposit precheck failed: ${precheck.status || "unknown"}.`);
+  const metadata = storageItemMetadata(template);
+  const stackCount = Math.ceil(qty / metadata.stackMax);
+  const availableSlots = Number(precheck.maxItemCount || 0) > 0 ? Number(precheck.maxItemCount) - Number(precheck.itemCount || 0) : Number.MAX_SAFE_INTEGER;
+  if (stackCount > availableSlots) throw new Error(`Storage needs ${stackCount} free slot(s), but only ${Math.max(0, availableSlots)} are available.`);
+  const itemVolume = metadata.volume * qty;
+  let itemStacks = {};
+  try { itemStacks = JSON.parse(precheck.itemStacks || "{}"); } catch {}
+  const volumeVerified = metadata.volume > 0 && Object.keys(itemStacks).every((storedTemplate) => storageItemMetadata(storedTemplate).volume > 0);
+  const usedVolume = Object.entries(itemStacks).reduce((sum, [storedTemplate, count]) => sum + storageItemMetadata(storedTemplate).volume * Math.max(0, Number(count) || 0), 0);
+  const maxItemVolume = Number(precheck.maxItemVolume || 0);
+  if (volumeVerified && maxItemVolume > 0 && usedVolume + itemVolume > maxItemVolume) throw new Error(`Storage volume would exceed capacity: ${Math.round((usedVolume + itemVolume) * 100) / 100} required / ${maxItemVolume} maximum.`);
+  const storage = { actorId: String(actorId), inventoryId: String(inventoryId), name: storageDisplayName(precheck.actorClass), actorClass: precheck.actorClass, map: precheck.map, partitionId: precheck.partitionId, dimensionIndex: Number(precheck.dimensionIndex || 0), itemCount: Number(precheck.itemCount || 0), maxItemCount: Number(precheck.maxItemCount || 0), usedVolume: Math.round(usedVolume * 100) / 100, maxItemVolume, volumeVerified };
+  if (dryRun) return { ok: true, dryRun: true, status: "dry-run-passed", transport: "database", player: { accountId: precheck.accountId, characterName: precheck.characterName, onlineStatus: precheck.onlineStatus }, storage, item: { id: template, name: giveItemDisplayName(template), qty, grade, stackCount, stackMax: metadata.stackMax, volume: itemVolume }, note: "Player is offline. Storage target, identity, and free slots were validated. No database write was performed." };
+  const statsJson = JSON.stringify({ FCustomizationStats: [[], {}], FItemStackAndDurabilityStats: [[], {}] });
+  const insertSql = `
+    begin;
+    set local search_path=dune,public;
+    do $$ begin
+      if not exists(select 1 from dune.player_state ps where (${playerPredicate}) and lower(coalesce(ps.online_status::text,'unknown')) in ('offline','disconnected','inactive')) then
+        raise exception 'Selected player is no longer offline';
+      end if;
+    end $$;
+    select i.id from dune.inventories i join dune.actors a on a.id=i.actor_id
+      where i.id=${inventoryId} and i.actor_id=${actorId}
+        and (((i.inventory_type=4) and a.class ilike '%Container%') or (i.inventory_type=0 and coalesce(i.max_item_count,0)>0 and a.class ilike '%Vehicles%'))
+      for update of i;
+    create temp table storage_grant_target on commit drop as
+      select i.id inventory_id, i.actor_id, coalesce(i.max_item_count,0)::int max_item_count,
+             (select count(*)::int from dune.items it where it.inventory_id=i.id) item_count,
+             (select coalesce(max(it.position_index),-1)::bigint from dune.items it where it.inventory_id=i.id) max_position
+      from dune.inventories i join dune.actors a on a.id=i.actor_id
+      where i.id=${inventoryId} and i.actor_id=${actorId}
+        and (((i.inventory_type=4) and a.class ilike '%Container%') or (i.inventory_type=0 and coalesce(i.max_item_count,0)>0 and a.class ilike '%Vehicles%'))
+      limit 1;
+    create temp table storage_grant_prepared on commit drop as
+      select nextval('dune.items_id_seq'::regclass) item_id, t.inventory_id,
+             least(${metadata.stackMax}, ${qty}-(n-1)*${metadata.stackMax})::bigint stack_size,
+             (t.max_position+n)::bigint position_index
+      from storage_grant_target t cross join generate_series(1,${stackCount}) n
+      where (t.max_item_count<=0 or t.item_count+${stackCount}<=t.max_item_count);
+    select dune.save_item(row(p.item_id,p.inventory_id,p.stack_size,p.position_index,${sqlString(template)},true,extract(epoch from clock_timestamp())::bigint,${sqlString(statsJson)}::jsonb,${grade},null)::dune.inventoryitem) from storage_grant_prepared p;
+    select case when count(*)=${stackCount} and coalesce(sum(i.stack_size),0)=${qty} then 'inserted' else 'verification_failed' end,
+           count(*)::text, coalesce(sum(i.stack_size),0)::text,
+           coalesce(string_agg(i.id::text,',' order by i.id),'')
+      from storage_grant_prepared p join dune.items i on i.id=p.item_id and i.inventory_id=p.inventory_id and i.template_id=${sqlString(template)};
+    commit;
+  `;
+  const resultRows = parseDbRows(await dbQuery(insertSql, 30000), ["status", "stackCount", "quantity", "itemIds"]);
+  const inserted = [...resultRows].reverse().find((row) => row.status === "inserted" || row.status === "verification_failed") || {};
+  if (inserted.status !== "inserted") throw new Error("Storage deposit did not pass post-write verification; inspect the database before retrying.");
+  const result = { ok: true, dryRun: false, status: "storage-inserted", transport: "database", verified: true, player: { accountId: precheck.accountId, characterName: precheck.characterName, onlineStatus: precheck.onlineStatus }, storage, item: { id: template, name: giveItemDisplayName(template), qty: Number(inserted.quantity || qty), grade, stackCount: Number(inserted.stackCount || stackCount), stackMax: metadata.stackMax, volume: itemVolume, itemIds: String(inserted.itemIds || "").split(",").filter(Boolean) }, note: "Inserted without restarting the battlegroup. Keep the player offline until the deposit is visible in game." };
+  appendAdminAudit("storage_item_deposited", { playerId, actorId, inventoryId, template, qty, grade, itemIds: result.item.itemIds });
+  return result;
+}
+
 function readManagerConfigFallback() {
   const config = defaultManagerConfig();
   if (!fs.existsSync(MANAGER_CONFIG_PATH)) return config;
@@ -15894,9 +16097,19 @@ function appPage() {
           <div class="field-grid mt">
             <label>Player Search<input id="givePlayerSearch" placeholder="Search player or account" oninput="renderPlayerSelect()"></label>
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
+            <label>Destination<select id="giveDestination" onchange="syncGiveDestination()"><option value="player">Player Inventory</option><option value="storage">Storage Container</option></select></label>
             <label>Quantity<input id="adminQty" type="number" min="1" max="50000" value="1" oninput="updateGiveTargetSummary()"></label>
             <label id="adminQualityWrap">Grade<input id="adminQuality" type="number" min="0" max="5" value="0" oninput="syncQualityWarning()"></label>
             <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute" selected>Live Give</option></select></label>
+            <div id="giveStorageFields" class="hidden" style="grid-column:1/-1">
+              <div class="field-grid">
+                <label>Storage Search<input id="giveStorageSearch" placeholder="Type, actor, map, or inventory" oninput="renderGiveStorageTargets()"></label>
+                <label>Storage<select id="giveStorageTarget" onchange="renderGiveStorageDetails();updateGiveTargetSummary()"></select></label>
+              </div>
+              <div class="action-row mt"><button type="button" onclick="refreshGiveStorageTargets()">Refresh Storage</button></div>
+              <div id="giveStorageDetails" class="empty mt">Choose a detected storage container.</div>
+              <div class="warning mt">Storage deposit writes directly to the selected container without restarting the battlegroup. The selected player must be offline and should remain offline until the item is visible in game.</div>
+            </div>
             <div class="give-primary-actions">
               <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
               <button id="addGiveQueueButton" onclick="addSelectedItemToGiveQueue()">Add to Queue</button>
@@ -16993,7 +17206,7 @@ let managerFrameCheckTimer=null;
 function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",playerRenamePreviewState=null,permissionState=null,baseCleanupState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,permissionState=null,baseCleanupState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
@@ -17474,7 +17687,13 @@ function wireDatabaseImportControls(){const file=document.getElementById("dbRest
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,databaseReachable:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]})]);const dbReachable=probe.databaseReachable===true||probe.ok===true;adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",dbReachable?"Reachable":"Limited");tone("adminDbMirror",dbReachable?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",dbReachable?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Unknown");tone("adminDbMirror","Unknown");badge("topDb","DB status unknown");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
-function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";if(!player||!item){el.innerHTML='<strong>Select player and item</strong><span>Choose a player, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory");el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
+function selectedGiveStorage(){const id=document.getElementById("giveStorageTarget")?.value||"";return giveStorageTargets.find(row=>String(row.inventoryId)===String(id))||null;}
+function giveStorageLabel(row){return (row.name||"Storage")+" / Actor "+row.actorId+" / "+row.itemCount+" of "+row.maxItemCount+" slots";}
+function renderGiveStorageTargets(){const select=document.getElementById("giveStorageTarget");if(!select)return;const current=select.value;const q=String(document.getElementById("giveStorageSearch")?.value||"").trim().toLowerCase();const rows=q?giveStorageTargets.filter(row=>[row.name,row.kind,row.actorId,row.inventoryId,row.map,row.partitionId].join(" ").toLowerCase().includes(q)):giveStorageTargets;select.innerHTML=rows.length?rows.map(row=>'<option value="'+esc(row.inventoryId)+'">'+esc(giveStorageLabel(row))+'</option>').join(""):'<option value="">No storage found</option>';if(rows.some(row=>String(row.inventoryId)===String(current)))select.value=current;renderGiveStorageDetails();}
+function renderGiveStorageDetails(){const el=document.getElementById("giveStorageDetails");if(!el)return;const row=selectedGiveStorage();if(!row){el.textContent="Choose a detected storage container.";return;}const pos=row.position||{};const volume=row.maxItemVolume>0?(row.usedVolume+" / "+row.maxItemVolume+(row.volumeVerified?"":" estimated")):"Not limited";el.innerHTML='<div class="detail-row"><span class="subtle">Target</span><strong>'+esc(row.name)+" / "+esc(row.kind)+'</strong></div><div class="detail-row"><span class="subtle">Identity</span><strong>Actor '+esc(row.actorId)+' / Inventory '+esc(row.inventoryId)+'</strong></div><div class="detail-row"><span class="subtle">Location</span><strong>'+esc(row.map||"Unknown")+' / P'+esc(row.partitionId||"-")+' / D'+esc(row.dimensionIndex)+' / '+esc(Math.round(pos.x||0))+', '+esc(Math.round(pos.y||0))+', '+esc(Math.round(pos.z||0))+'</strong></div><div class="detail-row"><span class="subtle">Capacity</span><strong>'+esc(row.itemCount)+' / '+esc(row.maxItemCount)+' slots / Volume '+esc(volume)+'</strong></div>';}
+async function refreshGiveStorageTargets(){const el=document.getElementById("giveStorageDetails");try{if(el)el.textContent="Loading storage containers...";const data=await getJson("/api/admin/storage-targets",{timeoutMs:20000});giveStorageTargets=data.storages||[];renderGiveStorageTargets();updateGiveTargetSummary();return data;}catch(e){giveStorageTargets=[];renderGiveStorageTargets();if(el){el.className="warning mt";el.textContent=betterError(e);}return null;}}
+function syncGiveDestination(){const storage=document.getElementById("giveDestination")?.value==="storage";document.getElementById("giveStorageFields")?.classList.toggle("hidden",!storage);if(storage&&!giveStorageTargets.length)refreshGiveStorageTargets();syncQualityWarning();syncGiveItemControls();updateGiveTargetSummary();}
+function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
 function progressionPlayerLookupValue(p){return String(p?.player_controller_id||p?.character_id||p?.player_pawn_id||p?.id||p?.character_name||p?.name||"").trim();}
 function renderProgressionPlayerSelect(){const select=document.getElementById("progressionPlayerSelect");if(!select)return;const current=select.value;const options=adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);const meta=[p.player_controller_id&&("controller "+p.player_controller_id),p.character_id&&("character "+p.character_id),p.online_status||p.status].filter(Boolean).join(" / ");return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+(meta?" / "+meta:""))+'</option>':"";}).filter(Boolean).join("");select.innerHTML='<option value="">Choose detected player...</option>'+(options||'<option value="" disabled>No detected players</option>');if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
 async function refreshProgressionPlayers(){const select=document.getElementById("progressionPlayerSelect");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();renderProgressionPlayerSelect();addActivity("progression","Progression players loaded",adminPlayers.length+" detected players");return data;}catch(e){if(select)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Progression players failed",e.message);return null;}}
@@ -17672,7 +17891,7 @@ let gradeRelogChoiceNoticeShown=false;
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;input.min=0;input.max=5;if(!supported)input.value=0;else{const grade=Number(input.value||0);if(Number.isFinite(grade)&&grade<0)input.value=0;if(Number.isFinite(grade)&&grade>5)input.value=5;if(usesRelogGrade(input.value)&&!gradeRelogChoiceNoticeShown){gradeRelogChoiceNoticeShown=true;setTimeout(()=>showGradeRelogPopup("items"),0);}}}if(warning){warning.classList.toggle("hidden",false);warning.textContent=supported?"Grade 1-5 uses a database-backed grant and may require relog or inventory refresh. Grade 0 uses the live receiver.":"Grade giving is not supported by the current receiver method.";}syncGiveItemControls();}
 function usesRelogGrade(value){const grade=Number(value||0);return Number.isFinite(grade)&&grade>=1&&grade<=5;}
 async function showGradeRelogPopup(context="item"){await appAlert("Player relog required","Grade 1-5 "+context+" are written directly to the database. The player must relog before the item appears in their inventory.","I Understand");}
-function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(selectedAdminItem)};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");return payload;}
+function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const destination=document.getElementById("giveDestination")?.value||"player";const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(selectedAdminItem),destination};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");if(destination==="storage"){const storage=selectedGiveStorage();if(!storage)throw new Error("Choose a storage container first.");payload.actorId=storage.actorId;payload.inventoryId=storage.inventoryId;}return payload;}
 function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Grade "+row.quality:"")+(row.grantKind?" / "+row.grantKind:"");}
 function updateGiveQueueSummary(processed=0,total=giveQueue.length,succeeded=0,failed=0){const el=document.getElementById("giveQueueSummary");if(el)el.textContent="Progress: "+processed+" / "+total+" · Succeeded: "+succeeded+" · Failed: "+failed;const retry=document.getElementById("retryGiveQueueButton");if(retry)retry.disabled=!lastGiveQueueFailedItems.length||liveGiveBusy;syncGiveItemControls();}
 function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span>'+(row.grantKind?'<br><span class="subtle">'+esc(row.grantKind)+'</span>':'')+'</span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
@@ -17697,15 +17916,40 @@ async function deleteGiveQueuePreset(){const log=document.getElementById("giveQu
 async function exportGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{const name=selectedGiveQueuePresetName();if(!name)throw new Error("Choose a preset first.");const data=await getJson("/api/live-give/queue-presets/get?name="+encodeURIComponent(name));const json=JSON.stringify(data.preset,null,2);const blob=new Blob([json],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=(data.preset.name||"give-queue-preset").replace(/[^A-Za-z0-9_.-]+/g,"-")+".json";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);if(log)log.value="Exported preset: "+data.preset.name;playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
 async function importGiveQueuePresetFile(event){const input=event.target;const log=document.getElementById("giveQueueLog");try{setGiveQueuePresetValidation("");const file=input.files&&input.files[0];if(!file)return;const text=await file.text();const preset=JSON.parse(text);preset.items=normalizeClientPresetItems(preset.items);preset.name=String(preset.name||giveQueuePresetInputName()||file.name.replace(/\\.json$/i,"")).trim();if(!preset.name){setGiveQueuePresetValidation("Enter a preset name before importing this file.");document.getElementById("giveQueuePresetName")?.focus();playUiSound("warning");return;}if(giveQueuePresetExists(preset.name)&&!(await appConfirm("Overwrite preset","A preset named '"+preset.name+"' already exists. Overwrite it?","Overwrite","Cancel")))return;const data=await getJson("/api/live-give/queue-presets/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({preset})});if(log)log.value="Imported preset: "+data.preset.name+"\\nItems: "+data.preset.items.length;await refreshGiveQueuePresets();const select=document.getElementById("giveQueuePresetSelect");if(select)select.value=data.preset.name;setGiveQueuePresetName(data.preset.name);playUiSound("success");}catch(e){if(log)log.value="Import failed: "+betterError(e);playUiSound("warning");}finally{if(input)input.value="";}}
 function isServerOnlineStatus(data){if(data?.runtimeTransport&&typeof data.runtimeTransport.serverOnline==="boolean")return data.runtimeTransport.serverOnline;return mapServerSummary(data).online;}
-function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const button=document.getElementById("adminGiveButton");if(button)button.textContent=mode==="execute"?"Publish Live Give":"Give Item";updateGiveTargetSummary();syncLiveGiveTransportStatus();syncGiveItemControls();}
+function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const storage=document.getElementById("giveDestination")?.value==="storage";const button=document.getElementById("adminGiveButton");if(button)button.textContent=storage?(mode==="execute"?"Deposit to Storage":"Test Storage Deposit"):(mode==="execute"?"Publish Live Give":"Give Item");updateGiveTargetSummary();syncLiveGiveTransportStatus();syncGiveItemControls();}
 function syncGiveItemResultFromLog(){if(!document.getElementById("give")?.classList.contains("active"))return;const source=document.getElementById("adminLog");const result=document.getElementById("giveItemResult");const detail=document.getElementById("giveItemResultDetail");const message=String(source?.textContent||"").trim();if(detail)detail.textContent=message||"No Give Item request has run.";if(result){const summary=message.split(/\r?\n/).find(Boolean)||"Ready to give an item.";result.className=(/failed|error|unavailable|offline|blocked/i.test(summary)?"warning":"empty")+" give-result";result.textContent=summary;}}
 function wireGiveItemResult(){const source=document.getElementById("adminLog");if(!source||source.dataset.giveResultWired)return;source.dataset.giveResultWired="true";new MutationObserver(syncGiveItemResultFromLog).observe(source,{childList:true,characterData:true,subtree:true});syncGiveItemResultFromLog();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
-function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(mode==="execute"&&!usesDbGrade&&!adminLiveGiveAvailable);if(give)give.disabled=blocked;if(add)add.disabled=liveGiveBusy||!selectedAdminItem;if(queue)queue.disabled=blocked||!giveQueue.length;if(retry)retry.disabled=blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
+function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(!storageMode&&mode==="execute"&&!usesDbGrade&&!adminLiveGiveAvailable);if(give)give.disabled=blocked||(storageMode&&!selectedGiveStorage());if(add){add.disabled=storageMode||liveGiveBusy||!selectedAdminItem;add.title=storageMode?"Give Queue currently targets player inventory only.":"Add selected item to Give Queue";}if(queue)queue.disabled=storageMode||blocked||!giveQueue.length;if(retry)retry.disabled=storageMode||blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const receiver=await getJson("/api/receiver/status",{timeoutMs:5000});liveGiveServerOnline=Boolean(receiver.ok);adminLiveGiveAvailable=Boolean(receiver.ok);liveGiveTransport={mode:"http-json",configured:Boolean(receiver.ok),reachable:Boolean(receiver.ok),target:receiver.giveUrl||"",reason:receiver.ok?"":(receiver.reason||receiver.error||"Receiver is offline.")};liveGiveUnavailableMessage=receiver.ok?"":liveGiveTransportMessage(liveGiveTransport);setGiveServerStatus(receiver.ok?"Server Status: Online. Give Item receiver is available.":"Server Status: Offline. "+(receiver.reason||receiver.error||"Receiver is offline."),receiver.ok?"ok":"warn");syncLiveGiveTransportStatus();return receiver;}catch(receiverError){try{const env=await getJson("/api/live-give/env",{timeoutMs:8000});adminLiveGiveAvailable=Boolean(env.liveGiveAvailable);liveGiveTransport=env.giveTransport||liveGiveTransport;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(env.message||liveGiveTransportMessage(liveGiveTransport||env));liveGiveServerOnline=adminLiveGiveAvailable||Boolean(env.giveTransport?.reachable);setGiveServerStatus(liveGiveServerOnline?(adminLiveGiveAvailable?"Server Status: Online. Give Item is available.":"Server Status: Receiver online. Live Give transport is limited."):"Server Status: Offline. "+(liveGiveUnavailableMessage||env.error||"Start the server before using Give Item."),liveGiveServerOnline?"ok":"warn");syncLiveGiveTransportStatus();return env;}catch(envError){liveGiveServerOnline=false;adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(receiverError)+" / "+betterError(envError);setGiveServerStatus("Server Status: Offline. "+liveGiveUnavailableMessage,"warn");syncLiveGiveTransportStatus();return null;}}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
-async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="execute";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();updateGiveTargetSummary();syncGiveItemControls();await Promise.all([refreshGivePlayersFast(),refreshGiveItemsFast(),checkGiveItemServerStatus()]);syncLiveGiveMode();}
+async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="execute";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncGiveDestination();updateGiveTargetSummary();syncGiveItemControls();await Promise.all([refreshGivePlayersFast(),refreshGiveItemsFast(),checkGiveItemServerStatus()]);syncLiveGiveMode();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const usesDbGrade=usesRelogGrade(payload.quality);if(!usesDbGrade){log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();}else log.textContent=mode==="execute"?"Preparing database grade grant...":"Running database grade dry-run...";if(mode==="execute"){if(!usesDbGrade&&!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}if(usesDbGrade)await showGradeRelogPopup("items");log.textContent=usesDbGrade?"Writing grade item to player inventory...":"Publishing Live Give...";addActivity("grant",usesDbGrade?"Database grade grant":"Publishing Live Give",payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status=usesDbGrade?"Database grade grant failed.":"Live Give failed.";if(data.status==="db-inserted")status="Database grade grant inserted.";else if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),player:data.player||null,inventory:data.inventory||null,item:data.item||null,timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent=usesDbGrade?"Running database grade Dry-Run...":"Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,player:data.player||null,inventory:data.inventory||null,item:data.item||null,command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
+const giveAdminItemPlayerInventory=giveAdminItem;
+giveAdminItem=async function(){
+  const destination=document.getElementById("giveDestination")?.value||"player";
+  if(destination!=="storage")return giveAdminItemPlayerInventory();
+  const log=document.getElementById("adminLog");
+  if(liveGiveBusy)return;
+  try{
+    liveGiveBusy=true;syncGiveItemControls();
+    const payload=adminGivePayload();
+    const mode=document.getElementById("liveGiveMode")?.value||"dry-run";
+    const storage=selectedGiveStorage();
+    const player=selectedPlayer();
+    if(!storage)throw new Error("Choose a storage container first.");
+    if(mode==="execute"&&!(await appConfirm("Deposit item into storage","Deposit "+payload.qty+" x "+(selectedAdminItem?.name||payload.template)+" into "+storage.name+"?\n\nActor "+storage.actorId+" / Inventory "+storage.inventoryId+"\nPlayer: "+playerLabel(player||{})+" must be offline and should remain offline until the item appears.","Deposit Item","Cancel")))return;
+    log.textContent=mode==="execute"?"Validating offline player and depositing into storage...":"Testing storage target and capacity...";
+    const data=await getJson("/api/admin/give-storage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode,confirmed:mode==="execute"}),timeoutMs:60000});
+    const status=mode==="execute"?"Storage deposit verified.":"Storage dry-run passed.";
+    log.textContent=status+"\n"+(data.note||"")+"\n\n"+JSON.stringify({status:data.status,verified:Boolean(data.verified),player:data.player,storage:data.storage,item:data.item},null,2);
+    addActivity("grant",status,(selectedAdminItem?.name||payload.template)+" -> Actor "+storage.actorId);
+    showToast(status,"success");
+    await refreshGiveStorageTargets();
+    playUiSound("success");
+  }catch(e){log.textContent=betterError(e);addActivity("error","Storage deposit failed",e.message);showToast(betterError(e),"error");playUiSound("warning");}
+  finally{liveGiveBusy=false;syncGiveItemControls();}
+};
 const giveAdminItemWithoutSentToast=giveAdminItem;
 giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");const notice=selectedAdminItem?giveItemSchematicNotice(selectedAdminItem):"";if(log&&notice&&text&&!text.includes(notice))log.textContent=text+"\\n\\nNote: "+notice;if(/Live Give (verified|published)/i.test(text))showToast(notice?"Research unlock sent":"Item sent","success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
@@ -18424,6 +18668,29 @@ async function route(req, res) {
       await json(res, result, result.ok || result.dryRun ? 200 : 409);
     } catch (error) {
       await json(res, { ok: false, error: error.message, timings: error.timings || {} }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/storage-targets" && req.method === "GET") {
+    try { await json(res, await adminStorageTargets()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/give-storage" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      if (String(body.mode || "dry-run").toLowerCase() === "execute") {
+        const result = await runTrackedOperation(`storage:deposit:${body.inventoryId || "unknown"}`, "Storage Item Deposit", async ({ update }) => {
+          update("Validating storage deposit", `Actor ${body.actorId || "unknown"} / Inventory ${body.inventoryId || "unknown"}`);
+          return adminGiveItemToStorage(body);
+        }, { category: "players", detail: `${body.template || "Item"} -> storage ${body.inventoryId || "unknown"}` });
+        await json(res, result);
+      } else {
+        await json(res, await adminGiveItemToStorage(body));
+      }
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, error instanceof OperationBusyError ? failure.statusCode : 400);
     }
     return;
   }

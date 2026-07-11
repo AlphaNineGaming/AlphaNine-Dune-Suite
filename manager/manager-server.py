@@ -39,7 +39,10 @@ def default_ssh_key():
 DEFAULT_MANAGER_CONFIG = {
     "vmIp": "",
     "sshKeyPath": default_ssh_key(),
+    "sshUser": "dune",
     "battlegroup": "",
+    "namespace": "",
+    "source": "",
 }
 
 
@@ -57,7 +60,7 @@ def read_manager_config():
 
 def sanitize_manager_config(payload):
     config = read_manager_config()
-    for key in ("vmIp", "sshKeyPath", "battlegroup"):
+    for key in ("vmIp", "sshKeyPath", "sshUser", "battlegroup", "namespace", "source"):
         if key in payload:
             config[key] = str(payload.get(key, "")).strip()
     return config
@@ -80,7 +83,7 @@ def connection_values(require_battlegroup=False):
         raise RuntimeError("Server setup needs an SSH key path.")
     if require_battlegroup and not battlegroup:
         raise RuntimeError("Server setup needs a battlegroup ID.")
-    namespace = f"funcom-seabass-{battlegroup}" if battlegroup else ""
+    namespace = config.get("namespace", "").strip() or (f"funcom-seabass-{battlegroup}" if battlegroup else "")
     return config, vm_ip, ssh_key, battlegroup, namespace
 
 

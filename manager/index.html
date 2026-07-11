@@ -1338,20 +1338,10 @@
             <span class="switch"><input id="serverStormToggle" type="checkbox" checked><span class="track"></span><span id="serverStormToggleText">Enabled</span></span>
           </label>
           <div class="setup-grid">
-            <label>VM IP<input class="setup-input" id="setupVmIp" placeholder="192.168.1.11" aria-label="Dune server VM IP"></label>
-            <label>Battlegroup<input class="setup-input" id="setupBattlegroup" placeholder="sh-..." aria-label="Dune battlegroup ID"></label>
+            <label>VM connection<input class="setup-input" id="setupVmIp" readonly aria-label="VM connection detected by the Suite"></label>
+            <label>Battlegroup<input class="setup-input" id="setupBattlegroup" readonly aria-label="Battlegroup selected by the Suite"></label>
           </div>
-          <label class="setup-wide">SSH key path<input class="setup-input" id="setupSshKeyPath" placeholder="C:\Users\...\DuneAwakeningServer\sshKey" aria-label="SSH key path"></label>
-          <div class="server-row setup-actions">
-            <button class="btn" id="saveSetupBtn" title="Save server setup">
-              <svg viewBox="0 0 24 24" fill="none"><path d="M5 4h12l2 2v16H5zM8 4v7h9M8 18h8" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-              Save Setup
-            </button>
-            <button class="btn" id="detectBattlegroupBtn" title="Detect battlegroups from the server">
-              <svg viewBox="0 0 24 24" fill="none"><path d="M4 12h4l2-6 4 12 2-6h4M12 3v2m0 14v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              Detect
-            </button>
-          </div>
+          <label class="setup-wide">SSH key<input class="setup-input" id="setupSshKeyPath" readonly aria-label="SSH key detected by the Suite"></label>
           <div class="server-status" id="serverStatus">Ready to apply real self-hosted UserSettings. Applying restarts the battlegroup.</div>
         </div>
         <div class="server-panel weekly-patch">
@@ -1778,7 +1768,7 @@
 
     async function loadServerSetup() {
       try {
-        const response = await fetch(configEndpoint());
+        const response = await fetch("/manager-api/api/server/suite-connection");
         if (!response.ok) throw new Error(`Server returned ${response.status}`);
         const data = await response.json();
         writeSetup(data.config || {});
@@ -1786,9 +1776,8 @@
           setServerStatus(`Manager service warning: ${data.warning}`, "warn");
           return;
         }
-        if (!(data.config?.vmIp && data.config?.battlegroup)) {
-          setServerStatus("Add your VM IP, SSH key, and battlegroup, then save setup.");
-        }
+        if (!data.config?.ready) setServerStatus(`Suite startup still needs: ${(data.config?.missing || []).join(", ")}. Complete Suite Setup and select a battlegroup.`, "warn");
+        else setServerStatus("Connection loaded automatically from Suite startup. Ready to apply real self-hosted UserSettings.", "ok");
       } catch (error) {
         setServerStatus("Could not reach the suite manager service. Restart AlphaNine Dune Suite and try again.", "error");
       }
@@ -2139,8 +2128,6 @@
     document.querySelector("#setServerBtn").addEventListener("click", setServerSettings);
     document.querySelector("#setServerSideBtn").addEventListener("click", setServerSettings);
     document.querySelector("#refreshServerBtn").addEventListener("click", refreshServerSettings);
-    document.querySelector("#saveSetupBtn").addEventListener("click", handleSaveSetup);
-    document.querySelector("#detectBattlegroupBtn").addEventListener("click", detectBattlegroup);
     document.querySelector("#landsraadPreviewBtn").addEventListener("click", previewLandsraadPatch);
     document.querySelector("#landsraadApplyBtn").addEventListener("click", applyLandsraadPatch);
     document.querySelector("#importBtn").addEventListener("click", () => document.querySelector("#fileInput").click());

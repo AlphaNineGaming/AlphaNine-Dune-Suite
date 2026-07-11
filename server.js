@@ -9,6 +9,7 @@ const crypto = require("crypto");
 const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
+const { OperationRegistry, OperationBusyError } = require("./lib/operations");
 const {
   PLAYER_RENAME_MAX_LENGTH,
   sanitizePlayerRenameName,
@@ -72,6 +73,8 @@ function packagedChildCwd() {
 const MANAGER_DIR = packagedUnpackedPath("manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
 const DATA_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "data") : path.join(__dirname, "data");
+const OPERATION_HISTORY_PATH = path.join(DATA_DIR, "operations.json");
+const operationRegistry = new OperationRegistry(OPERATION_HISTORY_PATH, { maxHistory: 100 });
 const UI_OVERRIDE_CSS_PATH = path.join(DATA_DIR, "ui-overrides.css");
 const BUNDLED_DATA_DIR = packagedAssetPath("data");
 const BUNDLED_UI_OVERRIDE_CSS_PATH = path.join(BUNDLED_DATA_DIR, "ui-overrides.css");
@@ -5602,6 +5605,7 @@ function publicRestoreJob(job) {
   return {
     ok: job.status !== "failed",
     jobId: job.jobId,
+    operationId: job.operation?.id || "",
     status: job.status,
     step: job.step,
     startedAt: job.startedAt,
@@ -5618,12 +5622,32 @@ function publicRestoreJob(job) {
   };
 }
 
+function operationsSnapshot() {
+  return operationRegistry.snapshot();
+}
+
+async function runTrackedOperation(key, title, task, details = {}) {
+  const tracked = await operationRegistry.run(key, title, task, details);
+  if (tracked.result && typeof tracked.result === "object" && !Array.isArray(tracked.result)) {
+    return { ...tracked.result, operation: tracked.operation };
+  }
+  return { ok: true, result: tracked.result, operation: tracked.operation };
+}
+
+function operationErrorResponse(error) {
+  if (error instanceof OperationBusyError || error?.code === "operation_busy") {
+    return { statusCode: 409, payload: { ok: false, code: "operation_busy", error: error.message, operation: error.operation || null } };
+  }
+  return { statusCode: 500, payload: { ok: false, error: error.message, operation: error.operation || null } };
+}
+
 function restoreJobStep(job, step, extra = {}) {
   job.step = step;
   if (Object.prototype.hasOwnProperty.call(extra, "verificationSubstep")) job.verificationSubstep = extra.verificationSubstep || "";
   if (Object.prototype.hasOwnProperty.call(extra, "verificationDetail")) job.verificationDetail = extra.verificationDetail || "";
   job.updatedAt = new Date().toISOString();
   job.history.push({ at: job.updatedAt, step, ...extra });
+  if (job.operation) operationRegistry.update(job.operation, step, extra.verificationSubstep || extra.verificationDetail || "");
   databaseBackupAudit("database_import_step_changed", { jobId: job.jobId, step, ...extra });
 }
 
@@ -5633,10 +5657,16 @@ function finishRestoreJob(job, status, result = {}) {
   job.durationMs = new Date(job.completedAt).getTime() - new Date(job.startedAt).getTime();
   job.result = result;
   if (status === "failed") job.error = result.error || "Restore failed or could not be verified.";
+  if (job.operation) operationRegistry.finish(job.operation, status === "failed" ? "failed" : "success", job.error || "");
 }
 
 function startDatabaseRestoreJob(payload = {}) {
   const jobId = `import-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const operation = operationRegistry.begin("database:import", "Database Import", {
+    category: "database",
+    stage: "Pending",
+    detail: path.basename(String(payload.filePath || "Selected backup"))
+  });
   const job = {
     jobId,
     status: "pending",
@@ -5650,6 +5680,7 @@ function startDatabaseRestoreJob(payload = {}) {
     history: [],
     timeline: RESTORE_TIMELINE_STEPS
   };
+  Object.defineProperty(job, "operation", { value: operation, enumerable: false, writable: false });
   databaseRestoreJobs.set(jobId, job);
   databaseBackupAudit("database_import_started", { jobId, filePath: job.payload.filePath });
   restoreJobStep(job, "Pending");
@@ -13126,7 +13157,7 @@ function logPythonResolution(resolved) {
 
 function defaultManagerConfig() {
   const sshKeyPath = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "DuneAwakeningServer", "sshKey") : "";
-  return { vmIp: "", sshKeyPath, battlegroup: "" };
+  return { vmIp: "", sshKeyPath, sshUser: "dune", battlegroup: "", namespace: "", source: "" };
 }
 
 function readManagerConfigFallback() {
@@ -13145,12 +13176,40 @@ function readManagerConfigFallback() {
 
 function writeManagerConfigFallback(payload) {
   const config = readManagerConfigFallback();
-  for (const key of ["vmIp", "sshKeyPath", "battlegroup"]) {
+  for (const key of ["vmIp", "sshKeyPath", "sshUser", "battlegroup", "namespace", "source"]) {
     if (Object.prototype.hasOwnProperty.call(payload || {}, key)) config[key] = String(payload[key] || "").trim();
   }
   fs.mkdirSync(MANAGER_DATA_DIR, { recursive: true });
   fs.writeFileSync(MANAGER_CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
   return config;
+}
+
+function managerConnectionFromSuite(configValue = loadConfig()) {
+  const selected = normalizeSelectedBattlegroup(configValue.selectedBattlegroup);
+  const key = sshKeyStatus(configValue.sshKey || configValue.receiverSshKey || defaultSshKeyPath());
+  const vmIp = String(configValue.sshHost || configValue.vmIp || configValue.receiverSshHost || "").trim();
+  return {
+    vmIp,
+    sshKeyPath: key.path || "",
+    sshUser: String(configValue.sshUser || configValue.receiverSshUser || "dune").trim(),
+    battlegroup: selected?.name || "",
+    namespace: selected?.namespace || "",
+    source: "AlphaNine Dune Suite startup"
+  };
+}
+
+function syncManagerConnectionFromSuite(configValue = loadConfig()) {
+  const runtime = managerConnectionFromSuite(configValue);
+  const saved = writeManagerConfigFallback(runtime);
+  return {
+    ...saved,
+    ready: Boolean(saved.vmIp && saved.sshKeyPath && saved.battlegroup && saved.namespace),
+    missing: [
+      !saved.vmIp && "VM IP",
+      !saved.sshKeyPath && "SSH key",
+      !(saved.battlegroup && saved.namespace) && "battlegroup"
+    ].filter(Boolean)
+  };
 }
 
 function managerFallbackWarning() {
@@ -13320,6 +13379,11 @@ function spawnManagerProcess(resolved, useShell, reason) {
 async function proxyToManager(req, res, pathname) {
   startManagerService();
   const managerPath = pathname.replace(/^\/manager-api/, "");
+  const suiteConnection = syncManagerConnectionFromSuite();
+  if (managerPath === "/api/server/suite-connection" && req.method === "GET") {
+    await json(res, { ok: suiteConnection.ready, config: suiteConnection });
+    return;
+  }
   if (managerStartError && await handleManagerFallback(req, res, managerPath)) return;
   const target = `http://127.0.0.1:${MANAGER_PORT}${managerPath}`;
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : await readBody(req);
@@ -13923,6 +13987,14 @@ function appPage() {
     .tab::before { content:""; flex:0 0 auto; width:8px; height:8px; border:1px solid currentColor; transform:rotate(45deg); box-shadow:0 0 8px currentColor; opacity:.72; }
     .tab.active, .tab:hover { color:var(--text); border-color:var(--line); background:rgba(246,202,135,.1); box-shadow:inset 0 0 22px rgba(246,202,135,.07), 0 0 14px rgba(224,173,99,.09); }
     .tab.active { font-size:12px; font-weight:850; }
+    .tab #operationsNavCount { margin-left:auto; min-width:20px; text-align:center; color:var(--gold-bright); font-size:10px; }
+    .operation-row { display:grid; grid-template-columns:minmax(190px,1.2fr) minmax(150px,.8fr) minmax(220px,1.4fr) 110px; gap:12px; align-items:start; padding:10px 0; border-bottom:1px solid rgba(255,255,255,.07); }
+    .operation-row:last-child { border-bottom:0; }
+    .operation-row strong,.operation-row span { min-width:0; overflow-wrap:anywhere; }
+    .operation-status { display:inline-flex; width:max-content; padding:3px 7px; border:1px solid var(--line); color:var(--muted); font-size:10px; text-transform:uppercase; }
+    .operation-status.running,.operation-status.pending { color:var(--gold-bright); border-color:rgba(214,166,69,.45); }
+    .operation-status.success { color:var(--ok); border-color:rgba(93,217,139,.36); }
+    .operation-status.failed,.operation-status.interrupted { color:var(--danger); border-color:rgba(255,110,102,.42); }
     body.sidebar-collapsed .tab { width:46px; min-height:46px; justify-content:center; padding:0; gap:0; font-size:0; letter-spacing:0; }
     body.sidebar-collapsed .tab.active { font-size:0; }
     body.sidebar-collapsed .tab::before { margin:0; }
@@ -15248,6 +15320,7 @@ function appPage() {
       .topbar-actions,.status-strip,.controls,.action-row,.primary-action-row,.hero-actions{justify-content:flex-start}
       .button,.controls button,button{min-height:42px}
       .panel-head,.hero-actions,.preset-name-row,.give-sidebar .preset-name-row,.live-map-toolbar,.feed-row,.ops-row,.detail-row,.path-picker-row{grid-template-columns:1fr}
+      .operation-row{grid-template-columns:1fr;gap:5px}
       #marketListings{max-width:100%}
       .panel-head{align-items:flex-start}
       .suite-health-strip,.field-grid,.settings-grid,.test-grid,.progression-bars,.progression-editor-grid,.progression-compact-support{grid-template-columns:1fr}
@@ -15457,33 +15530,43 @@ function appPage() {
     </div>
     <nav class="nav">
       <div class="nav-group">
-        <div class="nav-group-title">Main</div>
+        <div class="nav-group-title">Overview</div>
         <button class="tab active" data-view="dashboard">Dashboard</button>
-        <button class="tab" data-view="live-map">Live Map</button>
+        <button class="tab" data-view="operations">Operations <span id="operationsNavCount"></span></button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">Server</div>
+        <button class="tab" data-view="server">Server Control</button>
+        <button class="tab" data-view="management">Server Management</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">Players</div>
         <button class="tab" data-view="players">Players</button>
         <button class="tab" data-view="give">Give Item</button>
         <button class="tab" data-view="progression">Progression Inspector</button>
       </div>
       <div class="nav-group">
-        <div class="nav-group-title">Server</div>
-        <button class="tab" data-view="server">Server Control</button>
-        <button class="tab" data-view="database">Database</button>
+        <div class="nav-group-title">World</div>
+        <button class="tab" data-view="live-map">Live Map</button>
         <button class="tab" data-view="cleanup">Server Cleanup</button>
-        <button class="tab" data-view="management">Server Management</button>
       </div>
       <div class="nav-group">
-        <div class="nav-group-title">Tools</div>
-        <button class="tab" data-view="web-portal">Web Portal</button>
-        <button class="tab" data-view="item-database">Item Database</button>
+        <div class="nav-group-title">Economy</div>
         <button class="tab" data-view="market">Market Bot</button>
-        <button class="tab" data-view="settings">Settings</button>
       </div>
-      <div class="nav-group advanced-nav">
-        <div class="nav-group-title">Advanced</div>
+      <div class="nav-group">
+        <div class="nav-group-title">Data</div>
+        <button class="tab" data-view="database">Database</button>
+        <button class="tab" data-view="item-database">Item Database</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">System</div>
+        <button class="tab" data-view="web-portal">Web Portal</button>
+        <button class="tab" data-view="settings">Settings</button>
+        <button class="tab" data-view="diagnostics">Setup Doctor</button>
         <button class="tab advanced-only hidden" data-view="admin" aria-hidden="true" tabindex="-1">Admin Tools</button>
         <button class="tab advanced-only" data-view="env">Env Setup</button>
         <button class="tab advanced-only" data-view="logs">Logs</button>
-        <button class="tab" data-view="diagnostics">Setup Doctor</button>
       </div>
     </nav>
     <div class="sidebar-foot">
@@ -15620,6 +15703,7 @@ function appPage() {
             <button data-open="market">Market Bot</button>
             <button data-open="players">Players</button>
             <button data-open="server">Server Control</button>
+            <button data-open="operations">Operations</button>
             <button onclick="refreshAll()">Refresh All</button>
           </div>
           <div class="sound-widget advanced-only" aria-label="UI sound controls">
@@ -15634,6 +15718,29 @@ function appPage() {
             <span>Need help? Join our Discord: <a href="https://discord.gg/RQsVw2vyg" target="_blank" rel="noopener">https://discord.gg/RQsVw2vyg</a></span>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section id="operations" class="view">
+      <div class="grid four">
+        <div class="panel pad metric-tile"><div class="label">Active</div><div id="operationsActiveCount" class="value">0</div><div class="subtle">Currently running.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Completed</div><div id="operationsSuccessCount" class="value">0</div><div class="subtle">Recent successful work.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Failed</div><div id="operationsFailedCount" class="value">0</div><div class="subtle">Needs review.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Interrupted</div><div id="operationsInterruptedCount" class="value">0</div><div class="subtle">Verify before retrying.</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div>
+            <div class="label">Operation History</div>
+            <div class="subtle">Long-running Suite work, duplicate-action protection, and restart recovery state.</div>
+          </div>
+          <div class="action-row">
+            <button type="button" onclick="refreshOperations()">Refresh</button>
+            <button type="button" onclick="clearCompletedOperations()">Clear Completed</button>
+          </div>
+        </div>
+        <div id="operationsStatus" class="empty mt">Loading operation history...</div>
+        <div id="operationsRows" class="mt"><div class="empty">No operations recorded.</div></div>
       </div>
     </section>
 
@@ -16863,6 +16970,7 @@ const WEB_PORTAL_URLS=${JSON.stringify(portalUrls)};
 const tabs=[...document.querySelectorAll(".tab")], views=[...document.querySelectorAll(".view")];
 const viewCopy={
   dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
+  operations:["Operations","Persistent progress, duplicate-action protection, and recent Suite work."],
   players:["Players","Search, inspect, and select characters for admin actions."],
   give:["Give Item","Live item grants through the configured receiver."],
   market:["Market Bot","Automatic NPC stock control, player-listing purchases, and manual market tools."],
@@ -16882,10 +16990,11 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",playerRenamePreviewState=null,permissionState=null,baseCleanupState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let operationsState={active:[],operations:[]};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -17164,6 +17273,11 @@ async function refreshAfterTeleport(payload,data){
 async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){status.className=(liveTeleportReady?"empty mt":"warning mt")+" advanced-status";status.textContent=!liveTeleportReady?(data.reasons||["Live Teleport unavailable."]).join(" "):"Live Teleport ready. Map-click and drag destinations send directly; exact player targets still use resolved preview.";}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt advanced-status";status.textContent=betterError(e);}return null;}}
 async function previewTeleport(){const payload={...teleportPayload(),requestMode:"preview"};invalidateTeleportPreview();document.getElementById("teleportLog").textContent="Preview requested. No command will be sent.";try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||null;const sent=liveTeleportResolutionDiagnostics?.sent;if(sent){setValue("teleportX",sent.x);setValue("teleportY",sent.y);setValue("teleportZ",sent.z!==null&&sent.z!==""&&Number.isFinite(Number(sent.z))?sent.z:"");}liveTeleportPreviewExecutable=data.canExecute===true;liveTeleportPreviewSignature=teleportPayloadSignature(teleportPayload());document.getElementById("teleportLog").textContent=renderTeleportResult(data);updateLiveMapDebug();await refreshTeleportReadiness();playUiSound(data.canExecute?"success":"warning");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
 async function executeLiveTeleport(requireExactPreview=false){const payload={...teleportPayload(),requestMode:"execute"};try{if(requireExactPreview&&(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload)))throw new Error("Exact player target changed or has not been previewed. Preview the current target before live teleport.");if(requireExactPreview&&!liveTeleportPreviewExecutable)throw new Error("Exact player teleport is blocked because preview did not resolve a valid target and partition.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));showLiveMapResultBadge("Teleport: sending live command...","working");document.getElementById("teleportLog").textContent="Teleport clicked. Sending the live command immediately...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";showLiveMapResultBadge("Last teleport: Sent — verifying database position","working");await refreshAfterTeleport(payload,data);playUiSound("success");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);showLiveMapResultBadge("Last teleport: Failed — "+betterError(e),"fail");playUiSound("warning");}finally{refreshTeleportReadiness();}}
+function operationDurationText(value){const seconds=Math.max(0,Math.floor(Number(value||0)/1000));if(seconds<60)return seconds+"s";const minutes=Math.floor(seconds/60);return minutes<60?minutes+"m "+(seconds%60)+"s":Math.floor(minutes/60)+"h "+(minutes%60)+"m";}
+function operationTimeText(value){if(!value)return"--";const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString();}
+function renderOperations(data=operationsState){operationsState=data||{active:[],operations:[]};const rows=operationsState.operations||[];const active=rows.filter(row=>row.status==="pending"||row.status==="running");const success=rows.filter(row=>row.status==="success");const failed=rows.filter(row=>row.status==="failed");const interrupted=rows.filter(row=>row.status==="interrupted");tone("operationsActiveCount",active.length);tone("operationsSuccessCount",success.length);tone("operationsFailedCount",failed.length);tone("operationsInterruptedCount",interrupted.length);const nav=document.getElementById("operationsNavCount");if(nav)nav.textContent=active.length?String(active.length):"";const status=document.getElementById("operationsStatus");if(status){status.className=active.length?"warning mt":"empty mt";status.textContent=active.length?(active.length+" operation(s) running. Conflicting duplicate actions are blocked."):"No active operation. Recent results remain available after restarting the Suite.";}const wrap=document.getElementById("operationsRows");if(!wrap)return;wrap.innerHTML=rows.length?rows.map(row=>'<div class="operation-row"><div><strong>'+esc(row.title||row.key||"Operation")+'</strong><div class="subtle">'+esc(row.category||"system")+' / '+esc(row.id||"")+'</div></div><div><span class="operation-status '+esc(row.status||"unknown")+'">'+esc(row.status||"unknown")+'</span><div class="subtle mt">'+esc(row.stage||"")+'</div></div><div><strong>'+esc(row.detail||row.error||"No additional details.")+'</strong>'+(row.error?'<div class="subtle">'+esc(row.error)+'</div>':'')+'</div><div><strong>'+esc(operationDurationText(row.durationMs))+'</strong><div class="subtle">'+esc(operationTimeText(row.startedAt))+'</div></div></div>').join(""):'<div class="empty">No operations recorded yet.</div>';}
+async function refreshOperations(){try{const data=await getJson("/api/operations",{timeoutMs:8000});renderOperations(data);return data;}catch(error){const status=document.getElementById("operationsStatus");if(status){status.className="warning mt";status.textContent=betterError(error);}return null;}}
+async function clearCompletedOperations(){try{if(!(await appConfirm("Clear operation history","Clear completed, failed, and interrupted operation records? Active work remains visible.","Clear History","Cancel")))return;const data=await getJson("/api/operations/completed",{method:"DELETE",timeoutMs:8000});renderOperations(data);showToast("Operation history cleared.","success");}catch(error){showToast(betterError(error),"error");}}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
@@ -17611,7 +17725,7 @@ function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>res
 async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
 async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);
+renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{}));
@@ -17671,6 +17785,15 @@ async function route(req, res) {
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {
     try { await json(res, await vmConnectionMonitor()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/operations" && req.method === "GET") {
+    await json(res, operationsSnapshot());
+    return;
+  }
+  if (url.pathname === "/api/operations/completed" && req.method === "DELETE") {
+    operationRegistry.clearCompleted();
+    await json(res, operationsSnapshot());
     return;
   }
   if (url.pathname === "/api/config" && req.method === "GET") {
@@ -17896,19 +18019,27 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/database/backup" && req.method === "POST") {
     try {
-      const result = await createDatabaseBackup();
+      const result = await runTrackedOperation("database:backup", "Database Backup", async ({ update }) => {
+        update("Creating Battlegroup backup", "Waiting for the backup command and artifact verification.");
+        return createDatabaseBackup();
+      }, { category: "database" });
       await json(res, result, result.ok ? 200 : 500);
     } catch (error) {
-      await json(res, { ok: false, status: "failed", error: error.message }, 500);
+      const failure = operationErrorResponse(error);
+      await json(res, { ...failure.payload, status: "failed" }, failure.statusCode);
     }
     return;
   }
   if (url.pathname === "/api/database/safety-backup" && req.method === "POST") {
     try {
-      const result = await createDatabaseBackup({ prefix: "pre-import-safety", safety: true, timeout: 120000 });
+      const result = await runTrackedOperation("database:backup", "Database Safety Backup", async ({ update }) => {
+        update("Creating safety backup", "Preparing a verified restore point before database changes.");
+        return createDatabaseBackup({ prefix: "pre-import-safety", safety: true, timeout: 120000 });
+      }, { category: "database" });
       await json(res, result, result.ok ? 200 : 500);
     } catch (error) {
-      await json(res, { ok: false, status: "failed", error: error.message }, 500);
+      const failure = operationErrorResponse(error);
+      await json(res, { ...failure.payload, status: "failed" }, failure.statusCode);
     }
     return;
   }
@@ -17939,7 +18070,8 @@ async function route(req, res) {
       const result = startDatabaseRestoreJob(JSON.parse(await readBody(req) || "{}"));
       await json(res, result, 202);
     } catch (error) {
-      await json(res, { ok: false, status: "failed", error: error.message }, 400);
+      const failure = operationErrorResponse(error);
+      await json(res, { ...failure.payload, status: "failed" }, error instanceof OperationBusyError ? 409 : 400);
     }
     return;
   }
@@ -18036,10 +18168,14 @@ async function route(req, res) {
   if (url.pathname === "/api/maps/deploy" && req.method === "POST") {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
-      const result = await setMapReplicas(body.map, body.replicas, body.memory);
+      const result = await runTrackedOperation(`map:${String(body.map || "unknown")}`, "Map Deployment", async ({ update }) => {
+        update("Applying map deployment", `${body.map || "Map"} -> ${body.replicas} replica(s)`);
+        return setMapReplicas(body.map, body.replicas, body.memory);
+      }, { category: "server", detail: String(body.map || "") });
       await json(res, result, result.ok ? 200 : 500);
     } catch (error) {
-      await json(res, { ok: false, error: error.message }, 400);
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, error instanceof OperationBusyError ? 409 : 400);
     }
     return;
   }
@@ -18177,9 +18313,13 @@ async function route(req, res) {
   if (url.pathname === "/api/admin/base-cleanup/delete" && req.method === "POST") {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
-      await json(res, await adminDeleteOrphanBase(body));
+      await json(res, await runTrackedOperation(`cleanup:base:${body.actorId || "unknown"}`, "Base Cleanup", async ({ update }) => {
+        update("Rechecking base ownership", `Base actor ${body.actorId || "unknown"}`);
+        return adminDeleteOrphanBase(body);
+      }, { category: "world", detail: `Base actor ${body.actorId || "unknown"}` }));
     } catch (error) {
-      await json(res, { ok: false, error: error.message }, 400);
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, error instanceof OperationBusyError ? 409 : 400);
     }
     return;
   }
@@ -18303,17 +18443,25 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/market-bot/install" && req.method === "POST") {
     try {
-      await json(res, await installMarketBot());
+      await json(res, await runTrackedOperation("market-bot:deployment", "Install / Update Market Bot", async ({ update }) => {
+        update("Deploying Market Bot", "Uploading configuration and waiting for the VM service.");
+        return installMarketBot();
+      }, { category: "economy" }));
     } catch (error) {
-      await json(res, { ok: false, error: error.message }, 500);
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
     }
     return;
   }
   if (url.pathname === "/api/market-bot/uninstall" && req.method === "POST") {
     try {
-      await json(res, await uninstallMarketBot());
+      await json(res, await runTrackedOperation("market-bot:deployment", "Uninstall Market Bot", async ({ update }) => {
+        update("Removing Market Bot", "Removing the VM service and managed files.");
+        return uninstallMarketBot();
+      }, { category: "economy" }));
     } catch (error) {
-      await json(res, { ok: false, error: error.message }, 500);
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
     }
     return;
   }
@@ -18446,11 +18594,21 @@ async function route(req, res) {
   }
   if (url.pathname.startsWith("/api/action/") && req.method === "POST") {
     const action = decodeURIComponent(url.pathname.split("/").pop());
-    const result = await battlegroup(action);
-    if (action === "start") {
-      result.dbTunnel = await startDatabaseTunnel().catch((error) => ({ ok: false, error: error.message }));
+    try {
+      const result = await runTrackedOperation("battlegroup:control", `Battlegroup ${action}`, async ({ update }) => {
+        update(`Running Battlegroup ${action}`, "Waiting for the server management command to finish.");
+        const response = await battlegroup(action);
+        if (action === "start") {
+          update("Starting database tunnel", "Battlegroup start completed; checking database access.");
+          response.dbTunnel = await startDatabaseTunnel().catch((error) => ({ ok: false, error: error.message }));
+        }
+        return response;
+      }, { category: "server", detail: action });
+      await json(res, result, result.ok ? 200 : 500);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
     }
-    await json(res, result, result.ok ? 200 : 500);
     return;
   }
   if (url.pathname === "/api/sietches" && req.method === "GET") {
@@ -18486,14 +18644,23 @@ async function route(req, res) {
   }
   if (url.pathname.startsWith("/api/vm/") && req.method === "POST") {
     const action = decodeURIComponent(url.pathname.split("/").pop());
-    const result = await vmAction(action);
-    if (result.ok && action === "start" && url.searchParams.get("wait") === "1") {
-      const wait = await waitForVmRunning();
-      if (!wait.ok) appendVmAudit("start_timeout", { ...result, ok: false, error: wait.error, state: wait.vm?.state || "Unknown" });
-      await json(res, { ...result, waited: wait, vm: wait.vm, ok: Boolean(wait.ok) }, wait.ok ? 200 : 500);
-      return;
+    try {
+      const result = await runTrackedOperation("vm:control", `VM ${action}`, async ({ update }) => {
+        update(`Running VM ${action}`, "Waiting for Hyper-V to report the requested state.");
+        const response = await vmAction(action);
+        if (response.ok && action === "start" && url.searchParams.get("wait") === "1") {
+          update("Waiting for VM", "Hyper-V accepted the start request; waiting for the VM to become ready.");
+          const wait = await waitForVmRunning();
+          if (!wait.ok) appendVmAudit("start_timeout", { ...response, ok: false, error: wait.error, state: wait.vm?.state || "Unknown" });
+          return { ...response, waited: wait, vm: wait.vm, ok: Boolean(wait.ok) };
+        }
+        return { ...response, vm: await vmInfo().catch(() => ({ state: response.state || "Unknown" })) };
+      }, { category: "server", detail: action });
+      await json(res, result, result.ok ? 200 : 500);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
     }
-    await json(res, { ...result, vm: await vmInfo().catch(() => ({ state: result.state || "Unknown" })) }, result.ok ? 200 : 500);
     return;
   }
   if (url.pathname === "/api/director") {
@@ -18543,6 +18710,7 @@ server.listen(PORT, HOST, async () => {
   const startupVmSync = autoSyncVmIpFromHyperV()
     .then((result) => {
       if (result.synced) console.log(`VM address updated to ${result.detectedIp}; dependent Suite connections were refreshed.`);
+      syncManagerConnectionFromSuite(result.config || loadConfig());
       return result;
     })
     .catch((error) => {

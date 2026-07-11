@@ -12642,40 +12642,61 @@ async function adminBaseCleanupScan() {
     mode: "dry-run",
     bases,
     summary,
-    policy: "A base is deletable only when it has at least one owner/rank/player reference and none of those references match dune.player_state."
+    policy: "Orphan deletion requires no player_state match. Owned-base override requires a verified player match, an offline owner, and actor-specific typed confirmation. Unknown-owner bases remain protected."
   };
 }
 
 async function adminDeleteOrphanBase(payload = {}) {
   const actorId = requireInteger(payload.actorId, "actor_id", 0);
   requireConfirmed(payload.confirmed);
+  const forceOwned = payload.forceOwned === true || payload.forceOwned === "true";
+  const expectedConfirmation = `DELETE BASE ${actorId}`;
+  if (forceOwned && String(payload.confirmText || "").trim() !== expectedConfirmation) {
+    throw new Error(`Owned-base override requires typing ${expectedConfirmation}.`);
+  }
+  const allowOwnedSql = forceOwned ? "true" : "false";
   const sql = `
     begin;
     ${baseCleanupBaseSql(`and afe.actor_id = ${actorId}`)}
-    , orphan_target as (
-      select bs.actor_id
+    , delete_target as (
+      select
+        bs.actor_id,
+        case when coalesce(rs.matched_ref_count, 0) = 0 then 'orphaned' else 'owned_override' end as delete_mode
       from base_summary bs
       left join ref_summary rs on rs.actor_id = bs.actor_id
       where bs.actor_id = ${actorId}
         and coalesce(rs.ref_count, 0) > 0
-        and coalesce(rs.matched_ref_count, 0) = 0
+        and (
+          coalesce(rs.matched_ref_count, 0) = 0
+          or (
+            ${allowOwnedSql}
+            and coalesce(rs.matched_ref_count, 0) > 0
+            and not exists (
+              select 1
+              from ref_matches rm
+              where rm.actor_id = bs.actor_id
+                and rm.account_id is not null
+                and lower(coalesce(rm.online_status::text, '')) in ('online', 'connected', 'true', '1')
+            )
+          )
+        )
     ),
     target_buildings as (
       select distinct b.id as building_id, bi.owner_entity_id
       from dune.buildings b
       join dune.building_instances bi on bi.building_id = b.id
       join dune.actor_fgl_entities afe on afe.entity_id = bi.owner_entity_id
-      join orphan_target t on t.actor_id = afe.actor_id
+      join delete_target t on t.actor_id = afe.actor_id
     ),
     deleted_ranks as (
       delete from dune.permission_actor_rank par
-      using orphan_target t
+      using delete_target t
       where par.permission_actor_id = t.actor_id
       returning 1
     ),
     deleted_permission as (
       delete from dune.permission_actor pa
-      using orphan_target t
+      using delete_target t
       where pa.actor_id = t.actor_id
       returning 1
     ),
@@ -12693,18 +12714,19 @@ async function adminDeleteOrphanBase(payload = {}) {
     ),
     deleted_fgl as (
       delete from dune.actor_fgl_entities afe
-      using orphan_target t
+      using delete_target t
       where afe.actor_id = t.actor_id
       returning 1
     ),
     deleted_actor as (
       delete from dune.actors a
-      using orphan_target t
+      using delete_target t
       where a.id = t.actor_id
       returning 1
     )
     select 'deleted',
-      (select count(*) from orphan_target)::text,
+      (select count(*) from delete_target)::text,
+      coalesce((select max(delete_mode) from delete_target), ''),
       (select count(*) from deleted_ranks)::text,
       (select count(*) from deleted_permission)::text,
       (select count(*) from deleted_instances)::text,
@@ -12717,19 +12739,26 @@ async function adminDeleteOrphanBase(payload = {}) {
   const row = output.split(/\r?\n/).find((line) => line.startsWith("deleted\t"));
   const parts = row ? row.split("\t") : [];
   const matchedTargets = Number(parts[1] || 0);
-  if (!matchedTargets) throw new Error("Base was not deleted because it is no longer orphaned or was not found.");
+  if (!matchedTargets) {
+    throw new Error(forceOwned
+      ? "Base was not deleted. It may not exist, may have no verified owner reference, or a matched owner may still be online."
+      : "Base was not deleted because it is no longer orphaned or was not found.");
+  }
+  const deleteMode = parts[2] || "orphaned";
   const result = {
     ok: true,
     actorId: String(actorId),
-    deletedRanks: Number(parts[2] || 0),
-    deletedPermissionActors: Number(parts[3] || 0),
-    deletedBuildingInstances: Number(parts[4] || 0),
-    deletedBuildings: Number(parts[5] || 0),
-    deletedFglLinks: Number(parts[6] || 0),
-    deletedActors: Number(parts[7] || 0),
-    message: `Deleted orphaned base actor ${actorId}.`
+    deleteMode,
+    forceOwned: deleteMode === "owned_override",
+    deletedRanks: Number(parts[3] || 0),
+    deletedPermissionActors: Number(parts[4] || 0),
+    deletedBuildingInstances: Number(parts[5] || 0),
+    deletedBuildings: Number(parts[6] || 0),
+    deletedFglLinks: Number(parts[7] || 0),
+    deletedActors: Number(parts[8] || 0),
+    message: deleteMode === "owned_override" ? `Deleted owned base actor ${actorId} by administrator override.` : `Deleted orphaned base actor ${actorId}.`
   };
-  appendAdminAudit("orphan_base_deleted", result);
+  appendAdminAudit(deleteMode === "owned_override" ? "owned_base_override_deleted" : "orphan_base_deleted", result);
   return result;
 }
 
@@ -16119,7 +16148,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <button type="button" class="primary" onclick="refreshBaseCleanup()">Scan Bases</button>
           </div>
           <div id="baseCleanupStatus" class="empty mt">Run a scan before deleting anything. Unknown-owner bases are shown for review but are not deletable.</div>
-          <div class="warning mt">Delete buttons appear only for bases with owner/rank references that no longer match any row in dune.player_state. The backend re-checks the same rule before deleting.</div>
+          <div class="warning mt">Normal delete is limited to orphaned bases. Owned bases require the advanced override, exact actor confirmation, and an offline matched owner. The backend re-checks the rule before deleting.</div>
         </div>
         <div class="panel pad">
           <div class="label">Cleanup Policy</div>
@@ -16127,8 +16156,12 @@ DUNE_RECEIVER_SSH_KEY</pre>
             <div class="detail-row"><span class="subtle">Scan mode</span><strong>Dry-run first</strong></div>
             <div class="detail-row"><span class="subtle">Delete rule</span><strong>Owner missing from player_state</strong></div>
             <div class="detail-row"><span class="subtle">Unknown owner</span><strong>Protected</strong></div>
+            <div class="detail-row"><span class="subtle">Owned override</span><strong>Offline players only</strong></div>
             <div class="detail-row"><span class="subtle">Audit</span><strong>admin-audit.log</strong></div>
           </div>
+          <div class="warning mt">Advanced override permanently removes a base even when its owner remains in player_state. The backend blocks matched owners reported online.</div>
+          <label class="check-row mt"><input id="baseCleanupOwnedOverride" type="checkbox" onchange="renderBaseCleanup()">Enable owned-base deletion</label>
+          <label class="mt">Actor-specific confirmation<input id="baseCleanupOverrideConfirm" placeholder="DELETE BASE 123" oninput="renderBaseCleanup()"></label>
         </div>
       </div>
       <div class="panel pad mt">
@@ -17352,9 +17385,9 @@ function syncPermissionForms(){const p=selectedPlayer();const identity=document.
 function permissionQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
 async function refreshPermissions(){const summary=document.getElementById("permissionSummary");if(summary)summary.textContent="Loading permission views...";try{permissionState=await getJson("/api/admin/permissions"+permissionQuery());renderPermissions();addActivity("permissions","Permission views refreshed",permissionState.playerControllerId?("controller "+permissionState.playerControllerId):"all players");}catch(e){if(summary)summary.textContent=betterError(e);addActivity("error","Permission refresh failed",e.message);}}
 function baseCleanupStatusLabel(row){if(row.status==="orphaned")return"Orphaned";if(row.status==="partial-missing")return"Partial missing";if(row.status==="owned")return"Owned";if(row.status==="unknown-owner")return"Unknown owner";return row.status||"Unknown";}
-function renderBaseCleanup(){const data=baseCleanupState||{};const summary=data.summary||{};tone("baseCleanupTotal",summary.totalBases??"--");tone("baseCleanupOrphaned",summary.orphanedBases??"--");tone("baseCleanupUnknown",summary.unknownOwnerBases??"--");tone("baseCleanupPieces",summary.buildingInstancesAtRisk??"--");const status=document.getElementById("baseCleanupStatus");if(status){status.className=(summary.orphanedBases?"warning mt":"empty mt");status.textContent=data.generatedAt?("Dry-run scan complete. Orphaned bases: "+(summary.orphanedBases||0)+". Building instances at risk: "+(summary.buildingInstancesAtRisk||0)+"."):"Run a scan before deleting anything.";}const wrap=document.getElementById("baseCleanupRows");if(!wrap)return;const rows=data.bases||[];if(!rows.length){wrap.innerHTML='<div class="empty">No bases returned by the cleanup scan.</div>';return;}wrap.innerHTML=rows.map(row=>{const label=baseCleanupStatusLabel(row);const detail='Actor '+esc(row.actorId||"-")+' / Buildings '+esc((row.buildingIds||[]).join(", ")||"-")+' / Instances '+esc(row.instanceCount||0);const refs=row.playerRefs||row.missingRefs||"No owner reference found.";const action=row.deletable?'<button type="button" class="danger" onclick="deleteOrphanBase('+Number(row.actorId)+')">Delete Base</button>':'<button type="button" disabled>Protected</button>';return '<div class="detail-row"><span><strong>'+esc(row.actorName||("Base "+row.actorId))+'</strong><br><span class="subtle">'+detail+'</span><br><span class="subtle">'+esc(refs)+'</span></span><strong>'+esc(label)+'<br><span class="action-row">'+action+'</span></strong></div>';}).join("");}
+function renderBaseCleanup(){const data=baseCleanupState||{};const summary=data.summary||{};tone("baseCleanupTotal",summary.totalBases??"--");tone("baseCleanupOrphaned",summary.orphanedBases??"--");tone("baseCleanupUnknown",summary.unknownOwnerBases??"--");tone("baseCleanupPieces",summary.buildingInstancesAtRisk??"--");const status=document.getElementById("baseCleanupStatus");if(status){status.className=(summary.orphanedBases?"warning mt":"empty mt");status.textContent=data.generatedAt?("Dry-run scan complete. Orphaned bases: "+(summary.orphanedBases||0)+". Building instances at risk: "+(summary.buildingInstancesAtRisk||0)+"."):"Run a scan before deleting anything.";}const wrap=document.getElementById("baseCleanupRows");if(!wrap)return;const rows=data.bases||[];if(!rows.length){wrap.innerHTML='<div class="empty">No bases returned by the cleanup scan.</div>';return;}const overrideEnabled=document.getElementById("baseCleanupOwnedOverride")?.checked===true;const confirmText=document.getElementById("baseCleanupOverrideConfirm")?.value.trim()||"";wrap.innerHTML=rows.map(row=>{const actorId=Number(row.actorId)||0;const label=baseCleanupStatusLabel(row);const detail='Actor '+esc(row.actorId||"-")+' / Buildings '+esc((row.buildingIds||[]).join(", ")||"-")+' / Instances '+esc(row.instanceCount||0);const refs=row.playerRefs||row.missingRefs||"No owner reference found.";let action='<button type="button" disabled>Protected</button>';if(row.deletable){action='<button type="button" class="danger" onclick="deleteBaseCleanupActor('+actorId+',false)">Delete Base</button>';}else if(overrideEnabled&&(row.status==="owned"||row.status==="partial-missing")){const exact=confirmText===("DELETE BASE "+actorId);action='<button type="button" class="danger" '+(exact?'':'disabled')+' onclick="deleteBaseCleanupActor('+actorId+',true)">Delete Owned Base</button>';}return '<div class="detail-row"><span><strong>'+esc(row.actorName||("Base "+row.actorId))+'</strong><br><span class="subtle">'+detail+'</span><br><span class="subtle">'+esc(refs)+'</span></span><strong>'+esc(label)+'<br><span class="action-row">'+action+'</span></strong></div>';}).join("");}
 async function refreshBaseCleanup(){const status=document.getElementById("baseCleanupStatus");try{if(status){status.className="empty mt";status.textContent="Scanning base ownership against live players...";}baseCleanupState=await getJson("/api/admin/base-cleanup/orphans",{timeoutMs:60000});renderBaseCleanup();addActivity("cleanup","Base cleanup scan completed",(baseCleanupState.summary?.orphanedBases||0)+" orphaned base(s)");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Base cleanup scan failed",e.message);}}
-async function deleteOrphanBase(actorId){const row=(baseCleanupState?.bases||[]).find(item=>String(item.actorId)===String(actorId));try{if(!row)throw new Error("Base row is not loaded. Run Scan Bases again.");const ok=await appConfirm("Delete orphaned base","Delete base actor "+actorId+" ("+(row.actorName||"Base")+") and "+(row.instanceCount||0)+" building instance(s)? This is allowed only if the owner still does not exist in player_state.","Delete Base","Cancel");if(!ok)return;const data=await getJson("/api/admin/base-cleanup/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({actorId,confirmed:true}),timeoutMs:60000});setText("baseCleanupStatus",(data.message||"Base deleted.")+" Removed buildings: "+(data.deletedBuildings||0)+", instances: "+(data.deletedBuildingInstances||0)+".");showToast("Orphaned base deleted.","success");addActivity("cleanup","Orphaned base deleted","Actor "+actorId);await refreshBaseCleanup();}catch(e){setText("baseCleanupStatus",betterError(e));showToast(betterError(e),"error");addActivity("error","Base delete failed",e.message);}}
+async function deleteBaseCleanupActor(actorId,forceOwned=false){const row=(baseCleanupState?.bases||[]).find(item=>String(item.actorId)===String(actorId));try{if(!row)throw new Error("Base row is not loaded. Run Scan Bases again.");const confirmText=document.getElementById("baseCleanupOverrideConfirm")?.value.trim()||"";if(forceOwned&&confirmText!=="DELETE BASE "+actorId)throw new Error("Type DELETE BASE "+actorId+" before deleting this owned base.");const title=forceOwned?"Delete owned player base":"Delete orphaned base";const detail=forceOwned?"The player remains in the database and must be offline. This permanently removes the base and cannot be undone.":"The backend will confirm that the owner still does not exist in player_state.";const ok=await appConfirm(title,"Delete base actor "+actorId+" ("+(row.actorName||"Base")+") and "+(row.instanceCount||0)+" building instance(s)?\\n\\n"+detail,"Delete Base","Cancel");if(!ok)return;const data=await getJson("/api/admin/base-cleanup/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({actorId,confirmed:true,forceOwned,confirmText:forceOwned?confirmText:""}),timeoutMs:60000});setText("baseCleanupStatus",(data.message||"Base deleted.")+" Removed buildings: "+(data.deletedBuildings||0)+", instances: "+(data.deletedBuildingInstances||0)+".");showToast(forceOwned?"Owned base deleted by override.":"Orphaned base deleted.","success");addActivity("cleanup",forceOwned?"Owned base override deleted":"Orphaned base deleted","Actor "+actorId);if(forceOwned)setValue("baseCleanupOverrideConfirm","");await refreshBaseCleanup();}catch(e){setText("baseCleanupStatus",betterError(e));showToast(betterError(e),"error");addActivity("error","Base delete failed",e.message);}}
 function renderPermissions(){const data=permissionState||{};const summary=document.getElementById("permissionSummary");if(summary){summary.className=data.isGuildAdmin?"warning mt":"empty mt";summary.innerHTML=data.playerControllerId?('Controller '+esc(data.playerControllerId)+' / Guild admin: <strong>'+esc(data.isGuildAdmin?"yes":"no")+'</strong>'):'All permission rows. Select a player for focused views.';}const guild=document.getElementById("guildRows");if(guild)guild.innerHTML=(data.guildMembers||[]).length?(data.guildMembers||[]).map(row=>'<tr><td>'+esc(row.player_id)+'</td><td>'+esc(row.guild_id)+'</td><td>'+esc(row.role_id)+'</td><td><span class="badge '+(row.is_guild_admin?'ok':'warn')+'">'+esc(row.is_guild_admin?'role_id 100':'no')+'</span></td></tr>').join(""):'<tr><td colspan="4">No guild member rows found for this selection.</td></tr>';const perms=document.getElementById("permissionRows");if(perms)perms.innerHTML=(data.objectPermissions||[]).length?(data.objectPermissions||[]).map(row=>'<tr><td>'+esc(row.actor_id)+'</td><td>'+esc(row.actor_name||"-")+'</td><td>'+esc(row.player_id)+'</td><td>'+esc(row.rank)+'</td></tr>').join(""):'<tr><td colspan="4">No object permission rows found for this selection.</td></tr>';const codes=document.getElementById("accessCodeRows");if(codes)codes.innerHTML=(data.accessCodes||[]).length?(data.accessCodes||[]).map(row=>'<tr><td>'+esc(row.account_id)+'</td><td>'+esc(row.access_code)+'</td><td>'+esc(row.access_code_type)+'</td><td>'+esc(row.is_resettable)+'</td></tr>').join(""):'<tr><td colspan="4">No access codes found for this selection.</td></tr>';syncPermissionForms();}
 function updatePermissionPreviews(){const actor=document.getElementById("permActorId")?.value||"actor_id";const ctrl=document.getElementById("permControllerId")?.value||"player_controller_id";const rank=document.getElementById("permRank")?.value||"rank";const map=document.getElementById("permMapId")?.value||"map_id";const p1=document.getElementById("permRankPreview");if(p1)p1.textContent="select dune.permission_set_player_rank("+actor+", "+ctrl+", "+rank+", '"+map.replace(/'/g,"''")+"');";const account=document.getElementById("accessAccountId")?.value||"account_id";const code=document.getElementById("accessCodeValue")?.value||"access_code";const type=document.getElementById("accessCodeType")?.value||"access_code_type";const reset=document.getElementById("accessResettable")?.checked?"true":"false";const p2=document.getElementById("accessCodePreview");if(p2)p2.textContent="select dune.create_server_player_access_codes("+account+", "+code+", "+type+", "+reset+");";}
 ["permActorId","permControllerId","permRank","permMapId","accessAccountId","accessCodeValue","accessCodeType","accessResettable"].forEach(id=>setTimeout(()=>{const el=document.getElementById(id);if(el)el.addEventListener("input",updatePermissionPreviews);if(el)el.addEventListener("change",updatePermissionPreviews);},0));

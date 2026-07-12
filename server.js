@@ -13118,6 +13118,29 @@ function configuredPythonPath() {
   return null;
 }
 
+function installedPythonCandidates() {
+  if (process.platform !== "win32") return [];
+  const roots = [
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs", "Python") : "",
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, "Python") : "",
+    process.env["ProgramFiles(x86)"] ? path.join(process.env["ProgramFiles(x86)"], "Python") : ""
+  ].filter(Boolean);
+  const candidates = [];
+  for (const root of roots) {
+    try {
+      const installs = fs.readdirSync(root, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && /^Python\d+$/i.test(entry.name))
+        .sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true }));
+      for (const install of installs) {
+        candidates.push(path.join(root, install.name, "python.exe"));
+      }
+    } catch {
+      // The standard install root is optional; continue to the next location.
+    }
+  }
+  return [...new Set(candidates)];
+}
+
 function findPython() {
   const configured = configuredPythonPath();
   if (configured) {
@@ -13130,6 +13153,11 @@ function findPython() {
   }
   if (commandAvailable("python")) return { command: "python", source: "PATH", exists: true };
   if (commandAvailable("py")) return { command: "py", source: "PATH", exists: true };
+  for (const command of installedPythonCandidates()) {
+    if (commandAvailable(command)) {
+      return { command, source: "standard Windows install location", exists: true };
+    }
+  }
   return null;
 }
 

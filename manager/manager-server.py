@@ -103,6 +103,8 @@ def stop_stale_local_server(port=8812):
         result = subprocess.run(
             ["netstat.exe", "-ano", "-p", "tcp"],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=5,
             check=False,
@@ -113,7 +115,7 @@ def stop_stale_local_server(port=8812):
 
     current_pid = str(os.getpid())
     port_marker = f":{port}"
-    for line in result.stdout.splitlines():
+    for line in (result.stdout or "").splitlines():
         parts = line.split()
         if len(parts) < 5 or parts[0].upper() != "TCP" or parts[3].upper() != "LISTENING":
             continue

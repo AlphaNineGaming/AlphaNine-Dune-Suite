@@ -13444,7 +13444,7 @@ function syncManagerConnectionFromSuite(configValue = loadConfig()) {
 }
 
 function managerFallbackWarning() {
-  return managerStartError || "Manager service is unavailable because Python was not found.";
+  return managerStartError || "Manager service is unavailable. The Python process has not become ready yet; check the startup diagnostics.";
 }
 
 async function handleManagerFallback(req, res, managerPath) {
@@ -13589,8 +13589,13 @@ function spawnManagerProcess(resolved, useShell, reason) {
     cwd: MANAGER_DIR,
     shell: useShell,
     windowsHide: true,
-    stdio: "ignore"
+    stdio: ["ignore", "pipe", "pipe"]
   });
+  let stdout = "";
+  let stderr = "";
+  const appendOutput = (current, chunk) => `${current}${String(chunk || "")}`.slice(-4000);
+  managerProcess.stdout?.on("data", (chunk) => { stdout = appendOutput(stdout, chunk); });
+  managerProcess.stderr?.on("data", (chunk) => { stderr = appendOutput(stderr, chunk); });
   managerProcess.on("error", (error) => {
     if (error.code === "ENOENT" && !useShell && isWindowsAppsAlias(resolved.command)) {
       managerSpawnDiagnostics = { ...managerSpawnDiagnostics, errorCode: error.code || "", errorMessage: error.message || String(error) };
@@ -13604,7 +13609,42 @@ function spawnManagerProcess(resolved, useShell, reason) {
     console.error(managerStartError);
     managerProcess = null;
   });
-  managerProcess.on("exit", () => { managerProcess = null; });
+  managerProcess.on("exit", (code, signal) => {
+    managerSpawnDiagnostics = {
+      ...managerSpawnDiagnostics,
+      exitCode: code,
+      exitSignal: signal || "",
+      stdout: stdout.trim(),
+      stderr: stderr.trim()
+    };
+    if (code !== 0 && !managerStartError) {
+      const detail = stderr.trim() || stdout.trim() || `exit code ${code}${signal ? ` (${signal})` : ""}`;
+      managerStartError = `Manager service exited before becoming ready: ${detail}`;
+      console.error(managerStartError);
+    }
+    managerProcess = null;
+  });
+}
+
+async function waitForManagerReady(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "";
+  while (Date.now() < deadline) {
+    if (managerStartError) return false;
+    try {
+      const response = await fetch(`http://127.0.0.1:${MANAGER_PORT}/`, { signal: AbortSignal.timeout(500) });
+      if (response.ok) return true;
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = error.message || String(error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!managerStartError) {
+    managerStartError = `Manager service did not become ready on port ${MANAGER_PORT} within ${timeoutMs}ms${lastError ? `: ${lastError}` : "."}`;
+    managerSpawnDiagnostics = { ...managerSpawnDiagnostics, readinessTimeoutMs: timeoutMs, readinessError: lastError };
+  }
+  return false;
 }
 
 async function proxyToManager(req, res, pathname) {
@@ -13615,6 +13655,7 @@ async function proxyToManager(req, res, pathname) {
     await json(res, { ok: suiteConnection.ready, config: suiteConnection });
     return;
   }
+  if (!managerStartError) await waitForManagerReady();
   if (managerStartError && await handleManagerFallback(req, res, managerPath)) return;
   const target = `http://127.0.0.1:${MANAGER_PORT}${managerPath}`;
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : await readBody(req);

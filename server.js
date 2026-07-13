@@ -8280,6 +8280,7 @@ async function progressionApply(payload) {
       });
       await timer.step("flevel_update", async () => withProgressionStepTimeout(dbQuery(`
         begin;
+        set local search_path to dune, public;
         select dune.set_specialization_xp_and_level(${specializationPlayerId}, ${sqlString(preview.newValues.track_type)}::dune.specializationtracktype, ${preview.newValues.xp_amount}, ${preview.newValues.level});
         commit;
       `, 20000), 22000, "flevel_update"));
@@ -12942,7 +12943,10 @@ async function currentTrackRow(playerControllerId, track) {
 }
 
 function specializationCall(playerControllerId, track, xpAmount, level) {
-  return `select dune.set_specialization_xp_and_level(${playerControllerId}, ${sqlString(track)}::dune.specializationtracktype, ${xpAmount}, ${level});`;
+  return `begin;
+set local search_path to dune, public;
+select dune.set_specialization_xp_and_level(${playerControllerId}, ${sqlString(track)}::dune.specializationtracktype, ${xpAmount}, ${level});
+commit;`;
 }
 
 async function adminSpecializationAction(payload, mode) {

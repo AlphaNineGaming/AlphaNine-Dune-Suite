@@ -36,6 +36,7 @@ async function startServer(configPath, appData) {
       ALPHANINE_HTTPS_PORT: String(port + 1),
       APPDATA: appData,
       LOCALAPPDATA: path.join(appData, "Local"),
+      ALPHANINE_DATA_DIR: path.join(appData, "AlphaNine Dune Suite"),
       ALPHANINE_CONFIG_PATH: configPath,
       ALPHANINE_SKIP_MANAGER: "1"
     },

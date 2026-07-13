@@ -76,7 +76,11 @@ jobs:
             curl -fsS http://127.0.0.1:8810/api/remote-access/status >installed-status.json && break
             sleep 0.25
           done
-          grep -q '"ok":true' installed-status.json
+          if ! grep -q '"ok":true' installed-status.json; then
+            sudo systemctl status alphanine-dune-suite --no-pager || true
+            sudo journalctl -u alphanine-dune-suite --no-pager -n 160 || true
+            exit 1
+          fi
           sudo env ALPHANINE_ADMIN_PASSWORD='ubuntu-installed-test-42' alphanine-dune-suite-password --username admin
           test "$(curl -ksS -o /dev/null -w '%{http_code}' https://127.0.0.1:8811/)" = "302"
           sudo systemctl disable --now alphanine-dune-suite

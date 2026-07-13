@@ -42,7 +42,11 @@ async function startServer({ port, configPath, appData }) {
     env: {
       ...process.env,
       PORT: String(port),
+      ALPHANINE_HTTPS_PORT: String(port + 1),
       APPDATA: appData,
+      LOCALAPPDATA: path.join(appData, "Local"),
+      ALPHANINE_DATA_DIR: path.join(appData, "AlphaNine Dune Suite"),
+      ALPHANINE_SKIP_MANAGER: "1",
       ALPHANINE_CONFIG_PATH: configPath,
       DUNE_DATABASE_PASSWORD: "",
       DUNE_RECEIVER_TOKEN: "",

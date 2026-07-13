@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import signal
 import webbrowser
 
 
@@ -13,8 +14,16 @@ ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) el
 
 
 def writable_data_root():
+    explicit = os.environ.get("ALPHANINE_MANAGER_DATA_DIR")
     base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-    data_root = Path(base) / "AlphaNine Dune Awakening Manager" if base else ROOT
+    if explicit:
+        data_root = Path(explicit)
+    elif base:
+        data_root = Path(base) / "AlphaNine Dune Awakening Manager"
+    elif os.name != "nt":
+        data_root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "alphanine-dune-suite" / "manager"
+    else:
+        data_root = ROOT
     try:
         data_root.mkdir(parents=True, exist_ok=True)
         return data_root
@@ -32,6 +41,9 @@ MANAGER_CONFIG = DATA_ROOT / "manager-config.json"
 
 
 def default_ssh_key():
+    if os.name != "nt":
+        candidates = [Path.home() / ".ssh" / "id_ed25519", Path.home() / ".ssh" / "id_rsa"]
+        return str(next((item for item in candidates if item.exists()), candidates[0]))
     local_app_data = os.environ.get("LOCALAPPDATA", "")
     return str(Path(local_app_data) / "DuneAwakeningServer" / "sshKey") if local_app_data else ""
 
@@ -98,6 +110,17 @@ def bool_text(value):
 
 def stop_stale_local_server(port=8812):
     if os.name != "nt":
+        try:
+            result = subprocess.run(
+                ["sh", "-c", f"command -v ss >/dev/null 2>&1 && ss -ltnp 'sport = :{int(port)}' 2>/dev/null || true"],
+                text=True, capture_output=True, timeout=5, check=False,
+            )
+            for pid in set(__import__("re").findall(r"pid=(\d+)", result.stdout or "")):
+                if pid != str(os.getpid()):
+                    os.kill(int(pid), signal.SIGTERM)
+                    return
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
         return
     try:
         result = subprocess.run(

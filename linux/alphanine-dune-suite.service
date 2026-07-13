@@ -1,0 +1,28 @@
+[Unit]
+Description=AlphaNine Dune Suite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alphanine-suite
+Group=alphanine-suite
+WorkingDirectory=/opt/alphanine-dune-suite
+Environment=NODE_ENV=production
+Environment=ALPHANINE_DATA_DIR=/var/lib/alphanine-dune-suite
+Environment=ALPHANINE_MANAGER_DATA_DIR=/var/lib/alphanine-dune-suite/manager
+Environment=PORT=8810
+Environment=ALPHANINE_HTTPS_PORT=8811
+EnvironmentFile=-/etc/alphanine-dune-suite/env
+ExecStart=/usr/bin/node /opt/alphanine-dune-suite/server.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/alphanine-dune-suite
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

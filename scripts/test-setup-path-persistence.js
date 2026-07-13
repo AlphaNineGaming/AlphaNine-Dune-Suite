@@ -30,7 +30,15 @@ async function startServer(configPath, appData) {
   const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
     cwd: ROOT,
     windowsHide: true,
-    env: { ...process.env, PORT: String(port), APPDATA: appData, ALPHANINE_CONFIG_PATH: configPath },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      ALPHANINE_HTTPS_PORT: String(port + 1),
+      APPDATA: appData,
+      LOCALAPPDATA: path.join(appData, "Local"),
+      ALPHANINE_CONFIG_PATH: configPath,
+      ALPHANINE_SKIP_MANAGER: "1"
+    },
     stdio: "ignore"
   });
   for (let attempt = 0; attempt < 100; attempt += 1) {

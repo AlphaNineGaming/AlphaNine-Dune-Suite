@@ -1,4 +1,4 @@
-const CACHE_NAME = "alphanine-dune-suite-v1-grade-relog-1-0-4";
+const CACHE_NAME = "alphanine-dune-suite-v2-local-http-only";
 const STATIC_ASSETS = [
   "/",
   "/manifest.webmanifest",
@@ -11,6 +11,10 @@ const STATIC_ASSETS = [
 ];
 
 self.addEventListener("install", (event) => {
+  if (self.location.protocol === "https:") {
+    event.waitUntil(self.skipWaiting());
+    return;
+  }
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then((cache) => cache.addAll(STATIC_ASSETS))
@@ -28,6 +32,7 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
+  if (self.location.protocol === "https:") return;
   const request = event.request;
   if (request.method !== "GET") return;
 

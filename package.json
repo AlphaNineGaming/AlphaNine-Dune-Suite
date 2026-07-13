@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.0.42",
+  "version": "1.0.43",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -16,11 +16,16 @@
     "test:python-discovery": "node scripts/test-python-discovery.js",
     "test:manager-netstat": "node scripts/test-manager-netstat-decoding.js",
     "test:specialization-progression": "node scripts/test-specialization-progression.js",
+    "test:remote-access": "node scripts/test-remote-access.js",
+    "test:linux-platform": "node scripts/test-linux-platform.js",
+    "test:linux-package": "node scripts/test-linux-package.js",
+    "build:linux": "node scripts/build-linux-headless.js",
     "build:win": "electron-builder --win nsis --x64 --publish never --config.win.signAndEditExecutable=false && node scripts/ensure-admin-manifest.js"
   },
   "dependencies": {
     "express": "^5.2.1",
-    "leaflet": "^1.9.4"
+    "leaflet": "^1.9.4",
+    "selfsigned": "^3.0.1"
   },
   "devDependencies": {
     "electron": "^38.3.0",

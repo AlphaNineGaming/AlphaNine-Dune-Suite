@@ -10,6 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError } = require("./lib/operations");
+const { createRemoteAccess } = require("./lib/remote-access");
 const {
   PLAYER_RENAME_MAX_LENGTH,
   sanitizePlayerRenameName,
@@ -18,10 +19,18 @@ const {
 } = require("./lib/player-rename");
 
 const { version: APP_VERSION } = require("./package.json");
-const HOST = process.env.ALPHANINE_WEB_PORTAL_HOST || "0.0.0.0";
+const RUNTIME_PLATFORM = process.env.ALPHANINE_PLATFORM_OVERRIDE || process.platform;
+const IS_WINDOWS = RUNTIME_PLATFORM === "win32";
+const LOCAL_HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
+const HTTPS_HOST = process.env.ALPHANINE_HTTPS_HOST || "0.0.0.0";
+const HTTPS_PORT = Number(process.env.ALPHANINE_HTTPS_PORT || 8811);
 const MANAGER_PORT = 8812;
-const APPDATA_DIR = process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "";
+const APPDATA_DIR = process.env.ALPHANINE_DATA_DIR
+  || (IS_WINDOWS && process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "")
+  || (!IS_WINDOWS ? path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "alphanine-dune-suite") : "");
+const REMOTE_ACCESS_DIR = process.env.ALPHANINE_REMOTE_ACCESS_DIR || path.join(APPDATA_DIR || __dirname, "remote-access");
+const remoteAccess = createRemoteAccess({ dataDir: REMOTE_ACCESS_DIR });
 const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || (APPDATA_DIR ? path.join(APPDATA_DIR, "config.json") : path.join(__dirname, "config.json"));
 const BUNDLED_TELEPORT_PRESETS_PATH = path.join(__dirname, "assets", "teleport-location-presets.json");
 const TELEPORT_PRESETS_PATH = process.env.ALPHANINE_TELEPORT_PRESETS_PATH || (process.env.APPDATA
@@ -89,8 +98,10 @@ const GEAR_DATA_ENTITIES_URL = "https://cdn-hosted.gaming.tools/dune/data/en/ent
 const GEAR_CDN_ASSET_URL = "https://cdn-hosted.gaming.tools/dune";
 const ITEM_GRADES = ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Unique", "Unknown"];
 const CATALOG_MAIN_CATEGORIES = new Set(["items", "buildables", "placeables", "customizations"]);
-const LOCALAPPDATA_DIR = process.env.LOCALAPPDATA || process.env.APPDATA || "";
-const MANAGER_DATA_DIR = LOCALAPPDATA_DIR ? path.join(LOCALAPPDATA_DIR, "AlphaNine Dune Awakening Manager") : MANAGER_DIR;
+const LOCALAPPDATA_DIR = process.env.LOCALAPPDATA || process.env.APPDATA || APPDATA_DIR || "";
+const MANAGER_DATA_DIR = process.env.ALPHANINE_MANAGER_DATA_DIR
+  || (IS_WINDOWS && LOCALAPPDATA_DIR ? path.join(LOCALAPPDATA_DIR, "AlphaNine Dune Awakening Manager") : "")
+  || (!IS_WINDOWS ? path.join(APPDATA_DIR, "manager") : MANAGER_DIR);
 const MANAGER_CONFIG_PATH = path.join(MANAGER_DATA_DIR, "manager-config.json");
 const MANAGER_APPLIED_PROFILE_PATH = path.join(MANAGER_DATA_DIR, "applied-profile.json");
 const MANAGER_APPLIED_SETTINGS_PATH = path.join(MANAGER_DATA_DIR, "applied-server-settings.json");
@@ -201,7 +212,7 @@ function psSingleQuoteSync(value) {
 }
 
 function detectVmIpSync(vmNameValue) {
-  if (process.platform !== "win32") return "";
+  if (!IS_WINDOWS) return "";
   const vmName = String(vmNameValue || "").trim();
   if (!vmName) return "";
   const script = `
@@ -242,7 +253,7 @@ function pythonPathStatus(value) {
 
 function commandPath(command) {
   if (!command) return "";
-  if (process.platform === "win32") {
+  if (IS_WINDOWS) {
     try {
       const result = spawnSync("where.exe", [command], { windowsHide: true, encoding: "utf8", timeout: 5000 });
       if (result.error || result.status !== 0) return "";
@@ -293,6 +304,7 @@ function detectPythonPath(configValue = {}) {
     configValue.pythonPath,
     process.env.PYTHON_PATH,
     process.env.PYTHON_PATH_C,
+    commandPath("python3"),
     commandPath("python"),
     commandPath("py"),
     ...commonPythonCandidates()
@@ -484,6 +496,7 @@ function loadConfig() {
     const token = generateReceiverToken();
     const generated = { ...defaultConfig, receiverToken: token, adminGiveItemToken: token, receiverTokenSource: "generated" };
     const detected = autoDetectInitialConfig(generated).config;
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(detected, null, 2));
     return detected;
   }
@@ -760,6 +773,10 @@ function expandEnvPath(value) {
 }
 
 function defaultSshKeyPath() {
+  if (!IS_WINDOWS) {
+    const candidates = [path.join(os.homedir(), ".ssh", "id_ed25519"), path.join(os.homedir(), ".ssh", "id_rsa")];
+    return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+  }
   const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
   return path.resolve(localAppData, "DuneAwakeningServer", "sshKey");
 }
@@ -1067,8 +1084,12 @@ function localIps() {
 }
 
 function webPortalUrls() {
-  const urls = [`http://127.0.0.1:${PORT}`];
-  for (const address of localIps()) urls.push(`http://${address}:${PORT}`);
+  return [`http://127.0.0.1:${PORT}`];
+}
+
+function remotePortalUrls() {
+  const urls = [`https://127.0.0.1:${HTTPS_PORT}`];
+  for (const address of localIps()) urls.push(`https://${address}:${HTTPS_PORT}`);
   return [...new Set(urls)];
 }
 
@@ -1255,7 +1276,7 @@ async function stopManagedReceiver() {
     const managedPid = String(receiverManagedProcess.pid || "managed");
     try {
       receiverManagedProcess.kill("SIGTERM");
-      if (process.platform === "win32" && receiverManagedProcess.pid) {
+      if (IS_WINDOWS && receiverManagedProcess.pid) {
         await run("taskkill", ["/pid", String(receiverManagedProcess.pid), "/T", "/F"], { timeout: 10000 });
       }
     } catch {}
@@ -1269,8 +1290,12 @@ async function stopManagedReceiver() {
   }
   const listenerPid = await listeningPidOnPort(urls.port);
   if (listenerPid && listenerPid !== String(process.pid)) {
-    const killed = await run("taskkill", ["/pid", listenerPid, "/T", "/F"], { timeout: 10000 });
-    if (killed.ok) stopped.push(listenerPid);
+    if (IS_WINDOWS) {
+      const killed = await run("taskkill", ["/pid", listenerPid, "/T", "/F"], { timeout: 10000 });
+      if (killed.ok) stopped.push(listenerPid);
+    } else {
+      try { process.kill(Number(listenerPid), "SIGTERM"); stopped.push(listenerPid); } catch {}
+    }
   }
   const offline = await waitForReceiverOffline(urls.healthUrl);
   if (!offline) {
@@ -1833,7 +1858,7 @@ async function diagnosticsSnapshot() {
     configPath: CONFIG_PATH,
     appData: APPDATA_DIR || __dirname,
     webPortal: {
-      bindHost: HOST,
+      bindHost: LOCAL_HOST,
       port: PORT,
       urls: webPortalUrls()
     },
@@ -1916,7 +1941,7 @@ async function checkGitHubUpdates(repo) {
   try {
     const releasesPath = `/repos/${targetRepo}/releases?per_page=20`;
     const releases = await githubApiJson(releasesPath);
-    const latestRelease = Array.isArray(releases) ? releases.find((release) => !release?.draft) : null;
+    const latestRelease = Array.isArray(releases) ? releases.find((release) => !release?.draft && !release?.prerelease) : null;
     if (latestRelease) return githubReleaseUpdatePayload(latestRelease, targetRepo, releasesPath);
     const latestPath = `/repos/${targetRepo}/releases/latest`;
     return githubReleaseUpdatePayload(await githubApiJson(latestPath), targetRepo, latestPath);
@@ -1944,8 +1969,12 @@ function run(command, args, options = {}) {
 }
 
 async function listeningPidOnPort(port) {
-  if (process.platform !== "win32") return "";
   const localPort = Number(port);
+  if (!IS_WINDOWS) {
+    const result = await run("sh", ["-c", `command -v ss >/dev/null 2>&1 && ss -ltnp 'sport = :${localPort}' 2>/dev/null || true`], { timeout: 10000, maxBuffer: 1024 * 256 });
+    const output = String(result.stdout || "");
+    return output.match(/pid=(\d+)/)?.[1] || "";
+  }
   const ps = await run("powershell.exe", [
     "-NoProfile",
     "-Command",
@@ -2112,7 +2141,7 @@ async function runDatabaseTunnelStart(configValue, settings, options) {
       "-i", settings.keyPath,
       `${settings.user}@${settings.host}`
     ];
-    const sshBinary = process.platform === "win32" ? "ssh.exe" : "ssh";
+    const sshBinary = IS_WINDOWS ? "ssh.exe" : "ssh";
     const childState = { error: "", exited: false, exitCode: null };
     let child;
     try {
@@ -2414,7 +2443,7 @@ async function vmInfoFast(timeoutMs = 5000) {
 }
 
 async function backendElevationStatus() {
-  if (process.platform !== "win32") return { elevated: null, supported: false, message: "Elevation diagnostics are only available on Windows." };
+  if (!IS_WINDOWS) return { elevated: typeof process.getuid === "function" ? process.getuid() === 0 : null, supported: true, message: "Linux service permissions are managed by the service account." };
   const script = "$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent()); $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)";
   const result = await ps(script, 10000);
   if (!result.ok) {
@@ -2453,7 +2482,7 @@ async function backendDiagnostics() {
 }
 
 async function hyperVStatus() {
-  if (process.platform !== "win32") {
+  if (!IS_WINDOWS) {
     return { ok: false, available: false, code: "unsupported_platform", message: "Hyper-V controls are only available on Windows." };
   }
   const script = `
@@ -2649,7 +2678,7 @@ function mergeMonitorPorts(rows = []) {
 function configuredMonitorPorts() {
   const receiver = receiverUrls();
   const ports = [
-    { key: "suite", label: "8810 (Suite Backend)", host: HOST, port: PORT, source: "Suite settings", probe: true },
+    { key: "suite", label: "8810 (Suite Backend)", host: LOCAL_HOST, port: PORT, source: "Suite settings", probe: true },
     { key: "receiver", label: `${receiver.port} (Live Give Receiver)`, host: receiver.host, port: receiver.port, source: "Suite settings", probe: true },
     { key: "ssh", label: "22 (SSH)", port: 22, source: "Suite settings", probe: true }
   ];
@@ -13093,7 +13122,7 @@ function normalizeExecutablePath(value) {
   let executable = unquoteEnvValue(value).trim();
   executable = executable.replace(/^\uFEFF/, "");
   executable = unquoteEnvValue(executable).trim();
-  if (process.platform === "win32") {
+  if (IS_WINDOWS) {
     executable = executable.replace(/\//g, "\\");
   }
   if (!executable) return "";
@@ -13141,7 +13170,7 @@ function configuredPythonPath() {
 }
 
 function installedPythonCandidates() {
-  if (process.platform !== "win32") return [];
+  if (!IS_WINDOWS) return [];
   const roots = [
     process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs", "Python") : "",
     process.env.ProgramFiles ? path.join(process.env.ProgramFiles, "Python") : "",
@@ -13173,6 +13202,7 @@ function findPython() {
     }
     console.warn(`Configured PYTHON_PATH was not found: ${configured.command} (${configured.source})`);
   }
+  if (commandAvailable("python3")) return { command: "python3", source: "PATH", exists: true };
   if (commandAvailable("python")) return { command: "python", source: "PATH", exists: true };
   if (commandAvailable("py")) return { command: "py", source: "PATH", exists: true };
   for (const command of installedPythonCandidates()) {
@@ -13184,7 +13214,7 @@ function findPython() {
 }
 
 function isWindowsAppsAlias(command) {
-  return process.platform === "win32" && /\\WindowsApps\\/i.test(String(command || ""));
+  return IS_WINDOWS && /\\WindowsApps\\/i.test(String(command || ""));
 }
 
 function managerSpawnDetails(resolved, args, useShell, reason = "") {
@@ -13591,6 +13621,7 @@ function sendManagerUnavailable(res, reason, status = 503) {
 }
 
 function startManagerService() {
+  if (process.env.ALPHANINE_SKIP_MANAGER === "1") return;
   if (managerProcess) return;
   if (managerStartError) return;
   const resolved = findPython();
@@ -17007,7 +17038,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel-head">
           <div>
             <div class="label">Web Portal</div>
-            <div class="subtle mt">Open the Suite web portal from this machine or copy the LAN URLs for another device.</div>
+            <div class="subtle mt">Use loopback HTTP on this machine or the authenticated HTTPS portal from another device.</div>
           </div>
           <button type="button" onclick="openWebPortal()">Open Portal</button>
         </div>
@@ -17021,6 +17052,32 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <button type="button" onclick="refreshDiagnostics()">Refresh URLs</button>
         </div>
         <div id="webPortalStatus" class="empty mt">Web portal is served by AlphaNine Dune Suite while the app is running.</div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div>
+            <div class="label">Secure Remote Access</div>
+            <div class="subtle mt">A separate HTTPS portal protected by an administrator login. Setup is available only from this computer.</div>
+          </div>
+          <button type="button" onclick="refreshRemoteAccessStatus()">Refresh</button>
+        </div>
+        <div class="detail-list mt">
+          <div class="detail-row"><span class="subtle">Status</span><strong id="remoteAccessConfigured">Checking...</strong></div>
+          <div class="detail-row"><span class="subtle">HTTPS URLs</span><strong id="remoteAccessUrls" class="env-path-value">Checking...</strong></div>
+          <div class="detail-row"><span class="subtle">Certificate SHA-256</span><strong id="remoteAccessFingerprint" class="env-path-value">Checking...</strong></div>
+        </div>
+        <div class="field-grid mt">
+          <label>Administrator username<input id="remoteAccessUsername" value="admin" autocomplete="username"></label>
+          <label>New password<input id="remoteAccessPassword" type="password" minlength="12" autocomplete="new-password" placeholder="At least 12 characters"></label>
+          <label>Confirm password<input id="remoteAccessPasswordConfirm" type="password" minlength="12" autocomplete="new-password"></label>
+        </div>
+        <div class="action-row mt">
+          <button type="button" onclick="setRemoteAccessPassword()">Set / Replace Password</button>
+          <button type="button" onclick="openRemotePortal()">Open HTTPS Login</button>
+          <button type="button" onclick="copyRemotePortalUrl()">Copy HTTPS URL</button>
+          <button id="remoteAccessLogout" type="button" onclick="remoteLogout()" style="display:none">Sign Out</button>
+        </div>
+        <div id="remoteAccessStatus" class="empty mt">The generated certificate is self-signed for local testing, so the browser will show a one-time warning.</div>
       </div>
     </section>
 
@@ -17284,6 +17341,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
 </div>
 <script>
 const WEB_PORTAL_URLS=${JSON.stringify(portalUrls)};
+let REMOTE_PORTAL_URLS=[];
 const tabs=[...document.querySelectorAll(".tab")], views=[...document.querySelectorAll(".view")];
 const viewCopy={
   dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
@@ -17346,6 +17404,11 @@ function portalUrlText(urls=WEB_PORTAL_URLS){return (urls&&urls.length?urls:WEB_
 function renderWebPortalUrls(urls=WEB_PORTAL_URLS){const resolved=urls&&urls.length?urls:WEB_PORTAL_URLS;setText("diagPortal",portalUrlText(resolved));setText("settingsWebPortalUrl",portalUrlText(resolved));setText("webPortalPrimaryUrl",resolved[0]||"");setText("webPortalAllUrls",portalUrlText(resolved));}
 function openWebPortal(){const url=(WEB_PORTAL_URLS&&WEB_PORTAL_URLS[0])||location.origin;window.open(url,"_blank","noopener");setText("webPortalStatus","Opened "+url);playUiSound("click");}
 async function copyWebPortalUrl(){const text=portalUrlText(WEB_PORTAL_URLS);try{await navigator.clipboard.writeText(text);setText("webPortalStatus","Web portal URL copied.");showToast("Web Portal URL copied","success");playUiSound("success");}catch(error){setText("webPortalStatus",betterError(error));playUiSound("warning");}}
+async function refreshRemoteAccessStatus(){if(location.protocol==="https:"){REMOTE_PORTAL_URLS=[location.origin];setText("remoteAccessConfigured","Authenticated remote session");setText("remoteAccessUrls",location.origin);setText("remoteAccessFingerprint","View on the server computer");setText("remoteAccessStatus","Password and certificate setup are restricted to the local Suite.");const logout=document.getElementById("remoteAccessLogout");if(logout)logout.style.display="";return;}try{const data=await getJson("/api/remote-access/status");REMOTE_PORTAL_URLS=data.urls||[];setText("remoteAccessConfigured",data.configured?"Password configured":"Password setup required");setText("remoteAccessUrls",portalUrlText(REMOTE_PORTAL_URLS));setText("remoteAccessFingerprint",data.certificateFingerprint||"Certificate is starting");}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function setRemoteAccessPassword(){const username=document.getElementById("remoteAccessUsername")?.value||"admin";const password=document.getElementById("remoteAccessPassword")?.value||"";const confirm=document.getElementById("remoteAccessPasswordConfirm")?.value||"";if(password!==confirm){setText("remoteAccessStatus","Passwords do not match.");return;}try{await getJson("/api/remote-access/password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});document.getElementById("remoteAccessPassword").value="";document.getElementById("remoteAccessPasswordConfirm").value="";setText("remoteAccessStatus","Remote administrator password saved. Existing remote sessions were signed out.");showToast("Remote access password saved","success");await refreshRemoteAccessStatus();}catch(error){setText("remoteAccessStatus",betterError(error));}}
+function openRemotePortal(){const url=REMOTE_PORTAL_URLS[0]||("https://127.0.0.1:${HTTPS_PORT}");window.open(url,"_blank","noopener");setText("remoteAccessStatus","Opened "+url+". Accept the self-signed certificate warning for this test build.");}
+async function copyRemotePortalUrl(){const text=(REMOTE_PORTAL_URLS&&REMOTE_PORTAL_URLS[0])||"https://127.0.0.1:${HTTPS_PORT}";try{await navigator.clipboard.writeText(text);setText("remoteAccessStatus","HTTPS URL copied.");}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function remoteLogout(){try{await getJson("/api/auth/logout",{method:"POST"});location.href="/login";}catch(error){setText("remoteAccessStatus",betterError(error));}}
 function normalizeUiMode(value){return String(value||"").toLowerCase()==="advanced"?"advanced":"simple";}
 function applyUiMode(value){uiMode=normalizeUiMode(value);document.body.classList.toggle("simple-mode",uiMode==="simple");document.body.classList.toggle("advanced-mode",uiMode==="advanced");setValue("headerUiMode",uiMode);setValue("settingsUiMode",uiMode);if(appConfig)appConfig.uiMode=uiMode;if(uiMode==="simple"&&document.getElementById("logs")?.classList.contains("active"))setView("dashboard");}
 async function changeUiMode(value){const previous=uiMode;applyUiMode(value);try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,uiMode})});appConfig=data.config||{...current,uiMode};applyUiMode(appConfig.uiMode);setText("settingsSaveStatus","UI mode saved.");playUiSound("click");}catch(error){applyUiMode(previous);setText("settingsSaveStatus","Could not save UI mode: "+betterError(error));playUiSound("warning");}}
@@ -17597,7 +17660,8 @@ async function refreshOperations(){try{const data=await getJson("/api/operations
 async function clearCompletedOperations(){try{if(!(await appConfirm("Clear operation history","Clear completed, failed, and interrupted operation records? Active work remains visible.","Clear History","Cancel")))return;const data=await getJson("/api/operations/completed",{method:"DELETE",timeoutMs:8000});renderOperations(data);showToast("Operation history cleared.","success");}catch(error){showToast(betterError(error),"error");}}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
-async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
+function csrfCookie(){const match=document.cookie.match(/(?:^|;\s*)alphanine_csrf=([^;]+)/);return match?decodeURIComponent(match[1]):"";}
+async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;const method=String(request.method||"GET").toUpperCase();if(!["GET","HEAD","OPTIONS"].includes(method)){request.headers={...(request.headers||{}),"X-CSRF-Token":csrfCookie()};}r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(r.status===401&&location.protocol==="https:"){location.href="/login";throw new Error("Remote session expired. Sign in again.");}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
 function formatMarketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"--";}
 function marketBotHealthLabel(data){if(data?.health?.ok&&data.tokenConfigured===false)return"Token Needed";if(data?.status?.exchange_ready===false||data?.health?.ready===false)return"Waiting for Exchange";if(data?.health?.ok)return"Online";if(data?.status||data?.config)return"Online";return"Offline";}
 function renderMarketBotConfig(config){if(!config)return;setChecked("marketBotEnabled",config.enabled!==false);setValue("marketBotBuyInterval",config.buy_interval||"");setValue("marketBotListInterval",config.list_interval||"");setValue("marketBotAIOrderMin",config.ai_order_min??30);setValue("marketBotAIOrderMax",config.ai_order_max??60);setValue("marketBotMaxPlayerBuys",config.max_buys??2);setText("marketBotConfigResult","Loaded bot config. Changes apply on the next scheduler check.");}
@@ -18084,17 +18148,101 @@ function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>res
 async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
 async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);
+renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
-if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{}));
+if(location.protocol==="http:"&&"serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{}));
 </script>
 </body>
 </html>`;
 }
 
+function remoteLoginPage(message = "") {
+  const safeMessage = String(message || "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[character]));
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AlphaNine Dune Suite Login</title><style>
+  :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at top,#2b1c08,#050403 55%);font:15px system-ui;color:#f8e7c4}.card{width:min(420px,calc(100% - 32px));padding:30px;border:1px solid #8d642c;border-radius:18px;background:rgba(13,10,7,.96);box-shadow:0 28px 80px #000}.kicker{color:#d99a3b;font-weight:800;letter-spacing:.14em;text-transform:uppercase}h1{margin:10px 0 6px;font-size:27px}p{color:#bcae92;line-height:1.5}label{display:block;margin:16px 0 6px;color:#d8c49d}input{width:100%;padding:13px;border:1px solid #65502f;border-radius:9px;background:#090806;color:#fff;font:inherit}button{width:100%;margin-top:20px;padding:13px;border:0;border-radius:9px;background:linear-gradient(180deg,#e0a349,#a96717);font-weight:800;color:#1b1004;cursor:pointer}.error{min-height:22px;margin-top:14px;color:#ffb3a4}.note{font-size:12px}</style></head><body><main class="card"><div class="kicker">Secure Remote Access</div><h1>AlphaNine Dune Suite</h1><p>Sign in with the administrator credential configured from the Suite on the server computer.</p><form id="login"><label for="username">Username</label><input id="username" autocomplete="username" value="admin" required><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required><button type="submit">Sign In</button></form><div id="error" class="error">${safeMessage}</div><p class="note">This connection is encrypted with HTTPS. A self-signed test certificate may require one browser confirmation.</p></main><script>document.getElementById("login").addEventListener("submit",async(event)=>{event.preventDefault();const error=document.getElementById("error");error.textContent="Signing in...";try{const response=await fetch("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})});const data=await response.json();if(!response.ok)throw new Error(data.error||"Login failed");location.href="/";}catch(reason){error.textContent=reason.message;}});</script></body></html>`;
+}
+
+function applyRemoteSecurityHeaders(res) {
+  res.setHeader("Strict-Transport-Security", "max-age=31536000");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Content-Security-Policy", "frame-ancestors 'self'; base-uri 'self'; form-action 'self'");
+}
+
+async function handleRequest(req, res) {
+  const isHttps = Boolean(req.socket.encrypted);
+  if (!isHttps) return route(req, res);
+  applyRemoteSecurityHeaders(res);
+  const url = new URL(req.url, `https://${req.headers.host || `127.0.0.1:${HTTPS_PORT}`}`);
+  if (url.pathname === "/login" && req.method === "GET") {
+    send(res, 200, "text/html", remoteLoginPage());
+    return;
+  }
+  if (url.pathname === "/api/auth/login" && req.method === "POST") {
+    let body = {};
+    try { body = JSON.parse(await readBody(req) || "{}"); } catch {
+      await json(res, { ok: false, error: "Invalid login request." }, 400);
+      return;
+    }
+    const result = remoteAccess.login(req, body.username, body.password);
+    if (!result.ok) {
+      if (result.retryAfterMs) res.setHeader("Retry-After", Math.ceil(result.retryAfterMs / 1000));
+      await json(res, { ok: false, error: result.error }, result.status);
+      return;
+    }
+    res.setHeader("Set-Cookie", remoteAccess.sessionCookies(result));
+    await json(res, { ok: true });
+    return;
+  }
+  const activeSession = remoteAccess.session(req);
+  if (!activeSession) {
+    if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/manager-api/")) {
+      await json(res, { ok: false, error: "Authentication required." }, 401);
+    } else {
+      res.writeHead(302, { Location: "/login", "Cache-Control": "no-store" });
+      res.end();
+    }
+    return;
+  }
+  if (!["GET", "HEAD", "OPTIONS"].includes(String(req.method).toUpperCase()) && !remoteAccess.verifyCsrf(req, activeSession)) {
+    await json(res, { ok: false, error: "CSRF validation failed. Refresh the page and try again." }, 403);
+    return;
+  }
+  if (url.pathname === "/api/auth/logout" && req.method === "POST") {
+    remoteAccess.logout(req);
+    res.setHeader("Set-Cookie", remoteAccess.clearCookies());
+    await json(res, { ok: true });
+    return;
+  }
+  return route(req, res);
+}
+
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  if (url.pathname === "/api/remote-access/status" && req.method === "GET") {
+    if (req.socket.encrypted || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Remote access setup is available only on the local Suite." }, 403);
+      return;
+    }
+    await json(res, { ok: true, configured: remoteAccess.configured(), username: "admin", urls: remotePortalUrls(), certificateFingerprint: remoteAccess.certificateFingerprint() });
+    return;
+  }
+  if (url.pathname === "/api/remote-access/password" && req.method === "POST") {
+    if (req.socket.encrypted || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Remote access setup is available only on the local Suite." }, 403);
+      return;
+    }
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, remoteAccess.setPassword(body.password, body.username));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
   if (url.pathname === "/" || url.pathname === "/index.html") {
     send(res, 200, "text/html", appPage());
     return;
@@ -19082,12 +19230,27 @@ async function route(req, res) {
 startManagerService();
 
 const server = http.createServer((req, res) => {
-  route(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
+  handleRequest(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
 });
 
-server.listen(PORT, HOST, async () => {
+let httpsServer = null;
+try {
+  const tls = remoteAccess.ensureCertificate(localIps());
+  httpsServer = https.createServer({ key: tls.key, cert: tls.cert, minVersion: "TLSv1.2" }, (req, res) => {
+    handleRequest(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
+  });
+  httpsServer.on("error", (error) => console.error(`AlphaNine HTTPS portal failed: ${error.message}`));
+  httpsServer.listen(HTTPS_PORT, HTTPS_HOST, () => {
+    console.log(`AlphaNine Dune Suite secure remote portal: ${remotePortalUrls().join(" ")}`);
+    console.log(`Remote administrator password: ${remoteAccess.configured() ? "configured" : "setup required in Web Portal > Secure Remote Access"}`);
+  });
+} catch (error) {
+  console.error(`AlphaNine HTTPS portal could not start: ${error.message}`);
+}
+
+server.listen(PORT, LOCAL_HOST, async () => {
   console.log(`AlphaNine Dune Suite desktop: http://127.0.0.1:${PORT}`);
-  console.log(`AlphaNine Dune Suite web portal: ${webPortalUrls().join(" ")}`);
+  console.log(`AlphaNine Dune Suite local portal: ${webPortalUrls().join(" ")}`);
   console.log(`Expected server install: ${DEFAULT_SERVER_ROOT}`);
   const startupVmSync = autoSyncVmIpFromHyperV()
     .then((result) => {

@@ -13585,7 +13585,8 @@ function spawnManagerProcess(resolved, useShell, reason) {
   const args = ["manager-server.py", "--no-open"];
   const details = managerSpawnDetails(resolved, args, useShell, reason);
   logManagerSpawnDetails(details);
-  managerProcess = spawn(resolved.command, args, {
+  const spawnCommand = useShell ? `"${String(resolved.command).replace(/"/g, "")}"` : resolved.command;
+  managerProcess = spawn(spawnCommand, args, {
     cwd: MANAGER_DIR,
     shell: useShell,
     windowsHide: true,

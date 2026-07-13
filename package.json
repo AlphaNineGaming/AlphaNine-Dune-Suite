@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.0.43",
+  "version": "1.0.44",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -11,6 +11,9 @@
     "test:setup-paths": "node scripts/test-setup-path-persistence.js",
     "test:setup-database": "node scripts/test-setup-database-auth.js",
     "test:player-rename": "node scripts/test-player-rename.js",
+    "test:durability-repair": "node scripts/test-durability-repair.js",
+    "test:repair-queue": "node scripts/test-repair-queue.js",
+    "test:ui-syntax": "node scripts/test-rendered-ui-syntax.js",
     "test:base-cleanup": "node scripts/test-base-cleanup-override.js",
     "test:operations": "node scripts/test-operations.js",
     "test:python-discovery": "node scripts/test-python-discovery.js",

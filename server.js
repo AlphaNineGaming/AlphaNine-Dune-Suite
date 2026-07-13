@@ -11,6 +11,7 @@ const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError } = require("./lib/operations");
 const { createRemoteAccess } = require("./lib/remote-access");
+const { durabilityRepairCandidate } = require("./lib/durability-repair");
 const {
   PLAYER_RENAME_MAX_LENGTH,
   sanitizePlayerRenameName,
@@ -41,6 +42,8 @@ const PROGRESSION_DATA_DIR = APPDATA_DIR || __dirname;
 const PROGRESSION_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "progression-backups");
 const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progression-audit.log");
 const PLAYER_RENAME_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "player-rename-backups");
+const REPAIR_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "repair-backups");
+const REPAIR_QUEUE_PATH = path.join(PROGRESSION_DATA_DIR, "repair-queue.json");
 const DATABASE_TUNNEL_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "database-tunnel.log");
 let databaseTunnelStartPromise = null;
 const DB_QUERY_CACHE_TTL_MS = 120000;
@@ -2960,13 +2963,15 @@ async function sshCommand(command, timeout = 180000, options = {}) {
   const key = sshKeyStatus(cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
   if (!key.exists) return { ok: false, stdout: "", stderr: key.message, error: key.message, sshKey: key };
   const user = String(cfg.sshUser || cfg.receiverSshUser || "dune").trim();
-  return run("ssh", [
+  const args = [
     "-o", "StrictHostKeyChecking=no",
     "-o", "LogLevel=QUIET",
     "-i", key.path,
     `${user}@${ip}`,
     command
-  ], { timeout, maxBuffer: options.maxBuffer });
+  ];
+  if (options.inputPath) return runWithStdin("ssh", args, options.inputPath, { timeout, maxBuffer: options.maxBuffer });
+  return run("ssh", args, { timeout, maxBuffer: options.maxBuffer });
 }
 
 function parseMetricPair(line) {
@@ -5037,6 +5042,36 @@ async function dbQuery(sql, timeout = 45000, runtimeTarget = null) {
     throw error;
   }
   return result.stdout.trim();
+}
+
+async function dbQueryStreamed(sql, timeout = 45000, runtimeTarget = null) {
+  const target = runtimeTarget || await cachedDatabaseRuntimeTarget();
+  const { namespace, dbPod, dbSvc } = target;
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-sql-"));
+  const inputPath = path.join(temporaryDirectory, "query.sql");
+  fs.writeFileSync(inputPath, String(sql || ""), "utf8");
+  const buildCommand = (password) => `sudo kubectl exec -i -n ${shQuote(namespace)} ${shQuote(dbPod)} -- env PGPASSWORD=${shQuote(password)} psql -v ON_ERROR_STOP=1 -h ${shQuote(dbSvc)} -p 15432 -U postgres -d dune -At -F $'\\t' -f -`;
+  try {
+    let passwordInfo = await cachedDatabasePassword(target);
+    let command = buildCommand(passwordInfo.password);
+    let result = await sshCommand(command, timeout, { inputPath, maxBuffer: 1024 * 1024 * 16 });
+    if (!result.ok && passwordInfo.source === "config") {
+      dbPasswordCache = null;
+      passwordInfo = await cachedDatabasePassword(target, { ignoreConfig: true });
+      command = buildCommand(passwordInfo.password);
+      result = await sshCommand(command, timeout, { inputPath, maxBuffer: 1024 * 1024 * 16 });
+    }
+    if (!result.ok) {
+      invalidateDatabaseQueryCache();
+      const error = new Error(result.stderr || result.stdout || result.error || "Streamed database query failed.");
+      error.diagnostics = target.diagnostics || null;
+      error.lastCommand = command;
+      throw error;
+    }
+    return result.stdout.trim();
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 }
 
 async function cachedDatabaseRuntimeTarget() {
@@ -9381,6 +9416,370 @@ async function applyPlayerRename(body = {}) {
     });
     throw error;
   }
+}
+
+const repairPreviews = new Map();
+const REPAIR_CONFIRM_TEXT = "REPAIR DURABILITY";
+const REPAIR_PREVIEW_TTL_MS = 30 * 60 * 1000;
+
+function repairDbId(value, label = "database id") {
+  const id = String(value || "").trim();
+  if (!/^\d+$/.test(id)) throw new Error(`${label} is missing or invalid.`);
+  return id;
+}
+
+function repairDecodeStats(value) {
+  return Buffer.from(String(value || ""), "base64").toString("utf8");
+}
+
+function repairPublicTarget(row) {
+  const candidate = durabilityRepairCandidate(row.kind, row.currentDurability, row.decayedMaxDurability);
+  return {
+    targetId: `${row.kind}:${row.id}`,
+    kind: row.kind,
+    id: row.id,
+    inventoryId: row.inventoryId || "",
+    inventoryType: row.inventoryType || "",
+    vehicleId: row.vehicleId || "",
+    vehicleName: row.vehicleName || "",
+    templateId: row.templateId || "",
+    currentDurability: candidate.current,
+    allowedMaximum: candidate.maximum,
+    repairable: candidate.repairable,
+    reason: candidate.reason
+  };
+}
+
+async function repairResolvePlayer(queryValue) {
+  const query = String(queryValue || "").trim();
+  if (!query) throw new Error("Choose a player first.");
+  const result = await adminPlayers({ query, limit: 5, hydration: false });
+  if (!result.ok || !result.players?.length) throw new Error(result.error || "Player was not found.");
+  const exact = result.players.filter((row) => [row.account_id, row.player_controller_id, row.player_pawn_id, row.character_id, row.player_state_row_id, row.character_name]
+    .some((value) => String(value || "").toLowerCase() === query.toLowerCase()));
+  if (exact.length > 1) throw new Error("The player lookup is ambiguous. Choose the player by controller or account id.");
+  const row = exact[0] || result.players[0];
+  const player = progressionPlayerFromAdminRow(row, result.source || "adminPlayers");
+  repairDbId(player.account_id, "Player account id");
+  repairDbId(player.player_controller_id || player.actor_id, "Player controller id");
+  repairDbId(player.player_pawn_id, "Player pawn id");
+  return player;
+}
+
+async function repairInspectPlayer(queryValue, { includePrivate = false } = {}) {
+  const player = await repairResolvePlayer(queryValue);
+  const accountId = repairDbId(player.account_id, "Player account id");
+  const controllerId = repairDbId(player.player_controller_id || player.actor_id, "Player controller id");
+  const pawnId = repairDbId(player.player_pawn_id, "Player pawn id");
+  const itemSql = `
+    select 'item', i.id::text, inv.id::text, inv.inventory_type::text, '', '',
+      coalesce(i.template_id::text, ''),
+      coalesce(i.stats #>> '{FItemStackAndDurabilityStats,1,CurrentDurability}', ''),
+      coalesce(i.stats #>> '{FItemStackAndDurabilityStats,1,DecayedMaxDurability}', ''),
+      replace(encode(convert_to(i.stats::text, 'UTF8'), 'base64'), E'\\n', '')
+    from dune.inventories inv
+    join dune.items i on i.inventory_id = inv.id
+    where inv.actor_id = ${pawnId}
+      and i.stats #> '{FItemStackAndDurabilityStats,1,CurrentDurability}' is not null
+    order by i.id;
+  `;
+  const vehicleSql = `
+    set search_path to dune, public;
+    with owned as (
+      select * from dune.get_player_owned_vehicles_data(${controllerId}, ${accountId})
+    )
+    select 'vehicle-module', vm.id::text, '', '', o.out_actor_id::text,
+      replace(replace(coalesce(o.out_name, o.out_class, 'Vehicle'), E'\\t', ' '), E'\\n', ' '),
+      coalesce(vm.template_id::text, ''),
+      coalesce(vm.stats #>> '{FVehicleModuleDurabilityStats,1,CurrentDurability}', ''),
+      coalesce(vm.stats #>> '{FVehicleModuleDurabilityStats,1,DecayedMaxDurability}', ''),
+      replace(encode(convert_to(vm.stats::text, 'UTF8'), 'base64'), E'\\n', '')
+    from owned o
+    join dune.vehicle_modules vm on vm.vehicle_id = o.out_actor_id
+    where vm.stats #> '{FVehicleModuleDurabilityStats,1,CurrentDurability}' is not null
+    order by o.out_actor_id, vm.id;
+  `;
+  const columns = ["kind", "id", "inventoryId", "inventoryType", "vehicleId", "vehicleName", "templateId", "currentDurability", "decayedMaxDurability", "statsBase64"];
+  const [itemOutput, vehicleOutput] = await Promise.all([dbQuery(itemSql, 30000), dbQuery(vehicleSql, 30000)]);
+  const privateTargets = [...parseDbRows(itemOutput, columns), ...parseDbRows(vehicleOutput, columns)]
+    .filter((row) => row.kind === "item" || row.kind === "vehicle-module")
+    .map((row) => ({ ...row, stats: repairDecodeStats(row.statsBase64) }));
+  const targets = privateTargets.map(repairPublicTarget);
+  const items = targets.filter((target) => target.kind === "item");
+  const vehicleModules = targets.filter((target) => target.kind === "vehicle-module");
+  const response = {
+    ok: true,
+    player,
+    playerOffline: isOfflinePlayerStatus(player.online_status),
+    items,
+    vehicleModules,
+    summary: {
+      durableItems: items.length,
+      vehicleModules: vehicleModules.length,
+      repairableItems: items.filter((target) => target.repairable).length,
+      repairableVehicleModules: vehicleModules.filter((target) => target.repairable).length,
+      unknownVehicleMaximums: vehicleModules.filter((target) => target.allowedMaximum === null).length
+    },
+    policy: {
+      preservesPermanentDecay: true,
+      itemFallbackMaximum: 100,
+      vehicleUnknownMaximumsBlocked: true,
+      applyRequiresOfflinePlayer: true,
+      liveBattlegroupSupported: true
+    }
+  };
+  return includePrivate ? { ...response, privateTargets } : response;
+}
+
+function pruneRepairPreviews() {
+  for (const [id, preview] of repairPreviews) {
+    if (Date.now() - preview.createdAt > REPAIR_PREVIEW_TTL_MS) repairPreviews.delete(id);
+  }
+}
+
+async function previewDurabilityRepair(body = {}) {
+  pruneRepairPreviews();
+  const inspected = await repairInspectPlayer(body.query || body.playerId, { includePrivate: true });
+  if (!inspected.playerOffline) throw new Error("The player must be offline before creating a repair preview.");
+  const selectedIds = new Set(Array.isArray(body.targetIds) ? body.targetIds.map(String) : []);
+  if (!selectedIds.size) throw new Error("Select at least one repairable item or vehicle module.");
+  const selected = inspected.privateTargets.filter((row) => selectedIds.has(`${row.kind}:${row.id}`)).map((row) => ({ ...row, ...repairPublicTarget(row) }));
+  if (selected.length !== selectedIds.size) throw new Error("One or more selected repair targets no longer exist. Refresh the inspector.");
+  const blocked = selected.find((target) => !target.repairable);
+  if (blocked) throw new Error(`${blocked.targetId} cannot be repaired: ${blocked.reason}`);
+  const previewId = crypto.randomBytes(16).toString("hex");
+  const createdAt = Date.now();
+  fs.mkdirSync(REPAIR_BACKUP_DIR, { recursive: true });
+  const backupPath = path.join(REPAIR_BACKUP_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}-${previewId}.json`);
+  const backup = { action: "durability_repair", createdAt: new Date(createdAt).toISOString(), player: inspected.player, targets: selected.map(({ statsBase64, ...target }) => target) };
+  fs.writeFileSync(backupPath, JSON.stringify(backup, null, 2), "utf8");
+  const preview = { previewId, createdAt, backupPath, player: inspected.player, targets: selected };
+  repairPreviews.set(previewId, preview);
+  appendAdminAudit("durability_repair_preview_created", { previewId, accountId: inspected.player.account_id, targetCount: selected.length, backupPath });
+  return { ok: true, status: "preview", previewId, player: inspected.player, targets: selected.map(repairPublicTarget), backupPath, auditLogPath: ADMIN_AUDIT_LOG, confirmText: REPAIR_CONFIRM_TEXT, expiresAt: new Date(createdAt + REPAIR_PREVIEW_TTL_MS).toISOString() };
+}
+
+async function applyDurabilityRepair(body = {}) {
+  pruneRepairPreviews();
+  const previewId = String(body.previewId || "").trim();
+  const preview = repairPreviews.get(previewId);
+  if (!preview) throw new Error("Repair preview was not found or has expired. Generate a new preview.");
+  if (String(body.confirmText || "").trim() !== REPAIR_CONFIRM_TEXT) throw new Error(`Type ${REPAIR_CONFIRM_TEXT} to apply the repair.`);
+  const player = await repairResolvePlayer(preview.player.player_controller_id || preview.player.actor_id || preview.player.account_id);
+  if (!isOfflinePlayerStatus(player.online_status)) throw new Error("The player is online or has an unknown connection state. Repair cancelled.");
+  const accountId = repairDbId(player.account_id, "Player account id");
+  const controllerId = repairDbId(player.player_controller_id || player.actor_id, "Player controller id");
+  const pawnId = repairDbId(player.player_pawn_id, "Player pawn id");
+  const statements = preview.targets.map((target) => {
+    const id = repairDbId(target.id);
+    const table = target.kind === "item" ? "dune.items" : "dune.vehicle_modules";
+    const durabilityPath = target.kind === "item" ? "{FItemStackAndDurabilityStats,1,CurrentDurability}" : "{FVehicleModuleDurabilityStats,1,CurrentDurability}";
+    const expectedStats = sqlString(target.stats);
+    const maximum = Number(target.allowedMaximum);
+    return `
+      update ${table}
+      set stats = jsonb_set(stats, '${durabilityPath}', to_jsonb(${maximum}::double precision), false)
+      where id = ${id} and stats = ${expectedStats}::jsonb;
+      get diagnostics changed = row_count;
+      if changed <> 1 then raise exception 'Repair target ${target.targetId} changed after preview.'; end if;
+      if not exists (select 1 from ${table} where id = ${id} and abs((stats #>> '${durabilityPath}')::double precision - ${maximum}) < 0.000001) then
+        raise exception 'Repair verification failed for ${target.targetId}.';
+      end if;`;
+  }).join("\n");
+  try {
+    await dbQueryStreamed(`
+      begin;
+      do $durability_repair$
+      declare changed integer;
+      begin
+        perform 1
+        from dune.player_state ps
+        where ps.account_id = ${accountId}
+          and ps.player_controller_id = ${controllerId}
+          and ps.player_pawn_id = ${pawnId}
+          and lower(coalesce(ps.online_status::text, '')) = any(array['offline','disconnected','inactive','false','f','0','no'])
+        for update;
+        if not found then raise exception 'The player became online or changed after preview. Repair cancelled.'; end if;
+        ${statements}
+      end
+      $durability_repair$;
+      commit;
+    `, 45000);
+    repairPreviews.delete(previewId);
+    appendAdminAudit("durability_repair_applied", { previewId, accountId: player.account_id, targetCount: preview.targets.length, backupPath: preview.backupPath, verified: true });
+    return { ok: true, status: "applied", repaired: preview.targets.length, player, targets: preview.targets.map(repairPublicTarget), backupPath: preview.backupPath, auditLogPath: ADMIN_AUDIT_LOG, message: `Repaired ${preview.targets.length} durability record(s) to their allowed maximum.` };
+  } catch (error) {
+    appendAdminAudit("durability_repair_failed", { previewId, accountId: player.account_id, targetCount: preview.targets.length, backupPath: preview.backupPath, error: error.message });
+    throw error;
+  }
+}
+
+function loadRepairQueue() {
+  try {
+    if (!fs.existsSync(REPAIR_QUEUE_PATH)) return [];
+    const parsed = JSON.parse(fs.readFileSync(REPAIR_QUEUE_PATH, "utf8"));
+    return Array.isArray(parsed) ? parsed.filter((item) => item && item.queueId && Array.isArray(item.targetIds)).map((item) => item.status === "processing"
+      ? { ...item, status: "queued", nextAttemptAt: new Date().toISOString(), lastError: "Suite restarted while this repair was processing; safely queued for revalidation." }
+      : item) : [];
+  } catch (error) {
+    appendAdminAudit("durability_repair_queue_load_failed", { path: REPAIR_QUEUE_PATH, error: error.message });
+    return [];
+  }
+}
+
+let repairQueue = loadRepairQueue();
+let repairQueueProcessing = false;
+
+function saveRepairQueue() {
+  repairQueue = repairQueue.slice(0, 200);
+  fs.mkdirSync(path.dirname(REPAIR_QUEUE_PATH), { recursive: true });
+  const temporaryPath = `${REPAIR_QUEUE_PATH}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(repairQueue, null, 2), "utf8");
+  fs.renameSync(temporaryPath, REPAIR_QUEUE_PATH);
+}
+
+function publicRepairQueueItem(item) {
+  return {
+    queueId: item.queueId,
+    status: item.status,
+    player: item.player,
+    targetIds: item.targetIds,
+    targetCount: item.targetIds.length,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    attempts: item.attempts || 0,
+    nextAttemptAt: item.nextAttemptAt || "",
+    lastError: item.lastError || "",
+    result: item.result || null
+  };
+}
+
+function repairQueueSnapshot() {
+  return {
+    ok: true,
+    processing: repairQueueProcessing,
+    path: REPAIR_QUEUE_PATH,
+    items: repairQueue.map(publicRepairQueueItem),
+    summary: {
+      queued: repairQueue.filter((item) => item.status === "queued").length,
+      processing: repairQueue.filter((item) => item.status === "processing").length,
+      completed: repairQueue.filter((item) => item.status === "completed").length,
+      failed: repairQueue.filter((item) => item.status === "failed").length
+    }
+  };
+}
+
+async function enqueueDurabilityRepair(body = {}) {
+  const confirmText = String(body.confirmText || "").trim();
+  if (confirmText !== "QUEUE REPAIR") throw new Error("Type QUEUE REPAIR to queue repairs for an online player.");
+  const inspected = await repairInspectPlayer(body.query || body.playerId, { includePrivate: true });
+  const requested = new Set(Array.isArray(body.targetIds) ? body.targetIds.map(String) : []);
+  if (!requested.size) throw new Error("Select at least one repairable item or vehicle module.");
+  const selected = inspected.privateTargets.filter((row) => requested.has(`${row.kind}:${row.id}`)).map((row) => ({ ...row, ...repairPublicTarget(row) }));
+  if (selected.length !== requested.size) throw new Error("One or more selected repair targets no longer exist. Refresh the inspector.");
+  const blocked = selected.find((target) => !target.repairable);
+  if (blocked) throw new Error(`${blocked.targetId} cannot be queued: ${blocked.reason}`);
+  const playerQuery = inspected.player.player_controller_id || inspected.player.actor_id || inspected.player.account_id;
+  const duplicate = repairQueue.find((item) => item.status === "queued" && String(item.player?.query) === String(playerQuery)
+    && item.targetIds.length === requested.size && item.targetIds.every((id) => requested.has(id)));
+  if (duplicate) return { ok: true, status: "already-queued", item: publicRepairQueueItem(duplicate), queue: repairQueueSnapshot() };
+  const now = new Date().toISOString();
+  const item = {
+    queueId: crypto.randomBytes(12).toString("hex"),
+    status: "queued",
+    player: {
+      query: String(playerQuery),
+      accountId: inspected.player.account_id,
+      controllerId: inspected.player.player_controller_id || inspected.player.actor_id,
+      pawnId: inspected.player.player_pawn_id,
+      characterName: inspected.player.character_name,
+      onlineStatusAtQueue: inspected.player.online_status
+    },
+    targetIds: [...requested],
+    createdAt: now,
+    updatedAt: now,
+    attempts: 0,
+    nextAttemptAt: now,
+    lastError: "",
+    result: null
+  };
+  repairQueue.unshift(item);
+  saveRepairQueue();
+  appendAdminAudit("durability_repair_queued", { queueId: item.queueId, accountId: item.player.accountId, playerStatus: item.player.onlineStatusAtQueue, targetIds: item.targetIds });
+  setTimeout(() => processRepairQueue().catch(() => {}), 250).unref?.();
+  return { ok: true, status: "queued", item: publicRepairQueueItem(item), queue: repairQueueSnapshot(), message: `Queued ${item.targetIds.length} repair(s) for ${item.player.characterName || "player"}. They will run automatically after the player disconnects.` };
+}
+
+function removeRepairQueueItem(queueId) {
+  const id = String(queueId || "").trim();
+  const index = repairQueue.findIndex((item) => item.queueId === id);
+  if (index < 0) throw new Error("Repair queue item was not found.");
+  if (repairQueue[index].status === "processing") throw new Error("This repair is currently processing and cannot be removed.");
+  const [removed] = repairQueue.splice(index, 1);
+  saveRepairQueue();
+  appendAdminAudit("durability_repair_queue_removed", { queueId: removed.queueId, accountId: removed.player?.accountId, status: removed.status });
+  return { ok: true, removed: publicRepairQueueItem(removed), queue: repairQueueSnapshot() };
+}
+
+async function processRepairQueueItem(item) {
+  const inspected = await repairInspectPlayer(item.player.query, { includePrivate: true });
+  item.player.onlineStatusLastChecked = inspected.player.online_status;
+  if (!inspected.playerOffline) {
+    item.status = "queued";
+    item.updatedAt = new Date().toISOString();
+    item.nextAttemptAt = new Date(Date.now() + 20000).toISOString();
+    item.lastError = "Waiting for player to disconnect.";
+    return;
+  }
+  const requested = new Set(item.targetIds);
+  const current = inspected.privateTargets.filter((row) => requested.has(`${row.kind}:${row.id}`)).map((row) => ({ ...row, ...repairPublicTarget(row) }));
+  const repairableIds = current.filter((target) => target.repairable).map((target) => target.targetId);
+  const skipped = item.targetIds.filter((id) => !repairableIds.includes(id));
+  if (!repairableIds.length) {
+    item.status = "completed";
+    item.updatedAt = new Date().toISOString();
+    item.nextAttemptAt = "";
+    item.lastError = "";
+    item.result = { repaired: 0, skipped, message: "No selected targets still required repair when the player disconnected." };
+    appendAdminAudit("durability_repair_queue_completed", { queueId: item.queueId, accountId: item.player.accountId, repaired: 0, skipped });
+    return;
+  }
+  const preview = await previewDurabilityRepair({ query: item.player.query, targetIds: repairableIds });
+  const result = await applyDurabilityRepair({ previewId: preview.previewId, confirmText: REPAIR_CONFIRM_TEXT });
+  item.status = "completed";
+  item.updatedAt = new Date().toISOString();
+  item.nextAttemptAt = "";
+  item.lastError = "";
+  item.result = { repaired: result.repaired, skipped, backupPath: result.backupPath, auditLogPath: result.auditLogPath, message: result.message };
+  appendAdminAudit("durability_repair_queue_completed", { queueId: item.queueId, accountId: item.player.accountId, repaired: result.repaired, skipped, backupPath: result.backupPath });
+}
+
+async function processRepairQueue() {
+  if (repairQueueProcessing) return repairQueueSnapshot();
+  const due = repairQueue.filter((item) => item.status === "queued" && (!item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= Date.now()));
+  if (!due.length) return repairQueueSnapshot();
+  repairQueueProcessing = true;
+  try {
+    for (const item of due) {
+      item.status = "processing";
+      item.updatedAt = new Date().toISOString();
+      saveRepairQueue();
+      try {
+        await processRepairQueueItem(item);
+      } catch (error) {
+        item.attempts = Number(item.attempts || 0) + 1;
+        item.status = item.attempts >= 10 ? "failed" : "queued";
+        item.updatedAt = new Date().toISOString();
+        item.nextAttemptAt = item.status === "queued" ? new Date(Date.now() + 60000).toISOString() : "";
+        item.lastError = error.message;
+        appendAdminAudit(item.status === "failed" ? "durability_repair_queue_failed" : "durability_repair_queue_retry", { queueId: item.queueId, accountId: item.player?.accountId, attempts: item.attempts, error: error.message });
+      }
+      saveRepairQueue();
+    }
+  } finally {
+    repairQueueProcessing = false;
+  }
+  return repairQueueSnapshot();
 }
 
 async function adminPlayers(options = {}) {
@@ -15868,6 +16267,7 @@ function appPage() {
         <div class="nav-group-title">Players</div>
         <button class="tab" data-view="players">Players</button>
         <button class="tab" data-view="give">Give Item</button>
+        <button class="tab" data-view="repair">Repair Inspector</button>
         <button class="tab" data-view="progression">Progression Inspector</button>
       </div>
       <div class="nav-group">
@@ -16304,6 +16704,46 @@ function appPage() {
           <div id="giveQueueSummary" class="empty mt">Progress: 0 / 0 · Succeeded: 0 · Failed: 0</div>
           <textarea id="giveQueueLog" class="mt" rows="10" readonly placeholder="Queue results will appear here."></textarea>
         </aside>
+      </div>
+    </section>
+
+    <section id="repair" class="view">
+      <div class="layout-2">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Durability Repair</div><div class="subtle">Restore current durability without removing permanent maximum-durability decay.</div></div><button type="button" onclick="refreshRepairPlayers()">Refresh Players</button></div>
+          <div class="field-grid mt">
+            <label>Player<select id="repairPlayerSelect" onchange="resetRepairInspector()"><option value="">Loading detected players...</option></select></label>
+            <button type="button" class="primary" onclick="inspectRepairTargets()">Inspect Items &amp; Vehicles</button>
+          </div>
+          <div id="repairStatus" class="empty mt">Choose a player to inspect durable inventory items and owned vehicle modules.</div>
+          <div class="warning mt">Offline players can be repaired immediately. Online-player repairs are safely queued and run automatically after disconnect. Vehicle modules with an unknown allowed maximum are shown but cannot be selected.</div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Repair Policy</div>
+          <div class="detail-list mt">
+            <div class="detail-row"><span class="subtle">Restored field</span><strong>CurrentDurability only</strong></div>
+            <div class="detail-row"><span class="subtle">Permanent decay</span><strong>Preserved</strong></div>
+            <div class="detail-row"><span class="subtle">Item fallback maximum</span><strong>100 when stored max is 0/missing</strong></div>
+            <div class="detail-row"><span class="subtle">Vehicle unknown maximum</span><strong>Blocked</strong></div>
+            <div class="detail-row"><span class="subtle">Running battlegroup</span><strong>Supported</strong></div>
+            <div class="detail-row"><span class="subtle">Write protection</span><strong>Preview + backup + exact read-back</strong></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Repair Targets</div><div id="repairSelectionSummary" class="subtle">No inspection loaded.</div></div><div class="action-row"><button type="button" onclick="selectAllRepairableTargets()">Select All Repairable</button><button type="button" onclick="clearRepairTargets()">Clear</button></div></div>
+        <div id="repairTargets" class="mt"><div class="empty">Inspect a player to load repair targets.</div></div>
+        <div class="action-row mt"><button id="repairPrepareButton" type="button" onclick="previewRepair()">Generate Preview + Backup</button></div>
+      </div>
+      <div id="repairImmediatePanel" class="panel pad mt">
+        <div class="label">Protected Apply</div>
+        <label class="mt">Type REPAIR DURABILITY<input id="repairConfirmText" placeholder="REPAIR DURABILITY" oninput="syncRepairApplyButton()"></label>
+        <div class="action-row mt"><button id="repairApplyButton" type="button" class="danger" onclick="applyRepair()" disabled>Apply Repair</button></div>
+        <pre id="repairPreviewLog" class="mt">No repair preview generated.</pre>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Repair Queue</div><div id="repairQueueSummary" class="subtle">Loading queued repairs...</div></div><div class="action-row"><button type="button" onclick="processRepairQueueNow()">Check Now</button><button type="button" onclick="refreshRepairQueue()">Refresh Queue</button></div></div>
+        <div id="repairQueueRows" class="detail-list mt"><div class="empty">No queued repairs.</div></div>
       </div>
     </section>
 
@@ -17347,6 +17787,7 @@ const viewCopy={
   operations:["Operations","Persistent progress, duplicate-action protection, and recent Suite work."],
   players:["Players","Search, inspect, and select characters for admin actions."],
   give:["Give Item","Live item grants through the configured receiver."],
+  repair:["Repair Inspector","Restore item and vehicle-module durability with protected database writes."],
   market:["Market Bot","Automatic NPC stock control, player-listing purchases, and manual market tools."],
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
@@ -17364,10 +17805,10 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,permissionState=null,baseCleanupState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
@@ -17863,7 +18304,27 @@ function syncGiveDestination(){const storage=document.getElementById("giveDestin
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
 function progressionPlayerLookupValue(p){return String(p?.player_controller_id||p?.character_id||p?.player_pawn_id||p?.id||p?.character_name||p?.name||"").trim();}
 function renderProgressionPlayerSelect(){const select=document.getElementById("progressionPlayerSelect");if(!select)return;const current=select.value;const options=adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);const meta=[p.player_controller_id&&("controller "+p.player_controller_id),p.character_id&&("character "+p.character_id),p.online_status||p.status].filter(Boolean).join(" / ");return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+(meta?" / "+meta:""))+'</option>':"";}).filter(Boolean).join("");select.innerHTML='<option value="">Choose detected player...</option>'+(options||'<option value="" disabled>No detected players</option>');if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
-async function refreshProgressionPlayers(){const select=document.getElementById("progressionPlayerSelect");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();renderProgressionPlayerSelect();addActivity("progression","Progression players loaded",adminPlayers.length+" detected players");return data;}catch(e){if(select)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Progression players failed",e.message);return null;}}
+function renderRepairPlayerSelect(){const select=document.getElementById("repairPlayerSelect");if(!select)return;const current=select.value;select.innerHTML='<option value="">Choose a player...</option>'+adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+' / '+(p.online_status||"unknown"))+'</option>':"";}).join("");if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
+async function refreshRepairPlayers(){const select=document.getElementById("repairPlayerSelect");if(select)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:15000});adminPlayers=data.players||[];renderRepairPlayerSelect();badge("topPlayers","Players "+adminPlayers.length);return data;}catch(e){if(select)select.innerHTML='<option value="">Player load failed</option>';setText("repairStatus",betterError(e));return null;}}
+function resetRepairInspector(){repairInspectorState=null;repairPreviewState=null;const targets=document.getElementById("repairTargets");if(targets)targets.innerHTML='<div class="empty">Inspect a player to load repair targets.</div>';setText("repairSelectionSummary","No inspection loaded.");setText("repairPreviewLog","No repair preview generated.");setValue("repairConfirmText","");syncRepairMode();syncRepairApplyButton();}
+function repairTargets(){return repairInspectorState?[...(repairInspectorState.items||[]),...(repairInspectorState.vehicleModules||[])]:[];}
+function selectedRepairTargetIds(){return [...document.querySelectorAll('[data-repair-target]:checked')].map(input=>input.value);}
+function invalidateRepairPreview(){repairPreviewState=null;setValue("repairConfirmText","");setText("repairPreviewLog","Selection changed. Generate a new preview and backup.");syncRepairSelectionSummary();syncRepairApplyButton();}
+function syncRepairSelectionSummary(){const selected=selectedRepairTargetIds().length;const total=repairTargets().filter(target=>target.repairable).length;setText("repairSelectionSummary",selected+" selected / "+total+" repairable.");}
+function syncRepairApplyButton(){const button=document.getElementById("repairApplyButton");if(button)button.disabled=!repairPreviewState||getValue("repairConfirmText")!=="REPAIR DURABILITY";}
+function syncRepairMode(){const offline=Boolean(repairInspectorState?.playerOffline);const button=document.getElementById("repairPrepareButton");const panel=document.getElementById("repairImmediatePanel");if(button)button.textContent=repairInspectorState&&!offline?"Queue Repair for Logout":"Generate Preview + Backup";if(panel)panel.classList.toggle("hidden",Boolean(repairInspectorState&&!offline));}
+function repairTargetRows(targets,empty){if(!targets.length)return '<tr><td colspan="6">'+esc(empty)+'</td></tr>';return targets.map(target=>'<tr><td><input type="checkbox" data-repair-target value="'+esc(target.targetId)+'" '+(target.repairable?'onchange="invalidateRepairPreview()"':'disabled')+'></td><td>'+esc(target.vehicleName||target.kind)+'</td><td>'+esc(target.templateId||target.id)+'</td><td>'+esc(target.currentDurability==null?'--':target.currentDurability)+'</td><td>'+esc(target.allowedMaximum==null?'Unknown':target.allowedMaximum)+'</td><td>'+esc(target.repairable?'Ready':target.reason)+'</td></tr>').join("");}
+function renderRepairTargets(){const wrap=document.getElementById("repairTargets");if(!wrap)return;if(!repairInspectorState){wrap.innerHTML='<div class="empty">Inspect a player to load repair targets.</div>';syncRepairMode();return;}wrap.innerHTML='<div class="label">Inventory Items</div><table class="mt"><thead><tr><th></th><th>Type</th><th>Template</th><th>Current</th><th>Allowed Max</th><th>Status</th></tr></thead><tbody>'+repairTargetRows(repairInspectorState.items||[],"No durable inventory items found.")+'</tbody></table><div class="label mt">Owned Vehicle Modules</div><table class="mt"><thead><tr><th></th><th>Vehicle</th><th>Module</th><th>Current</th><th>Allowed Max</th><th>Status</th></tr></thead><tbody>'+repairTargetRows(repairInspectorState.vehicleModules||[],"No durable owned vehicle modules found.")+'</tbody></table>';syncRepairSelectionSummary();syncRepairMode();}
+async function inspectRepairTargets(){const query=getValue("repairPlayerSelect");try{if(!query)throw new Error("Choose a player first.");repairPreviewState=null;setText("repairStatus","Inspecting inventory items and owned vehicle modules...");const data=await getJson("/api/admin/repair/inspect?query="+encodeURIComponent(query),{timeoutMs:60000});repairInspectorState=data;renderRepairTargets();const mode=data.playerOffline?"Immediate repair is available.":"Player is online; selected repairs will be queued until disconnect.";setText("repairStatus",(data.player?.character_name||"Player")+" / "+(data.player?.online_status||"unknown")+": "+data.summary.repairableItems+" repairable item(s), "+data.summary.repairableVehicleModules+" repairable vehicle module(s). "+mode);setText("repairPreviewLog",data.playerOffline?"Inspection loaded. Select targets and generate a preview.":"Inspection loaded for an online player. Select targets and queue them for automatic repair after logout.");addActivity("players","Repair inspection loaded",data.player?.character_name||query);}catch(e){repairInspectorState=null;renderRepairTargets();setText("repairStatus",betterError(e));showToast(betterError(e),"error");}syncRepairApplyButton();}
+function selectAllRepairableTargets(){document.querySelectorAll('[data-repair-target]:not(:disabled)').forEach(input=>{input.checked=true;});invalidateRepairPreview();}
+function clearRepairTargets(){document.querySelectorAll('[data-repair-target]').forEach(input=>{input.checked=false;});invalidateRepairPreview();}
+async function previewRepair(){try{const query=getValue("repairPlayerSelect");const targetIds=selectedRepairTargetIds();if(!repairInspectorState||!query)throw new Error("Inspect a player first.");if(!targetIds.length)throw new Error("Select at least one repairable target.");if(!repairInspectorState.playerOffline){const confirmed=await appConfirm("Queue Repair Until Logout","Queue "+targetIds.length+" repair(s) for "+(repairInspectorState.player?.character_name||"this online player")+"? The Suite will re-inspect the selected records, create the backup, and repair them automatically after the player disconnects.","Queue Repair","Cancel");if(!confirmed)return;const queued=await getJson("/api/admin/repair/queue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,targetIds,confirmText:"QUEUE REPAIR"}),timeoutMs:60000});setText("repairStatus",queued.message||"Repair queued until player logout.");showToast(queued.message||"Repair queued.","success");clearRepairTargets();await refreshRepairQueue();return;}setText("repairPreviewLog","Creating an exact pre-change backup and protected preview...");const data=await getJson("/api/admin/repair/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,targetIds}),timeoutMs:60000});repairPreviewState=data;setText("repairPreviewLog","Preview ready for "+data.targets.length+" target(s).\nBackup: "+data.backupPath+"\nExpires: "+new Date(data.expiresAt).toLocaleString()+"\n\nThe battlegroup may remain running. Type REPAIR DURABILITY, then apply while the player remains offline.");syncRepairApplyButton();showToast("Repair preview and backup ready.","success");}catch(e){repairPreviewState=null;setText("repairPreviewLog",betterError(e));syncRepairApplyButton();showToast(betterError(e),"error");}}
+async function applyRepair(){try{if(!repairPreviewState)throw new Error("Generate a repair preview first.");if(getValue("repairConfirmText")!=="REPAIR DURABILITY")throw new Error("Type REPAIR DURABILITY exactly.");const confirmed=await appConfirm("Apply Live Durability Repair","Apply "+repairPreviewState.targets.length+" live repair(s)? The battlegroup may remain running, but the player must remain offline. Permanent maximum-durability decay will remain unchanged.","Apply Repair","Cancel");if(!confirmed)return;setText("repairPreviewLog","Revalidating the offline player and applying the protected live transaction...");const data=await getJson("/api/admin/repair/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:repairPreviewState.previewId,confirmText:getValue("repairConfirmText")}),timeoutMs:90000});repairPreviewState=null;setValue("repairConfirmText","");syncRepairApplyButton();showToast(data.message||"Repair applied.","success");await inspectRepairTargets();setText("repairPreviewLog",(data.message||"Repair applied.")+"\nBackup: "+(data.backupPath||"created")+"\nAudit: "+(data.auditLogPath||"admin-audit.log"));}catch(e){setText("repairPreviewLog",betterError(e));showToast(betterError(e),"error");syncRepairApplyButton();}}
+function renderRepairQueue(){const wrap=document.getElementById("repairQueueRows");const items=repairQueueState?.items||[];const summary=repairQueueState?.summary||{};setText("repairQueueSummary",(summary.queued||0)+" waiting / "+(summary.processing||0)+" processing / "+(summary.completed||0)+" completed / "+(summary.failed||0)+" failed");if(!wrap)return;if(!items.length){wrap.innerHTML='<div class="empty">No queued repairs.</div>';return;}wrap.innerHTML=items.map(item=>{const player=item.player?.characterName||item.player?.controllerId||"Player";const result=item.result?.message||item.lastError||((item.status==="queued")?"Waiting for player to disconnect.":"");const action=item.status==="processing"?'':'<button type="button" onclick="removeRepairQueue(\''+esc(item.queueId)+'\')">'+(item.status==="queued"?'Cancel':'Clear')+'</button>';return '<div class="detail-row"><span><strong>'+esc(player)+'</strong><span class="subtle">'+esc(item.targetCount)+" target(s) · "+esc(item.status)+" · "+esc(new Date(item.updatedAt||item.createdAt).toLocaleString())+'</span><span class="subtle">'+esc(result)+'</span></span>'+action+'</div>';}).join("");}
+async function refreshRepairQueue(){try{repairQueueState=await getJson("/api/admin/repair/queue",{timeoutMs:12000});renderRepairQueue();return repairQueueState;}catch(e){setText("repairQueueSummary",betterError(e));return null;}}
+async function processRepairQueueNow(){try{setText("repairQueueSummary","Checking queued players...");repairQueueState=await getJson("/api/admin/repair/queue/process",{method:"POST",timeoutMs:90000});renderRepairQueue();showToast("Repair queue checked.","success");}catch(e){setText("repairQueueSummary",betterError(e));showToast(betterError(e),"error");}}
+async function removeRepairQueue(queueId){try{const confirmed=await appConfirm("Remove Repair Queue Entry","Remove this queued or completed repair entry? No durability records will be changed.","Remove","Cancel");if(!confirmed)return;const data=await getJson("/api/admin/repair/queue/"+encodeURIComponent(queueId),{method:"DELETE"});repairQueueState=data.queue;renderRepairQueue();showToast("Repair queue entry removed.","success");}catch(e){showToast(betterError(e),"error");}}
+async function refreshProgressionPlayers(){const select=document.getElementById("progressionPlayerSelect");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();renderProgressionPlayerSelect();renderRepairPlayerSelect();addActivity("progression","Progression players loaded",adminPlayers.length+" detected players");return data;}catch(e){if(select)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Progression players failed",e.message);return null;}}
 function selectProgressionDetectedPlayer(value){const query=String(value||"").trim();setValue("progressionPlayerQuery",query);if(query)lookupProgressionPlayer();}
 function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(players[0]&&!selectedPlayerId){selectedPlayerId=players[0].id;select.value=selectedPlayerId;}updateGiveTargetSummary();renderProgressionPlayerSelect();}
 async function refreshGivePlayersFast(){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();renderProgressionPlayerSelect();addActivity("probe","Give Item players loaded",adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
@@ -18150,6 +18611,7 @@ function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();
 renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
+setInterval(()=>{if(document.getElementById("repair")?.classList.contains("active"))refreshRepairQueue();},10000);
 if(location.protocol==="http:"&&"serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{}));
 </script>
 </body>
@@ -18723,6 +19185,52 @@ async function route(req, res) {
     catch (error) { await json(res, { ok: false, status: "blocked", error: error.message }, 400); }
     return;
   }
+  if (url.pathname === "/api/admin/repair/inspect" && req.method === "GET") {
+    try { await json(res, await repairInspectPlayer(url.searchParams.get("query"))); }
+    catch (error) { await json(res, { ok: false, status: "blocked", error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/admin/repair/preview" && req.method === "POST") {
+    try { await json(res, await previewDurabilityRepair(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) {
+      appendAdminAudit("durability_repair_preview_failed", { error: error.message });
+      await json(res, { ok: false, status: "blocked", error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/repair/apply" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await runTrackedOperation(`repair:${body.previewId || "unknown"}`, "Durability Repair", async ({ update }) => {
+        update("Validating live repair", "Checking offline player, preview fingerprints, and backup while the battlegroup remains available.");
+        return applyDurabilityRepair(body);
+      }, { category: "players", detail: "Item and vehicle durability repair" });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, error instanceof OperationBusyError ? failure.statusCode : 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/repair/queue" && req.method === "GET") {
+    await json(res, repairQueueSnapshot());
+    return;
+  }
+  if (url.pathname === "/api/admin/repair/queue" && req.method === "POST") {
+    try { await json(res, await enqueueDurabilityRepair(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) { await json(res, { ok: false, status: "blocked", error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/admin/repair/queue/process" && req.method === "POST") {
+    try { await json(res, await processRepairQueue()); }
+    catch (error) { await json(res, { ok: false, status: "failed", error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname.startsWith("/api/admin/repair/queue/") && req.method === "DELETE") {
+    try { await json(res, removeRepairQueueItem(decodeURIComponent(url.pathname.slice("/api/admin/repair/queue/".length)))); }
+    catch (error) { await json(res, { ok: false, status: "blocked", error: error.message }, 400); }
+    return;
+  }
   if (url.pathname === "/api/players/feed" && req.method === "GET") {
     try { await json(res, await playersFeed()); }
     catch (error) { await json(res, { ok: false, players: [], error: error.message }, 500); }
@@ -19285,6 +19793,9 @@ server.listen(PORT, LOCAL_HOST, async () => {
   logLiveGiveStartupValidation();
   setTimeout(() => runMarketExpiredCleanupBackground("startup"), 30000);
   setInterval(() => runMarketExpiredCleanupBackground("timer"), 10 * 60 * 1000);
+  setTimeout(() => processRepairQueue().catch((error) => appendAdminAudit("durability_repair_queue_processor_error", { error: error.message })), 3000);
+  const repairQueueInterval = setInterval(() => processRepairQueue().catch((error) => appendAdminAudit("durability_repair_queue_processor_error", { error: error.message })), 20000);
+  repairQueueInterval.unref?.();
 });
 
 process.on("exit", () => {

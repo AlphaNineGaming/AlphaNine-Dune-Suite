@@ -9,6 +9,9 @@ const service = fs.readFileSync(path.join(__dirname, "..", "linux", "alphanine-d
 const installer = fs.readFileSync(path.join(__dirname, "..", "linux", "install.sh"), "utf8");
 
 assert.match(server, /XDG_DATA_HOME[\s\S]*?alphanine-dune-suite/, "Linux XDG data path is missing.");
+assert.match(server, /ADMIN_AUDIT_LOG = path\.join\(APPDATA_DIR \|\| __dirname/, "Admin audit log must use the writable application data directory.");
+assert.match(server, /PROGRESSION_DATA_DIR = APPDATA_DIR \|\| __dirname/, "Progression runtime files must use the writable application data directory.");
+assert.match(server, /TELEPORT_PRESETS_PATH[\s\S]*?APPDATA_DIR/, "Teleport presets must use the writable application data directory.");
 assert.match(server, /commandPath\("python3"\)/, "Python 3 discovery is missing.");
 assert.match(server, /run\("sh", \["-c", `command -v ss/, "Linux listener discovery is missing.");
 assert.match(server, /process\.kill\(Number\(listenerPid\), "SIGTERM"\)/, "Linux receiver termination is missing.");

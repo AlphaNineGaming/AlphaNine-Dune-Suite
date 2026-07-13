@@ -33,16 +33,11 @@ const REMOTE_ACCESS_DIR = process.env.ALPHANINE_REMOTE_ACCESS_DIR || path.join(A
 const remoteAccess = createRemoteAccess({ dataDir: REMOTE_ACCESS_DIR });
 const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || (APPDATA_DIR ? path.join(APPDATA_DIR, "config.json") : path.join(__dirname, "config.json"));
 const BUNDLED_TELEPORT_PRESETS_PATH = path.join(__dirname, "assets", "teleport-location-presets.json");
-const TELEPORT_PRESETS_PATH = process.env.ALPHANINE_TELEPORT_PRESETS_PATH || (process.env.APPDATA
-  ? path.join(process.env.APPDATA, "AlphaNine Dune Suite", "teleport-location-presets.json")
-  : path.join(__dirname, "data", "teleport-location-presets.json"));
+const TELEPORT_PRESETS_PATH = process.env.ALPHANINE_TELEPORT_PRESETS_PATH
+  || path.join(APPDATA_DIR || path.join(__dirname, "data"), "teleport-location-presets.json");
 const TELEPORT_PLACEHOLDER_COMMAND = "teleport {playerId} {x} {y} {z}";
-const ADMIN_AUDIT_LOG = process.env.APPDATA
-  ? path.join(process.env.APPDATA, "AlphaNine Dune Suite", "admin-audit.log")
-  : path.join(__dirname, "admin-audit.log");
-const PROGRESSION_DATA_DIR = process.env.APPDATA
-  ? path.join(process.env.APPDATA, "AlphaNine Dune Suite")
-  : __dirname;
+const ADMIN_AUDIT_LOG = path.join(APPDATA_DIR || __dirname, "admin-audit.log");
+const PROGRESSION_DATA_DIR = APPDATA_DIR || __dirname;
 const PROGRESSION_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "progression-backups");
 const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progression-audit.log");
 const PLAYER_RENAME_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "player-rename-backups");

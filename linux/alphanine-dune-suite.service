@@ -14,7 +14,7 @@ Environment=ALPHANINE_MANAGER_DATA_DIR=/var/lib/alphanine-dune-suite/manager
 Environment=PORT=8810
 Environment=ALPHANINE_HTTPS_PORT=8811
 EnvironmentFile=-/etc/alphanine-dune-suite/env
-ExecStart=/usr/bin/node /opt/alphanine-dune-suite/server.js
+ExecStart=@NODE_BINARY@ /opt/alphanine-dune-suite/server.js
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

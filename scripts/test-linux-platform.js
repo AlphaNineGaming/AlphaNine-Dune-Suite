@@ -17,10 +17,13 @@ assert.match(server, /!release\?\.draft && !release\?\.prerelease/, "Stable upda
 assert.match(manager, /XDG_DATA_HOME/, "Manager Linux data path is missing.");
 assert.match(manager, /os\.kill\(int\(pid\), signal\.SIGTERM\)/, "Manager Linux stale-process cleanup is missing.");
 assert.match(service, /User=alphanine-suite/);
+assert.match(service, /ExecStart=@NODE_BINARY@/, "Service must use the installer-resolved Node executable.");
 assert.match(service, /NoNewPrivileges=true/);
 assert.match(service, /ProtectSystem=strict/);
 assert.match(service, /ALPHANINE_DATA_DIR=\/var\/lib\/alphanine-dune-suite/);
 assert.match(installer, /Node\.js 20 or newer is required/);
+assert.match(installer, /NODE_BIN=\$\(command -v node\)/, "Installer must resolve Node's absolute path.");
+assert.match(installer, /sed "s\|@NODE_BINARY@\|\$NODE_BIN\|g"/, "Installer must render Node's path into the service unit.");
 assert.match(installer, /chown -R root:alphanine-suite "\$INSTALL_DIR" "\$CONFIG_DIR"/, "Installed files must be readable by the service group.");
 assert.match(installer, /chmod 0640 "\$CONFIG_DIR\/env"/, "Service environment permissions are incorrect.");
 assert.match(installer, /systemctl enable --now alphanine-dune-suite\.service/);

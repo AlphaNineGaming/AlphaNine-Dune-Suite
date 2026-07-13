@@ -8005,10 +8005,11 @@ async function progressionPreview(payload) {
         if (!track) throw new Error("trackType is required.");
         const xp = Math.round(clampNumber(payload?.xpAmount, "xpAmount", 0, 44182));
         const level = clampNumber(payload?.level, "level", 0, 100);
-        const current = (playerData.specializationTracks || []).find((row) => row.track_type === track) || null;
-        oldValues = current || { track_type: track, xp_amount: "0", level: "0", missing: true };
-        newValues = { track_type: track, xp_amount: xp, level };
-        sqlPreview = `SELECT dune.set_specialization_xp_and_level(${actorId}, ${sqlString(track)}::dune.specializationtracktype, ${xp}, ${level});`;
+        const current = (playerData.specializationTracks || []).find((row) => String(row.track_type).toLowerCase() === track.toLowerCase()) || null;
+        const specializationPlayerId = requireInteger(current?.player_id || playerData.player?.player_controller_id, "specialization_player_id", 1);
+        oldValues = current || { player_id: String(specializationPlayerId), track_type: track, xp_amount: "0", level: "0", missing: true };
+        newValues = { player_id: specializationPlayerId, track_type: track, xp_amount: xp, level };
+        sqlPreview = `SELECT dune.set_specialization_xp_and_level(${specializationPlayerId}, ${sqlString(track)}::dune.specializationtracktype, ${xp}, ${level});`;
       } else if (action === "faction_reputation") {
         if (inspect.supports?.factionReputation?.status !== "detected") return progressionUnsupported("Faction reputation schema/function support was not detected.", inspect);
         if (!componentSupport.factionComponent) return progressionUnsupported("FactionPlayerComponent cache sync support was not detected for this player; refusing live reputation write.", inspect);
@@ -8247,6 +8248,7 @@ async function progressionApply(payload) {
     if (action === "skill_unlocks") {
       throw new Error("Skill unlock apply is not enabled yet. The app can list and preview selected skills, but no verified player skill unlock storage adapter was detected.");
     } else if (action === "specialization_xp") {
+      const specializationPlayerId = requireInteger(preview.newValues.player_id || preview.player?.player_controller_id, "specialization_player_id", 1);
       await timer.step("safety_check", async () => {
         const inspect = await withProgressionStepTimeout(progressionInspector(), 10000, "safety_check");
         if (inspect.supports?.specializationXp?.status !== "detected") throw new Error("Specialization XP support is no longer detected.");
@@ -8254,19 +8256,19 @@ async function progressionApply(payload) {
       });
       await timer.step("flevel_update", async () => withProgressionStepTimeout(dbQuery(`
         begin;
-        select dune.set_specialization_xp_and_level(${actorId}, ${sqlString(preview.newValues.track_type)}::dune.specializationtracktype, ${preview.newValues.xp_amount}, ${preview.newValues.level});
+        select dune.set_specialization_xp_and_level(${specializationPlayerId}, ${sqlString(preview.newValues.track_type)}::dune.specializationtracktype, ${preview.newValues.xp_amount}, ${preview.newValues.level});
         commit;
       `, 20000), 22000, "flevel_update"));
       const readBackOutput = await timer.step("verify_readback", async () => withProgressionStepTimeout(dbQuery(`
-        select track_type::text, xp_amount::text, level::text
+        select player_id::text, track_type::text, xp_amount::text, level::text
         from dune.specialization_tracks
-        where player_id = ${actorId}
+        where player_id = ${specializationPlayerId}
           and track_type = ${sqlString(preview.newValues.track_type)}::dune.specializationtracktype
         limit 1;
       `, 15000), 17000, "verify_readback"));
-      const [trackType = "", xpAmount = "", level = ""] = String(readBackOutput || "").split("\t");
-      const readBackValues = { track_type: trackType, xp_amount: xpAmount, level };
-      const expectedValues = { track_type: String(preview.newValues.track_type), xp_amount: String(preview.newValues.xp_amount), level: String(preview.newValues.level) };
+      const [playerId = "", trackType = "", xpAmount = "", level = ""] = String(readBackOutput || "").split("\t");
+      const readBackValues = { player_id: playerId, track_type: trackType, xp_amount: xpAmount, level };
+      const expectedValues = { player_id: String(specializationPlayerId), track_type: String(preview.newValues.track_type), xp_amount: String(preview.newValues.xp_amount), level: String(preview.newValues.level) };
       const verified = Object.keys(expectedValues).every((key) => String(readBackValues[key]) === expectedValues[key]);
       verificationDebug = { readBackValues, expectedValues };
       if (!verified) {
@@ -17898,7 +17900,7 @@ function renderProgressionPlayer(data){
   if(warnings){const items=data?.warnings||[];warnings.innerHTML=items.length?items.map(item=>'<div class="warning">'+esc(item)+'</div>').join(""):'<div class="empty">No warnings.</div>';}
   renderProgressionCharacterDebug(data);
   const spec=document.getElementById("progressionSpecRows");
-  if(spec)spec.innerHTML=data?.ok?((data.specializationTracks||[]).length?(data.specializationTracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No specialization rows found for this player.</td></tr>'):'<tr><td colspan="3">No player loaded.</td></tr>';
+  if(spec)spec.innerHTML=data?.ok?((data.specializationTracks||[]).length?(data.specializationTracks||[]).map(row=>'<tr><td>'+esc(row.track_type)+'</td><td>'+esc(row.xp_amount)+'</td><td>'+esc(row.level)+'</td></tr>').join(""):'<tr><td colspan="3">No existing specialization rows. Applying a track below will create its first row.</td></tr>'):'<tr><td colspan="3">No player loaded.</td></tr>';
   renderProgressionSpecializationEditor(data);
   const factions=document.getElementById("progressionFactionRows");
   if(factions){const groups=progressionFactionGroups(data);factions.innerHTML=data?.ok?(groups.length?groups.map(row=>'<tr><td>'+esc(progressionFactionLabel(row))+'<div class="subtle">Targets: '+esc(row.actorIds.join(", "))+'</div></td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';}
@@ -17909,7 +17911,7 @@ function renderProgressionSpecializationEditor(data){const select=document.getEl
 function syncProgressionSpecializationEditor(){const track=document.getElementById("progressionSpecializationTrack")?.value||"";const row=progressionSpecializationRow(track);setValue("progressionSpecializationXp",row?.xp_amount||0);setValue("progressionSpecializationLevel",row?.level||0);progressionSpecializationPreviewState=null;setValue("progressionSpecializationConfirmText","");updateProgressionSpecializationPreviewText();}
 function invalidateProgressionSpecializationPreview(){progressionSpecializationPreviewState=null;setValue("progressionSpecializationConfirmText","");updateProgressionSpecializationPreviewText();}
 function progressionSpecializationTargets(){const track=document.getElementById("progressionSpecializationTrack")?.value||"";const xpAmount=Number(document.getElementById("progressionSpecializationXp")?.value||0);const level=Number(document.getElementById("progressionSpecializationLevel")?.value||0);if(!track)throw new Error("Choose a specialization track.");if(!Number.isInteger(xpAmount)||xpAmount<0||xpAmount>44182)throw new Error("Specialization XP must be a whole number from 0 to 44182.");if(!Number.isInteger(level)||level<0||level>100)throw new Error("Specialization level must be a whole number from 0 to 100.");return{track,xpAmount,level};}
-function updateProgressionSpecializationPreviewText(){const log=document.getElementById("progressionSpecializationPreviewLog");if(!log)return;try{if(!progressionPlayerState?.ok){log.textContent="Load a player before changing specialization progression.";return;}const target=progressionSpecializationTargets();const row=progressionSpecializationRow(target.track);log.textContent="Ready to preview specialization change.\nTrack: "+target.track+"\nCurrent XP / level: "+(row?.xp_amount||0)+" / "+(row?.level||0)+"\nTarget XP / level: "+target.xpAmount+" / "+target.level+"\nPlayer must be offline. Trait purchases and Spice Melange are not changed.";}catch(e){log.textContent=betterError(e);}}
+function updateProgressionSpecializationPreviewText(){const log=document.getElementById("progressionSpecializationPreviewLog");if(!log)return;try{if(!progressionPlayerState?.ok){log.textContent="Load a player before changing specialization progression.";return;}const target=progressionSpecializationTargets();const row=progressionSpecializationRow(target.track);log.textContent="Ready to preview specialization change.\nTrack: "+target.track+"\nDatabase row: "+(row?"existing":"not created yet; first apply will create it")+"\nCurrent XP / level: "+(row?.xp_amount||0)+" / "+(row?.level||0)+"\nTarget XP / level: "+target.xpAmount+" / "+target.level+"\nPlayer controller ID: "+(row?.player_id||progressionPlayerState.player?.player_controller_id||"not resolved")+"\nPlayer must be offline. Trait purchases and Spice Melange are not changed.";}catch(e){log.textContent=betterError(e);}}
 async function previewProgressionSpecializationApply(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before generating a specialization preview.");if(String(progressionPlayerState.player?.online_status||"").toLowerCase().includes("online"))throw new Error("Specialization editing requires the player to be offline.");const target=progressionSpecializationTargets();const row=progressionSpecializationRow(target.track);const confirmed=await appConfirm("Preview Specialization Change","Create a backup preview for "+(progressionPlayerState.player?.character_name||"this player")+"?\nTrack: "+target.track+"\nCurrent XP / level: "+(row?.xp_amount||0)+" / "+(row?.level||0)+"\nTarget XP / level: "+target.xpAmount+" / "+target.level+"\n\nThis does not purchase traits or spend Spice Melange.","Generate Preview","Cancel");if(!confirmed)return;const lookupId=progressionPlayerState.player?.actor_id||progressionPlayerState.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";const data=await getJson("/api/progression/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"specialization_xp",query:lookupId,playerId:lookupId,trackType:target.track,xpAmount:target.xpAmount,level:target.level}),timeoutMs:60000});if(!data.ok)throw new Error(data.reason||data.error||"Specialization preview failed.");progressionSpecializationPreviewState=data;setText("progressionSpecializationPreviewLog","Specialization preview generated. Backup created before any write.\nBackup: "+data.backupPath+"\nAudit log: "+(data.auditLogPath||"")+"\n\nBefore values:\n"+JSON.stringify(data.oldValues,null,2)+"\n\nTarget values:\n"+JSON.stringify(data.newValues,null,2)+"\n\nOperation:\n"+data.sqlPreview+"\n\nType APPLY PROGRESSION before applying.");pushProgressionRecent("Specialization preview",target.track+" -> level "+target.level,"NOW");addActivity("progression","Specialization preview created",target.track+" / "+target.xpAmount+" XP / level "+target.level);playUiSound("success");}catch(e){progressionSpecializationPreviewState=null;setText("progressionSpecializationPreviewLog",betterError(e));pushProgressionRecent("Specialization preview failed",betterError(e),"ERR");addActivity("error","Specialization preview failed",e.message);playUiSound("warning");}}
 async function applyProgressionSpecializationLive(){try{if(!progressionSpecializationPreviewState)throw new Error("Generate Specialization Preview + Backup first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionSpecializationPreviewState.previewId,confirmText:document.getElementById("progressionSpecializationConfirmText")?.value||""}),timeoutMs:45000});if(!data.ok)throw new Error((data.warning||data.error||"Specialization apply failed")+"\n"+JSON.stringify(data.debug||{},null,2));setText("progressionSpecializationPreviewLog","Specialization apply succeeded.\nBackup: "+data.backupPath+"\nAudit log: "+(data.auditLogPath||"")+"\n\nBefore values:\n"+JSON.stringify(data.oldValues,null,2)+"\n\nTarget values:\n"+JSON.stringify(data.newValues,null,2)+"\n\nRead-back verification:\n"+JSON.stringify(data.debug?.readBackValues||{},null,2));pushProgressionRecent("Specialization changed",data.newValues?.track_type+" -> level "+data.newValues?.level,"NOW");addActivity("progression","Specialization changed",data.newValues?.track_type||data.action);progressionSpecializationPreviewState=null;setValue("progressionSpecializationConfirmText","");await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionSpecializationPreviewLog",betterError(e));pushProgressionRecent("Specialization apply failed",betterError(e),"ERR");addActivity("error","Specialization apply failed",e.message);playUiSound("warning");}}
 function progressionFactionLabel(faction){return [faction.name||faction.faction_name||"",faction.id||faction.faction_id||""].filter(Boolean).join(" / ")||"Faction";}

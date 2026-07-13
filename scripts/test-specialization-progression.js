@@ -12,5 +12,7 @@ requirePattern(/action:"specialization_xp"[\s\S]*?trackType:target\.track[\s\S]*
 requirePattern(/Specialization editing requires the player to be offline\./, "Specialization writes are not guarded by offline-player validation.");
 requirePattern(/from dune\.specialization_tracks[\s\S]*?verify_readback/, "Specialization apply does not perform database read-back verification.");
 requirePattern(/does not purchase specialization traits or spend Spice Melange/, "Specialization editor does not explain the trait-purchase boundary.");
+requirePattern(/current\?\.player_id \|\| playerData\.player\?\.player_controller_id/, "New specialization rows do not target the player controller ID.");
+requirePattern(/first apply will create/, "Missing specialization rows are not explained as a valid upsert state.");
 
 console.log("Specialization progression regression checks passed.");

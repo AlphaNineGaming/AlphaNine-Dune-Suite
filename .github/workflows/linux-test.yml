@@ -63,6 +63,23 @@ jobs:
           test "$(curl -ksS -o /dev/null -w '%{http_code}' https://127.0.0.1:18921/)" = "302"
           ALPHANINE_DATA_DIR="$data_dir" ALPHANINE_ADMIN_PASSWORD='ubuntu-package-test-42' node "$package_dir/scripts/set-remote-password.js" --username admin
           test "$(curl -ksS -o /dev/null -w '%{http_code}' https://127.0.0.1:18921/api/status)" = "401"
+          kill "$suite_pid"
+          wait "$suite_pid" 2>/dev/null || true
+          sudo sh "$package_dir/linux/install.sh"
+          sudo -u alphanine-suite test -r /opt/alphanine-dune-suite/server.js
+          sudo -u alphanine-suite test -x /opt/alphanine-dune-suite
+          if ! sudo systemctl is-active --quiet alphanine-dune-suite; then
+            sudo journalctl -u alphanine-dune-suite --no-pager -n 120
+            exit 1
+          fi
+          for attempt in $(seq 1 80); do
+            curl -fsS http://127.0.0.1:8810/api/remote-access/status >installed-status.json && break
+            sleep 0.25
+          done
+          grep -q '"ok":true' installed-status.json
+          sudo env ALPHANINE_ADMIN_PASSWORD='ubuntu-installed-test-42' alphanine-dune-suite-password --username admin
+          test "$(curl -ksS -o /dev/null -w '%{http_code}' https://127.0.0.1:8811/)" = "302"
+          sudo systemctl disable --now alphanine-dune-suite
       - name: Upload Linux test artifact
         uses: actions/upload-artifact@v4
         with:

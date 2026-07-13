@@ -21,6 +21,8 @@ assert.match(service, /NoNewPrivileges=true/);
 assert.match(service, /ProtectSystem=strict/);
 assert.match(service, /ALPHANINE_DATA_DIR=\/var\/lib\/alphanine-dune-suite/);
 assert.match(installer, /Node\.js 20 or newer is required/);
+assert.match(installer, /chown -R root:alphanine-suite "\$INSTALL_DIR" "\$CONFIG_DIR"/, "Installed files must be readable by the service group.");
+assert.match(installer, /chmod 0640 "\$CONFIG_DIR\/env"/, "Service environment permissions are incorrect.");
 assert.match(installer, /systemctl enable --now alphanine-dune-suite\.service/);
 const runtime = spawnSync(process.execPath, [path.join(__dirname, "test-remote-access.js")], {
   cwd: path.join(__dirname, ".."),

@@ -24,10 +24,10 @@ find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cp -a "$SOURCE_DIR"/. "$INSTALL_DIR"/
 cp "$INSTALL_DIR/linux/alphanine-dune-suite.service" /etc/systemd/system/alphanine-dune-suite.service
 [ -f "$CONFIG_DIR/env" ] || cp "$INSTALL_DIR/linux/env.example" "$CONFIG_DIR/env"
-chown -R root:root "$INSTALL_DIR" "$CONFIG_DIR"
+chown -R root:alphanine-suite "$INSTALL_DIR" "$CONFIG_DIR"
 chown -R alphanine-suite:alphanine-suite "$DATA_DIR"
 chmod 0750 "$INSTALL_DIR" "$DATA_DIR" "$CONFIG_DIR"
-chmod 0600 "$CONFIG_DIR/env"
+chmod 0640 "$CONFIG_DIR/env"
 
 cat > /usr/local/bin/alphanine-dune-suite-password <<'EOF'
 #!/usr/bin/env sh

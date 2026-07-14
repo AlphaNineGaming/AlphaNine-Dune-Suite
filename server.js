@@ -7195,6 +7195,7 @@ function progressionPlayerFromAdminRow(row, source = "adminPlayers") {
     player_controller_id: row.player_controller_id || "",
     player_pawn_id: row.player_pawn_id || "",
     character_id: row.character_id || "",
+    player_state_row_id: row.player_state_row_id || "",
     online_status: row.online_status || row.status || "unknown",
     map: row.map || "",
     matched_column: row.matched_column || "",
@@ -9450,13 +9451,29 @@ function repairPublicTarget(row) {
   };
 }
 
+function repairPlayerSelector(player = {}) {
+  const rowId = String(player.player_state_row_id || "").trim();
+  if (/^\d+$/.test(rowId)) return `row:${rowId}`;
+  const controllerId = String(player.player_controller_id || player.actor_id || "").trim();
+  if (/^\d+$/.test(controllerId)) return `controller:${controllerId}`;
+  const accountId = String(player.account_id || player.id || "").trim();
+  if (/^\d+$/.test(accountId)) return `account:${accountId}`;
+  return controllerId || accountId;
+}
+
 async function repairResolvePlayer(queryValue) {
   const query = String(queryValue || "").trim();
   if (!query) throw new Error("Choose a player first.");
-  const result = await adminPlayers({ query, limit: 5, hydration: false });
+  const selector = /^(row|controller|account):(\d+)$/i.exec(query);
+  const lookup = selector ? selector[2] : query;
+  const result = await adminPlayers({ query: lookup, limit: selector ? 50 : 5, hydration: false });
   if (!result.ok || !result.players?.length) throw new Error(result.error || "Player was not found.");
-  const exact = result.players.filter((row) => [row.account_id, row.player_controller_id, row.player_pawn_id, row.character_id, row.player_state_row_id, row.character_name]
-    .some((value) => String(value || "").toLowerCase() === query.toLowerCase()));
+  const selectorField = selector ? { row: "player_state_row_id", controller: "player_controller_id", account: "account_id" }[selector[1].toLowerCase()] : "";
+  const exact = result.players.filter((row) => selectorField
+    ? String(row[selectorField] || "") === lookup
+    : [row.account_id, row.player_controller_id, row.player_pawn_id, row.character_id, row.player_state_row_id, row.character_name]
+      .some((value) => String(value || "").toLowerCase() === query.toLowerCase()));
+  if (selector && !exact.length) throw new Error("The selected player record was not found. Refresh Players and try again.");
   if (exact.length > 1) throw new Error("The player lookup is ambiguous. Choose the player by controller or account id.");
   const row = exact[0] || result.players[0];
   const player = progressionPlayerFromAdminRow(row, result.source || "adminPlayers");
@@ -9565,7 +9582,7 @@ async function applyDurabilityRepair(body = {}) {
   const preview = repairPreviews.get(previewId);
   if (!preview) throw new Error("Repair preview was not found or has expired. Generate a new preview.");
   if (String(body.confirmText || "").trim() !== REPAIR_CONFIRM_TEXT) throw new Error(`Type ${REPAIR_CONFIRM_TEXT} to apply the repair.`);
-  const player = await repairResolvePlayer(preview.player.player_controller_id || preview.player.actor_id || preview.player.account_id);
+  const player = await repairResolvePlayer(repairPlayerSelector(preview.player));
   if (!isOfflinePlayerStatus(player.online_status)) throw new Error("The player is online or has an unknown connection state. Repair cancelled.");
   const accountId = repairDbId(player.account_id, "Player account id");
   const controllerId = repairDbId(player.player_controller_id || player.actor_id, "Player controller id");
@@ -9679,7 +9696,7 @@ async function enqueueDurabilityRepair(body = {}) {
   if (selected.length !== requested.size) throw new Error("One or more selected repair targets no longer exist. Refresh the inspector.");
   const blocked = selected.find((target) => !target.repairable);
   if (blocked) throw new Error(`${blocked.targetId} cannot be queued: ${blocked.reason}`);
-  const playerQuery = inspected.player.player_controller_id || inspected.player.actor_id || inspected.player.account_id;
+  const playerQuery = repairPlayerSelector(inspected.player);
   const duplicate = repairQueue.find((item) => item.status === "queued" && String(item.player?.query) === String(playerQuery)
     && item.targetIds.length === requested.size && item.targetIds.every((id) => requested.has(id)));
   if (duplicate) return { ok: true, status: "already-queued", item: publicRepairQueueItem(duplicate), queue: repairQueueSnapshot() };
@@ -9846,6 +9863,7 @@ async function adminPlayers(options = {}) {
           or ps.player_controller_id::text = ${sqlString(query)}
           or ps.player_pawn_id::text = ${sqlString(query)}
           or ps.player_state_id::text = ${sqlString(query)}
+          or ps.id::text = ${sqlString(query)}
         `
       : "";
     return `
@@ -9857,7 +9875,8 @@ async function adminPlayers(options = {}) {
           when a.account_id::text = ${sqlString(query)} then 'account_id'
           when ps.player_controller_id::text = ${sqlString(query)} then 'player_controller_id'
           when ps.player_pawn_id::text = ${sqlString(query)} then 'player_pawn_id'
-          when ps.player_state_id::text = ${sqlString(query)} then 'player_state_id'` : ""}
+          when ps.player_state_id::text = ${sqlString(query)} then 'player_state_id'
+          when ps.id::text = ${sqlString(query)} then 'player_state_row_id'` : ""}
           else 'unknown'
         end as matched_column
       from (
@@ -9867,7 +9886,8 @@ async function adminPlayers(options = {}) {
           or account_id::text = ${sqlString(query)}
           or player_controller_id::text = ${sqlString(query)}
           or player_pawn_id::text = ${sqlString(query)}
-          or player_state_id::text = ${sqlString(query)}` : ""}
+          or player_state_id::text = ${sqlString(query)}
+          or id::text = ${sqlString(query)}` : ""}
         union
         select id as account_id from dune.accounts
         where ${partial ? "\"user\" ilike " + value : "lower(\"user\") = lower(" + value + ")"}
@@ -9884,10 +9904,11 @@ async function adminPlayers(options = {}) {
         ${idPredicate}
       order by
         case
-          when lower(coalesce(ps.character_name, '')) ${loweredOp} lower(${value}) then 0
-          when ${partial ? `ac."user" ${op} ${value}` : `lower(coalesce(ac."user", '')) = lower(${value})`} then 1
-          ${numericQuery ? `when ac.funcom_id ${op} ${value} then 2` : ""}
-          else 3
+          ${numericQuery ? `when ps.id::text = ${sqlString(query)} then 0` : ""}
+          when lower(coalesce(ps.character_name, '')) ${loweredOp} lower(${value}) then 1
+          when ${partial ? `ac."user" ${op} ${value}` : `lower(coalesce(ac."user", '')) = lower(${value})`} then 2
+          ${numericQuery ? `when ac.funcom_id ${op} ${value} then 3` : ""}
+          else 4
         end,
         ps.last_avatar_activity desc nulls last,
         ps.player_state_id
@@ -18304,7 +18325,8 @@ function syncGiveDestination(){const storage=document.getElementById("giveDestin
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
 function progressionPlayerLookupValue(p){return String(p?.player_controller_id||p?.character_id||p?.player_pawn_id||p?.id||p?.character_name||p?.name||"").trim();}
 function renderProgressionPlayerSelect(){const select=document.getElementById("progressionPlayerSelect");if(!select)return;const current=select.value;const options=adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);const meta=[p.player_controller_id&&("controller "+p.player_controller_id),p.character_id&&("character "+p.character_id),p.online_status||p.status].filter(Boolean).join(" / ");return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+(meta?" / "+meta:""))+'</option>':"";}).filter(Boolean).join("");select.innerHTML='<option value="">Choose detected player...</option>'+(options||'<option value="" disabled>No detected players</option>');if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
-function renderRepairPlayerSelect(){const select=document.getElementById("repairPlayerSelect");if(!select)return;const current=select.value;select.innerHTML='<option value="">Choose a player...</option>'+adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+' / '+(p.online_status||"unknown"))+'</option>':"";}).join("");if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
+function repairPlayerLookupValue(p){if(p?.player_state_row_id)return"row:"+p.player_state_row_id;if(p?.player_controller_id)return"controller:"+p.player_controller_id;if(p?.account_id||p?.id)return"account:"+(p.account_id||p.id);return progressionPlayerLookupValue(p);}
+function renderRepairPlayerSelect(){const select=document.getElementById("repairPlayerSelect");if(!select)return;const current=select.value;select.innerHTML='<option value="">Choose a player...</option>'+adminPlayers.map(p=>{const value=repairPlayerLookupValue(p);return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+' / '+(p.online_status||"unknown"))+'</option>':"";}).join("");if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
 async function refreshRepairPlayers(){const select=document.getElementById("repairPlayerSelect");if(select)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:15000});adminPlayers=data.players||[];renderRepairPlayerSelect();badge("topPlayers","Players "+adminPlayers.length);return data;}catch(e){if(select)select.innerHTML='<option value="">Player load failed</option>';setText("repairStatus",betterError(e));return null;}}
 function resetRepairInspector(){repairInspectorState=null;repairPreviewState=null;const targets=document.getElementById("repairTargets");if(targets)targets.innerHTML='<div class="empty">Inspect a player to load repair targets.</div>';setText("repairSelectionSummary","No inspection loaded.");setText("repairPreviewLog","No repair preview generated.");setValue("repairConfirmText","");syncRepairMode();syncRepairApplyButton();}
 function repairTargets(){return repairInspectorState?[...(repairInspectorState.items||[]),...(repairInspectorState.vehicleModules||[])]:[];}

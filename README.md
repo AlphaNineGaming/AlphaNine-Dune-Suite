@@ -82,12 +82,6 @@ Node.js is only required for developers running from source. Installed users sho
 
 The installer includes the suite app and receiver files. Settings are stored in the Windows app data folder so they survive updates.
 
-## Linux Test Build
-
-The experimental Linux build runs as a headless `systemd` web service on Ubuntu or Debian. It uses the authenticated HTTPS portal and controls the Dune appliance through SSH. Hyper-V controls remain Windows-only.
-
-Linux requires Node.js 20 or newer and Python 3. Download the `linux-x64.tar.gz` asset from the test pre-release and follow [LINUX_TEST_GUIDE.md](LINUX_TEST_GUIDE.md). Linux test pre-releases are intentionally ignored by the stable Windows automatic updater.
-
 ## Mobile App
 
 AlphaNine Dune Suite includes mobile web app metadata, an install manifest, and a service worker. When the Suite is running, open the Web Portal URL shown in the app from a phone on the same network, then use the browser menu to add it to the home screen.

@@ -11771,7 +11771,9 @@ async function marketListings(payload = {}) {
   const expiredCleanup = await cleanupExpiredMarketListings({ source: "listings", gameNow }).catch((error) => ({ ok: false, error: error.message }));
   const limit = requireInteger(payload.limit ?? 100, "limit", 1, 250);
   const q = String(payload.q || "").trim();
-  const where = q ? `where (o.template_id ilike ${sqlString(`%${q}%`)} or coalesce(e.exchange_name, '') ilike ${sqlString(`%${q}%`)} or coalesce(a.class, '') ilike ${sqlString(`%${q}%`)})` : "";
+  const listingPredicates = ["i.stack_size > 0"];
+  if (q) listingPredicates.push(`(o.template_id ilike ${sqlString(`%${q}%`)} or coalesce(e.exchange_name, '') ilike ${sqlString(`%${q}%`)} or coalesce(a.class, '') ilike ${sqlString(`%${q}%`)})`);
+  const where = `where ${listingPredicates.join(" and ")}`;
   const sql = `
     select
       o.id::text,
@@ -11788,8 +11790,8 @@ async function marketListings(payload = {}) {
       coalesce(o.expiration_time::text, ''),
       coalesce(o.item_id::text, '')
     from dune.dune_exchange_orders o
-    left join dune.dune_exchange_sell_orders s on s.order_id = o.id
-    left join dune.items i on i.id = o.item_id
+    join dune.dune_exchange_sell_orders s on s.order_id = o.id
+    join dune.items i on i.id = o.item_id
     left join dune.dune_exchanges e on e.id = o.exchange_id
     left join dune.actors a on a.id = o.owner_id
     ${where}

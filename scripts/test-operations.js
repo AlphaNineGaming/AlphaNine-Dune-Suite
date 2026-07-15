@@ -10,7 +10,7 @@ const filePath = path.join(root, "operations.json");
 try {
   const registry = new OperationRegistry(filePath, { maxHistory: 10 });
   const active = registry.begin("vm:control", "VM start", { category: "server" });
-  registry.update(active, "Waiting for VM", "Hyper-V accepted the request.");
+  registry.update(active, "Waiting for VM", "Hyper-V accepted the request.", { progress: 35, logLine: "VM start requested" });
   assert.throws(
     () => registry.begin("vm:control", "VM stop"),
     (error) => error instanceof OperationBusyError && error.code === "operation_busy"
@@ -21,6 +21,8 @@ try {
   assert.equal(completed.active.length, 0);
   assert.equal(completed.operations[0].status, "success");
   assert.equal(completed.operations[0].stage, "Completed");
+  assert.equal(completed.operations[0].progress, 100);
+  assert.deepEqual(completed.operations[0].logTail, ["VM start requested"]);
 
   return registry.run("database:backup", "Database Backup", async ({ update }) => {
     update("Writing backup", "Testing failed result persistence.");

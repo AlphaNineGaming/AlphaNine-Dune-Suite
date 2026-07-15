@@ -12,6 +12,7 @@ const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/
 const { OperationRegistry, OperationBusyError } = require("./lib/operations");
 const { createRemoteAccess } = require("./lib/remote-access");
 const { durabilityRepairCandidate } = require("./lib/durability-repair");
+const { cleanUpdateLine, parseServerUpdateMetadata, classifyServerUpdate, serverUpdateProgress } = require("./lib/server-update");
 const {
   PLAYER_RENAME_MAX_LENGTH,
   sanitizePlayerRenameName,
@@ -82,6 +83,9 @@ const CODEX_DIR = path.join(__dirname, "gear-codex");
 const DATA_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "data") : path.join(__dirname, "data");
 const OPERATION_HISTORY_PATH = path.join(DATA_DIR, "operations.json");
 const operationRegistry = new OperationRegistry(OPERATION_HISTORY_PATH, { maxHistory: 100 });
+const DUNE_SERVER_STEAM_APP_ID = 4754530;
+const SERVER_UPDATE_CHECK_TTL_MS = 10 * 60 * 1000;
+let serverUpdateCheckCache = { checkedAt: 0, data: null, promise: null };
 const UI_OVERRIDE_CSS_PATH = path.join(DATA_DIR, "ui-overrides.css");
 const BUNDLED_DATA_DIR = packagedAssetPath("data");
 const BUNDLED_UI_OVERRIDE_CSS_PATH = path.join(BUNDLED_DATA_DIR, "ui-overrides.css");
@@ -842,6 +846,8 @@ if (config.receiverToken) {
 let lastDirectorUrl = null;
 let managerProcess = null;
 let managerStartError = "";
+let managerReadinessError = "";
+let managerReadinessPromise = null;
 let loggedPythonCommand = "";
 let managerSpawnDiagnostics = null;
 let receiverManagedProcess = null;
@@ -2973,6 +2979,231 @@ async function sshCommand(command, timeout = 180000, options = {}) {
   ];
   if (options.inputPath) return runWithStdin("ssh", args, options.inputPath, { timeout, maxBuffer: options.maxBuffer });
   return run("ssh", args, { timeout, maxBuffer: options.maxBuffer });
+}
+
+async function steamServerUpToDateCheck(buildId) {
+  const version = String(buildId || "").trim();
+  if (!/^\d+$/.test(version)) throw new Error("Downloaded Steam build ID is unavailable.");
+  const pathname = `/ISteamApps/UpToDateCheck/v1/?appid=${DUNE_SERVER_STEAM_APP_ID}&version=${encodeURIComponent(version)}`;
+  return new Promise((resolve, reject) => {
+    const request = https.get({
+      hostname: "api.steampowered.com",
+      path: pathname,
+      headers: { "User-Agent": `AlphaNine-Dune-Suite/${APP_VERSION}`, "Accept": "application/json" },
+      timeout: 12000
+    }, (response) => {
+      let body = "";
+      response.on("data", (chunk) => { body += chunk; });
+      response.on("end", () => {
+        try {
+          const data = JSON.parse(body || "{}");
+          if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(data?.response?.message || `Steam update API returned HTTP ${response.statusCode}.`);
+          if (typeof data?.response?.up_to_date !== "boolean") throw new Error(data?.response?.message || "Steam update API did not return up_to_date.");
+          resolve(data);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.on("timeout", () => request.destroy(new Error("Steam update check timed out.")));
+    request.on("error", reject);
+  });
+}
+
+async function steamPublicBuildCheckViaVm(buildId) {
+  const current = String(buildId || "").trim();
+  const command = `steamcmd +login anonymous +app_info_update 1 +app_info_print ${DUNE_SERVER_STEAM_APP_ID} +logoff +quit 2>/dev/null | awk -F'"' '/"branches"/{in_branches=1} in_branches && /"public"/{in_public=1; next} in_public && /"buildid"/{print $4; exit}'`;
+  const result = await sshCommand(command, 60000, { maxBuffer: 1024 * 1024 * 2 });
+  const latest = String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).find((line) => /^\d+$/.test(line)) || "";
+  if (!result.ok || !latest) throw new Error(result.stderr || result.error || "SteamCMD did not return the public branch build ID.");
+  return { response: { success: true, up_to_date: latest === current, required_version: Number(latest) }, source: "SteamCMD public branch metadata" };
+}
+
+function serverUpdateSelection(configValue = loadConfig()) {
+  const selected = normalizeSelectedBattlegroup(configValue.selectedBattlegroup);
+  return {
+    namespace: String(selected?.namespace || "").trim(),
+    battlegroup: String(selected?.name || "").trim()
+  };
+}
+
+function serverUpdateMetadataCommand(configValue = loadConfig()) {
+  const selected = serverUpdateSelection(configValue);
+  return `
+manifest=/home/dune/.dune/download/steamapps/appmanifest_${DUNE_SERVER_STEAM_APP_ID}.acf
+version_file=/home/dune/.dune/download/images/battlegroup/version.txt
+namespace=${shQuote(selected.namespace)}
+battlegroup=${shQuote(selected.battlegroup)}
+if [ -z "$namespace" ]; then namespace=$(sudo kubectl get ns --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | grep '^funcom-seabass-' | head -n1); fi
+if [ -z "$battlegroup" ] && [ -n "$namespace" ]; then battlegroup=\${namespace#funcom-seabass-}; fi
+steam_build=$(sed -n 's/^[[:space:]]*"buildid"[[:space:]]*"\\([0-9][0-9]*\\)".*/\\1/p' "$manifest" 2>/dev/null | head -n1)
+downloaded_revision=$(head -n1 "$version_file" 2>/dev/null | tr -d '\\r\\n')
+deployed_revisions=""
+if [ -n "$namespace" ] && [ -n "$battlegroup" ]; then
+  deployed_revisions=$(sudo kubectl get battlegroup "$battlegroup" -n "$namespace" -o json 2>/dev/null | jq -r '.. | objects | .image? // empty' | sed -nE 's#.*seabass-server[^:]*:([0-9]+-0-[A-Za-z0-9_-]+).*#\\1#p' | sort -u | paste -sd, -)
+fi
+printf '__ALPHANINE_STEAM_BUILD_ID__=%s\\n' "$steam_build"
+printf '__ALPHANINE_DOWNLOADED_REVISION__=%s\\n' "$downloaded_revision"
+printf '__ALPHANINE_DEPLOYED_REVISIONS__=%s\\n' "$deployed_revisions"
+printf '__ALPHANINE_BATTLEGROUP__=%s\\n' "$battlegroup"
+printf '__ALPHANINE_NAMESPACE__=%s\\n' "$namespace"
+`;
+}
+
+async function uncachedServerUpdateCheck() {
+  const checkedAt = new Date().toISOString();
+  const metadataResult = await sshCommand(serverUpdateMetadataCommand(), 30000, { maxBuffer: 1024 * 256 });
+  if (!metadataResult.ok) {
+    return { ok: false, updateAvailable: false, checkedAt, error: metadataResult.stderr || metadataResult.error || "Could not read Funcom server version metadata." };
+  }
+  const metadata = parseServerUpdateMetadata(metadataResult.stdout);
+  if (!metadata.steamBuildId) return { ok: false, updateAvailable: false, checkedAt, metadata, error: "Funcom Steam app manifest build ID was not found on the server VM." };
+  try {
+    const steam = await steamServerUpToDateCheck(metadata.steamBuildId);
+    return { ok: true, checkedAt, source: "Valve ISteamApps.UpToDateCheck + Funcom battlegroup metadata", appId: DUNE_SERVER_STEAM_APP_ID, metadata, ...classifyServerUpdate(metadata, steam) };
+  } catch (webError) {
+    try {
+      const steam = await steamPublicBuildCheckViaVm(metadata.steamBuildId);
+      return {
+        ok: true,
+        checkedAt,
+        source: "SteamCMD public branch metadata + Funcom battlegroup metadata",
+        appId: DUNE_SERVER_STEAM_APP_ID,
+        metadata,
+        ...classifyServerUpdate(metadata, steam),
+        warning: `Valve web check unavailable; used read-only SteamCMD metadata instead: ${webError.message}`
+      };
+    } catch (fallbackError) {
+      const classified = classifyServerUpdate(metadata, {});
+      return {
+        ok: classified.downloadedPending,
+        checkedAt,
+        source: "Funcom battlegroup metadata; Steam version checks unavailable",
+        appId: DUNE_SERVER_STEAM_APP_ID,
+        metadata,
+        ...classified,
+        error: `${webError.message} SteamCMD fallback: ${fallbackError.message}`
+      };
+    }
+  }
+}
+
+async function checkServerUpdate({ force = false } = {}) {
+  const fresh = serverUpdateCheckCache.data && Date.now() - serverUpdateCheckCache.checkedAt < SERVER_UPDATE_CHECK_TTL_MS;
+  if (!force && fresh) return { ...serverUpdateCheckCache.data, cached: true };
+  if (serverUpdateCheckCache.promise) return serverUpdateCheckCache.promise;
+  serverUpdateCheckCache.promise = uncachedServerUpdateCheck().then((data) => {
+    serverUpdateCheckCache = { checkedAt: Date.now(), data, promise: null };
+    return data;
+  }).catch((error) => {
+    const data = { ok: false, updateAvailable: false, checkedAt: new Date().toISOString(), error: error.message };
+    serverUpdateCheckCache = { checkedAt: Date.now(), data, promise: null };
+    return data;
+  });
+  return serverUpdateCheckCache.promise;
+}
+
+async function sshStreamingCommand(command, options = {}) {
+  const sync = await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
+  const cfg = sync.config || loadConfig();
+  const info = sync.vm || await vmInfo(cfg.vmName || configuredVmName());
+  const ip = normalizeIpv4(info.ip) || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
+  if (!info.exists && !ip) return { ok: false, code: 1, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
+  if (info.exists && info.state !== "Running") return { ok: false, code: 1, stdout: "", stderr: "VM is not running.", error: "VM is not running." };
+  const key = sshKeyStatus(cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
+  if (!key.exists) return { ok: false, code: 1, stdout: "", stderr: key.message, error: key.message };
+  const user = String(cfg.sshUser || cfg.receiverSshUser || "dune").trim();
+  const args = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "LogLevel=QUIET", "-i", key.path, `${user}@${ip}`, command];
+  return new Promise((resolve) => {
+    const child = spawn("ssh", args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const maxOutput = Number(options.maxBuffer || 1024 * 1024);
+    let stdout = "";
+    let stderr = "";
+    let lineBuffer = "";
+    let settled = false;
+    let timer = null;
+    const emitLines = (chunk) => {
+      lineBuffer += String(chunk || "");
+      const lines = lineBuffer.split(/\r?\n|\r/);
+      lineBuffer = lines.pop() || "";
+      for (const line of lines) if (cleanUpdateLine(line)) options.onLine?.(cleanUpdateLine(line));
+    };
+    child.stdout.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-maxOutput); emitLines(chunk); });
+    child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-maxOutput); emitLines(chunk); });
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (cleanUpdateLine(lineBuffer)) options.onLine?.(cleanUpdateLine(lineBuffer));
+      resolve(result);
+    };
+    child.on("error", (error) => finish({ ok: false, code: 1, stdout, stderr, error: error.message }));
+    child.on("exit", (code, signal) => finish({ ok: code === 0, code: Number(code ?? 1), signal: signal || "", stdout, stderr, error: code === 0 ? "" : (cleanUpdateLine(stderr) || `SSH update exited with code ${code}.`) }));
+    timer = setTimeout(() => {
+      child.kill();
+      finish({ ok: false, code: 1, stdout, stderr, error: `Dune server update timed out after ${Number(options.timeout || 900000)}ms.` });
+    }, Number(options.timeout || 900000));
+  });
+}
+
+function serverUpdateApplyCommand(configValue = loadConfig()) {
+  const selected = serverUpdateSelection(configValue);
+  const namespace = shQuote(selected.namespace);
+  return `
+target_namespace=${namespace}
+mapfile -t update_namespaces < <(sudo kubectl get ns --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | grep '^funcom-seabass-')
+if [ \${#update_namespaces[@]} -gt 1 ]; then
+  selected_index=""
+  for index in "\${!update_namespaces[@]}"; do [ "\${update_namespaces[$index]}" = "$target_namespace" ] && selected_index=$((index+1)); done
+  if [ -z "$selected_index" ]; then echo "Configured battlegroup namespace was not found: $target_namespace" >&2; exit 1; fi
+  printf '%s\\n' "$selected_index" | /home/dune/.dune/bin/battlegroup update
+else
+  /home/dune/.dune/bin/battlegroup update
+fi
+`;
+}
+
+function startServerUpdateJob() {
+  const operation = operationRegistry.begin("battlegroup:update", "Dune Server Update", {
+    category: "server",
+    stage: "Starting update",
+    detail: "Preparing Funcom battlegroup update.",
+    progress: 1
+  });
+  setImmediate(async () => {
+    let progress = 1;
+    let lastPublishedAt = 0;
+    let lastPublishedStage = "";
+    let lastPublishedProgress = -1;
+    try {
+      appendAdminAudit("server_update_started", { operationId: operation.id, selection: serverUpdateSelection() });
+      const result = await sshStreamingCommand(serverUpdateApplyCommand(), {
+        timeout: 15 * 60 * 1000,
+        maxBuffer: 1024 * 1024 * 4,
+        onLine: (line) => {
+          const parsed = serverUpdateProgress(line, progress);
+          progress = parsed.progress;
+          const now = Date.now();
+          const changed = parsed.stage !== lastPublishedStage || parsed.progress !== lastPublishedProgress;
+          if (changed || now - lastPublishedAt >= 250) {
+            operationRegistry.update(operation, parsed.stage, parsed.line.slice(0, 500), { progress, logLine: parsed.line });
+            lastPublishedAt = now;
+            lastPublishedStage = parsed.stage;
+            lastPublishedProgress = parsed.progress;
+          }
+        }
+      });
+      if (!result.ok) throw new Error(result.error || result.stderr || "Funcom server update failed.");
+      operationRegistry.finish(operation, "success");
+      serverUpdateCheckCache = { checkedAt: 0, data: null, promise: null };
+      appendAdminAudit("server_update_completed", { operationId: operation.id, progress: 100 });
+    } catch (error) {
+      operationRegistry.update(operation, "Update failed", error.message, { progress, logLine: `ERROR: ${error.message}` });
+      operationRegistry.finish(operation, "failed", error.message);
+      appendAdminAudit("server_update_failed", { operationId: operation.id, error: error.message });
+    }
+  });
+  return operationRegistry.public(operation);
 }
 
 function parseMetricPair(line) {
@@ -14141,7 +14372,7 @@ function syncManagerConnectionFromSuite(configValue = loadConfig()) {
 }
 
 function managerFallbackWarning() {
-  return managerStartError || "Manager service is unavailable. The Python process has not become ready yet; check the startup diagnostics.";
+  return managerStartError || managerReadinessError || "Manager service is unavailable. The Python process has not become ready yet; check the startup diagnostics.";
 }
 
 async function handleManagerFallback(req, res, managerPath) {
@@ -14325,25 +14556,41 @@ function spawnManagerProcess(resolved, useShell, reason) {
   });
 }
 
-async function waitForManagerReady(timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = "";
-  while (Date.now() < deadline) {
-    if (managerStartError) return false;
-    try {
-      const response = await fetch(`http://127.0.0.1:${MANAGER_PORT}/`, { signal: AbortSignal.timeout(500) });
-      if (response.ok) return true;
-      lastError = `HTTP ${response.status}`;
-    } catch (error) {
-      lastError = error.message || String(error);
+async function waitForManagerReady(timeoutMs = Math.min(envNumber("ALPHANINE_MANAGER_START_TIMEOUT_MS", 20000), 60000)) {
+  if (managerReadinessPromise) return managerReadinessPromise;
+  managerReadinessPromise = (async () => {
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    let lastError = "";
+    while (Date.now() < deadline) {
+      if (managerStartError) return false;
+      try {
+        const response = await fetch(`http://127.0.0.1:${MANAGER_PORT}/`, { signal: AbortSignal.timeout(1000) });
+        if (response.ok) {
+          const readyAfterMs = Date.now() - startedAt;
+          if (managerReadinessError) console.log(`Manager service recovered after a previous readiness timeout; port ${MANAGER_PORT} is ready.`);
+          managerReadinessError = "";
+          managerSpawnDiagnostics = { ...managerSpawnDiagnostics, ready: true, readyAfterMs, readinessError: "" };
+          return true;
+        }
+        lastError = `HTTP ${response.status}`;
+      } catch (error) {
+        lastError = error.message || String(error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (!managerStartError) {
+      managerReadinessError = `Manager service is still starting on port ${MANAGER_PORT} after ${timeoutMs}ms${lastError ? `: ${lastError}` : ". It will be checked again automatically."}`;
+      managerSpawnDiagnostics = { ...managerSpawnDiagnostics, ready: false, readinessTimeoutMs: timeoutMs, readinessError: lastError };
+      console.warn(managerReadinessError);
+    }
+    return false;
+  })();
+  try {
+    return await managerReadinessPromise;
+  } finally {
+    managerReadinessPromise = null;
   }
-  if (!managerStartError) {
-    managerStartError = `Manager service did not become ready on port ${MANAGER_PORT} within ${timeoutMs}ms${lastError ? `: ${lastError}` : "."}`;
-    managerSpawnDiagnostics = { ...managerSpawnDiagnostics, readinessTimeoutMs: timeoutMs, readinessError: lastError };
-  }
-  return false;
 }
 
 async function proxyToManager(req, res, pathname) {
@@ -14369,7 +14616,7 @@ async function proxyToManager(req, res, pathname) {
     res.end(text);
   } catch (error) {
     if (await handleManagerFallback(req, res, managerPath)) return;
-    await json(res, managerErrorPayload(managerStartError || `Manager service is not ready: ${error.message}`), 502);
+    await json(res, managerErrorPayload(managerStartError || managerReadinessError || `Manager service is not ready: ${error.message}`), 502);
   }
 }
 
@@ -15476,6 +15723,17 @@ function appPage() {
     .suite-modal-card { width:min(520px,100%); border:1px solid var(--line); border-radius:var(--panel-radius); background:linear-gradient(180deg, rgba(19,19,12,.98), rgba(5,7,5,.96)); box-shadow:var(--shadow); padding:var(--panel-pad); clip-path:polygon(0 0, calc(100% - var(--panel-cut)) 0, 100% var(--panel-cut), 100% 100%, var(--panel-cut) 100%, 0 calc(100% - var(--panel-cut))); }
     .suite-modal-card h3 { margin:0; font-size:18px; color:var(--gold-bright); letter-spacing:0; }
     .suite-modal-card p { margin:10px 0 0; color:var(--muted); line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .server-update-card { width:min(720px,100%); }
+    .server-update-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin-top:14px; }
+    .server-update-meta > div { min-width:0; padding:9px 10px; border:1px solid var(--line); background:rgba(255,255,255,.025); }
+    .server-update-meta span,.server-update-meta strong { display:block; overflow-wrap:anywhere; }
+    .server-update-meta span { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }
+    .server-update-meta strong { margin-top:4px; color:var(--text); font-size:12px; }
+    .server-update-progress { height:12px; margin-top:14px; overflow:hidden; border:1px solid var(--line); border-radius:999px; background:rgba(0,0,0,.3); }
+    .server-update-progress i { display:block; width:0; height:100%; border-radius:999px; background:linear-gradient(90deg,var(--gold),var(--gold-bright),var(--good)); box-shadow:0 0 16px rgba(240,201,106,.34); transition:width .25s ease; }
+    .server-update-stage { display:flex; justify-content:space-between; gap:12px; margin-top:8px; color:var(--muted); font-size:12px; }
+    .server-update-log { max-height:260px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+    @media (max-width:700px) { .server-update-meta { grid-template-columns:1fr; } .server-update-stage { align-items:flex-start; flex-direction:column; } }
     .suite-toast { position:fixed; left:50%; top:50%; z-index:7000; width:min(420px, calc(100vw - 36px)); min-height:78px; display:flex; align-items:center; justify-content:center; gap:12px; padding:17px 20px; border:1px solid var(--line); border-radius:18px; background:linear-gradient(180deg, var(--panel-2), var(--panel)); color:var(--text); box-shadow:var(--shadow), 0 0 0 9999px rgba(0,0,0,.18); transform:translate(-50%,-50%) scale(1); text-align:center; font-size:16px; line-height:1.25; font-weight:900; letter-spacing:.02em; transition:opacity .18s ease, transform .18s ease; clip-path:none; }
     .suite-toast::before { content:""; width:13px; height:13px; flex:0 0 auto; border-radius:999px; background:currentColor; box-shadow:0 0 16px currentColor; }
     .suite-toast.hidden { display:flex!important; opacity:0; transform:translate(-50%,-42%) scale(.96); pointer-events:none; }
@@ -16340,6 +16598,30 @@ function appPage() {
     <div class="action-row mt">
       <button id="suiteConfirmOk" class="primary" type="button">Continue</button>
       <button id="suiteConfirmCancel" type="button">Cancel</button>
+    </div>
+  </div>
+</div>
+<div id="serverUpdatePanel" class="suite-modal-overlay hidden" role="dialog" aria-modal="true" aria-label="Dune server update progress">
+  <div class="suite-modal-card server-update-card">
+    <div class="panel-head">
+      <div>
+        <div class="kicker">Funcom Server Update</div>
+        <h3 id="serverUpdatePanelTitle">Preparing update</h3>
+      </div>
+      <span id="serverUpdatePanelState" class="badge warn">Starting</span>
+    </div>
+    <p id="serverUpdatePanelDetail">Connecting to the server VM.</p>
+    <div class="server-update-meta">
+      <div><span>Steam Build</span><strong id="serverUpdateCurrentBuild">--</strong></div>
+      <div><span>Downloaded Revision</span><strong id="serverUpdateDownloadedRevision">--</strong></div>
+      <div><span>Deployed Revision</span><strong id="serverUpdateDeployedRevision">--</strong></div>
+    </div>
+    <div class="server-update-progress" aria-hidden="true"><i id="serverUpdateProgressFill"></i></div>
+    <div class="server-update-stage"><strong id="serverUpdateStage">Starting update</strong><span id="serverUpdateProgressText">0% · 0 sec</span></div>
+    <pre id="serverUpdateLiveLog" class="server-update-log mt">Waiting for Funcom update output...</pre>
+    <div class="action-row mt">
+      <button type="button" onclick="hideServerUpdatePanel()">Hide Panel</button>
+      <button type="button" onclick="setView('operations');hideServerUpdatePanel()">Open Operations</button>
     </div>
   </div>
 </div>
@@ -17573,11 +17855,12 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="page-section-title">Maintenance</div>
         <div class="controls mt">
           <button onclick="act('backup')">Backup</button>
-          <button onclick="act('update')">Update</button>
+          <button id="serverUpdateButton" onclick="checkServerUpdateNow()">Check Server Update</button>
           <button onclick="openDirector()">Open Director</button>
           <button onclick="act('logs-export')">Export Logs</button>
           <button onclick="act('operator-logs-export')">Export Operator Logs</button>
         </div>
+        <div id="serverUpdateDetectionStatus" class="empty mt">Automatic Funcom update detection starts after the dashboard is ready.</div>
         <pre id="serverLog" class="mt advanced-only">Ready.</pre>
       </div>
       <div class="panel pad mt">
@@ -18092,6 +18375,7 @@ tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
+let serverUpdateOperationId="",serverUpdateCheckState=null,serverUpdatePollTimer=null;
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);if(liveMap)renderLiveMapLayers();setText("settingsSaveStatus","Drag-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Drag-to-teleport enabled":"Drag-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Drag setting failed: "+betterError(error),"fail");}}
@@ -18380,6 +18664,20 @@ function operationTimeText(value){if(!value)return"--";const date=new Date(value
 function renderOperations(data=operationsState){operationsState=data||{active:[],operations:[]};const rows=operationsState.operations||[];const active=rows.filter(row=>row.status==="pending"||row.status==="running");const success=rows.filter(row=>row.status==="success");const failed=rows.filter(row=>row.status==="failed");const interrupted=rows.filter(row=>row.status==="interrupted");tone("operationsActiveCount",active.length);tone("operationsSuccessCount",success.length);tone("operationsFailedCount",failed.length);tone("operationsInterruptedCount",interrupted.length);const nav=document.getElementById("operationsNavCount");if(nav)nav.textContent=active.length?String(active.length):"";const status=document.getElementById("operationsStatus");if(status){status.className=active.length?"warning mt":"empty mt";status.textContent=active.length?(active.length+" operation(s) running. Conflicting duplicate actions are blocked."):"No active operation. Recent results remain available after restarting the Suite.";}const wrap=document.getElementById("operationsRows");if(!wrap)return;wrap.innerHTML=rows.length?rows.map(row=>'<div class="operation-row"><div><strong>'+esc(row.title||row.key||"Operation")+'</strong><div class="subtle">'+esc(row.category||"system")+' / '+esc(row.id||"")+'</div></div><div><span class="operation-status '+esc(row.status||"unknown")+'">'+esc(row.status||"unknown")+'</span><div class="subtle mt">'+esc(row.stage||"")+'</div></div><div><strong>'+esc(row.detail||row.error||"No additional details.")+'</strong>'+(row.error?'<div class="subtle">'+esc(row.error)+'</div>':'')+'</div><div><strong>'+esc(operationDurationText(row.durationMs))+'</strong><div class="subtle">'+esc(operationTimeText(row.startedAt))+'</div></div></div>').join(""):'<div class="empty">No operations recorded yet.</div>';}
 async function refreshOperations(){try{const data=await getJson("/api/operations",{timeoutMs:8000});renderOperations(data);return data;}catch(error){const status=document.getElementById("operationsStatus");if(status){status.className="warning mt";status.textContent=betterError(error);}return null;}}
 async function clearCompletedOperations(){try{if(!(await appConfirm("Clear operation history","Clear completed, failed, and interrupted operation records? Active work remains visible.","Clear History","Cancel")))return;const data=await getJson("/api/operations/completed",{method:"DELETE",timeoutMs:8000});renderOperations(data);showToast("Operation history cleared.","success");}catch(error){showToast(betterError(error),"error");}}
+function serverUpdateValue(value){return String(value||"--");}
+function serverUpdateElapsed(operation){const started=Date.parse(operation?.startedAt||"");if(!Number.isFinite(started))return"0 sec";return operationDurationText(Math.max(0,(operation?.finishedAt?Date.parse(operation.finishedAt):Date.now())-started));}
+function setServerUpdateDetectionStatus(message,kind="empty"){const el=document.getElementById("serverUpdateDetectionStatus");if(!el)return;el.className=(kind==="warning"?"warning":"empty")+" mt";el.textContent=String(message||"");}
+function fillServerUpdateVersions(data={}){const metadata=data.metadata||data;setText("serverUpdateCurrentBuild",serverUpdateValue(data.requiredBuildId&&data.requiredBuildId!==data.currentBuildId?data.currentBuildId+" -> "+data.requiredBuildId:data.currentBuildId||metadata.steamBuildId));setText("serverUpdateDownloadedRevision",serverUpdateValue(data.downloadedRevision||metadata.downloadedRevision));setText("serverUpdateDeployedRevision",serverUpdateValue(data.deployedRevision||metadata.deployedRevision));}
+function showServerUpdatePanel(data=serverUpdateCheckState||{}){fillServerUpdateVersions(data);document.getElementById("serverUpdatePanel")?.classList.remove("hidden");}
+function hideServerUpdatePanel(){document.getElementById("serverUpdatePanel")?.classList.add("hidden");}
+function renderServerUpdateOperation(operation){if(!operation)return;const running=operation.status==="running"||operation.status==="pending";const success=operation.status==="success";const progress=Number.isFinite(Number(operation.progress))?Math.max(0,Math.min(100,Number(operation.progress))):(success?100:0);setText("serverUpdatePanelTitle",success?"Dune server update completed":operation.status==="failed"?"Dune server update failed":"Updating Dune server");setText("serverUpdatePanelDetail",operation.detail||operation.error||(running?"Funcom update is running.":"Update finished."));setText("serverUpdateStage",operation.stage||"Updating");setText("serverUpdateProgressText",Math.round(progress)+"% · "+serverUpdateElapsed(operation));const fill=document.getElementById("serverUpdateProgressFill");if(fill)fill.style.width=progress+"%";const badgeEl=document.getElementById("serverUpdatePanelState");if(badgeEl){badgeEl.textContent=success?"Completed":operation.status==="failed"?"Failed":"Updating";badgeEl.className="badge "+(success?"ok":operation.status==="failed"?"bad":"warn");}const lines=Array.isArray(operation.logTail)?operation.logTail:[];setText("serverUpdateLiveLog",lines.length?lines.join("\n"):(operation.error||"Waiting for Funcom update output..."));setServerUpdateDetectionStatus(success?"Dune server update completed.":operation.status==="failed"?("Update failed: "+(operation.error||operation.detail||"Unknown error")):("Update running: "+(operation.stage||"Starting")),success?"empty":"warning");if(!running){serverUpdateOperationId="";window.clearTimeout(serverUpdatePollTimer);playUiSound(success?"success":"warning");showToast(success?"Dune server update completed.":"Dune server update failed.",success?"success":"error");setTimeout(()=>checkServerUpdateAvailability({force:true,prompt:false}),1800);}}
+async function pollServerUpdateOperation(operationId){window.clearTimeout(serverUpdatePollTimer);if(!operationId)return;try{const data=await getJson("/api/operations",{timeoutMs:8000});renderOperations(data);const operation=(data.operations||[]).find(row=>row.id===operationId)||(data.active||[]).find(row=>row.key==="battlegroup:update");if(!operation)throw new Error("The server update operation was not found.");serverUpdateOperationId=operation.id;renderServerUpdateOperation(operation);if(operation.status==="running"||operation.status==="pending")serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operation.id),1000);}catch(error){setText("serverUpdatePanelDetail",betterError(error));setServerUpdateDetectionStatus("Update status unavailable: "+betterError(error),"warning");serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operationId),2500);}}
+async function startDetectedServerUpdate(updateData=serverUpdateCheckState||{}){showServerUpdatePanel(updateData);setText("serverUpdatePanelTitle","Starting Dune server update");setText("serverUpdatePanelDetail","Creating a protected background update operation.");setText("serverUpdateLiveLog","Waiting for Funcom update output...");try{const data=await getJson("/api/server-update/start",{method:"POST",timeoutMs:15000});serverUpdateOperationId=data.operation?.id||"";if(!serverUpdateOperationId)throw new Error("Update operation ID was not returned.");renderServerUpdateOperation(data.operation);setActionCenter("Dune server update started","Live status is available in the update panel.","working");addActivity("server","Dune server update started",serverUpdateOperationId);await pollServerUpdateOperation(serverUpdateOperationId);}catch(error){const operations=await refreshOperations().catch(()=>null);const active=(operations?.active||[]).find(row=>row.key==="battlegroup:update");if(active){serverUpdateOperationId=active.id;showServerUpdatePanel(updateData);await pollServerUpdateOperation(active.id);return;}setText("serverUpdatePanelTitle","Dune server update could not start");setText("serverUpdatePanelDetail",betterError(error));setText("serverUpdateLiveLog",betterError(error));setServerUpdateDetectionStatus("Update could not start: "+betterError(error),"warning");playUiSound("warning");}}
+function serverUpdatePromptKey(data){return [data.requiredBuildId||"",data.downloadedRevision||"",data.deployedRevision||""].join("|");}
+async function checkServerUpdateAvailability(options={}){const force=options.force===true,prompt=options.prompt!==false;if(serverUpdateOperationId)return serverUpdateCheckState;setServerUpdateDetectionStatus("Checking Funcom and Steam server versions...","warning");const button=document.getElementById("serverUpdateButton");if(button)button.disabled=true;try{const data=await getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:45000});serverUpdateCheckState=data;fillServerUpdateVersions(data);if(!data.updateAvailable){setServerUpdateDetectionStatus("Server is current. Steam build "+serverUpdateValue(data.currentBuildId)+" · deployed "+serverUpdateValue(data.deployedRevision)+".","empty");if(force)showToast("Dune server is up to date.","success");return data;}setServerUpdateDetectionStatus("Dune server update available. "+(data.reason||"A newer Funcom build was detected."),"warning");if(prompt){const key=serverUpdatePromptKey(data);let alreadyPrompted=false;try{alreadyPrompted=sessionStorage.getItem("alphaNineServerUpdatePrompted")===key;}catch{}if(force||!alreadyPrompted){const activeDialog=document.querySelector(".suite-modal-overlay:not(.hidden),.setup-overlay:not(.hidden),.startup-progress-overlay:not(.hidden)");if(activeDialog){window.setTimeout(()=>checkServerUpdateAvailability({force:false,prompt:true}),30000);return data;}try{sessionStorage.setItem("alphaNineServerUpdatePrompted",key);}catch{}const message=(data.reason||"A newer Dune server build is available.")+"\n\nSteam build: "+serverUpdateValue(data.currentBuildId)+(data.requiredBuildId&&data.requiredBuildId!==data.currentBuildId?" -> "+data.requiredBuildId:"")+"\nDownloaded revision: "+serverUpdateValue(data.downloadedRevision)+"\nDeployed revision: "+serverUpdateValue(data.deployedRevision)+"\n\nUpdating may reconcile or restart server pods and disconnect online players. A recent backup is recommended.";if(await appConfirm("Dune Server Update Available",message,"Update Now","Later"))await startDetectedServerUpdate(data);}}return data;}catch(error){setServerUpdateDetectionStatus("Automatic server update check unavailable: "+betterError(error),"warning");if(force)showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
+async function checkServerUpdateNow(){return checkServerUpdateAvailability({force:true,prompt:true});}
+async function resumeServerUpdatePanel(){try{const data=await refreshOperations();const active=(data?.active||[]).find(row=>row.key==="battlegroup:update");if(!active)return false;serverUpdateOperationId=active.id;showServerUpdatePanel(serverUpdateCheckState||{});renderServerUpdateOperation(active);pollServerUpdateOperation(active.id);return true;}catch{return false;}}
+async function initializeServerUpdateMonitor(){if(await resumeServerUpdatePanel())return;await checkServerUpdateAvailability({force:false,prompt:true});}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 function csrfCookie(){const match=document.cookie.match(/(?:^|;\s*)alphanine_csrf=([^;]+)/);return match?decodeURIComponent(match[1]):"";}
@@ -18898,7 +19196,7 @@ function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>res
 async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
 async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);
+renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 setInterval(()=>{if(document.getElementById("repair")?.classList.contains("active"))refreshRepairQueue();},10000);
@@ -19043,6 +19341,21 @@ async function route(req, res) {
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {
     try { await json(res, await vmConnectionMonitor()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/server-update/check" && req.method === "GET") {
+    const result = await checkServerUpdate({ force: url.searchParams.get("force") === "1" });
+    await json(res, result, result.ok ? 200 : 503);
+    return;
+  }
+  if (url.pathname === "/api/server-update/start" && req.method === "POST") {
+    try {
+      const operation = startServerUpdateJob();
+      await json(res, { ok: true, started: true, operation }, 202);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
     return;
   }
   if (url.pathname === "/api/operations" && req.method === "GET") {
@@ -19950,6 +20263,16 @@ async function route(req, res) {
   }
   if (url.pathname.startsWith("/api/action/") && req.method === "POST") {
     const action = decodeURIComponent(url.pathname.split("/").pop());
+    if (action === "update") {
+      try {
+        const operation = startServerUpdateJob();
+        await json(res, { ok: true, started: true, operation }, 202);
+      } catch (error) {
+        const failure = operationErrorResponse(error);
+        await json(res, failure.payload, failure.statusCode);
+      }
+      return;
+    }
     try {
       const result = await runTrackedOperation("battlegroup:control", `Battlegroup ${action}`, async ({ update }) => {
         update(`Running Battlegroup ${action}`, "Waiting for the server management command to finish.");
@@ -20078,6 +20401,10 @@ server.listen(PORT, LOCAL_HOST, async () => {
   console.log(`AlphaNine Dune Suite desktop: http://127.0.0.1:${PORT}`);
   console.log(`AlphaNine Dune Suite local portal: ${webPortalUrls().join(" ")}`);
   console.log(`Expected server install: ${DEFAULT_SERVER_ROOT}`);
+  if (process.env.ALPHANINE_SKIP_STARTUP_SERVICES === "1") {
+    console.log("Startup services skipped for isolated Suite validation.");
+    return;
+  }
   const startupVmSync = autoSyncVmIpFromHyperV()
     .then((result) => {
       if (result.synced) console.log(`VM address updated to ${result.detectedIp}; dependent Suite connections were refreshed.`);

@@ -33,10 +33,11 @@ async function waitForUi() {
   try {
     const html = await waitForUi();
     assert(html.includes('id="repair"'), "Rendered Repair Inspector is missing.");
+    assert(html.includes('id="landsraad"'), "Rendered Landsraad tier editor is missing.");
     const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((match) => match[1]).filter((script) => script.trim());
     assert(scripts.length, "No inline UI script was rendered.");
     for (const script of scripts) new Function(script);
-    console.log("Rendered Suite UI and Repair Inspector JavaScript syntax passed.");
+    console.log("Rendered Suite UI, Repair Inspector, and Landsraad editor JavaScript syntax passed.");
   } finally {
     child.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });

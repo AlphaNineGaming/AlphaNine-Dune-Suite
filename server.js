@@ -88,6 +88,7 @@ const BUNDLED_UI_OVERRIDE_CSS_PATH = path.join(BUNDLED_DATA_DIR, "ui-overrides.c
 const DUNE_ITEMS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-items-catalog.json");
 const DUNE_SKILLS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-skills-catalog.json");
 const MANAGER_ITEM_CATALOG_PATH = path.join(MANAGER_DIR, "dune-item-catalog.json");
+const MARKET_BOT_ITEM_DATA_PATH = packagedAssetPath("assets", "market-bot", "item-data.json");
 const DUNE_ITEMS_CACHE_PATH = path.join(DATA_DIR, "dune-items-cache.json");
 const GEAR_IMAGE_CACHE_DIR = path.join(DATA_DIR, "gear-images");
 const BUNDLED_GEAR_IMAGE_DIR = path.join(BUNDLED_DATA_DIR, "gear-images");
@@ -4374,18 +4375,23 @@ function loadDuneItemsCache() {
     const data = JSON.parse(fs.readFileSync(DUNE_ITEMS_CACHE_PATH, "utf8"));
     const rawItems = (data.items || []).map(sanitizeGearItemForUi).filter((item) => item.id && item.name);
     const managerCatalog = loadManagerCatalogItems();
-    const mergedRawItems = [...rawItems, ...managerCatalog.items];
+    const marketBotSchematics = loadMarketBotSchematicItems();
+    const mergedRawItems = [...rawItems, ...managerCatalog.items, ...marketBotSchematics.items];
     const items = dedupeGearItemsById(mergedRawItems);
     const managerOnlySchematics = managerCatalog.items.filter((item) => !rawItems.some((base) => base.id === item.id)).length;
+    const marketBotOnlySchematics = marketBotSchematics.items.filter((item) => !rawItems.some((base) => base.id === item.id) && !managerCatalog.items.some((base) => base.id === item.id)).length;
     return {
       ok: true,
       items,
       report: {
         ...(data.report || {}),
         ...managerCatalog.report,
+        ...marketBotSchematics.report,
         totalItemsFound: items.length,
         managerCatalogMergedSchematics: managerCatalog.items.length,
         managerOnlySchematics,
+        marketBotMergedSchematics: marketBotSchematics.items.length,
+        marketBotOnlySchematics,
         duplicateItemsRemoved: Math.max(0, mergedRawItems.length - items.length)
       },
       generatedAt: data.generatedAt || "",
@@ -5042,6 +5048,59 @@ async function dbQuery(sql, timeout = 45000, runtimeTarget = null) {
     throw error;
   }
   return result.stdout.trim();
+}
+
+function loadMarketBotSchematicItems() {
+  if (!fs.existsSync(MARKET_BOT_ITEM_DATA_PATH)) {
+    return { items: [], report: { marketBotCatalogPath: MARKET_BOT_ITEM_DATA_PATH, marketBotCatalogPresent: false } };
+  }
+  try {
+    const raw = fs.readFileSync(MARKET_BOT_ITEM_DATA_PATH, "utf8").replace(/^\uFEFF/, "");
+    const catalog = JSON.parse(raw);
+    const sourceItems = catalog?.items && typeof catalog.items === "object" && !Array.isArray(catalog.items) ? catalog.items : {};
+    const names = catalog?.names && typeof catalog.names === "object" ? catalog.names : {};
+    const items = Object.entries(sourceItems)
+      .filter(([, row]) => row && row.is_schematic === true)
+      .map(([id, row]) => {
+        const name = String(row.name || names[id] || id).trim();
+        const tier = normalizeItemTier(row.tier);
+        const grade = normalizeItemGrade(row.rarity, "Unique");
+        return sanitizeGearItemForUi({
+          id,
+          name,
+          category: "Schematics",
+          type: "Unique Schematics",
+          subtype: "Unique Schematic",
+          tier,
+          rarity: grade,
+          grade,
+          detail: String(row.category || ""),
+          maxStack: String(row.stack_max || 1),
+          hasDisplayName: Boolean(name && name !== id),
+          spawnable: true,
+          source: "market-bot-catalog"
+        });
+      })
+      .filter((item) => item.id && item.name);
+    return {
+      items: dedupeGearItemsById(items),
+      report: {
+        marketBotCatalogPath: MARKET_BOT_ITEM_DATA_PATH,
+        marketBotCatalogPresent: true,
+        marketBotCatalogItems: Object.keys(sourceItems).length,
+        marketBotCatalogSchematics: items.length
+      }
+    };
+  } catch (error) {
+    return {
+      items: [],
+      report: {
+        marketBotCatalogPath: MARKET_BOT_ITEM_DATA_PATH,
+        marketBotCatalogPresent: true,
+        marketBotCatalogError: error.message
+      }
+    };
+  }
 }
 
 async function dbQueryStreamed(sql, timeout = 45000, runtimeTarget = null) {
@@ -7767,6 +7826,8 @@ const progressionPreviews = new Map();
 const PROGRESSION_CONFIRM_TEXT = "APPLY PROGRESSION";
 const landsraadWeeklyPatchPreviews = new Map();
 const LANDSRAAD_WEEKLY_CONFIRM_TEXT = "APPLY LANDSRAAD";
+const landsraadTierPreviews = new Map();
+const LANDSRAAD_TIER_CONFIRM_TEXT = "APPLY LANDSRAAD TIERS";
 const CHARACTER_PROGRESSION_LIMITS = {
   TotalXPEarned: 999999999,
   TotalSkillPoints: 999,
@@ -9427,6 +9488,169 @@ function repairDbId(value, label = "database id") {
   const id = String(value || "").trim();
   if (!/^\d+$/.test(id)) throw new Error(`${label} is missing or invalid.`);
   return id;
+}
+
+async function landsraadTierInspect() {
+  const metadata = await dbQuery(`
+    select column_name, data_type
+    from information_schema.columns
+    where table_schema = 'dune'
+      and table_name = 'landsraad_task_rewards'
+      and column_name in ('task_id', 'threshold', 'template_id', 'amount')
+    order by ordinal_position;
+  `, 12000);
+  const columns = parseDbRows(metadata, ["column", "data_type"]);
+  const names = new Set(columns.map((row) => row.column));
+  const supported = ["task_id", "threshold", "template_id", "amount"].every((name) => names.has(name));
+  if (!supported) {
+    return { ok: false, status: "unsupported", schema: "dune", table: "landsraad_task_rewards", columns, tiers: [], reason: "dune.landsraad_task_rewards with task_id, threshold, template_id, and amount columns was not detected." };
+  }
+  const output = await dbQuery(`
+    select rewards.threshold::text, count(*)::text
+    from dune.landsraad_task_rewards rewards
+    group by rewards.threshold
+    order by rewards.threshold;
+  `, 15000);
+  const tiers = parseDbRows(output, ["threshold", "rowCount"]).map((row, index) => ({
+    tier: index + 1,
+    label: `Tier ${index + 1}`,
+    threshold: requireInteger(row.threshold, "Stored Landsraad threshold", 1, 2147483647),
+    rowCount: requireInteger(row.rowCount, "Stored Landsraad reward row count", 1, 10000000)
+  }));
+  return {
+    ok: tiers.length > 0,
+    status: tiers.length ? "detected" : "empty",
+    schema: "dune",
+    table: "landsraad_task_rewards",
+    columns,
+    tiers,
+    totalRewardRows: tiers.reduce((sum, row) => sum + row.rowCount, 0),
+    reason: tiers.length ? "" : "No Landsraad reward tiers were found."
+  };
+}
+
+async function landsraadTierBackupRows() {
+  const output = await dbQuery(`
+    select task_id::text, threshold::text, template_id, amount::text
+    from dune.landsraad_task_rewards
+    order by threshold, task_id, template_id, amount;
+  `, 20000);
+  return parseDbRows(output, ["task_id", "threshold", "template_id", "amount"]);
+}
+
+function validateLandsraadThresholds(values, expectedCount) {
+  if (!Array.isArray(values)) throw new Error("Tier thresholds must be an array.");
+  if (values.length !== expectedCount) throw new Error(`Keep all ${expectedCount} detected Landsraad tiers.`);
+  const thresholds = values.map((value, index) => requireInteger(value, `Tier ${index + 1} threshold`, 1, 2147483647));
+  for (let index = 1; index < thresholds.length; index += 1) {
+    if (thresholds[index] <= thresholds[index - 1]) throw new Error(`Tier ${index + 1} must be greater than Tier ${index}.`);
+  }
+  return thresholds;
+}
+
+async function landsraadTierPreview(payload) {
+  try {
+    const inspect = await landsraadTierInspect();
+    if (!inspect.ok) return { ok: false, status: inspect.status, inspect, error: inspect.reason };
+    const thresholds = validateLandsraadThresholds(payload?.thresholds, inspect.tiers.length);
+    const rows = await landsraadTierBackupRows();
+    if (rows.length !== inspect.totalRewardRows) throw new Error("Landsraad reward rows changed during preview. Refresh and try again.");
+    const previewId = crypto.randomBytes(16).toString("hex");
+    const newTiers = inspect.tiers.map((row, index) => ({ ...row, threshold: thresholds[index] }));
+    const backupPath = progressionBackupPath("landsraad", "tiers", previewId);
+    const oldValues = { tiers: inspect.tiers, rows };
+    const newValues = { tiers: newTiers, totalRewardRows: inspect.totalRewardRows };
+    fs.writeFileSync(backupPath, JSON.stringify({ createdAt: new Date().toISOString(), action: "landsraad_tiers", oldValues, newValues, source: "landsraad-tier-preview", readOnlyBackup: true }, null, 2), "utf8");
+    const changedRewardRows = inspect.tiers.reduce((sum, row, index) => sum + (row.threshold === thresholds[index] ? 0 : row.rowCount), 0);
+    const preview = {
+      ok: true,
+      status: "preview",
+      previewId,
+      action: "landsraad_tiers",
+      backupPath,
+      auditLogPath: PROGRESSION_AUDIT_LOG,
+      oldValues,
+      newValues,
+      changedRewardRows,
+      confirmText: LANDSRAAD_TIER_CONFIRM_TEXT,
+      warning: `This changes ${changedRewardRows} live Landsraad reward row(s). Type ${LANDSRAAD_TIER_CONFIRM_TEXT} before applying.`
+    };
+    landsraadTierPreviews.set(previewId, { ...preview, createdAt: Date.now() });
+    progressionAudit("landsraad_tier_preview_created", { oldValues: { tiers: inspect.tiers, totalRewardRows: rows.length }, newValues, backupFilePath: backupPath });
+    return preview;
+  } catch (error) {
+    return { ok: false, status: "error", error: error.message, auditLogPath: PROGRESSION_AUDIT_LOG };
+  }
+}
+
+function landsraadTierDistributionSql(tiers) {
+  return tiers.map((row) => `(${requireInteger(row.threshold, "threshold", 1, 2147483647)}, ${requireInteger(row.rowCount, "rowCount", 1, 10000000)})`).join(", ");
+}
+
+async function landsraadTierApply(payload) {
+  let preview = null;
+  try {
+    if (!loadConfig().progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+    const previewId = String(payload?.previewId || "").trim();
+    preview = landsraadTierPreviews.get(previewId);
+    if (!preview) throw new Error("Generate Preview + Backup first or refresh an expired preview.");
+    if (payload?.confirmText !== LANDSRAAD_TIER_CONFIRM_TEXT) throw new Error(`Type ${LANDSRAAD_TIER_CONFIRM_TEXT} before applying.`);
+    if (Date.now() - preview.createdAt > 1000 * 60 * 30) throw new Error("Preview expired. Generate a new preview.");
+    if (!fs.existsSync(preview.backupPath)) throw new Error("Matching backup file is missing.");
+    const oldTiers = preview.oldValues.tiers;
+    const newTiers = preview.newValues.tiers;
+    validateLandsraadThresholds(newTiers.map((row) => row.threshold), oldTiers.length);
+    const oldDistribution = landsraadTierDistributionSql(oldTiers);
+    const newDistribution = landsraadTierDistributionSql(newTiers);
+    const changedTiers = oldTiers.map((row, index) => ({ old: row, next: newTiers[index] })).filter((pair) => pair.old.threshold !== pair.next.threshold);
+    const cases = changedTiers.map((pair) => `when ${requireInteger(pair.old.threshold, "old threshold", 1, 2147483647)} then ${requireInteger(pair.next.threshold, "new threshold", 1, 2147483647)}`).join("\n          ");
+    const oldList = changedTiers.map((pair) => requireInteger(pair.old.threshold, "old threshold", 1, 2147483647)).join(", ");
+    const updateSql = changedTiers.length ? `
+      update dune.landsraad_task_rewards
+      set threshold = case threshold
+          ${cases}
+          else threshold
+        end
+      where threshold in (${oldList});` : "";
+    const output = await dbQueryStreamed(`
+      begin;
+      lock table dune.landsraad_task_rewards in share row exclusive mode;
+      do $landsraad$
+      begin
+        if exists (
+          with expected(threshold, row_count) as (values ${oldDistribution}),
+          actual as (select threshold, count(*)::integer as row_count from dune.landsraad_task_rewards group by threshold)
+          select 1 from expected full join actual using (threshold)
+          where expected.row_count is distinct from actual.row_count
+        ) then raise exception 'Landsraad tier data changed after preview. No changes were applied.';
+        end if;
+      end $landsraad$;
+      ${updateSql}
+      do $landsraad$
+      begin
+        if exists (
+          with expected(threshold, row_count) as (values ${newDistribution}),
+          actual as (select threshold, count(*)::integer as row_count from dune.landsraad_task_rewards group by threshold)
+          select 1 from expected full join actual using (threshold)
+          where expected.row_count is distinct from actual.row_count
+        ) then raise exception 'Landsraad tier verification failed. Transaction rolled back.';
+        end if;
+      end $landsraad$;
+      select rewards.threshold::text, count(*)::text
+      from dune.landsraad_task_rewards rewards
+      group by rewards.threshold order by rewards.threshold;
+      commit;
+    `, 30000);
+    const readBack = parseDbRows(output, ["threshold", "rowCount"]).filter((row) => /^\d+$/.test(row.threshold));
+    landsraadTierPreviews.delete(previewId);
+    progressionAudit("landsraad_tier_apply_success", { oldValues: { tiers: oldTiers }, newValues: { tiers: newTiers }, backupFilePath: preview.backupPath, success: true, readBack });
+    return { ok: true, status: "applied", action: preview.action, tiers: newTiers, changedRewardRows: preview.changedRewardRows, backupPath: preview.backupPath, auditLogPath: PROGRESSION_AUDIT_LOG, readBack };
+  } catch (error) {
+    if (preview) {
+      try { progressionAudit("landsraad_tier_apply_failure", { oldValues: { tiers: preview.oldValues.tiers }, newValues: preview.newValues, backupFilePath: preview.backupPath, success: false, error: error.message }); } catch {}
+    }
+    return { ok: false, status: "error", error: error.message, backupPath: preview?.backupPath || "", auditLogPath: PROGRESSION_AUDIT_LOG };
+  }
 }
 
 function repairDecodeStats(value) {
@@ -16297,6 +16521,7 @@ function appPage() {
         <div class="nav-group-title">World</div>
         <button class="tab" data-view="live-map">Live Map</button>
         <button class="tab" data-view="cleanup">Server Cleanup</button>
+        <button class="tab" data-view="landsraad">Landsraad</button>
       </div>
       <div class="nav-group">
         <div class="nav-group-title">Economy</div>
@@ -17081,6 +17306,39 @@ DUNE_RECEIVER_SSH_KEY</pre>
       </div>
     </section>
 
+    <section id="landsraad" class="view">
+      <div class="layout-2">
+        <div class="panel pad">
+          <div class="panel-head">
+            <div><div class="label">Landsraad Reward Tiers</div><div class="subtle">Authoritative thresholds from dune.landsraad_task_rewards.</div></div>
+            <button type="button" onclick="refreshLandsraadTiers()">Refresh Tiers</button>
+          </div>
+          <div id="landsraadTierStatus" class="empty mt">Open Landsraad to load the current reward tiers.</div>
+          <div id="landsraadTierRows" class="detail-list mt"><div class="empty">No tiers loaded.</div></div>
+        </div>
+        <div class="panel pad">
+          <div class="label">Tier Editing Policy</div>
+          <div class="detail-list mt">
+            <div class="detail-row"><span class="subtle">Tier names</span><strong>Tier 1–5 by ascending threshold</strong></div>
+            <div class="detail-row"><span class="subtle">Changed field</span><strong>threshold only</strong></div>
+            <div class="detail-row"><span class="subtle">Rewards</span><strong>Task, template, and amount preserved</strong></div>
+            <div class="detail-row"><span class="subtle">Validation</span><strong>Positive, unique, strictly increasing</strong></div>
+            <div class="detail-row"><span class="subtle">Protection</span><strong>Backup + lock + transaction + read-back</strong></div>
+          </div>
+          <div class="warning mt">Editing a tier changes every reward row currently assigned to that threshold. Progression Editing must be enabled in Settings before Apply.</div>
+        </div>
+      </div>
+      <div class="panel pad mt">
+        <div class="label">Protected Apply</div>
+        <div class="action-row mt">
+          <button type="button" onclick="previewLandsraadTiers()">Generate Preview + Backup</button>
+        </div>
+        <label class="mt">Type APPLY LANDSRAAD TIERS<input id="landsraadTierConfirmText" placeholder="APPLY LANDSRAAD TIERS" oninput="syncLandsraadTierApplyButton()"></label>
+        <div class="action-row mt"><button id="landsraadTierApplyButton" type="button" class="danger" onclick="applyLandsraadTiers()" disabled>Apply Tier Changes</button></div>
+        <pre id="landsraadTierPreviewLog" class="mt">No Landsraad tier preview generated.</pre>
+      </div>
+    </section>
+
     <section id="progression" class="view">
       <div class="progression-shell">
         <div class="progression-hero">
@@ -17816,6 +18074,7 @@ const viewCopy={
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
   database:["Database","Battlegroup backup, import, and backup location management."],
   cleanup:["Server Cleanup","Dry-run first cleanup tools for orphaned bases, fiefs, and future stale server data."],
+  landsraad:["Landsraad","View and safely change live Landsraad reward tier thresholds."],
   server:["Server Control","Battlegroup controls, maps, and live server telemetry."],
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
@@ -17828,10 +18087,10 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
@@ -18344,6 +18603,13 @@ function selectAllRepairableTargets(){document.querySelectorAll('[data-repair-ta
 function clearRepairTargets(){document.querySelectorAll('[data-repair-target]').forEach(input=>{input.checked=false;});invalidateRepairPreview();}
 async function previewRepair(){try{const query=getValue("repairPlayerSelect");const targetIds=selectedRepairTargetIds();if(!repairInspectorState||!query)throw new Error("Inspect a player first.");if(!targetIds.length)throw new Error("Select at least one repairable target.");if(!repairInspectorState.playerOffline){const confirmed=await appConfirm("Queue Repair Until Logout","Queue "+targetIds.length+" repair(s) for "+(repairInspectorState.player?.character_name||"this online player")+"? The Suite will re-inspect the selected records, create the backup, and repair them automatically after the player disconnects.","Queue Repair","Cancel");if(!confirmed)return;const queued=await getJson("/api/admin/repair/queue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,targetIds,confirmText:"QUEUE REPAIR"}),timeoutMs:60000});setText("repairStatus",queued.message||"Repair queued until player logout.");showToast(queued.message||"Repair queued.","success");clearRepairTargets();await refreshRepairQueue();return;}setText("repairPreviewLog","Creating an exact pre-change backup and protected preview...");const data=await getJson("/api/admin/repair/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,targetIds}),timeoutMs:60000});repairPreviewState=data;setText("repairPreviewLog","Preview ready for "+data.targets.length+" target(s).\nBackup: "+data.backupPath+"\nExpires: "+new Date(data.expiresAt).toLocaleString()+"\n\nThe battlegroup may remain running. Type REPAIR DURABILITY, then apply while the player remains offline.");syncRepairApplyButton();showToast("Repair preview and backup ready.","success");}catch(e){repairPreviewState=null;setText("repairPreviewLog",betterError(e));syncRepairApplyButton();showToast(betterError(e),"error");}}
 async function applyRepair(){try{if(!repairPreviewState)throw new Error("Generate a repair preview first.");if(getValue("repairConfirmText")!=="REPAIR DURABILITY")throw new Error("Type REPAIR DURABILITY exactly.");const confirmed=await appConfirm("Apply Live Durability Repair","Apply "+repairPreviewState.targets.length+" live repair(s)? The battlegroup may remain running, but the player must remain offline. Permanent maximum-durability decay will remain unchanged.","Apply Repair","Cancel");if(!confirmed)return;setText("repairPreviewLog","Revalidating the offline player and applying the protected live transaction...");const data=await getJson("/api/admin/repair/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:repairPreviewState.previewId,confirmText:getValue("repairConfirmText")}),timeoutMs:90000});repairPreviewState=null;setValue("repairConfirmText","");syncRepairApplyButton();showToast(data.message||"Repair applied.","success");await inspectRepairTargets();setText("repairPreviewLog",(data.message||"Repair applied.")+"\nBackup: "+(data.backupPath||"created")+"\nAudit: "+(data.auditLogPath||"admin-audit.log"));}catch(e){setText("repairPreviewLog",betterError(e));showToast(betterError(e),"error");syncRepairApplyButton();}}
+function invalidateLandsraadTierPreview(){landsraadTierPreviewState=null;setValue("landsraadTierConfirmText","");setText("landsraadTierPreviewLog","Tier values changed. Generate a new preview and backup.");syncLandsraadTierApplyButton();}
+function syncLandsraadTierApplyButton(){const button=document.getElementById("landsraadTierApplyButton");if(button)button.disabled=!landsraadTierPreviewState||getValue("landsraadTierConfirmText")!=="APPLY LANDSRAAD TIERS";}
+function renderLandsraadTiers(data){landsraadTierState=data;landsraadTierPreviewState=null;setValue("landsraadTierConfirmText","");syncLandsraadTierApplyButton();const rows=document.getElementById("landsraadTierRows");if(!rows)return;if(!data?.ok){rows.innerHTML='<div class="empty">'+esc(data?.reason||data?.error||"Landsraad tiers unavailable.")+'</div>';setText("landsraadTierStatus",data?.reason||data?.error||"Landsraad tiers unavailable.");return;}rows.innerHTML=data.tiers.map(row=>'<div class="detail-row"><label>'+esc(row.label)+' threshold<input class="landsraad-tier-threshold" data-tier="'+esc(row.tier)+'" type="number" min="1" max="2147483647" step="1" value="'+esc(row.threshold)+'" oninput="invalidateLandsraadTierPreview()"></label><strong>'+esc(Number(row.rowCount).toLocaleString())+' reward rows</strong></div>').join("");setText("landsraadTierStatus",data.tiers.length+" tiers loaded from the live database / "+Number(data.totalRewardRows||0).toLocaleString()+" reward rows.");setText("landsraadTierPreviewLog","Current thresholds loaded. Adjust values, then generate a protected preview.");}
+async function refreshLandsraadTiers(){try{setText("landsraadTierStatus","Loading authoritative Landsraad thresholds...");const data=await getJson("/api/landsraad/tiers",{timeoutMs:30000});renderLandsraadTiers(data);if(!data.ok)throw new Error(data.reason||data.error||"Landsraad tiers unavailable.");addActivity("world","Landsraad tiers loaded",data.tiers.map(row=>row.threshold).join(", "));}catch(e){renderLandsraadTiers({ok:false,error:betterError(e),tiers:[]});addActivity("error","Landsraad tiers unavailable",e.message);}}
+function landsraadTierThresholdPayload(){return [...document.querySelectorAll(".landsraad-tier-threshold")].sort((a,b)=>Number(a.dataset.tier)-Number(b.dataset.tier)).map(input=>input.value);}
+async function previewLandsraadTiers(){try{if(!landsraadTierState?.ok)throw new Error("Refresh Landsraad tiers first.");const data=await getJson("/api/landsraad/tiers/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({thresholds:landsraadTierThresholdPayload()}),timeoutMs:45000});if(!data.ok)throw new Error(data.error||"Landsraad tier preview failed.");landsraadTierPreviewState=data;setText("landsraadTierPreviewLog","Preview ready.\nBackup: "+data.backupPath+"\nAffected reward rows: "+data.changedRewardRows+"\n\nCurrent tiers:\n"+JSON.stringify(data.oldValues.tiers,null,2)+"\n\nNew tiers:\n"+JSON.stringify(data.newValues.tiers,null,2)+"\n\nType APPLY LANDSRAAD TIERS before applying.");syncLandsraadTierApplyButton();showToast("Landsraad tier preview and backup ready.","success");}catch(e){landsraadTierPreviewState=null;setText("landsraadTierPreviewLog",betterError(e));syncLandsraadTierApplyButton();showToast(betterError(e),"error");}}
+async function applyLandsraadTiers(){try{if(!landsraadTierPreviewState)throw new Error("Generate a Landsraad tier preview first.");if(getValue("landsraadTierConfirmText")!=="APPLY LANDSRAAD TIERS")throw new Error("Type APPLY LANDSRAAD TIERS exactly.");const summary=landsraadTierPreviewState.newValues.tiers.map(row=>row.label+": "+Number(row.threshold).toLocaleString()).join("\n");const confirmed=await appConfirm("Apply Landsraad Tiers","Apply these live tier thresholds?\n\n"+summary+"\n\nTask IDs, reward items, and amounts remain unchanged.","Apply Tiers","Cancel");if(!confirmed)return;setText("landsraadTierPreviewLog","Locking and revalidating the live reward table...");const data=await getJson("/api/landsraad/tiers/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:landsraadTierPreviewState.previewId,confirmText:getValue("landsraadTierConfirmText")}),timeoutMs:60000});if(!data.ok)throw new Error(data.error||"Landsraad tier apply failed.");landsraadTierPreviewState=null;setValue("landsraadTierConfirmText","");syncLandsraadTierApplyButton();showToast("Landsraad tiers updated and verified.","success");addActivity("world","Landsraad tiers updated",data.tiers.map(row=>row.threshold).join(", "));await refreshLandsraadTiers();setText("landsraadTierPreviewLog","Tier update succeeded and read-back matched.\nBackup: "+data.backupPath+"\nAudit: "+data.auditLogPath);}catch(e){setText("landsraadTierPreviewLog",betterError(e));showToast(betterError(e),"error");syncLandsraadTierApplyButton();}}
 function renderRepairQueue(){const wrap=document.getElementById("repairQueueRows");const items=repairQueueState?.items||[];const summary=repairQueueState?.summary||{};setText("repairQueueSummary",(summary.queued||0)+" waiting / "+(summary.processing||0)+" processing / "+(summary.completed||0)+" completed / "+(summary.failed||0)+" failed");if(!wrap)return;if(!items.length){wrap.innerHTML='<div class="empty">No queued repairs.</div>';return;}wrap.innerHTML=items.map(item=>{const player=item.player?.characterName||item.player?.controllerId||"Player";const result=item.result?.message||item.lastError||((item.status==="queued")?"Waiting for player to disconnect.":"");const action=item.status==="processing"?'':'<button type="button" onclick="removeRepairQueue(\''+esc(item.queueId)+'\')">'+(item.status==="queued"?'Cancel':'Clear')+'</button>';return '<div class="detail-row"><span><strong>'+esc(player)+'</strong><span class="subtle">'+esc(item.targetCount)+" target(s) · "+esc(item.status)+" · "+esc(new Date(item.updatedAt||item.createdAt).toLocaleString())+'</span><span class="subtle">'+esc(result)+'</span></span>'+action+'</div>';}).join("");}
 async function refreshRepairQueue(){try{repairQueueState=await getJson("/api/admin/repair/queue",{timeoutMs:12000});renderRepairQueue();return repairQueueState;}catch(e){setText("repairQueueSummary",betterError(e));return null;}}
 async function processRepairQueueNow(){try{setText("repairQueueSummary","Checking queued players...");repairQueueState=await getJson("/api/admin/repair/queue/process",{method:"POST",timeoutMs:90000});renderRepairQueue();showToast("Repair queue checked.","success");}catch(e){setText("repairQueueSummary",betterError(e));showToast(betterError(e),"error");}}
@@ -19373,6 +19639,35 @@ async function route(req, res) {
   if (url.pathname === "/api/progression/skills" && req.method === "GET") {
     const catalog = loadDuneSkillsCatalog();
     await json(res, { ok: catalog.ok, skills: catalog.skills, generatedAt: catalog.generatedAt, treeCounts: catalog.treeCounts, typeCounts: catalog.typeCounts, report: catalog.report }, catalog.ok ? 200 : 500);
+    return;
+  }
+  if (url.pathname === "/api/landsraad/tiers" && req.method === "GET") {
+    try {
+      const result = await landsraadTierInspect();
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", tiers: [], error: error.message }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/landsraad/tiers/preview" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await landsraadTierPreview(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/landsraad/tiers/apply" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await landsraadTierApply(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/landsraad/weekly-rewards/inspect" && req.method === "GET") {

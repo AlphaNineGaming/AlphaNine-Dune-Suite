@@ -2923,6 +2923,49 @@ function vmMonitorKind(score, online) {
   return "ok";
 }
 
+let suiteStatusSnapshotInFlight = null;
+let vmConnectionMonitorInFlight = null;
+
+async function suiteStatusSnapshot() {
+  const vm = await vmInfoFast(5000);
+  let status = null;
+  let raw = "";
+  let statusResult = null;
+  const canCheckBattlegroup = Boolean((vm.exists && vm.state === "Running") || VM_IP);
+  if (canCheckBattlegroup) {
+    statusResult = await battlegroup("status");
+    raw = statusResult.stdout || statusResult.stderr || statusResult.error || "";
+    status = parseStatus(raw);
+  }
+  const telemetry = await vmResourceTelemetry().catch((error) => ({ source: "remote-vm", ok: false, error: error.message }));
+  const databaseHealth = await databaseHealthSnapshot(7000);
+  const runtimeTransport = await updateRuntimeGiveTransport({ vm, status, raw }, "status");
+  const serverStatus = mapServerSummaryStatus(status?.summary || status);
+  const topServerStatus = topServerStatusDecision({ vm, status, raw, statusResult });
+  return {
+    vm,
+    status,
+    databaseHealth,
+    telemetry,
+    resources: telemetry,
+    serverStatus,
+    topServerStatus,
+    selectedBattlegroup: normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup),
+    onlineDecisionReason: topServerStatus.onlineDecisionReason,
+    hardOfflineReasons: topServerStatus.hardOfflineReasons,
+    confirmationSources: topServerStatus.confirmationSources,
+    sshKey: sshKeyStatus(SSH_KEY),
+    directorUrl: lastDirectorUrl,
+    runtimeTransport
+  };
+}
+
+function sharedSuiteStatusSnapshot() {
+  if (suiteStatusSnapshotInFlight) return suiteStatusSnapshotInFlight;
+  suiteStatusSnapshotInFlight = suiteStatusSnapshot().finally(() => { suiteStatusSnapshotInFlight = null; });
+  return suiteStatusSnapshotInFlight;
+}
+
 async function vmConnectionMonitor() {
   const checkedAt = new Date().toISOString();
   const vm = await vmInfo();
@@ -3038,6 +3081,12 @@ function serverUpdateSelection(configValue = loadConfig()) {
     namespace: String(selected?.namespace || "").trim(),
     battlegroup: String(selected?.name || "").trim()
   };
+}
+
+function sharedVmConnectionMonitor() {
+  if (vmConnectionMonitorInFlight) return vmConnectionMonitorInFlight;
+  vmConnectionMonitorInFlight = vmConnectionMonitor().finally(() => { vmConnectionMonitorInFlight = null; });
+  return vmConnectionMonitorInFlight;
 }
 
 function serverUpdateMetadataCommand(configValue = loadConfig()) {
@@ -19014,14 +19063,20 @@ function renderSietchDetails(row){const box=document.getElementById("sietchDetai
 function syncSelectedSietch(){const row=selectedSietchRow();if(row)setValue("sietchNewLabel",row.label||"");renderSietchDetails(row);}
 async function refreshSietches(){const select=document.getElementById("sietchPartitionSelect");const result=document.getElementById("sietchRenameResult");try{if(result)result.textContent="Loading sietches...";const data=await getJson("/api/sietches",{timeoutMs:30000});sietchRows=data.rows||[];if(select){const current=select.value;select.innerHTML=sietchRows.length?sietchRows.map(row=>'<option value="'+esc(row.partitionId)+'">'+esc(sietchOptionLabel(row))+'</option>').join(""):'<option value="">No world partitions found</option>';if(current&&sietchRows.some(row=>String(row.partitionId)===String(current)))select.value=current;}syncSelectedSietch();if(result)result.textContent=sietchRows.length?("Loaded "+sietchRows.length+" sietch/world partition label(s)."):"No world partition labels found.";addActivity("server","Sietches refreshed",sietchRows.length+" partition labels");}catch(e){if(select)select.innerHTML='<option value="">Failed to load sietches</option>';renderSietchDetails(null);if(result)result.textContent=betterError(e);addActivity("error","Sietch refresh failed",e.message);}}
 async function renameSelectedSietch(){const row=selectedSietchRow();const result=document.getElementById("sietchRenameResult");try{if(!row)throw new Error("Select a sietch first.");const nextLabel=getValue("sietchNewLabel").trim().replace(/\\s+/g," ");if(!nextLabel)throw new Error("Enter the new sietch name.");if(nextLabel===row.label)throw new Error("The new name is the same as the current name.");const confirmed=await appConfirm("Rename Sietch","Rename "+(row.label||"(unnamed)")+" to "+nextLabel+"?\\n\\nCreate a database backup first if players are active.","Rename","Cancel");if(!confirmed)return;if(result)result.textContent="Renaming sietch...";const data=await getJson("/api/sietches/rename",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({partitionId:row.partitionId,previousLabel:row.label,nextLabel}),timeoutMs:30000});if(result)result.textContent="Renamed "+data.previousLabel+" to "+data.nextLabel+". "+(data.note||"");showToast("Sietch renamed.","success");addActivity("server","Sietch renamed",data.previousLabel+" -> "+data.nextLabel);await refreshSietches();}catch(e){if(result)result.textContent=betterError(e);showToast(betterError(e),"error");addActivity("error","Sietch rename failed",e.message);}}
-async function refresh(){try{const data=await getJson("/api/status");const s=data.status?.summary||{};const dbLabel=databaseHealthLabel(data);const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?((selected.title||"Title not found")+" / "+selected.namespace+" / "+selected.name):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",dbLabel);tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));badge("topDb",dbLabel);document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+dbLabel+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}catch(e){renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");badge("topDb","DB status unknown");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();}}
+let statusRefreshInFlight=null,vmMonitorRefreshInFlight=null,indicatorDelayActivityAt={};
+function isIndicatorPollDelay(error){return /request timed out for \/api\/(?:status|vm-monitor)/i.test(String(error?.message||error||""));}
+function reportIndicatorDelay(key,message,detail){const now=Date.now(),last=Number(indicatorDelayActivityAt[key]||0);if(now-last<60000)return;indicatorDelayActivityAt[key]=now;addActivity("warn",message,detail);}
+function clearIndicatorDelay(key){delete indicatorDelayActivityAt[key];}
+async function refreshStatusPoll(){try{const data=await getJson("/api/status",{timeoutMs:45000});clearIndicatorDelay("status");const s=data.status?.summary||{};const dbLabel=databaseHealthLabel(data);const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?((selected.title||"Title not found")+" / "+selected.namespace+" / "+selected.name):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",dbLabel);tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));badge("topDb",dbLabel);document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+dbLabel+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return data;}catch(e){if(isIndicatorPollDelay(e)){const message="Server status check delayed; keeping the last confirmed indicators.";document.getElementById("serverLog").textContent=message;setText("dashboardLog",message);syncLogs();reportIndicatorDelay("status","Server status delayed",message);return{ok:false,delayed:true,error:betterError(e)};}renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");badge("topDb","DB status unknown");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return{ok:false,error:betterError(e)};}}
+function refresh(){if(statusRefreshInFlight)return statusRefreshInFlight;statusRefreshInFlight=refreshStatusPoll().finally(()=>{statusRefreshInFlight=null;});return statusRefreshInFlight;}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(row){if(row&&typeof row==="object"&&row.statusLabel)return row.statusLabel;const open=row&&typeof row==="object"?row.open:row;if(open===null||open===undefined)return"Discovered";return open?"Open":"Closed";}
 function monitorMs(value){return Number.isFinite(Number(value))?Math.round(Number(value))+" ms":"-- ms";}
 function renderMonitorRows(rows){return rows.length?rows.map(row=>{const meta=[row.host?row.host+":"+row.port:"",row.source||"",row.detail||""].filter(Boolean).join(" / ")||(row.responseMs!=null?monitorMs(row.responseMs):row.error||"");const state=row.open===true?"ok":(row.open===false&&row.probe!==false?"bad":"warn");return '<div class="vm-row"><div><strong>'+esc(row.label)+'</strong><small>'+esc(meta)+'</small></div><span class="status-pill '+monitorKindClass(state)+'">'+esc(monitorStatusLabel(row))+'</span></div>';}).join(""):'<div class="empty">No configured ports.</div>';}
 function renderServiceRows(services){const rows=Object.values(services||{});return rows.length?rows.map(row=>'<div class="vm-row"><div><strong>'+esc(row.label)+'</strong><small>'+esc(row.responseMs!=null?monitorMs(row.responseMs):(row.error||""))+'</small></div><span class="status-pill '+monitorKindClass(row.reachable===null?"warn":row.reachable?"ok":"bad")+'">'+esc(row.reachable===null?"N/A":row.reachable?"Reachable":"Offline")+'</span></div>').join(""):'<div class="empty">No service checks.</div>';}
 function renderPingGraph(history){const graph=document.getElementById("vmPingGraph");if(!graph)return;const values=(history||[]).slice(-60);const max=Math.max(80,...values.map(row=>Number(row.ms)||0));graph.innerHTML=values.length?values.map(row=>{const ms=Number(row.ms);const ok=Number.isFinite(ms);const h=ok?Math.max(8,Math.round((ms/max)*64)):8;const kind=!ok?"bad":ms<120?"ok":ms<250?"warn":"bad";return '<span class="ping-bar '+kind+'" title="'+(ok?ms+' ms':'offline')+'" style="height:'+h+'px"></span>';}).join(""):'<div class="empty">Ping history will appear after checks.</div>';}
-async function refreshVmMonitor(){try{const data=await getJson("/api/vm-monitor");const kind=monitorKindClass(data.kind);setText("vmMonitorStatus",data.status||"Unknown");setText("vmMonitorAddress",data.vm?.address||"Unknown");setText("vmMonitorHost",data.vm?.hostname||"Unknown");setText("vmUptime",data.vm?.uptime||"Unknown");setText("vmHealthScore",Number.isFinite(Number(data.healthScore))?Math.round(Number(data.healthScore))+"%":"--");setText("vmPingCurrent",monitorMs(data.latency?.current));setText("vmPingAverage",monitorMs(data.latency?.average));setText("vmPingMin",monitorMs(data.latency?.min));setText("vmPingMax",monitorMs(data.latency?.max));setText("vmMonitorStamp","Last check "+new Date(data.checkedAt||Date.now()).toLocaleTimeString());setText("vmLastSuccess",data.lastSuccessfulConnection&&data.lastSuccessfulConnection!=="None yet"?new Date(data.lastSuccessfulConnection).toLocaleString():data.lastSuccessfulConnection||"None yet");["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card "+kind;});const ports=data.ports||[];const services=data.services||{};document.getElementById("vmPortList").innerHTML=renderMonitorRows(ports);document.getElementById("vmServiceList").innerHTML=renderServiceRows(services);document.getElementById("vmPortDetailList").innerHTML=ports.length?ports.map(row=>{const info=[row.source||"",row.detail||"",row.responseMs!=null?monitorMs(row.responseMs):(row.error||"")].filter(Boolean).join(" / ")||"Discovered";return '<div>'+esc(row.label)+": "+esc(monitorStatusLabel(row))+" / "+esc(info)+'</div>';}).join(""):'<div>No configured ports.</div>';document.getElementById("vmErrorList").innerHTML=(data.lastErrors||[]).length?data.lastErrors.map(error=>'<div>'+esc(error)+'</div>').join(""):'<div>No recent connection errors.</div>';renderPingGraph(data.latency?.history||[]);badge("topSsh",services.ssh?.reachable?"SSH reachable":"SSH offline");addActivity("vm","VM connection monitor",(data.status||"Unknown")+" / "+Math.round(Number(data.healthScore)||0)+"%");}catch(e){setText("vmMonitorStatus","Monitor error");setText("vmMonitorStamp",betterError(e));const card=document.getElementById("vmStatusCard");if(card)card.className="vm-status-card bad";addActivity("error","VM monitor failed",e.message);}}
+async function refreshVmMonitorPoll(){try{const data=await getJson("/api/vm-monitor",{timeoutMs:45000});clearIndicatorDelay("vm-monitor");const kind=monitorKindClass(data.kind);setText("vmMonitorStatus",data.status||"Unknown");setText("vmMonitorAddress",data.vm?.address||"Unknown");setText("vmMonitorHost",data.vm?.hostname||"Unknown");setText("vmUptime",data.vm?.uptime||"Unknown");setText("vmHealthScore",Number.isFinite(Number(data.healthScore))?Math.round(Number(data.healthScore))+"%":"--");setText("vmPingCurrent",monitorMs(data.latency?.current));setText("vmPingAverage",monitorMs(data.latency?.average));setText("vmPingMin",monitorMs(data.latency?.min));setText("vmPingMax",monitorMs(data.latency?.max));setText("vmMonitorStamp","Last check "+new Date(data.checkedAt||Date.now()).toLocaleTimeString());setText("vmLastSuccess",data.lastSuccessfulConnection&&data.lastSuccessfulConnection!=="None yet"?new Date(data.lastSuccessfulConnection).toLocaleString():data.lastSuccessfulConnection||"None yet");["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card "+kind;});const ports=data.ports||[];const services=data.services||{};document.getElementById("vmPortList").innerHTML=renderMonitorRows(ports);document.getElementById("vmServiceList").innerHTML=renderServiceRows(services);document.getElementById("vmPortDetailList").innerHTML=ports.length?ports.map(row=>{const info=[row.source||"",row.detail||"",row.responseMs!=null?monitorMs(row.responseMs):(row.error||"")].filter(Boolean).join(" / ")||"Discovered";return '<div>'+esc(row.label)+": "+esc(monitorStatusLabel(row))+" / "+esc(info)+'</div>';}).join(""):'<div>No configured ports.</div>';document.getElementById("vmErrorList").innerHTML=(data.lastErrors||[]).length?data.lastErrors.map(error=>'<div>'+esc(error)+'</div>').join(""):'<div>No recent connection errors.</div>';renderPingGraph(data.latency?.history||[]);badge("topSsh",services.ssh?.reachable?"SSH reachable":"SSH offline");addActivity("vm","VM connection monitor",(data.status||"Unknown")+" / "+Math.round(Number(data.healthScore)||0)+"%");return data;}catch(e){if(isIndicatorPollDelay(e)){const message="VM monitor check delayed; keeping the last confirmed indicators.";setText("vmMonitorStatus","Check delayed");setText("vmMonitorStamp",message);["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card warn";});reportIndicatorDelay("vm-monitor","VM monitor delayed",message);return{ok:false,delayed:true,error:betterError(e)};}setText("vmMonitorStatus","Monitor error");setText("vmMonitorStamp",betterError(e));const card=document.getElementById("vmStatusCard");if(card)card.className="vm-status-card bad";addActivity("error","VM monitor failed",e.message);return{ok:false,error:betterError(e)};}}
+function refreshVmMonitor(){if(vmMonitorRefreshInFlight)return vmMonitorRefreshInFlight;vmMonitorRefreshInFlight=refreshVmMonitorPoll().finally(()=>{vmMonitorRefreshInFlight=null;});return vmMonitorRefreshInFlight;}
 function betterError(e){return e&&e.message?e.message:"Command failed. Check that the suite is running as Administrator and the Dune VM is reachable.";}
 async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status",{timeoutMs:30000});renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
 async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!(await appConfirm("Confirm VM action","Are you sure you want to "+action+" the VM?","Run "+action,"Cancel")))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}
@@ -19535,26 +19590,11 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/status") {
-    const vm = await vmInfoFast(5000);
-    let status = null;
-    let raw = "";
-    let statusResult = null;
-    const canCheckBattlegroup = Boolean((vm.exists && vm.state === "Running") || VM_IP);
-    if (canCheckBattlegroup) {
-      statusResult = await battlegroup("status");
-      raw = statusResult.stdout || statusResult.stderr || statusResult.error || "";
-      status = parseStatus(raw);
-    }
-    const telemetry = await vmResourceTelemetry().catch((error) => ({ source: "remote-vm", ok: false, error: error.message }));
-    const databaseHealth = await databaseHealthSnapshot(7000);
-    const runtimeTransport = await updateRuntimeGiveTransport({ vm, status, raw }, "status");
-    const serverStatus = mapServerSummaryStatus(status?.summary || status);
-    const topServerStatus = topServerStatusDecision({ vm, status, raw, statusResult });
-    await json(res, { vm, status, databaseHealth, telemetry, resources: telemetry, serverStatus, topServerStatus, selectedBattlegroup: normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup), onlineDecisionReason: topServerStatus.onlineDecisionReason, hardOfflineReasons: topServerStatus.hardOfflineReasons, confirmationSources: topServerStatus.confirmationSources, sshKey: sshKeyStatus(SSH_KEY), directorUrl: lastDirectorUrl, runtimeTransport });
+    await json(res, await sharedSuiteStatusSnapshot());
     return;
   }
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {
-    try { await json(res, await vmConnectionMonitor()); }
+    try { await json(res, await sharedVmConnectionMonitor()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }

@@ -5,6 +5,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
 const port = 18910 + Math.floor(Math.random() * 200);
 const httpsPort = port + 500;
@@ -34,6 +35,13 @@ async function waitForUi() {
     const html = await waitForUi();
     assert(html.includes('id="repair"'), "Rendered Repair Inspector is missing.");
     assert(html.includes('id="landsraad"'), "Rendered Landsraad tier editor is missing.");
+    assert(html.includes("statusRefreshInFlight"), "Server indicator polling is missing its single-flight guard.");
+    assert(html.includes("vmMonitorRefreshInFlight"), "VM indicator polling is missing its single-flight guard.");
+    assert(serverSource.includes("suiteStatusSnapshotInFlight"), "Backend server status requests are not coalesced.");
+    assert(serverSource.includes("vmConnectionMonitorInFlight"), "Backend VM monitor requests are not coalesced.");
+    assert(html.includes('getJson("/api/status",{timeoutMs:45000})'), "Server indicator polling deadline is too short.");
+    assert(html.includes('getJson("/api/vm-monitor",{timeoutMs:45000})'), "VM indicator polling deadline is too short.");
+    assert(html.includes("keeping the last confirmed indicators"), "Transient indicator delays do not preserve the last confirmed state.");
     const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((match) => match[1]).filter((script) => script.trim());
     assert(scripts.length, "No inline UI script was rendered.");
     for (const script of scripts) new Function(script);

@@ -14,6 +14,17 @@ const { createRemoteAccess } = require("./lib/remote-access");
 const { durabilityRepairCandidate } = require("./lib/durability-repair");
 const { cleanUpdateLine, parseServerUpdateMetadata, classifyServerUpdate, serverUpdateProgress } = require("./lib/server-update");
 const {
+  defaultSchedulerConfig,
+  normalizeSchedulerConfig,
+  readSchedulerConfig,
+  saveSchedulerConfig,
+  buildInstallCommand: buildVmSchedulerInstallCommand,
+  buildStatusCommand: buildVmSchedulerStatusCommand,
+  buildActionCommand: buildVmSchedulerActionCommand,
+  buildRemoveCommand: buildVmSchedulerRemoveCommand,
+  parseJsonOutput: parseVmSchedulerJson
+} = require("./lib/vm-scheduler");
+const {
   PLAYER_RENAME_MAX_LENGTH,
   sanitizePlayerRenameName,
   isOfflinePlayerStatus,
@@ -82,6 +93,8 @@ const MANAGER_DIR = packagedUnpackedPath("manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
 const DATA_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "data") : path.join(__dirname, "data");
 const OPERATION_HISTORY_PATH = path.join(DATA_DIR, "operations.json");
+const SCHEDULER_CONFIG_PATH = path.join(DATA_DIR, "vm-scheduler.json");
+const SCHEDULER_SCRIPT_PATH = packagedAssetPath("assets", "scheduler", "alphanine-scheduler.sh");
 const operationRegistry = new OperationRegistry(OPERATION_HISTORY_PATH, { maxHistory: 100 });
 const DUNE_SERVER_STEAM_APP_ID = 4754530;
 const SERVER_UPDATE_CHECK_TTL_MS = 10 * 60 * 1000;
@@ -3201,6 +3214,112 @@ function startServerUpdateJob() {
       operationRegistry.update(operation, "Update failed", error.message, { progress, logLine: `ERROR: ${error.message}` });
       operationRegistry.finish(operation, "failed", error.message);
       appendAdminAudit("server_update_failed", { operationId: operation.id, error: error.message });
+    }
+  });
+  return operationRegistry.public(operation);
+}
+
+function selectedSchedulerBattlegroup() {
+  const selected = normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup);
+  if (!selected) throw new Error("Select a battlegroup in Settings before configuring the scheduler.");
+  if (selected.namespace !== `funcom-seabass-${selected.name}`) {
+    throw new Error("The selected battlegroup namespace does not match its Funcom battlegroup name.");
+  }
+  return selected;
+}
+
+function localSchedulerConfig() {
+  const selected = normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup);
+  try { return readSchedulerConfig(SCHEDULER_CONFIG_PATH, selected?.name || ""); }
+  catch (error) {
+    const fallback = defaultSchedulerConfig(selected?.name || "");
+    return { ...fallback, loadError: error.message };
+  }
+}
+
+async function vmSchedulerStatus() {
+  const localConfig = localSchedulerConfig();
+  const result = await sshCommand(buildVmSchedulerStatusCommand(), 45000, { maxBuffer: 1024 * 1024 * 2 });
+  if (!result.ok) {
+    return {
+      ok: false,
+      installed: false,
+      reachable: false,
+      localConfig,
+      error: result.error || result.stderr || "The VM scheduler could not be reached."
+    };
+  }
+  try {
+    return { ...parseVmSchedulerJson(result.stdout), reachable: true, localConfig };
+  } catch (error) {
+    return { ok: false, installed: false, reachable: true, localConfig, error: error.message, raw: String(result.stdout || "").slice(-2000) };
+  }
+}
+
+async function installVmScheduler(input = {}) {
+  const selected = selectedSchedulerBattlegroup();
+  if (input.battlegroup && String(input.battlegroup) !== selected.name) {
+    throw new Error("Scheduler target changed after the page loaded. Refresh and confirm the selected battlegroup.");
+  }
+  const config = normalizeSchedulerConfig({ ...input, battlegroup: selected.name }, selected.name);
+  if (!fs.existsSync(SCHEDULER_SCRIPT_PATH)) throw new Error("Bundled VM scheduler runtime is missing from this Suite build.");
+  const scriptSource = fs.readFileSync(SCHEDULER_SCRIPT_PATH, "utf8");
+  const installerSource = `#!/bin/sh\n${buildVmSchedulerInstallCommand({ config, scriptSource, appVersion: APP_VERSION })}\n`;
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const installerPath = path.join(DATA_DIR, `vm-scheduler-install-${process.pid}-${Date.now()}.sh`);
+  fs.writeFileSync(installerPath, installerSource, { encoding: "utf8", mode: 0o600 });
+  let result;
+  try {
+    result = await sshCommand("bash -s", 8 * 60 * 1000, { maxBuffer: 1024 * 1024 * 4, inputPath: installerPath });
+  } finally {
+    try { fs.rmSync(installerPath, { force: true }); } catch {}
+  }
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "VM scheduler installation failed.");
+  const selfTest = parseVmSchedulerJson(result.stdout);
+  if (!selfTest.ok) throw new Error(`VM scheduler self-test failed: ${(selfTest.failures || []).join(", ") || "unknown requirement"}`);
+  const saved = saveSchedulerConfig(SCHEDULER_CONFIG_PATH, config, selected.name);
+  appendAdminAudit("vm_scheduler_installed", { selectedBattlegroup: selected, config: saved, selfTest });
+  return { ok: true, installed: true, verified: true, config: saved, selfTest, status: await vmSchedulerStatus() };
+}
+
+async function removeVmScheduler() {
+  const result = await sshCommand(buildVmSchedulerRemoveCommand(), 60000, { maxBuffer: 1024 * 1024 });
+  if (!result.ok) throw new Error(result.error || result.stderr || result.stdout || "VM scheduler removal failed.");
+  const current = localSchedulerConfig();
+  if (current.battlegroup) saveSchedulerConfig(SCHEDULER_CONFIG_PATH, { ...current, enabled: false }, current.battlegroup);
+  appendAdminAudit("vm_scheduler_removed", { localConfigPath: SCHEDULER_CONFIG_PATH });
+  return { ...parseVmSchedulerJson(result.stdout), localConfig: localSchedulerConfig() };
+}
+
+function startVmSchedulerAction(action) {
+  const allowed = new Map([
+    ["self-test", { key: "scheduler:self-test", title: "Scheduler Self-Test", timeout: 2 * 60 * 1000 }],
+    ["backup-now", { key: "scheduler:backup", title: "Scheduled Backup Run Now", timeout: 20 * 60 * 1000 }],
+    ["restart-now", { key: "scheduler:restart", title: "Protected Scheduled Restart Run Now", timeout: 40 * 60 * 1000 }]
+  ]);
+  const definition = allowed.get(action);
+  if (!definition) throw new Error("Unknown scheduler action.");
+  const operation = operationRegistry.begin(definition.key, definition.title, {
+    category: "scheduler",
+    stage: action === "self-test" ? "Checking scheduler" : "Starting VM scheduler action",
+    detail: action === "restart-now" ? "Verifying players and safety backup before restart." : "Connecting to the Funcom VM.",
+    progress: 2
+  });
+  setImmediate(async () => {
+    try {
+      appendAdminAudit("vm_scheduler_action_started", { action, operationId: operation.id });
+      operationRegistry.update(operation, action === "self-test" ? "Running non-destructive checks" : "VM scheduler is working", "The job continues inside the Funcom VM.", { progress: action === "self-test" ? 35 : 15 });
+      const result = await sshCommand(buildVmSchedulerActionCommand(action), definition.timeout, { maxBuffer: 1024 * 1024 * 4 });
+      if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || `${definition.title} failed.`);
+      const status = await vmSchedulerStatus();
+      const last = status.lastStatus || null;
+      operationRegistry.update(operation, last?.message || "Scheduler action completed", last?.status || "Verified on the VM.", { progress: 100, logLine: JSON.stringify(last || status.selfTest || {}) });
+      operationRegistry.finish(operation, "success");
+      appendAdminAudit("vm_scheduler_action_completed", { action, operationId: operation.id, lastStatus: last });
+    } catch (error) {
+      operationRegistry.update(operation, "Scheduler action failed", error.message, { logLine: `ERROR: ${error.message}` });
+      operationRegistry.finish(operation, "failed", error.message);
+      appendAdminAudit("vm_scheduler_action_failed", { action, operationId: operation.id, error: error.message });
     }
   });
   return operationRegistry.public(operation);
@@ -16790,6 +16909,7 @@ function appPage() {
       <div class="nav-group">
         <div class="nav-group-title">Server</div>
         <button class="tab" data-view="server">Server Control</button>
+        <button class="tab" data-view="scheduler">Backup & Restart Scheduler</button>
         <button class="tab" data-view="management">Server Management</button>
       </div>
       <div class="nav-group">
@@ -17935,6 +18055,86 @@ DUNE_RECEIVER_SSH_KEY</pre>
       </details>
     </section>
 
+    <section id="scheduler" class="view">
+      <div class="grid four">
+        <div class="panel pad metric-tile"><div class="label">Installation</div><div id="schedulerInstalled" class="value">Checking...</div><div id="schedulerInstalledDetail" class="subtle">VM scheduler status.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Schedule</div><div id="schedulerEnabledStatus" class="value">Checking...</div><div id="schedulerNextDetail" class="subtle">Waiting for configuration.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Battlegroup</div><div id="schedulerBattlegroup" class="value">--</div><div class="subtle">Exact managed target.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Online Players</div><div id="schedulerPlayers" class="value">--</div><div class="subtle">Restart safety gate.</div></div>
+      </div>
+
+      <div class="layout-2 mt">
+        <div class="panel pad">
+          <div class="panel-head">
+            <div><div class="label">VM-Resident Schedule</div><div class="subtle">The Suite installs a managed Alpine cron worker. It continues while the Suite is closed.</div></div>
+            <button type="button" onclick="refreshScheduler()">Refresh</button>
+          </div>
+          <div class="field-grid mt">
+            <label class="check-row"><input id="schedulerEnabled" type="checkbox" checked onchange="markSchedulerDirty()">Enable installed schedule</label>
+            <label>Timezone<input id="schedulerTimezone" list="schedulerTimezoneOptions" placeholder="Asia/Jerusalem" onchange="markSchedulerDirty()"></label>
+            <datalist id="schedulerTimezoneOptions"><option value="UTC"><option value="Asia/Jerusalem"><option value="Europe/London"><option value="Europe/Berlin"><option value="America/New_York"><option value="America/Chicago"><option value="America/Denver"><option value="America/Los_Angeles"><option value="Australia/Sydney"></datalist>
+            <label class="advanced-only">Missed-run catch-up window (minutes)<input id="schedulerCatchup" type="number" min="0" max="720" step="15" value="120" onchange="markSchedulerDirty()"></label>
+          </div>
+          <div class="warning mt">Installing or updating the schedule never runs a past job immediately. Use Run Backup Now or Run Protected Restart to test explicitly.</div>
+        </div>
+
+        <div class="panel pad">
+          <div class="label">Safety Policy</div>
+          <div class="detail-list mt">
+            <div class="detail-row"><span class="subtle">Execution</span><strong>Alpine cron inside the Funcom VM</strong></div>
+            <div class="detail-row"><span class="subtle">Targeting</span><strong>Exact selected namespace and battlegroup</strong></div>
+            <div class="detail-row"><span class="subtle">Concurrency</span><strong>Single lock + update/DB-operation detection</strong></div>
+            <div class="detail-row"><span class="subtle">Backup verification</span><strong>Funcom success + non-empty dump + recovery YAML</strong></div>
+            <div class="detail-row"><span class="subtle">Restart verification</span><strong>Database, Gateway, Director, maps ready</strong></div>
+          </div>
+          <div id="schedulerLastStatus" class="empty mt">No scheduler event loaded.</div>
+        </div>
+      </div>
+
+      <div class="layout-2 mt">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Daily Backup</div><div class="subtle">Only scheduler-created backups are affected by retention.</div></div><label class="check-row"><input id="schedulerBackupEnabled" type="checkbox" checked onchange="markSchedulerDirty()">Enabled</label></div>
+          <div class="field-grid mt">
+            <label>Backup time<input id="schedulerBackupTime" type="time" value="04:00" onchange="markSchedulerDirty()"></label>
+            <label>Keep scheduled backups<input id="schedulerBackupRetention" type="number" min="1" max="90" value="7" onchange="markSchedulerDirty()"></label>
+            <label class="advanced-only">Backup timeout (minutes)<input id="schedulerBackupTimeout" type="number" min="5" max="60" value="15" onchange="markSchedulerDirty()"></label>
+          </div>
+          <div class="subtle mt">Backups use a targeted Funcom DatabaseOperation. Each dump is paired with the exact battlegroup recovery manifest.</div>
+        </div>
+
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Daily Protected Restart</div><div class="subtle">A verified recent backup is required before shutdown.</div></div><label class="check-row"><input id="schedulerRestartEnabled" type="checkbox" checked onchange="markSchedulerDirty()">Enabled</label></div>
+          <div class="field-grid mt">
+            <label>Restart time<input id="schedulerRestartTime" type="time" value="05:00" onchange="markSchedulerDirty()"></label>
+            <label>When players remain online<select id="schedulerPlayerPolicy" onchange="markSchedulerDirty();syncSchedulerPolicyWarning()"><option value="skip">Skip restart after deferral (Recommended)</option><option value="force">Force restart after deferral</option></select></label>
+            <label>Maximum deferral (minutes)<input id="schedulerMaxDeferral" type="number" min="0" max="720" step="15" value="180" onchange="markSchedulerDirty()"></label>
+            <label>Reuse verified backup up to (minutes)<input id="schedulerBackupFresh" type="number" min="5" max="720" step="5" value="90" onchange="markSchedulerDirty()"></label>
+            <label class="advanced-only">Health timeout (minutes)<input id="schedulerHealthTimeout" type="number" min="5" max="60" value="15" onchange="markSchedulerDirty()"></label>
+          </div>
+          <label class="check-row mt"><input id="schedulerBackupFirst" type="checkbox" checked disabled>Require verified backup before restart</label>
+          <div id="schedulerForceWarning" class="warning mt hidden">Force policy can restart with players online after the deferral expires. Skip is the safer default.</div>
+        </div>
+      </div>
+
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Install & Control</div><div class="subtle">Configuration is validated locally, installed atomically, and then tested inside the VM.</div></div><span id="schedulerDirtyStatus" class="micro">No unsaved changes</span></div>
+        <div class="controls mt">
+          <button type="button" class="primary" id="schedulerInstallButton" onclick="installScheduler()">Install / Update Schedule</button>
+          <button type="button" onclick="toggleSchedulerEnabled()" id="schedulerPauseButton">Pause Schedule</button>
+          <button type="button" onclick="runSchedulerAction('self-test')">Run Non-Destructive Test</button>
+          <button type="button" onclick="runSchedulerAction('backup-now')">Run Backup Now</button>
+          <button type="button" class="danger" onclick="runSchedulerAction('restart-now')">Run Protected Restart</button>
+          <button type="button" class="danger" onclick="removeScheduler()">Remove From VM</button>
+        </div>
+        <pre id="schedulerLog" class="mt">Open this page to inspect the VM scheduler.</pre>
+      </div>
+
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Scheduler History</div><div class="subtle">The VM keeps the last 200 events; the Suite displays the newest 50.</div></div><button type="button" onclick="refreshScheduler()">Refresh History</button></div>
+        <table class="mt"><thead><tr><th>Time</th><th>Action</th><th>Status</th><th>Message</th></tr></thead><tbody id="schedulerHistoryRows"><tr><td colspan="4">No scheduler history loaded.</td></tr></tbody></table>
+      </div>
+    </section>
+
     <section id="database" class="view">
       <div class="grid four">
         <div class="panel pad metric-tile"><div class="label">Database Status</div><div id="dbMgmtStatus" class="value">Checking...</div><div id="dbMgmtStatusDetail" class="subtle">Waiting for refresh.</div></div>
@@ -18359,6 +18559,7 @@ const viewCopy={
   cleanup:["Server Cleanup","Dry-run first cleanup tools for orphaned bases, fiefs, and future stale server data."],
   landsraad:["Landsraad","View and safely change live Landsraad reward tier thresholds."],
   server:["Server Control","Battlegroup controls, maps, and live server telemetry."],
+  scheduler:["Backup & Restart Scheduler","Persistent VM-resident backups and protected daily battlegroup restarts."],
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
   "web-portal":["Web Portal","Open or copy the local and LAN Suite portal URLs."],
@@ -18370,10 +18571,10 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,marketListingRows=[],selectedMarketListingIds=new Set(),itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
 let serverUpdateOperationId="",serverUpdateCheckState=null,serverUpdatePollTimer=null;
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
@@ -18676,6 +18877,20 @@ async function startDetectedServerUpdate(updateData=serverUpdateCheckState||{}){
 function serverUpdatePromptKey(data){return [data.requiredBuildId||"",data.downloadedRevision||"",data.deployedRevision||""].join("|");}
 async function checkServerUpdateAvailability(options={}){const force=options.force===true,prompt=options.prompt!==false;if(serverUpdateOperationId)return serverUpdateCheckState;setServerUpdateDetectionStatus("Checking Funcom and Steam server versions...","warning");const button=document.getElementById("serverUpdateButton");if(button)button.disabled=true;try{const data=await getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:45000});serverUpdateCheckState=data;fillServerUpdateVersions(data);if(!data.updateAvailable){setServerUpdateDetectionStatus("Server is current. Steam build "+serverUpdateValue(data.currentBuildId)+" · deployed "+serverUpdateValue(data.deployedRevision)+".","empty");if(force)showToast("Dune server is up to date.","success");return data;}setServerUpdateDetectionStatus("Dune server update available. "+(data.reason||"A newer Funcom build was detected."),"warning");if(prompt){const key=serverUpdatePromptKey(data);let alreadyPrompted=false;try{alreadyPrompted=sessionStorage.getItem("alphaNineServerUpdatePrompted")===key;}catch{}if(force||!alreadyPrompted){const activeDialog=document.querySelector(".suite-modal-overlay:not(.hidden),.setup-overlay:not(.hidden),.startup-progress-overlay:not(.hidden)");if(activeDialog){window.setTimeout(()=>checkServerUpdateAvailability({force:false,prompt:true}),30000);return data;}try{sessionStorage.setItem("alphaNineServerUpdatePrompted",key);}catch{}const message=(data.reason||"A newer Dune server build is available.")+"\n\nSteam build: "+serverUpdateValue(data.currentBuildId)+(data.requiredBuildId&&data.requiredBuildId!==data.currentBuildId?" -> "+data.requiredBuildId:"")+"\nDownloaded revision: "+serverUpdateValue(data.downloadedRevision)+"\nDeployed revision: "+serverUpdateValue(data.deployedRevision)+"\n\nUpdating may reconcile or restart server pods and disconnect online players. A recent backup is recommended.";if(await appConfirm("Dune Server Update Available",message,"Update Now","Later"))await startDetectedServerUpdate(data);}}return data;}catch(error){setServerUpdateDetectionStatus("Automatic server update check unavailable: "+betterError(error),"warning");if(force)showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
 async function checkServerUpdateNow(){return checkServerUpdateAvailability({force:true,prompt:true});}
+
+function schedulerConfigFromUi(){return{version:1,enabled:document.getElementById("schedulerEnabled")?.checked===true,battlegroup:String(schedulerState?.config?.battlegroup||schedulerState?.localConfig?.battlegroup||appConfig?.selectedBattlegroup?.name||"").trim(),timezone:getValue("schedulerTimezone"),catchUpWindowMinutes:Number(getValue("schedulerCatchup")||120),backup:{enabled:document.getElementById("schedulerBackupEnabled")?.checked===true,time:getValue("schedulerBackupTime"),retention:Number(getValue("schedulerBackupRetention")||7),timeoutMinutes:Number(getValue("schedulerBackupTimeout")||15)},restart:{enabled:document.getElementById("schedulerRestartEnabled")?.checked===true,time:getValue("schedulerRestartTime"),backupFirst:true,backupFreshMinutes:Number(getValue("schedulerBackupFresh")||90),playersOnlinePolicy:getValue("schedulerPlayerPolicy")||"skip",maxDeferralMinutes:Number(getValue("schedulerMaxDeferral")||180),healthTimeoutMinutes:Number(getValue("schedulerHealthTimeout")||15)}};}
+function fillSchedulerConfig(config={}){const backup=config.backup||{},restart=config.restart||{};setChecked("schedulerEnabled",config.enabled!==false);setValue("schedulerTimezone",config.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC");setValue("schedulerCatchup",config.catchUpWindowMinutes??120);setChecked("schedulerBackupEnabled",backup.enabled!==false);setValue("schedulerBackupTime",backup.time||"04:00");setValue("schedulerBackupRetention",backup.retention??7);setValue("schedulerBackupTimeout",backup.timeoutMinutes??15);setChecked("schedulerRestartEnabled",restart.enabled!==false);setValue("schedulerRestartTime",restart.time||"05:00");setValue("schedulerPlayerPolicy",restart.playersOnlinePolicy||"skip");setValue("schedulerMaxDeferral",restart.maxDeferralMinutes??180);setValue("schedulerBackupFresh",restart.backupFreshMinutes??90);setValue("schedulerHealthTimeout",restart.healthTimeoutMinutes??15);syncSchedulerPolicyWarning();schedulerDirty=false;setText("schedulerDirtyStatus","No unsaved changes");}
+function markSchedulerDirty(){schedulerDirty=true;setText("schedulerDirtyStatus","Unsaved schedule changes");}
+function syncSchedulerPolicyWarning(){document.getElementById("schedulerForceWarning")?.classList.toggle("hidden",getValue("schedulerPlayerPolicy")!=="force");}
+function schedulerStatusClass(status){const value=String(status||"").toLowerCase();return["succeeded","success","healthy","ready"].includes(value)?"ok":["failed","error","aborted","blocked"].includes(value)?"bad":"warn";}
+function renderSchedulerHistory(history=[]){const rows=document.getElementById("schedulerHistoryRows");if(!rows)return;const ordered=[...history].reverse();rows.innerHTML=ordered.length?ordered.map(row=>'<tr><td>'+esc(row.timestamp||"--")+'</td><td>'+esc(row.action||"--")+'</td><td><span class="badge '+schedulerStatusClass(row.status)+'">'+esc(row.status||"--")+'</span></td><td>'+esc(row.message||"")+'</td></tr>').join(""):'<tr><td colspan="4">No scheduler events yet.</td></tr>';}
+function renderSchedulerStatus(data={}){schedulerState=data;const installed=data.installed===true,config=(installed?data.config:null)||data.localConfig||{};tone("schedulerInstalled",installed?"Installed":"Not Installed");setText("schedulerInstalledDetail",data.reachable===false?(data.error||"VM unavailable"):(installed?(data.cronRegistered?"Cron registered and VM reachable":"Runtime present; cron needs repair"):("Not installed in the VM")));tone("schedulerEnabledStatus",installed?(config.enabled===false?"Paused":"Active"):"Not Installed");setText("schedulerNextDetail",config.backup?.enabled!==false&&config.restart?.enabled!==false?("Backup "+(config.backup?.time||"--")+" / Restart "+(config.restart?.time||"--")+" / "+(config.timezone||"UTC")):(config.backup?.enabled!==false?"Backup only":"Restart only"));tone("schedulerBattlegroup",config.battlegroup||appConfig?.selectedBattlegroup?.name||"Not Selected");tone("schedulerPlayers",data.players===null||data.players===undefined?"Unknown":String(data.players));const last=data.lastStatus;const lastEl=document.getElementById("schedulerLastStatus");if(lastEl){lastEl.className=(last&&schedulerStatusClass(last.status)==="bad"?"warning":"empty")+" mt";lastEl.textContent=last?(last.timestamp+" · "+last.action+" · "+last.status+"\n"+last.message):"No scheduler event loaded.";}setText("schedulerPauseButton",config.enabled===false?"Resume Schedule":"Pause Schedule");setText("schedulerInstallButton",installed?"Save & Reinstall Schedule":"Install Schedule In VM");renderSchedulerHistory(data.history||[]);setText("schedulerLog",data.error?data.error:JSON.stringify({installed:data.installed,cronRegistered:data.cronRegistered,vmNow:data.vmNow,localNow:data.localNow,health:data.health,lastStatus:data.lastStatus,state:data.state},null,2));if(!schedulerDirty)fillSchedulerConfig(config);}
+async function refreshScheduler(){try{setText("schedulerLog","Reading scheduler configuration and VM health...");const data=await getJson("/api/scheduler",{timeoutMs:50000});renderSchedulerStatus(data);return data;}catch(error){renderSchedulerStatus({ok:false,installed:false,reachable:false,error:betterError(error),localConfig:schedulerState?.localConfig||{}});playUiSound("warning");return null;}}
+async function installScheduler(overrideEnabled=null){const payload=schedulerConfigFromUi();if(overrideEnabled!==null){payload.enabled=overrideEnabled;setChecked("schedulerEnabled",overrideEnabled);}const selected=appConfig?.selectedBattlegroup||battlegroupData?.selectedBattlegroup;if(selected?.name)payload.battlegroup=selected.name;let warning="Target: "+(payload.battlegroup||"not selected")+"\nTimezone: "+payload.timezone+"\nDaily backup: "+(payload.backup.enabled?payload.backup.time:"Disabled")+"\nDaily restart: "+(payload.restart.enabled?payload.restart.time:"Disabled")+"\nPlayers online: "+(payload.restart.playersOnlinePolicy==="force"?"FORCE after "+payload.restart.maxDeferralMinutes+" minutes":"Skip after "+payload.restart.maxDeferralMinutes+" minutes")+"\n\nPast times today will not run automatically.";if(payload.restart.playersOnlinePolicy==="force")warning+="\n\nWARNING: Force policy can restart while players are online.";if(!(await appConfirm(schedulerState?.installed?"Update VM Schedule":"Install VM Schedule",warning,schedulerState?.installed?"Save & Reinstall":"Install","Cancel")))return;const button=document.getElementById("schedulerInstallButton");if(button)button.disabled=true;try{setText("schedulerLog","Installing scheduler runtime, timezone data, configuration, and cron registration...");const data=await getJson("/api/scheduler/install",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:600000});schedulerDirty=false;renderSchedulerStatus(data.status||data);showToast(payload.enabled?"VM scheduler installed and verified":"VM scheduler paused and verified","success");playUiSound("success");}catch(error){setText("schedulerLog",betterError(error));showToast("Scheduler installation failed","error");playUiSound("warning");}finally{if(button)button.disabled=false;}}
+async function toggleSchedulerEnabled(){const installed=schedulerState?.installed===true;if(!installed){await appAlert("Scheduler not installed","Install the scheduler in the VM before pausing or resuming it.");return;}const enabled=!(schedulerState?.config?.enabled!==false);await installScheduler(enabled);}
+async function pollSchedulerOperation(operationId){if(!operationId)return;for(let attempt=0;attempt<480;attempt+=1){await new Promise(resolve=>setTimeout(resolve,5000));try{const data=await getJson("/api/operations");const operation=(data.operations||[]).find(row=>row.id===operationId);if(operation){setText("schedulerLog",[operation.stage,operation.detail,...(operation.logTail||[])].filter(Boolean).join("\n"));if(!["running","pending"].includes(operation.status)){await refreshScheduler();showToast(operation.status==="success"?"Scheduler action completed":"Scheduler action failed",operation.status==="success"?"success":"error");return;}}}catch{}}}
+async function runSchedulerAction(action){if(!schedulerState?.installed){await appAlert("Scheduler not installed","Install and verify the VM scheduler first.");return;}let title="Run Scheduler Test",message="Run dependency, target, player-count, cron, and health checks without changing the battlegroup?",confirmLabel="Run Test";if(action==="backup-now"){title="Run Verified Backup Now";message="Create a real Funcom database backup for "+(schedulerState.config?.battlegroup||"the selected battlegroup")+" now? The artifact and recovery YAML will be verified.";confirmLabel="Run Backup";}if(action==="restart-now"){title="Run Protected Restart Now";message="This will check online players, require a recent verified backup (or create one), restart the exact battlegroup, and wait for full health.\n\nIf any players are online, the manual restart will be blocked.";confirmLabel="Backup & Restart";}if(!(await appConfirm(title,message,confirmLabel,"Cancel")))return;try{const data=await getJson("/api/scheduler/action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action}),timeoutMs:30000});setText("schedulerLog","Scheduler action started. Operation: "+(data.operation?.id||"unknown")+"\nThe job continues in the VM and Operations history.");addActivity("scheduler",title,data.operation?.id||"");pollSchedulerOperation(data.operation?.id);playUiSound("click");}catch(error){setText("schedulerLog",betterError(error));playUiSound("warning");}}
+async function removeScheduler(){if(!schedulerState?.installed){await appAlert("Scheduler not installed","There is no managed scheduler runtime to remove from the VM.");return;}if(!(await appConfirm("Remove VM Scheduler","Remove the AlphaNine cron entry, runtime, VM configuration, state, and VM history? Existing database backup artifacts will not be deleted.","Remove Scheduler","Cancel")))return;try{setText("schedulerLog","Removing only AlphaNine-managed scheduler files and cron lines...");const data=await getJson("/api/scheduler/remove",{method:"POST",timeoutMs:90000});renderSchedulerStatus(data);showToast("VM scheduler removed; backups were preserved","success");playUiSound("success");}catch(error){setText("schedulerLog",betterError(error));playUiSound("warning");}}
 async function resumeServerUpdatePanel(){try{const data=await refreshOperations();const active=(data?.active||[]).find(row=>row.key==="battlegroup:update");if(!active)return false;serverUpdateOperationId=active.id;showServerUpdatePanel(serverUpdateCheckState||{});renderServerUpdateOperation(active);pollServerUpdateOperation(active.id);return true;}catch{return false;}}
 async function initializeServerUpdateMonitor(){if(await resumeServerUpdatePanel())return;await checkServerUpdateAvailability({force:false,prompt:true});}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
@@ -19352,6 +19567,34 @@ async function route(req, res) {
     try {
       const operation = startServerUpdateJob();
       await json(res, { ok: true, started: true, operation }, 202);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
+    return;
+  }
+  if (url.pathname === "/api/scheduler" && req.method === "GET") {
+    await json(res, await vmSchedulerStatus());
+    return;
+  }
+  if (url.pathname === "/api/scheduler/install" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await installVmScheduler(body));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/scheduler/remove" && req.method === "POST") {
+    try { await json(res, await removeVmScheduler()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/scheduler/action" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, { ok: true, started: true, operation: startVmSchedulerAction(String(body.action || "")) }, 202);
     } catch (error) {
       const failure = operationErrorResponse(error);
       await json(res, failure.payload, failure.statusCode);

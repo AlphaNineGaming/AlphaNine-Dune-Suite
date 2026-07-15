@@ -42,6 +42,16 @@ async function waitForUi() {
     assert(html.includes('getJson("/api/status",{timeoutMs:45000})'), "Server indicator polling deadline is too short.");
     assert(html.includes('getJson("/api/vm-monitor",{timeoutMs:45000})'), "VM indicator polling deadline is too short.");
     assert(html.includes("keeping the last confirmed indicators"), "Transient indicator delays do not preserve the last confirmed state.");
+    assert(html.includes("loadSharedPlayerDirectory"), "Shared browser player directory is missing.");
+    assert(html.includes("PLAYER_DIRECTORY_REQUEST_TIMEOUT_MS=35000"), "Shared player request deadline is not aligned with backend work.");
+    assert(html.includes("keeping the last confirmed directory"), "Player refresh failures do not preserve confirmed player data.");
+    assert(!html.includes('getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000})'), "A legacy 12-second player loader remains in the UI.");
+    assert(serverSource.includes("createPlayerDirectory"), "Backend player directory cache is missing.");
+    assert(serverSource.includes("adminPlayerSchemaColumns"), "Player schema metadata is not cached.");
+    assert(serverSource.includes("canonicalPlayerSchemaSupported"), "Canonical player lookup failures can still fall through to compatibility table scans.");
+    assert(serverSource.includes("parsePlayerSelector(query)"), "Typed player selectors are missing from backend lookup.");
+    assert(html.includes('return"controller:"+p.player_controller_id'), "Progression detected players still submit ambiguous numeric identifiers.");
+    assert(html.includes('getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:60000})'), "Detailed progression lookup deadline is shorter than its enrichment phases.");
     const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((match) => match[1]).filter((script) => script.trim());
     assert(scripts.length, "No inline UI script was rendered.");
     for (const script of scripts) new Function(script);

@@ -4,7 +4,7 @@ const path = require("path");
 
 const root = path.join(__dirname, "..");
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const outputDir = path.join(root, "installer-output");
+const outputDir = process.env.ALPHANINE_BUILD_OUTPUT_DIR || path.join(root, "installer-output");
 const appExe = path.join(outputDir, "win-unpacked", `${packageJson.build.productName}.exe`);
 function buildArtifactName(ext = "exe") {
   return String(packageJson.build.artifactName || `${packageJson.build.productName} Setup ${packageJson.version}.${ext}`)

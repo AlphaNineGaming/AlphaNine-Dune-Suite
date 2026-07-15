@@ -11,6 +11,7 @@ const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError } = require("./lib/operations");
 const { createRemoteAccess } = require("./lib/remote-access");
+const { createPlayerDirectory, parsePlayerSelector } = require("./lib/player-directory");
 const { durabilityRepairCandidate } = require("./lib/durability-repair");
 const { cleanUpdateLine, parseServerUpdateMetadata, classifyServerUpdate, serverUpdateProgress } = require("./lib/server-update");
 const {
@@ -7717,9 +7718,10 @@ async function progressionPlayerLookup(queryValue) {
     liveEditingEnabled: Boolean(configValue.progressionEditingEnabled),
     rawSqlInputEnabled: false
   };
-  const nonNumericQuery = !/^\d+$/.test(query);
+  const typedSelectorQuery = Boolean(parsePlayerSelector(query));
+  const nonNumericQuery = !typedSelectorQuery && !/^\d+$/.test(query);
   console.info("[progression/player] query input", { query, helper: "adminPlayers", mode: "queried", limit: 5 });
-  const adminPlayerData = await timer.step("lookup", () => withProgressionStepTimeout(adminPlayers({ query, limit: 5 }), 8000, "lookup"));
+  const adminPlayerData = await timer.step("lookup", () => withProgressionStepTimeout(adminPlayers({ query, limit: 5, hydration: false }), 15000, "lookup"));
   console.info("[progression/player] adminPlayers result", {
     query,
     source: adminPlayerData.source || "",
@@ -7729,7 +7731,7 @@ async function progressionPlayerLookup(queryValue) {
   let players = (adminPlayerData.players || []).slice(0, 5).map((row) => progressionPlayerFromAdminRow(row, adminPlayerData.source || "adminPlayers"));
   if (!players.length && nonNumericQuery) {
     console.info("[progression/player] direct name lookup returned no rows; trying full-list local match", { query, helper: "adminPlayers", mode: "full-list-local-match", limit: 200 });
-    const listData = await timer.step("full_list_local_match", () => withProgressionStepTimeout(adminPlayers({ limit: 200, hydration: false }), 16000, "full_list_local_match"));
+    const listData = await timer.step("full_list_local_match", () => withProgressionStepTimeout(loadAdminPlayerDirectory({ limit: 200 }), 30000, "full_list_local_match"));
     const fallbackRows = (listData.players || []).filter((row) => progressionPlayerMatchesQuery(row, query)).slice(0, 5);
     players = fallbackRows.map((row) => progressionPlayerFromAdminRow({ ...row, matched_column: row.matched_column || "local_player_list_match" }, listData.source || "adminPlayers-full-list"));
     console.info("[progression/player] full-list local match result", {
@@ -10422,10 +10424,35 @@ async function processRepairQueue() {
   return repairQueueSnapshot();
 }
 
+const ADMIN_PLAYER_SCHEMA_TTL_MS = 5 * 60 * 1000;
+let adminPlayerSchemaCache = { output: "", loadedAt: 0 };
+let adminPlayerSchemaInFlight = null;
+
+async function adminPlayerSchemaColumns() {
+  if (adminPlayerSchemaCache.output && Date.now() - adminPlayerSchemaCache.loadedAt < ADMIN_PLAYER_SCHEMA_TTL_MS) {
+    return adminPlayerSchemaCache.output;
+  }
+  if (adminPlayerSchemaInFlight) return adminPlayerSchemaInFlight;
+  adminPlayerSchemaInFlight = dbQuery(`
+    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
+    from information_schema.columns
+    where table_schema = 'dune'
+      and table_name in ('player_state', 'communinet_player', 'accounts')
+    group by table_name
+  `, 5000).then((output) => {
+    adminPlayerSchemaCache = { output, loadedAt: Date.now() };
+    return output;
+  }).finally(() => {
+    adminPlayerSchemaInFlight = null;
+  });
+  return adminPlayerSchemaInFlight;
+}
+
 async function adminPlayers(options = {}) {
   const quoteIdent = (value) => `"${String(value).replace(/"/g, '""')}"`;
   const query = String(options.query || "").trim();
-  const numericQuery = /^\d+$/.test(query);
+  const typedSelector = parsePlayerSelector(query);
+  const numericQuery = /^\d+$/.test(query) || Boolean(typedSelector);
   const limit = Math.max(1, Math.min(Number(options.limit || (query ? 20 : 200)) || 20, query ? 50 : 200));
   const includeHydration = options.hydration !== false;
   const diagnostics = {
@@ -10440,13 +10467,7 @@ async function adminPlayers(options = {}) {
     reason: "",
     errors: []
   };
-  const columnOutput = await dbQuery(`
-    select table_name || E'\\t' || string_agg(column_name, ',' order by ordinal_position)
-    from information_schema.columns
-    where table_schema = 'dune'
-      and table_name in ('player_state', 'communinet_player', 'accounts')
-    group by table_name
-  `, 5000).catch((error) => {
+  const columnOutput = await adminPlayerSchemaColumns().catch((error) => {
     diagnostics.errors.push(`dune metadata lookup: ${error.message}`);
     return "";
   });
@@ -10454,6 +10475,11 @@ async function adminPlayers(options = {}) {
     const [table = "", columnsRaw = ""] = line.split("\t");
     return [table, new Set(columnsRaw.split(",").filter(Boolean).map((column) => column.toLowerCase()))];
   }));
+  const playerStateColumns = tableColumns.get("player_state") || new Set();
+  const accountColumns = tableColumns.get("accounts") || new Set();
+  const canonicalPlayerSchemaSupported = ["id", "account_id", "player_controller_id", "player_state_id", "player_pawn_id", "online_status", "character_name", "last_avatar_activity"]
+    .every((column) => playerStateColumns.has(column))
+    && ["id", "user", "funcom_id"].every((column) => accountColumns.has(column));
   const communinetColumns = tableColumns.get("communinet_player") || new Set();
   const hasCommuninetAccountId = communinetColumns.has("account_id");
   const communinetSourceLabel = hasCommuninetAccountId ? "dune.communinet_player + dune.player_state" : "dune.player_state";
@@ -10473,6 +10499,24 @@ async function adminPlayers(options = {}) {
       case when coalesce(nullif(ps.character_name, ''), nullif(ac."user", '')) is null then 'false' else 'true' end as resolved,
       coalesce(ps.id::text, '') as player_state_row_id`;
   const queriedPlayerSql = (partial = false) => {
+    if (typedSelector) {
+      const column = typedSelector.column;
+      const numericValue = typedSelector.value;
+      return `
+        select ${selectPlayerColumns},
+          ${sqlString(typedSelector.matchedColumn)} as matched_column
+        from (
+          select distinct account_id
+          from dune.player_state
+          where ${quoteIdent(column)} = ${numericValue}
+        ) a
+        left join dune.player_state ps on ps.account_id = a.account_id
+        left join dune.accounts ac on ac.id = a.account_id
+        where ps.${quoteIdent(column)} = ${numericValue}
+        order by ps.last_avatar_activity desc nulls last, ps.player_state_id
+        limit ${limit}
+      `;
+    }
     const value = partial ? sqlString(`%${query}%`) : sqlString(query);
     const op = partial ? "ilike" : "=";
     const loweredOp = partial ? "ilike" : "=";
@@ -10615,6 +10659,17 @@ async function adminPlayers(options = {}) {
       };
     }
     diagnostics.reason = query && hasCommuninetAccountId ? "No account/player rows were found in dune.communinet_player or dune.player_state." : "No account/player rows were found in dune.player_state.";
+    if (canonicalPlayerSchemaSupported) {
+      return {
+        ok: true,
+        source: "dune.player_state",
+        query,
+        players: [],
+        diagnostics,
+        error: diagnostics.reason,
+        details: playerDiagnosticLines(diagnostics)
+      };
+    }
     if (query && !numericQuery) {
       return {
         ok: true,
@@ -10641,6 +10696,18 @@ async function adminPlayers(options = {}) {
       error: error.message
     });
     diagnostics.errors.push(`dune.player_state character query: ${error.message}`);
+    if (canonicalPlayerSchemaSupported) {
+      diagnostics.reason = "The authoritative dune.player_state query failed. Compatibility table scanning was skipped because the canonical player schema is present.";
+      return {
+        ok: false,
+        source: "dune.player_state",
+        query,
+        players: [],
+        diagnostics,
+        error: `${diagnostics.reason} ${error.message}`,
+        details: playerDiagnosticLines(diagnostics)
+      };
+    }
     if (query && !numericQuery) {
       diagnostics.reason = "Player name query failed. Refusing to fall back to ID-only player discovery for a non-numeric query.";
       return {
@@ -10762,6 +10829,18 @@ async function adminPlayers(options = {}) {
     error: best.players.length ? "" : diagnostics.reason,
     details: playerDiagnosticLines(diagnostics)
   };
+}
+
+const adminPlayerDirectory = createPlayerDirectory({
+  freshMs: 15000,
+  staleMs: 5 * 60 * 1000,
+  load: () => adminPlayers({ limit: 200, hydration: false })
+});
+
+async function loadAdminPlayerDirectory(options = {}) {
+  const result = await adminPlayerDirectory.get({ force: options.force === true });
+  const limit = Math.max(1, Math.min(Number(options.limit || 200) || 200, 200));
+  return { ...result, players: result.players.slice(0, limit) };
 }
 
 async function playersFeed() {
@@ -18623,7 +18702,7 @@ let managerFrameCheckTimer=null;
 function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
 let serverUpdateOperationId="",serverUpdateCheckState=null,serverUpdatePollTimer=null;
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
@@ -18945,7 +19024,7 @@ async function initializeServerUpdateMonitor(){if(await resumeServerUpdatePanel(
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 function csrfCookie(){const match=document.cookie.match(/(?:^|;\s*)alphanine_csrf=([^;]+)/);return match?decodeURIComponent(match[1]):"";}
-async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||15000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;const method=String(request.method||"GET").toUpperCase();if(!["GET","HEAD","OPTIONS"].includes(method)){request.headers={...(request.headers||{}),"X-CSRF-Token":csrfCookie()};}r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(r.status===401&&location.protocol==="https:"){location.href="/login";throw new Error("Remote session expired. Sign in again.");}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
+async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||30000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;const method=String(request.method||"GET").toUpperCase();if(!["GET","HEAD","OPTIONS"].includes(method)){request.headers={...(request.headers||{}),"X-CSRF-Token":csrfCookie()};}r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(r.status===401&&location.protocol==="https:"){location.href="/login";throw new Error("Remote session expired. Sign in again.");}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
 function formatMarketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"--";}
 function marketBotHealthLabel(data){if(data?.health?.ok&&data.tokenConfigured===false)return"Token Needed";if(data?.status?.exchange_ready===false||data?.health?.ready===false)return"Waiting for Exchange";if(data?.health?.ok)return"Online";if(data?.status||data?.config)return"Online";return"Offline";}
 function renderMarketBotConfig(config){if(!config)return;setChecked("marketBotEnabled",config.enabled!==false);setValue("marketBotBuyInterval",config.buy_interval||"");setValue("marketBotListInterval",config.list_interval||"");setValue("marketBotAIOrderMin",config.ai_order_min??30);setValue("marketBotAIOrderMax",config.ai_order_max??60);setValue("marketBotMaxPlayerBuys",config.max_buys??2);setText("marketBotConfigResult","Loaded bot config. Changes apply on the next scheduler check.");}
@@ -19152,11 +19231,15 @@ function renderGiveStorageDetails(){const el=document.getElementById("giveStorag
 async function refreshGiveStorageTargets(){const el=document.getElementById("giveStorageDetails");try{if(el)el.textContent="Loading storage containers...";const data=await getJson("/api/admin/storage-targets",{timeoutMs:20000});giveStorageTargets=data.storages||[];renderGiveStorageTargets();updateGiveTargetSummary();return data;}catch(e){giveStorageTargets=[];renderGiveStorageTargets();if(el){el.className="warning mt";el.textContent=betterError(e);}return null;}}
 function syncGiveDestination(){const storage=document.getElementById("giveDestination")?.value==="storage";document.getElementById("giveStorageFields")?.classList.toggle("hidden",!storage);if(storage&&!giveStorageTargets.length)refreshGiveStorageTargets();syncQualityWarning();syncGiveItemControls();updateGiveTargetSummary();}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
-function progressionPlayerLookupValue(p){return String(p?.player_controller_id||p?.character_id||p?.player_pawn_id||p?.id||p?.character_name||p?.name||"").trim();}
+function progressionPlayerLookupValue(p){if(p?.player_controller_id)return"controller:"+p.player_controller_id;if(p?.player_state_row_id)return"row:"+p.player_state_row_id;if(p?.account_id||p?.id)return"account:"+(p.account_id||p.id);return String(p?.character_id||p?.player_pawn_id||p?.character_name||p?.name||"").trim();}
 function renderProgressionPlayerSelect(){const select=document.getElementById("progressionPlayerSelect");if(!select)return;const current=select.value;const options=adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);const meta=[p.player_controller_id&&("controller "+p.player_controller_id),p.character_id&&("character "+p.character_id),p.online_status||p.status].filter(Boolean).join(" / ");return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+(meta?" / "+meta:""))+'</option>':"";}).filter(Boolean).join("");select.innerHTML='<option value="">Choose detected player...</option>'+(options||'<option value="" disabled>No detected players</option>');if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
 function repairPlayerLookupValue(p){if(p?.player_state_row_id)return"row:"+p.player_state_row_id;if(p?.player_controller_id)return"controller:"+p.player_controller_id;if(p?.account_id||p?.id)return"account:"+(p.account_id||p.id);return progressionPlayerLookupValue(p);}
 function renderRepairPlayerSelect(){const select=document.getElementById("repairPlayerSelect");if(!select)return;const current=select.value;select.innerHTML='<option value="">Choose a player...</option>'+adminPlayers.map(p=>{const value=repairPlayerLookupValue(p);return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+' / '+(p.online_status||"unknown"))+'</option>':"";}).join("");if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
-async function refreshRepairPlayers(){const select=document.getElementById("repairPlayerSelect");if(select)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:15000});adminPlayers=data.players||[];renderRepairPlayerSelect();badge("topPlayers","Players "+adminPlayers.length);return data;}catch(e){if(select)select.innerHTML='<option value="">Player load failed</option>';setText("repairStatus",betterError(e));return null;}}
+const PLAYER_DIRECTORY_FRESH_MS=15000;
+const PLAYER_DIRECTORY_REQUEST_TIMEOUT_MS=35000;
+async function loadSharedPlayerDirectory(options={}){const force=options.force===true;if(!force&&adminPlayers.length&&Date.now()-playerDirectoryLoadedAt<PLAYER_DIRECTORY_FRESH_MS)return{ok:true,players:adminPlayers,playerDirectory:{cacheStatus:"browser-fresh",loadedAt:new Date(playerDirectoryLoadedAt).toISOString()}};if(playerDirectoryRequest)return playerDirectoryRequest;const url="/api/admin/players?limit=200&hydration=0"+(force?"&refresh=1":"");playerDirectoryRequest=getJson(url,{timeoutMs:PLAYER_DIRECTORY_REQUEST_TIMEOUT_MS}).then(data=>{if(!data||data.ok===false||!Array.isArray(data.players))throw new Error(data?.error||"Player directory returned an invalid response.");adminPlayers=data.players;playerDirectoryLoadedAt=Date.now();playerDirectoryLastError=data.playerDirectory?.warning||"";if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;return data;}).catch(error=>{playerDirectoryLastError=betterError(error);if(adminPlayers.length)return{ok:true,players:adminPlayers,playerDirectory:{cacheStatus:"browser-stale",warning:"Player refresh failed; keeping the last confirmed directory. "+playerDirectoryLastError}};throw error;}).finally(()=>{playerDirectoryRequest=null;});return playerDirectoryRequest;}
+function renderSharedPlayerDirectory(){renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderProgressionPlayerSelect();renderRepairPlayerSelect();tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);}
+async function refreshRepairPlayers(force=true){const select=document.getElementById("repairPlayerSelect");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await loadSharedPlayerDirectory({force});renderSharedPlayerDirectory();if(data.playerDirectory?.warning)setText("repairStatus",data.playerDirectory.warning);return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';setText("repairStatus",betterError(e));return null;}}
 function resetRepairInspector(){repairInspectorState=null;repairPreviewState=null;const targets=document.getElementById("repairTargets");if(targets)targets.innerHTML='<div class="empty">Inspect a player to load repair targets.</div>';setText("repairSelectionSummary","No inspection loaded.");setText("repairPreviewLog","No repair preview generated.");setValue("repairConfirmText","");syncRepairMode();syncRepairApplyButton();}
 function repairTargets(){return repairInspectorState?[...(repairInspectorState.items||[]),...(repairInspectorState.vehicleModules||[])]:[];}
 function selectedRepairTargetIds(){return [...document.querySelectorAll('[data-repair-target]:checked')].map(input=>input.value);}
@@ -19182,10 +19265,10 @@ function renderRepairQueue(){const wrap=document.getElementById("repairQueueRows
 async function refreshRepairQueue(){try{repairQueueState=await getJson("/api/admin/repair/queue",{timeoutMs:12000});renderRepairQueue();return repairQueueState;}catch(e){setText("repairQueueSummary",betterError(e));return null;}}
 async function processRepairQueueNow(){try{setText("repairQueueSummary","Checking queued players...");repairQueueState=await getJson("/api/admin/repair/queue/process",{method:"POST",timeoutMs:90000});renderRepairQueue();showToast("Repair queue checked.","success");}catch(e){setText("repairQueueSummary",betterError(e));showToast(betterError(e),"error");}}
 async function removeRepairQueue(queueId){try{const confirmed=await appConfirm("Remove Repair Queue Entry","Remove this queued or completed repair entry? No durability records will be changed.","Remove","Cancel");if(!confirmed)return;const data=await getJson("/api/admin/repair/queue/"+encodeURIComponent(queueId),{method:"DELETE"});repairQueueState=data.queue;renderRepairQueue();showToast("Repair queue entry removed.","success");}catch(e){showToast(betterError(e),"error");}}
-async function refreshProgressionPlayers(){const select=document.getElementById("progressionPlayerSelect");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();renderProgressionPlayerSelect();renderRepairPlayerSelect();addActivity("progression","Progression players loaded",adminPlayers.length+" detected players");return data;}catch(e){if(select)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Progression players failed",e.message);return null;}}
+async function refreshProgressionPlayers(force=true){const select=document.getElementById("progressionPlayerSelect");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading detected players...</option>';try{const data=await loadSharedPlayerDirectory({force});renderSharedPlayerDirectory();addActivity(data.playerDirectory?.warning?"warn":"progression",data.playerDirectory?.warning?"Using last confirmed players":"Progression players loaded",data.playerDirectory?.warning||adminPlayers.length+" detected players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Progression players failed",e.message);return null;}}
 function selectProgressionDetectedPlayer(value){const query=String(value||"").trim();setValue("progressionPlayerQuery",query);if(query)lookupProgressionPlayer();}
 function renderPlayerSelect(){const select=document.getElementById("adminPlayer");if(!select)return;const query=(document.getElementById("givePlayerSearch")?.value||"").trim().toLowerCase();const players=query?adminPlayers.filter(player=>playerLabel(player).toLowerCase().includes(query)):adminPlayers;select.innerHTML=players.length?players.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId&&players.some(player=>player.id===selectedPlayerId))select.value=selectedPlayerId;else if(players[0]&&!selectedPlayerId){selectedPlayerId=players[0].id;select.value=selectedPlayerId;}updateGiveTargetSummary();renderProgressionPlayerSelect();}
-async function refreshGivePlayersFast(){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000});adminPlayers=data.players||[];if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);renderPlayerSelect();renderPlayers();renderProgressionPlayerSelect();addActivity("probe","Give Item players loaded",adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
+async function refreshGivePlayersFast(force=false){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await loadSharedPlayerDirectory({force});renderSharedPlayerDirectory();addActivity(data.playerDirectory?.warning?"warn":"probe",data.playerDirectory?.warning?"Using last confirmed players":"Give Item players loaded",data.playerDirectory?.warning||adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
 async function refreshGiveItemsFast(){const status=document.getElementById("gearDiscoveryStatus");if(status&&!adminItems.length){status.className="warning mt";status.textContent="Loading bundled item catalog...";}try{const data=await getJson("/api/admin/items",{timeoutMs:20000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderSelectedGiveItem();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Give Item catalog loaded",adminItems.length+" items");return data;}catch(e){renderAdminItems();if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Give Item catalog failed",e.message);return null;}}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
 function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
@@ -19194,7 +19277,7 @@ function closePlayerRename(){resetPlayerRename(true);}
 function openPlayerRename(){const p=selectedPlayer();if(!p){showToast("Select a player first.","warning");return;}resetPlayerRename(false);const status=document.getElementById("playerRenameStatus");if(!p.player_state_row_id){if(status){status.className="warning mt";status.textContent="This player does not have an active encrypted player-state record. Refresh Players and try again.";}return;}const input=document.getElementById("playerRenameName");if(status){status.className=/^(offline|disconnected|inactive)$/i.test(String(p.online_status||""))?"empty mt":"warning mt";status.textContent=/^(offline|disconnected|inactive)$/i.test(String(p.online_status||""))?"Player is offline. Enter the new name and generate a protected preview.":"Player status is "+(p.online_status||"unknown")+". The rename preview will remain blocked until the player is offline.";}input?.focus();}
 function invalidatePlayerRenamePreview(){playerRenamePreviewState=null;const apply=document.getElementById("playerRenameApplyButton");if(apply)apply.disabled=true;const status=document.getElementById("playerRenameStatus");if(status){status.className="empty mt";status.textContent="Name changed. Generate a new preview before applying.";}}
 async function previewSelectedPlayerRename(){const p=selectedPlayer();const status=document.getElementById("playerRenameStatus");const previewButton=document.getElementById("playerRenamePreviewButton");const applyButton=document.getElementById("playerRenameApplyButton");try{if(!p)throw new Error("Select a player first.");if(!p.player_state_row_id)throw new Error("The selected player does not have an active player-state record.");const newName=document.getElementById("playerRenameName")?.value||"";playerRenamePreviewState=null;if(applyButton)applyButton.disabled=true;if(previewButton)previewButton.disabled=true;if(status){status.className="warning mt";status.textContent="Checking player status, name availability, and creating the encrypted-row backup...";}const data=await getJson("/api/admin/players/rename/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerStateRowId:p.player_state_row_id,newName}),timeoutMs:45000});playerRenamePreviewState=data;if(status){status.className="empty mt";status.textContent=(data.message||"Rename preview ready.")+"\nBackup: "+(data.backupPath||"created")+"\nPreview expires: "+new Date(data.expiresAt).toLocaleTimeString();}if(applyButton)applyButton.disabled=false;showToast("Player rename preview ready.","success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}showToast(betterError(e),"error");}finally{if(previewButton)previewButton.disabled=false;}}
-async function refreshPlayersAfterRename(accountId){const data=await getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:15000});adminPlayers=data.players||[];const preferred=String(accountId||selectedPlayerId||"");selectedPlayerId=adminPlayers.some(row=>String(row.id)===preferred)?preferred:(adminPlayers[0]?.id||"");renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();syncPermissionForms();progressionPlayerState=null;tone("adminPlayersFound",String(adminPlayers.length));badge("topPlayers","Players "+adminPlayers.length);if(liveMap)refreshLiveMap().catch(()=>{});}
+async function refreshPlayersAfterRename(accountId){const data=await loadSharedPlayerDirectory({force:true});const preferred=String(accountId||selectedPlayerId||"");selectedPlayerId=adminPlayers.some(row=>String(row.id)===preferred)?preferred:(adminPlayers[0]?.id||"");renderSharedPlayerDirectory();syncPermissionForms();progressionPlayerState=null;if(liveMap)refreshLiveMap().catch(()=>{});return data;}
 async function applySelectedPlayerRename(){const p=selectedPlayer();const preview=playerRenamePreviewState;const status=document.getElementById("playerRenameStatus");const applyButton=document.getElementById("playerRenameApplyButton");try{if(!p||!preview)throw new Error("Generate a rename preview first.");if(String(p.player_state_row_id)!==String(preview.playerStateRowId))throw new Error("The selected player changed. Generate a new rename preview.");const confirmed=await appConfirm("Rename Player","Rename "+preview.currentName+" to "+preview.newName+"?\n\nThe player must remain offline. Account ID, inventory, bases, guild, and progression IDs will not be changed.","Rename Player","Cancel");if(!confirmed)return;if(applyButton)applyButton.disabled=true;if(status){status.className="warning mt";status.textContent="Applying encrypted character-name update and verifying the database read-back...";}const data=await getJson("/api/admin/players/rename/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:preview.previewId,confirmed:true}),timeoutMs:45000});playerRenamePreviewState=null;if(status){status.className="empty mt";status.textContent=(data.message||"Player renamed.")+"\nBackup: "+(data.backupPath||"created")+"\nAudit: "+(data.auditLogPath||"admin-audit.log");}showToast(data.message||"Player renamed.","success");addActivity("players","Player renamed",data.previousName+" -> "+data.newName);try{await refreshPlayersAfterRename(data.accountId);closePlayerRename();}catch(refreshError){if(status){status.className="warning mt";status.textContent=(data.message||"Player renamed.")+"\nThe database update was verified, but the Players page could not refresh: "+betterError(refreshError)+"\nUse Refresh Players before making another change.";}showToast("Player renamed; refresh Players before continuing.","warning");}playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}if(applyButton)applyButton.disabled=!playerRenamePreviewState;showToast(betterError(e),"error");addActivity("error","Player rename failed",e.message);playUiSound("warning");}}
 function selectPlayer(id){selectedPlayerId=String(id||"");resetPlayerRename(true);const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;resetPlayerRename(true);const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
@@ -19307,7 +19390,7 @@ async function previewProgressionFactionApply(){try{if(!progressionPlayerState?.
 async function applyProgressionFactionLive(){try{if(!progressionFactionPreviewState)throw new Error("Generate Rank Preview + Backup first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionFactionPreviewState.previewId,confirmText:document.getElementById("progressionFactionConfirmText")?.value||""}),timeoutMs:45000});if(!data.ok)throw new Error((data.warning||data.error||"Faction rank apply failed")+"\\n"+JSON.stringify(data.debug||{},null,2));setText("progressionFactionPreviewLog","Faction rank apply succeeded.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nBefore values:\\n"+JSON.stringify(data.oldValues,null,2)+"\\n\\nTarget values:\\n"+JSON.stringify(data.newValues,null,2)+"\\n\\nRead-back verification:\\n"+JSON.stringify(data.debug?.readBackValues||{},null,2));pushProgressionRecent("Faction rank changed",data.action||"Faction reputation updated.","NOW");addActivity("progression","Faction rank changed",data.action);progressionFactionPreviewState=null;document.getElementById("progressionFactionConfirmText").value="";await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionFactionPreviewLog",betterError(e));pushProgressionRecent("Faction rank apply failed",betterError(e),"ERR");addActivity("error","Faction rank apply failed",e.message);playUiSound("warning");}}
 function compactProgressionRows(title,rows){return '<div class="detail-row"><span class="subtle">'+esc(title)+'</span><strong></strong></div>'+detailRows(rows);}
 function renderProgressionCharacterDebug(data){const el=document.getElementById("progressionCharacterDebug");if(!el)return;const debug=data?.progressionDebug||{};if(!data?.ok){el.innerHTML='<div class="empty">No progression player lookup debug data.</div>';return;}const p=data.player||{};const f=debug.fLevelTarget||{};const t=debug.techKnowledgeTarget||{};const links=(debug.fglEntityLinks||[]).filter(row=>row.found).map(row=>[row.actor_id,row.entity_id,row.slot_name].filter(Boolean).join(" / ")).join("; ")||"None";const components=(debug.componentNames||[]).slice(0,12).join(", ")||"None";const fieldStatus=debug.fieldStatus||{};const h=data.hydration||{};el.innerHTML=compactProgressionRows("Player",{character:p.character_name||"--",actor_id:p.actor_id||"--",pawn_id:p.player_pawn_id||"--",online_status:p.online_status||"--"})+compactProgressionRows("Targets",{fLevelActor:f.actor_id||"--",fLevelEntity:f.entity_id||"--",fLevelSlot:f.slot_name||"--",techActor:t.actor_id||"--",techPath:t.path||"--",hydrationPath:h.source?.valuePath||"--"})+compactProgressionRows("Components",{checkedActorIds:(debug.checkedActorIds||[]).join(", ")||"--",fglLinks:links,components})+compactProgressionRows("Timings",data.timings||{})+compactProgressionRows("Safety",{readOnly:data.safety?.readOnlyMode?"yes":"no",liveEditing:data.safety?.liveEditingEnabled?"enabled":"disabled",WaterHydration:hydrationValueText(h),TotalXPEarned:fieldStatus.TotalXPEarned||"--",TotalSkillPoints:fieldStatus.TotalSkillPoints||"--",UnspentSkillPoints:fieldStatus.UnspentSkillPoints||"--",TechKnowledgePoints:fieldStatus.m_TechKnowledgePoints||"--"});}
-async function lookupProgressionPlayer(){const query=document.getElementById("progressionPlayerQuery")?.value||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:20000});renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="timeout")addActivity("warn","Progression player lookup timed out",(data.step||"unknown step")+" / "+(data.hint||"Try exact character name."));else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||data.error||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup failed",e.message);}}
+async function lookupProgressionPlayer(){const query=document.getElementById("progressionPlayerQuery")?.value||"";addActivity("progression","Progression player lookup started",query||"empty query");try{const data=await getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:60000});renderProgressionPlayer(data);if(data.ok)addActivity("progression","Progression player found",data.player?.character_name||data.player?.actor_id||query);else if(data.status==="timeout")addActivity("warn","Progression player lookup timed out",(data.step||"unknown step")+" / "+(data.hint||"Try exact character name."));else if(data.status==="unsupported")addActivity("warn","Progression lookup unsupported",data.reason||"Required schema missing");else addActivity("warn","Progression player not found",data.reason||data.error||query);}catch(e){renderProgressionPlayer({ok:false,status:"error",reason:betterError(e)});addActivity("error","Progression lookup failed",e.message);}}
 setTimeout(()=>{const input=document.getElementById("progressionPlayerQuery");if(input)input.addEventListener("keydown",event=>{if(event.key==="Enter")lookupProgressionPlayer();});},0);
 function syncProgressionActionFields(){const actionEl=document.getElementById("progressionAction");if(actionEl)actionEl.value="character_xp_skill_points";document.querySelectorAll(".progression-character").forEach(el=>el.classList.remove("hidden"));progressionPreviewState=null;setText("progressionPreviewLog","No live progression preview generated.");}
 function progressionPayload(){const selected=progressionPlayerState?{player:progressionPlayerState.player||null,characterXp:progressionPlayerState.characterXp||null,techKnowledge:progressionPlayerState.techKnowledge||null,fLevelTarget:progressionPlayerState.progressionDebug?.fLevelTarget||null,techKnowledgeTarget:progressionPlayerState.progressionDebug?.techKnowledgeTarget||null,fieldStatus:progressionPlayerState.progressionDebug?.fieldStatus||{}}:null;return{action:"character_xp_skill_points",query:document.getElementById("progressionPlayerQuery")?.value||"",selectedPlayer:selected,totalXpEarned:document.getElementById("progressionTotalXp")?.value||0,totalSkillPoints:document.getElementById("progressionTotalSkillPoints")?.value||0,unspentSkillPoints:document.getElementById("progressionUnspentSkillPoints")?.value||0,techKnowledgePoints:document.getElementById("progressionTechKnowledgePoints")?.value||0,advancedOverride:document.getElementById("progressionAdvancedOverride")?.checked===true};}
@@ -20054,7 +20137,15 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/admin/players" && req.method === "GET") {
-    try { await json(res, await adminPlayers({ query: url.searchParams.get("query"), limit: url.searchParams.get("limit"), hydration: !/^(0|false|no)$/i.test(String(url.searchParams.get("hydration") || "true")) })); }
+    try {
+      const query = String(url.searchParams.get("query") || "").trim();
+      const hydration = !/^(0|false|no)$/i.test(String(url.searchParams.get("hydration") || "true"));
+      const force = /^(1|true|yes)$/i.test(String(url.searchParams.get("refresh") || ""));
+      const result = !query && !hydration
+        ? await loadAdminPlayerDirectory({ limit: url.searchParams.get("limit"), force })
+        : await adminPlayers({ query, limit: url.searchParams.get("limit"), hydration });
+      await json(res, result);
+    }
     catch (error) { await json(res, { ok: false, players: [], error: error.message }, 500); }
     return;
   }

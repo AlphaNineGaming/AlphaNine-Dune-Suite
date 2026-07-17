@@ -37,7 +37,7 @@ async function main() {
     method: "POST",
     body: {
       playerId: "test-player",
-      template: "Combat_Neut_AtreidesDeserterUnique04_Boots",
+      template: "radiation_suit",
       qty: 1,
       quality: 0
     }

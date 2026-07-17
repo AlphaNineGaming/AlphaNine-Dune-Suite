@@ -11,6 +11,7 @@ const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError } = require("./lib/operations");
 const { createRemoteAccess } = require("./lib/remote-access");
+const { createInternetTunnel } = require("./lib/internet-tunnel");
 const { createPlayerDirectory, parsePlayerSelector } = require("./lib/player-directory");
 const { durabilityRepairCandidate } = require("./lib/durability-repair");
 const { cleanUpdateLine, parseServerUpdateMetadata, classifyServerUpdate, serverUpdateProgress } = require("./lib/server-update");
@@ -39,12 +40,17 @@ const LOCAL_HOST = "127.0.0.1";
 const PORT = Number(process.env.PORT || 8810);
 const HTTPS_HOST = process.env.ALPHANINE_HTTPS_HOST || "0.0.0.0";
 const HTTPS_PORT = Number(process.env.ALPHANINE_HTTPS_PORT || 8811);
+const INTERNET_ORIGIN_PORT = Number(process.env.ALPHANINE_INTERNET_ORIGIN_PORT || 8813);
 const MANAGER_PORT = 8812;
 const APPDATA_DIR = process.env.ALPHANINE_DATA_DIR
   || (IS_WINDOWS && process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "")
   || (!IS_WINDOWS ? path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "alphanine-dune-suite") : "");
 const REMOTE_ACCESS_DIR = process.env.ALPHANINE_REMOTE_ACCESS_DIR || path.join(APPDATA_DIR || __dirname, "remote-access");
 const remoteAccess = createRemoteAccess({ dataDir: REMOTE_ACCESS_DIR });
+const internetTunnel = createInternetTunnel({
+  dataDir: path.join(REMOTE_ACCESS_DIR, "cloudflared"),
+  originUrl: `http://127.0.0.1:${INTERNET_ORIGIN_PORT}`
+});
 const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || (APPDATA_DIR ? path.join(APPDATA_DIR, "config.json") : path.join(__dirname, "config.json"));
 const BUNDLED_TELEPORT_PRESETS_PATH = path.join(__dirname, "assets", "teleport-location-presets.json");
 const TELEPORT_PRESETS_PATH = process.env.ALPHANINE_TELEPORT_PRESETS_PATH
@@ -18416,6 +18422,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         </div>
         <div class="field-grid mt">
           <label>Administrator username<input id="remoteAccessUsername" value="admin" autocomplete="username"></label>
+          <label>Remote permission<select id="remoteAccessRole"><option value="viewer">Viewer — read only</option><option value="operator">Operator — server controls</option><option value="owner">Owner — full approved remote access</option></select></label>
           <label>New password<input id="remoteAccessPassword" type="password" minlength="12" autocomplete="new-password" placeholder="At least 12 characters"></label>
           <label>Confirm password<input id="remoteAccessPasswordConfirm" type="password" minlength="12" autocomplete="new-password"></label>
         </div>
@@ -18425,7 +18432,46 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <button type="button" onclick="copyRemotePortalUrl()">Copy HTTPS URL</button>
           <button id="remoteAccessLogout" type="button" onclick="remoteLogout()" style="display:none">Sign Out</button>
         </div>
+        <div class="panel pad mt">
+          <div class="label">Authenticator App (2FA)</div>
+          <div class="subtle mt">Add the secret to Google Authenticator, Microsoft Authenticator, Authy, 1Password, or another TOTP app, then confirm one six-digit code.</div>
+          <div class="action-row mt"><button type="button" onclick="beginRemoteTotp()">Generate 2FA Secret</button><button type="button" onclick="disableRemoteTotp()">Disable 2FA</button></div>
+          <div id="remoteTotpSecret" class="empty mt">No setup secret generated.</div>
+          <div class="field-grid mt"><label>Six-digit code<input id="remoteTotpCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label></div>
+          <div class="action-row mt"><button type="button" onclick="confirmRemoteTotp()">Confirm and Enable 2FA</button></div>
+        </div>
         <div id="remoteAccessStatus" class="empty mt">The generated certificate is self-signed for local testing, so the browser will show a one-time warning.</div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div>
+            <div class="label">Internet Access</div>
+            <div class="subtle mt">Publish the authenticated portal through an outbound Cloudflare Tunnel. No router port forwarding is required.</div>
+          </div>
+          <button type="button" onclick="refreshInternetAccessStatus()">Refresh</button>
+        </div>
+        <div class="detail-list mt">
+          <div class="detail-row"><span class="subtle">Cloudflared</span><strong id="internetAccessInstalled">Checking...</strong></div>
+          <div class="detail-row"><span class="subtle">Publisher verification</span><strong id="internetAccessSignature">Checking...</strong></div>
+          <div class="detail-row"><span class="subtle">Tunnel</span><strong id="internetAccessRunning">Stopped</strong></div>
+          <div class="detail-row"><span class="subtle">Public URL</span><strong id="internetAccessUrl" class="env-path-value">Not assigned</strong></div>
+          <div class="detail-row"><span class="subtle">Protected origin</span><strong>127.0.0.1:${INTERNET_ORIGIN_PORT}</strong></div>
+          <div class="detail-row"><span class="subtle">Automatic shutdown</span><strong id="internetAccessIdle">60 minutes without remote activity</strong></div>
+        </div>
+        <div class="action-row mt">
+          <button type="button" onclick="installInternetTunnel()">Install cloudflared</button>
+          <button type="button" onclick="startQuickInternetTunnel()">Start Test URL</button>
+          <button type="button" onclick="openInternetPortal()">Open Public URL</button>
+          <button type="button" onclick="copyInternetPortalUrl()">Copy Public URL</button>
+          <button type="button" class="danger" onclick="stopInternetTunnel()">Stop Tunnel</button>
+        </div>
+        <div class="empty mt"><strong>Stable address:</strong> create a named tunnel in Cloudflare, set its service to <code>http://127.0.0.1:${INTERNET_ORIGIN_PORT}</code>, then paste its run token below. The token is used only to launch cloudflared and is not saved.</div>
+        <div class="field-grid mt">
+          <label>Named tunnel token<input id="internetTunnelToken" type="password" autocomplete="off" placeholder="Paste Cloudflare tunnel token"></label>
+          <label>Public URL<input id="internetTunnelPublicUrl" type="url" placeholder="https://suite.example.com"></label>
+        </div>
+        <div class="action-row mt"><button type="button" onclick="startNamedInternetTunnel()">Start Stable Tunnel</button></div>
+        <div id="internetAccessStatus" class="empty mt">Set the administrator password first. Test URLs are temporary; named tunnels are intended for regular internet use.</div>
       </div>
     </section>
 
@@ -18691,6 +18737,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
 <script>
 const WEB_PORTAL_URLS=${JSON.stringify(portalUrls)};
 let REMOTE_PORTAL_URLS=[];
+let INTERNET_PORTAL_URL="";
 const tabs=[...document.querySelectorAll(".tab")], views=[...document.querySelectorAll(".view")];
 const viewCopy={
   dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
@@ -18757,11 +18804,25 @@ function portalUrlText(urls=WEB_PORTAL_URLS){return (urls&&urls.length?urls:WEB_
 function renderWebPortalUrls(urls=WEB_PORTAL_URLS){const resolved=urls&&urls.length?urls:WEB_PORTAL_URLS;setText("diagPortal",portalUrlText(resolved));setText("settingsWebPortalUrl",portalUrlText(resolved));setText("webPortalPrimaryUrl",resolved[0]||"");setText("webPortalAllUrls",portalUrlText(resolved));}
 function openWebPortal(){const url=(WEB_PORTAL_URLS&&WEB_PORTAL_URLS[0])||location.origin;window.open(url,"_blank","noopener");setText("webPortalStatus","Opened "+url);playUiSound("click");}
 async function copyWebPortalUrl(){const text=portalUrlText(WEB_PORTAL_URLS);try{await navigator.clipboard.writeText(text);setText("webPortalStatus","Web portal URL copied.");showToast("Web Portal URL copied","success");playUiSound("success");}catch(error){setText("webPortalStatus",betterError(error));playUiSound("warning");}}
-async function refreshRemoteAccessStatus(){if(location.protocol==="https:"){REMOTE_PORTAL_URLS=[location.origin];setText("remoteAccessConfigured","Authenticated remote session");setText("remoteAccessUrls",location.origin);setText("remoteAccessFingerprint","View on the server computer");setText("remoteAccessStatus","Password and certificate setup are restricted to the local Suite.");const logout=document.getElementById("remoteAccessLogout");if(logout)logout.style.display="";return;}try{const data=await getJson("/api/remote-access/status");REMOTE_PORTAL_URLS=data.urls||[];setText("remoteAccessConfigured",data.configured?"Password configured":"Password setup required");setText("remoteAccessUrls",portalUrlText(REMOTE_PORTAL_URLS));setText("remoteAccessFingerprint",data.certificateFingerprint||"Certificate is starting");}catch(error){setText("remoteAccessStatus",betterError(error));}}
-async function setRemoteAccessPassword(){const username=document.getElementById("remoteAccessUsername")?.value||"admin";const password=document.getElementById("remoteAccessPassword")?.value||"";const confirm=document.getElementById("remoteAccessPasswordConfirm")?.value||"";if(password!==confirm){setText("remoteAccessStatus","Passwords do not match.");return;}try{await getJson("/api/remote-access/password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});document.getElementById("remoteAccessPassword").value="";document.getElementById("remoteAccessPasswordConfirm").value="";setText("remoteAccessStatus","Remote administrator password saved. Existing remote sessions were signed out.");showToast("Remote access password saved","success");await refreshRemoteAccessStatus();}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function applyRemoteRoleUi(){if(location.protocol!=="https:")return;try{const session=await getJson("/api/auth/session");const allowed={viewer:new Set(["dashboard","players","live-map","progression","landsraad","item-database"]),operator:new Set(["dashboard","players","live-map","progression","landsraad","item-database","server","scheduler"]),owner:null}[session.role]||new Set(["dashboard"]);document.body.dataset.remoteRole=session.role||"viewer";tabs.forEach(tab=>{const localOnly=["web-portal","settings","env","logs","diagnostics","management","operations"].includes(tab.dataset.view);tab.style.display=(localOnly||(allowed&&!allowed.has(tab.dataset.view)))?"none":"";});if(allowed&&!allowed.has(location.hash.slice(1)))setView("dashboard");setText("remoteAccessConfigured","Authenticated as "+session.role);setText("remoteAccessStatus",session.role==="viewer"?"Remote Viewer mode is read-only.":session.role==="operator"?"Remote Operator mode allows limited server controls.":"Remote Owner mode; sensitive writes require password confirmation every five minutes.");}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function refreshRemoteAccessStatus(){if(location.protocol==="https:"){REMOTE_PORTAL_URLS=[location.origin];setText("remoteAccessUrls",location.origin);setText("remoteAccessFingerprint","View on the server computer");const logout=document.getElementById("remoteAccessLogout");if(logout)logout.style.display="";await applyRemoteRoleUi();return;}try{const data=await getJson("/api/remote-access/status");REMOTE_PORTAL_URLS=data.urls||[];setText("remoteAccessConfigured",data.configured?("Password configured · "+data.role+(data.totpEnabled?" · 2FA on":" · 2FA off")):"Password setup required");setText("remoteAccessUrls",portalUrlText(REMOTE_PORTAL_URLS));setText("remoteAccessFingerprint",data.certificateFingerprint||"Certificate is starting");const role=document.getElementById("remoteAccessRole");if(role)role.value=data.role||"viewer";}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function setRemoteAccessPassword(){const username=document.getElementById("remoteAccessUsername")?.value||"admin";const role=document.getElementById("remoteAccessRole")?.value||"viewer";const password=document.getElementById("remoteAccessPassword")?.value||"";const confirm=document.getElementById("remoteAccessPasswordConfirm")?.value||"";if(password!==confirm){setText("remoteAccessStatus","Passwords do not match.");return;}try{await getJson("/api/remote-access/password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password,role})});document.getElementById("remoteAccessPassword").value="";document.getElementById("remoteAccessPasswordConfirm").value="";setText("remoteAccessStatus","Remote credentials and "+role+" permission saved. Existing remote sessions were signed out.");showToast("Remote access security saved","success");await refreshRemoteAccessStatus();}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function beginRemoteTotp(){try{const data=await getJson("/api/remote-access/totp/begin",{method:"POST"});setText("remoteTotpSecret","Secret: "+data.secret+"\n\nAuthenticator URI: "+data.uri);setText("remoteAccessStatus","Add the secret to your authenticator app, then enter its six-digit code.");}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function confirmRemoteTotp(){try{const code=document.getElementById("remoteTotpCode")?.value||"";await getJson("/api/remote-access/totp/confirm",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code})});document.getElementById("remoteTotpCode").value="";setText("remoteTotpSecret","2FA enabled. The setup secret is now hidden.");setText("remoteAccessStatus","Authenticator-app protection enabled. Existing remote sessions were signed out.");await refreshRemoteAccessStatus();}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function disableRemoteTotp(){const password=document.getElementById("remoteAccessPassword")?.value||"";try{if(!password)throw new Error("Enter the administrator password in New password before disabling 2FA.");await getJson("/api/remote-access/totp/disable",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})});setText("remoteTotpSecret","2FA disabled.");await refreshRemoteAccessStatus();}catch(error){setText("remoteAccessStatus",betterError(error));}}
 function openRemotePortal(){const url=REMOTE_PORTAL_URLS[0]||("https://127.0.0.1:${HTTPS_PORT}");window.open(url,"_blank","noopener");setText("remoteAccessStatus","Opened "+url+". Accept the self-signed certificate warning for this test build.");}
 async function copyRemotePortalUrl(){const text=(REMOTE_PORTAL_URLS&&REMOTE_PORTAL_URLS[0])||"https://127.0.0.1:${HTTPS_PORT}";try{await navigator.clipboard.writeText(text);setText("remoteAccessStatus","HTTPS URL copied.");}catch(error){setText("remoteAccessStatus",betterError(error));}}
 async function remoteLogout(){try{await getJson("/api/auth/logout",{method:"POST"});location.href="/login";}catch(error){setText("remoteAccessStatus",betterError(error));}}
+function renderInternetAccess(data){INTERNET_PORTAL_URL=data.publicUrl||"";setText("internetAccessInstalled",data.installed?"Installed":"Not installed");setText("internetAccessSignature",data.signatureVerified?("Verified · "+(data.signatureSigner||"Cloudflare")):(data.installed?(data.signatureStatus||"Not verified"):"Not installed"));setText("internetAccessIdle",(data.idleTimeoutMinutes||60)+" minutes without remote activity");setText("internetAccessRunning",data.running?((data.mode==="named"?"Stable":"Test")+" tunnel running"):"Stopped");setText("internetAccessUrl",INTERNET_PORTAL_URL||"Not assigned");if(data.lastError)setText("internetAccessStatus",data.lastError);else if(data.running&&!INTERNET_PORTAL_URL)setText("internetAccessStatus","Tunnel is connecting. Refresh in a few seconds to get the public URL.");else if(data.running)setText("internetAccessStatus","Internet portal is online, role-restricted, audited, and protected by the remote login.");}
+async function refreshInternetAccessStatus(){if(location.protocol==="https:")return;try{renderInternetAccess(await getJson("/api/internet-access/status"));}catch(error){setText("internetAccessStatus",betterError(error));}}
+async function waitForInternetPortalUrl(attempt=0){if(location.protocol==="https:")return;try{const data=await getJson("/api/internet-access/status");renderInternetAccess(data);if(data.running&&!data.publicUrl&&attempt<15)window.setTimeout(()=>waitForInternetPortalUrl(attempt+1),2000);}catch(error){setText("internetAccessStatus",betterError(error));}}
+async function installInternetTunnel(){setText("internetAccessStatus","Downloading the official Cloudflare tunnel client...");try{renderInternetAccess(await getJson("/api/internet-access/install",{method:"POST",timeoutMs:120000}));setText("internetAccessStatus","cloudflared installed. You can start a test or stable tunnel.");}catch(error){setText("internetAccessStatus",betterError(error));}}
+async function startQuickInternetTunnel(){setText("internetAccessStatus","Starting a temporary Cloudflare test URL...");try{renderInternetAccess(await getJson("/api/internet-access/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:"quick"})}));window.setTimeout(()=>waitForInternetPortalUrl(0),1500);}catch(error){setText("internetAccessStatus",betterError(error));}}
+async function startNamedInternetTunnel(){const token=document.getElementById("internetTunnelToken")?.value||"";const publicUrl=document.getElementById("internetTunnelPublicUrl")?.value||"";setText("internetAccessStatus","Starting the named Cloudflare tunnel...");try{renderInternetAccess(await getJson("/api/internet-access/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:"named",token,publicUrl})}));document.getElementById("internetTunnelToken").value="";}catch(error){setText("internetAccessStatus",betterError(error));}}
+async function stopInternetTunnel(){try{renderInternetAccess(await getJson("/api/internet-access/stop",{method:"POST"}));setText("internetAccessStatus","Internet tunnel stopped.");}catch(error){setText("internetAccessStatus",betterError(error));}}
+function openInternetPortal(){if(!INTERNET_PORTAL_URL){setText("internetAccessStatus","Start a tunnel and wait for its public URL first.");return;}window.open(INTERNET_PORTAL_URL,"_blank","noopener");}
+async function copyInternetPortalUrl(){if(!INTERNET_PORTAL_URL){setText("internetAccessStatus","No public URL is available yet.");return;}try{await navigator.clipboard.writeText(INTERNET_PORTAL_URL);setText("internetAccessStatus","Public URL copied.");}catch(error){setText("internetAccessStatus",betterError(error));}}
+window.setTimeout(refreshInternetAccessStatus,0);
 function normalizeUiMode(value){return String(value||"").toLowerCase()==="advanced"?"advanced":"simple";}
 function applyUiMode(value){uiMode=normalizeUiMode(value);document.body.classList.toggle("simple-mode",uiMode==="simple");document.body.classList.toggle("advanced-mode",uiMode==="advanced");setValue("headerUiMode",uiMode);setValue("settingsUiMode",uiMode);if(appConfig)appConfig.uiMode=uiMode;if(uiMode==="simple"&&document.getElementById("logs")?.classList.contains("active"))setView("dashboard");}
 async function changeUiMode(value){const previous=uiMode;applyUiMode(value);try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,uiMode})});appConfig=data.config||{...current,uiMode};applyUiMode(appConfig.uiMode);setText("settingsSaveStatus","UI mode saved.");playUiSound("click");}catch(error){applyUiMode(previous);setText("settingsSaveStatus","Could not save UI mode: "+betterError(error));playUiSound("warning");}}
@@ -19042,7 +19103,7 @@ async function initializeServerUpdateMonitor(){if(await resumeServerUpdatePanel(
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 function csrfCookie(){const match=document.cookie.match(/(?:^|;\s*)alphanine_csrf=([^;]+)/);return match?decodeURIComponent(match[1]):"";}
-async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||30000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;const method=String(request.method||"GET").toUpperCase();if(!["GET","HEAD","OPTIONS"].includes(method)){request.headers={...(request.headers||{}),"X-CSRF-Token":csrfCookie()};}r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(r.status===401&&location.protocol==="https:"){location.href="/login";throw new Error("Remote session expired. Sign in again.");}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
+async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||30000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;delete request._reauthTried;const method=String(request.method||"GET").toUpperCase();if(!["GET","HEAD","OPTIONS"].includes(method)){request.headers={...(request.headers||{}),"X-CSRF-Token":csrfCookie()};}r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(r.status===428&&location.protocol==="https:"&&!options._reauthTried){const password=window.prompt("Confirm the Remote Owner password to continue:");if(password===null)throw new Error("Owner confirmation cancelled.");const totp=window.prompt("Authenticator code, or leave blank if 2FA is disabled:")||"";const confirmResponse=await fetch("/api/auth/reauth",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfCookie()},body:JSON.stringify({password,totp})});const confirmData=await confirmResponse.json().catch(()=>({}));if(!confirmResponse.ok)throw new Error(confirmData.error||"Owner confirmation failed.");return await getJson(url,{...options,_reauthTried:true});}if(r.status===401&&location.protocol==="https:"){location.href="/login";throw new Error("Remote session expired. Sign in again.");}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
 function formatMarketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"--";}
 function marketBotHealthLabel(data){if(data?.health?.ok&&data.tokenConfigured===false)return"Token Needed";if(data?.status?.exchange_ready===false||data?.health?.ready===false)return"Waiting for Exchange";if(data?.health?.ok)return"Online";if(data?.status||data?.config)return"Online";return"Offline";}
 function renderMarketBotConfig(config){if(!config)return;setChecked("marketBotEnabled",config.enabled!==false);setValue("marketBotBuyInterval",config.buy_interval||"");setValue("marketBotListInterval",config.list_interval||"");setValue("marketBotAIOrderMin",config.ai_order_min??30);setValue("marketBotAIOrderMax",config.ai_order_max??60);setValue("marketBotMaxPlayerBuys",config.max_buys??2);setText("marketBotConfigResult","Loaded bot config. Changes apply on the next scheduler check.");}
@@ -19579,7 +19640,7 @@ renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();upda
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 setInterval(()=>{if(document.getElementById("repair")?.classList.contains("active"))refreshRepairQueue();},10000);
-if(location.protocol==="http:"&&"serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{}));
+if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{}));
 </script>
 </body>
 </html>`;
@@ -19587,8 +19648,9 @@ if(location.protocol==="http:"&&"serviceWorker" in navigator)window.addEventList
 
 function remoteLoginPage(message = "") {
   const safeMessage = String(message || "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[character]));
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AlphaNine Dune Suite Login</title><style>
-  :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at top,#2b1c08,#050403 55%);font:15px system-ui;color:#f8e7c4}.card{width:min(420px,calc(100% - 32px));padding:30px;border:1px solid #8d642c;border-radius:18px;background:rgba(13,10,7,.96);box-shadow:0 28px 80px #000}.kicker{color:#d99a3b;font-weight:800;letter-spacing:.14em;text-transform:uppercase}h1{margin:10px 0 6px;font-size:27px}p{color:#bcae92;line-height:1.5}label{display:block;margin:16px 0 6px;color:#d8c49d}input{width:100%;padding:13px;border:1px solid #65502f;border-radius:9px;background:#090806;color:#fff;font:inherit}button{width:100%;margin-top:20px;padding:13px;border:0;border-radius:9px;background:linear-gradient(180deg,#e0a349,#a96717);font-weight:800;color:#1b1004;cursor:pointer}.error{min-height:22px;margin-top:14px;color:#ffb3a4}.note{font-size:12px}</style></head><body><main class="card"><div class="kicker">Secure Remote Access</div><h1>AlphaNine Dune Suite</h1><p>Sign in with the administrator credential configured from the Suite on the server computer.</p><form id="login"><label for="username">Username</label><input id="username" autocomplete="username" value="admin" required><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required><button type="submit">Sign In</button></form><div id="error" class="error">${safeMessage}</div><p class="note">This connection is encrypted with HTTPS. A self-signed test certificate may require one browser confirmation.</p></main><script>document.getElementById("login").addEventListener("submit",async(event)=>{event.preventDefault();const error=document.getElementById("error");error.textContent="Signing in...";try{const response=await fetch("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})});const data=await response.json();if(!response.ok)throw new Error(data.error||"Login failed");location.href="/";}catch(reason){error.textContent=reason.message;}});</script></body></html>`;
+  let page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AlphaNine Dune Suite Login</title><style>
+  :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at top,#2b1c08,#050403 55%);font:15px system-ui;color:#f8e7c4}.card{width:min(420px,calc(100% - 32px));padding:30px;border:1px solid #8d642c;border-radius:18px;background:rgba(13,10,7,.96);box-shadow:0 28px 80px #000}.kicker{color:#d99a3b;font-weight:800;letter-spacing:.14em;text-transform:uppercase}h1{margin:10px 0 6px;font-size:27px}p{color:#bcae92;line-height:1.5}label{display:block;margin:16px 0 6px;color:#d8c49d}input{width:100%;padding:13px;border:1px solid #65502f;border-radius:9px;background:#090806;color:#fff;font:inherit}button{width:100%;margin-top:20px;padding:13px;border:0;border-radius:9px;background:linear-gradient(180deg,#e0a349,#a96717);font-weight:800;color:#1b1004;cursor:pointer}.error{min-height:22px;margin-top:14px;color:#ffb3a4}.note{font-size:12px}</style></head><body><main class="card"><div class="kicker">Secure Remote Access</div><h1>AlphaNine Dune Suite</h1><p>Sign in with the administrator credential configured from the Suite on the server computer.</p><form id="login"><label for="username">Username</label><input id="username" autocomplete="username" value="admin" required><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required><label for="totp">Authenticator code (if enabled)</label><input id="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"><button type="submit">Sign In</button></form><div id="error" class="error">${safeMessage}</div><p class="note">Your browser-to-portal connection is encrypted with HTTPS. Direct LAN access may show a one-time warning for the local certificate.</p></main><script>document.getElementById("login").addEventListener("submit",async(event)=>{event.preventDefault();const error=document.getElementById("error");error.textContent="Signing in...";try{const response=await fetch("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value,totp:document.getElementById("totp").value})});const data=await response.json();if(!response.ok)throw new Error(data.error||"Login failed");location.href="/";}catch(reason){error.textContent=reason.message;}});</script></body></html>`;
+  return page;
 }
 
 function applyRemoteSecurityHeaders(res) {
@@ -19600,9 +19662,66 @@ function applyRemoteSecurityHeaders(res) {
   res.setHeader("Content-Security-Policy", "frame-ancestors 'self'; base-uri 'self'; form-action 'self'");
 }
 
+function isRemotePortalRequest(req) {
+  return Boolean(req.socket.encrypted || req.alphanineInternetOrigin);
+}
+
+const REMOTE_LOCAL_ONLY_PREFIXES = [
+  "/api/config", "/api/setup/", "/api/test/", "/api/settings/", "/api/ssh-key/", "/api/server-install-path/",
+  "/api/live-give/env", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/",
+  "/api/admin/probe", "/api/admin/tuned-channels", "/api/admin/permissions", "/api/gear/discovery", "/api/discovery",
+  "/api/market-bot/config", "/api/market-bot/logs", "/api/director", "/manager-api/"
+];
+const REMOTE_VIEWER_GET_PATHS = new Set([
+  "/api/status", "/api/vm-monitor", "/api/server-update/check", "/api/scheduler", "/api/receiver/status",
+  "/api/battlegroups", "/api/battlegroups/selected", "/api/database/status", "/api/database/tunnel/status", "/api/database/backups",
+  "/api/maps", "/api/world-map/metadata", "/api/live-map/markers", "/api/live-map/entities", "/api/live-map/players",
+  "/api/live-map/vehicles", "/api/live-map/bases", "/api/live-map/teleport/presets", "/api/live-map/teleport/status",
+  "/api/admin/players", "/api/admin/repair/inspect", "/api/admin/repair/queue", "/api/players/feed", "/api/admin/items",
+  "/api/give-items", "/api/gear-codex/items", "/api/item-database/items", "/api/items/catalog/status", "/api/give-items/capabilities",
+  "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/landsraad/tiers",
+  "/api/landsraad/weekly-rewards/inspect", "/api/admin/skill-reputation", "/api/market-bot/overview",
+  "/api/market/status", "/api/market/listings", "/api/live-give/queue-presets", "/api/live-give/queue-presets/get",
+  "/api/sietches", "/api/vm/status", "/api/updates/check"
+]);
+const REMOTE_OPERATOR_POST_PATHS = new Set([
+  "/api/scheduler/action", "/api/receiver/start", "/api/receiver/stop", "/api/receiver/restart", "/api/maps/deploy", "/api/maps/memory"
+]);
+
+function remoteRoutePolicy(req, activeSession, url) {
+  const method = String(req.method || "GET").toUpperCase();
+  const pathname = url.pathname;
+  const role = activeSession.role || "viewer";
+  if (pathname === "/manager" || pathname.startsWith("/manager/")) return { allowed: false, status: 403, error: "Server Manager is available only from the local Suite." };
+  if (REMOTE_LOCAL_ONLY_PREFIXES.some((prefix) => pathname === prefix.replace(/\/$/, "") || pathname.startsWith(prefix))) return { allowed: false, status: 403, error: "This feature is available only from the local Suite." };
+  if (pathname === "/api/auth/session" || pathname === "/api/auth/logout" || pathname === "/api/auth/reauth") return { allowed: true };
+  if (!pathname.startsWith("/api/") && !pathname.startsWith("/manager-api/")) return { allowed: true };
+  if (role === "viewer") {
+    const allowed = method === "GET" && (REMOTE_VIEWER_GET_PATHS.has(pathname) || pathname.startsWith("/api/database/import-status/") || pathname.startsWith("/api/database/restore-status/"));
+    return allowed ? { allowed: true } : { allowed: false, status: 403, error: "Remote Viewer access is read-only and this endpoint is not approved." };
+  }
+  if (role === "operator") {
+    if (method === "GET" && REMOTE_VIEWER_GET_PATHS.has(pathname)) return { allowed: true };
+    if (method === "POST" && (REMOTE_OPERATOR_POST_PATHS.has(pathname) || pathname.startsWith("/api/action/") || pathname.startsWith("/api/vm/"))) return { allowed: true };
+    return { allowed: false, status: 403, error: "This action requires the Remote Owner role." };
+  }
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && Number(activeSession.reauthenticatedUntil || 0) < Date.now()) return { allowed: false, status: 428, error: "Owner confirmation expired. Re-enter your password and authenticator code." };
+  return { allowed: true };
+}
+
+function appendRemoteRequestAudit(req, activeSession, url, decision, statusCode = 0) {
+  const method = String(req.method || "GET").toUpperCase();
+  if (method === "GET" && decision.allowed) return;
+  appendAdminAudit(decision.allowed ? "remote_action" : "remote_action_blocked", {
+    username: activeSession?.username || "unknown", role: activeSession?.role || "unknown", address: remoteAccess.requestAddress(req),
+    method, path: url.pathname, allowed: Boolean(decision.allowed), statusCode, reason: decision.error || ""
+  });
+}
+
 async function handleRequest(req, res) {
-  const isHttps = Boolean(req.socket.encrypted);
-  if (!isHttps) return route(req, res);
+  const isRemote = isRemotePortalRequest(req);
+  if (!isRemote) return route(req, res);
+  if (req.alphanineInternetOrigin) internetTunnel.touch();
   applyRemoteSecurityHeaders(res);
   const url = new URL(req.url, `https://${req.headers.host || `127.0.0.1:${HTTPS_PORT}`}`);
   if (url.pathname === "/login" && req.method === "GET") {
@@ -19615,14 +19734,16 @@ async function handleRequest(req, res) {
       await json(res, { ok: false, error: "Invalid login request." }, 400);
       return;
     }
-    const result = remoteAccess.login(req, body.username, body.password);
+    const result = remoteAccess.login(req, body.username, body.password, body.totp);
     if (!result.ok) {
+      appendAdminAudit("remote_login_failed", { username: String(body.username || ""), address: remoteAccess.requestAddress(req), reason: result.error });
       if (result.retryAfterMs) res.setHeader("Retry-After", Math.ceil(result.retryAfterMs / 1000));
       await json(res, { ok: false, error: result.error }, result.status);
       return;
     }
     res.setHeader("Set-Cookie", remoteAccess.sessionCookies(result));
-    await json(res, { ok: true });
+    appendAdminAudit("remote_login_succeeded", { username: String(body.username || ""), role: result.role, address: remoteAccess.requestAddress(req) });
+    await json(res, { ok: true, role: result.role });
     return;
   }
   const activeSession = remoteAccess.session(req);
@@ -19639,36 +19760,115 @@ async function handleRequest(req, res) {
     await json(res, { ok: false, error: "CSRF validation failed. Refresh the page and try again." }, 403);
     return;
   }
+  if (url.pathname === "/api/auth/session" && req.method === "GET") {
+    await json(res, { ok: true, username: activeSession.username, role: activeSession.role, reauthenticationRequired: Number(activeSession.reauthenticatedUntil || 0) < Date.now() });
+    return;
+  }
+  if (url.pathname === "/api/auth/reauth" && req.method === "POST") {
+    let body = {};
+    try { body = JSON.parse(await readBody(req) || "{}"); } catch {}
+    const ok = remoteAccess.reauthenticate(req, body.password, body.totp);
+    appendAdminAudit(ok ? "remote_owner_reauthenticated" : "remote_owner_reauthentication_failed", { username: activeSession.username, role: activeSession.role, address: remoteAccess.requestAddress(req) });
+    await json(res, ok ? { ok: true, expiresIn: 300 } : { ok: false, error: "Owner confirmation failed." }, ok ? 200 : 401);
+    return;
+  }
   if (url.pathname === "/api/auth/logout" && req.method === "POST") {
     remoteAccess.logout(req);
     res.setHeader("Set-Cookie", remoteAccess.clearCookies());
     await json(res, { ok: true });
     return;
   }
+  const decision = remoteRoutePolicy(req, activeSession, url);
+  if (!decision.allowed) {
+    appendRemoteRequestAudit(req, activeSession, url, decision, decision.status);
+    await json(res, { ok: false, error: decision.error, remoteRole: activeSession.role }, decision.status);
+    return;
+  }
+  if (!["GET", "HEAD", "OPTIONS"].includes(String(req.method).toUpperCase())) res.once("finish", () => appendRemoteRequestAudit(req, activeSession, url, decision, res.statusCode));
   return route(req, res);
 }
 
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  if (url.pathname === "/api/internet-access/status" && req.method === "GET") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Internet access setup is available only on the local Suite." }, 403);
+      return;
+    }
+    await json(res, { ...internetTunnel.status(), passwordConfigured: remoteAccess.configured() });
+    return;
+  }
+  if (url.pathname === "/api/internet-access/install" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Internet access setup is available only on the local Suite." }, 403);
+      return;
+    }
+    try { await json(res, await internetTunnel.install()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/internet-access/start" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Internet access setup is available only on the local Suite." }, 403);
+      return;
+    }
+    try {
+      if (!remoteAccess.configured()) throw new Error("Set the remote administrator password before opening an internet tunnel.");
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, internetTunnel.start(body.mode, body.token, body.publicUrl));
+    } catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/internet-access/stop" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Internet access setup is available only on the local Suite." }, 403);
+      return;
+    }
+    await json(res, internetTunnel.stop());
+    return;
+  }
   if (url.pathname === "/api/remote-access/status" && req.method === "GET") {
-    if (req.socket.encrypted || !remoteAccess.isLoopbackRequest(req)) {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
       await json(res, { ok: false, error: "Remote access setup is available only on the local Suite." }, 403);
       return;
     }
-    await json(res, { ok: true, configured: remoteAccess.configured(), username: "admin", urls: remotePortalUrls(), certificateFingerprint: remoteAccess.certificateFingerprint() });
+    await json(res, { ok: true, ...remoteAccess.publicConfig(), urls: remotePortalUrls(), certificateFingerprint: remoteAccess.certificateFingerprint() });
     return;
   }
   if (url.pathname === "/api/remote-access/password" && req.method === "POST") {
-    if (req.socket.encrypted || !remoteAccess.isLoopbackRequest(req)) {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
       await json(res, { ok: false, error: "Remote access setup is available only on the local Suite." }, 403);
       return;
     }
     try {
       const body = JSON.parse(await readBody(req) || "{}");
-      await json(res, remoteAccess.setPassword(body.password, body.username));
+      await json(res, remoteAccess.setPassword(body.password, body.username, { role: body.role }));
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 400);
     }
+    return;
+  }
+  if (url.pathname === "/api/remote-access/role" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) { await json(res, { ok: false, error: "Remote access setup is available only on the local Suite." }, 403); return; }
+    try { const body = JSON.parse(await readBody(req) || "{}"); await json(res, { ok: true, ...remoteAccess.setRole(body.role) }); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/remote-access/totp/begin" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) { await json(res, { ok: false, error: "Two-factor setup is available only on the local Suite." }, 403); return; }
+    try { await json(res, remoteAccess.beginTotp()); } catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/remote-access/totp/confirm" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) { await json(res, { ok: false, error: "Two-factor setup is available only on the local Suite." }, 403); return; }
+    try { const body = JSON.parse(await readBody(req) || "{}"); await json(res, { ok: true, ...remoteAccess.confirmTotp(body.code) }); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/remote-access/totp/disable" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) { await json(res, { ok: false, error: "Two-factor setup is available only on the local Suite." }, 403); return; }
+    try { const body = JSON.parse(await readBody(req) || "{}"); await json(res, { ok: true, ...remoteAccess.disableTotp(body.password) }); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
     return;
   }
   if (url.pathname === "/" || url.pathname === "/index.html") {
@@ -20781,6 +20981,17 @@ startManagerService();
 const server = http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
 });
+
+const internetOriginServer = http.createServer((req, res) => {
+  req.alphanineInternetOrigin = true;
+  handleRequest(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
+});
+internetOriginServer.on("error", (error) => console.error(`AlphaNine internet tunnel origin failed: ${error.message}`));
+internetOriginServer.listen(INTERNET_ORIGIN_PORT, LOCAL_HOST, () => {
+  console.log(`AlphaNine protected tunnel origin: http://${LOCAL_HOST}:${INTERNET_ORIGIN_PORT}`);
+});
+process.once("exit", () => internetTunnel.stop());
+setInterval(() => internetTunnel.enforceIdleTimeout(), 60000).unref();
 
 let httpsServer = null;
 try {

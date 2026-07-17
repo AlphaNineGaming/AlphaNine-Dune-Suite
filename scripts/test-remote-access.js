@@ -5,11 +5,13 @@ const https = require("https");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const { totpCode } = require("../lib/remote-access");
 
 const root = path.join(__dirname, "..");
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-remote-test-"));
 const port = 18810 + Math.floor(Math.random() * 500);
 const httpsPort = port + 1;
+const internetPort = port + 3;
 const output = [];
 
 function request(protocol, requestPath, options = {}) {
@@ -18,7 +20,7 @@ function request(protocol, requestPath, options = {}) {
   return new Promise((resolve, reject) => {
     const req = client.request({
       hostname: "127.0.0.1",
-      port: protocol === "https" ? httpsPort : port,
+      port: options.port || (protocol === "https" ? httpsPort : port),
       path: requestPath,
       method: options.method || "GET",
       rejectUnauthorized: protocol !== "https" ? undefined : false,
@@ -61,6 +63,7 @@ const child = spawn(process.execPath, ["server.js"], {
     LOCALAPPDATA: path.join(temporary, "localappdata"),
     PORT: String(port),
     ALPHANINE_HTTPS_PORT: String(httpsPort),
+    ALPHANINE_INTERNET_ORIGIN_PORT: String(internetPort),
     ALPHANINE_SKIP_MANAGER: "1",
     ALPHANINE_PLATFORM_OVERRIDE: process.env.ALPHANINE_PLATFORM_OVERRIDE || "",
     ALPHANINE_REMOTE_ACCESS_DIR: path.join(temporary, "remote-access"),
@@ -85,6 +88,11 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
     assert.strictEqual(redirect.headers.location, "/login");
     const denied = await request("https", "/api/status");
     assert.strictEqual(denied.status, 401);
+    const tunnelRedirect = await request("http", "/", { port: internetPort });
+    assert.strictEqual(tunnelRedirect.status, 302);
+    assert.strictEqual(tunnelRedirect.headers.location, "/login");
+    const tunnelDenied = await request("http", "/api/status", { port: internetPort });
+    assert.strictEqual(tunnelDenied.status, 401);
 
     const configured = await request("http", "/api/remote-access/password", {
       method: "POST",
@@ -110,15 +118,41 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
 
     const home = await request("https", "/", { headers: { Cookie: cookieHeader } });
     assert.strictEqual(home.status, 200);
+    const remoteSession = await request("https", "/api/auth/session", { headers: { Cookie: cookieHeader } });
+    assert.strictEqual(remoteSession.json.role, "viewer");
+    const viewerStatus = await request("https", "/api/status", { headers: { Cookie: cookieHeader } });
+    assert.strictEqual(viewerStatus.status, 200);
+    const viewerWriteBlocked = await request("https", "/api/action/not-a-real-action", { method: "POST", headers: { Cookie: cookieHeader, "X-CSRF-Token": csrf } });
+    assert.strictEqual(viewerWriteBlocked.status, 403);
     assert.match(home.text, /AlphaNine Dune Suite/);
     const blockedPost = await request("https", "/api/auth/logout", { method: "POST", headers: { Cookie: cookieHeader } });
     assert.strictEqual(blockedPost.status, 403);
     const remoteSetupBlocked = await request("https", "/api/remote-access/status", { headers: { Cookie: cookieHeader } });
     assert.strictEqual(remoteSetupBlocked.status, 403);
+    const tunnelHome = await request("http", "/", { port: internetPort, headers: { Cookie: cookieHeader } });
+    assert.strictEqual(tunnelHome.status, 200);
+    const tunnelSetupBlocked = await request("http", "/api/internet-access/status", { port: internetPort, headers: { Cookie: cookieHeader } });
+    assert.strictEqual(tunnelSetupBlocked.status, 403);
     const logout = await request("https", "/api/auth/logout", { method: "POST", headers: { Cookie: cookieHeader, "X-CSRF-Token": csrf } });
     assert.strictEqual(logout.status, 200);
 
-    console.log("Remote access HTTPS, login, local-only setup, secure cookies, and CSRF checks passed.");
+    const ownerRole = await request("http", "/api/remote-access/role", { method: "POST", body: { role: "owner" } });
+    assert.strictEqual(ownerRole.status, 200);
+    assert.strictEqual(ownerRole.json.role, "owner");
+    const beginTotp = await request("http", "/api/remote-access/totp/begin", { method: "POST" });
+    assert.strictEqual(beginTotp.status, 200);
+    assert.match(beginTotp.json.secret, /^[A-Z2-7]+$/);
+    const confirmTotp = await request("http", "/api/remote-access/totp/confirm", { method: "POST", body: { code: totpCode(beginTotp.json.secret) } });
+    assert.strictEqual(confirmTotp.status, 200);
+    const missingTotp = await request("https", "/api/auth/login", { method: "POST", body: { username: "admin", password: "local-test-password-42" } });
+    assert.strictEqual(missingTotp.status, 401);
+    const ownerLogin = await request("https", "/api/auth/login", { method: "POST", body: { username: "admin", password: "local-test-password-42", totp: totpCode(beginTotp.json.secret) } });
+    assert.strictEqual(ownerLogin.status, 200);
+    const ownerCookies = ownerLogin.headers["set-cookie"].map((cookie) => cookie.split(";")[0]).join("; ");
+    const ownerLocalConfigBlocked = await request("https", "/api/config", { headers: { Cookie: ownerCookies } });
+    assert.strictEqual(ownerLocalConfigBlocked.status, 403);
+
+    console.log("Remote roles, viewer policy, owner 2FA, HTTPS/tunnel login, local-only setup, secure cookies, and CSRF checks passed.");
   } finally {
     child.kill();
     fs.rmSync(temporary, { recursive: true, force: true });

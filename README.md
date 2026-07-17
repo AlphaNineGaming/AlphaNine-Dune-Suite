@@ -92,6 +92,28 @@ Notes:
 - Browser-installed PWA mode normally requires HTTPS on real phones. A plain LAN `http://` URL may still work as a home-screen shortcut, but full install prompts and service-worker behavior depend on the mobile browser.
 - For a store-distributed native app, wrap the same web portal in an Android/iOS shell and point it at the Suite host URL.
 
+## Internet Web Portal
+
+The Web Portal page can publish the authenticated Suite portal through Cloudflare Tunnel without opening an inbound router or Windows Firewall port.
+
+1. Open **Web Portal** on the Suite computer.
+2. Set an administrator password of at least 12 characters.
+3. Select **Install cloudflared**.
+4. Select **Start Test URL** to receive a temporary `trycloudflare.com` address.
+5. For a stable address, create a named Cloudflare Tunnel, route its public hostname to `http://127.0.0.1:8813`, and paste its run token and public URL into the Suite.
+
+The tunnel token is passed to `cloudflared` only when the tunnel starts and is not written to Suite configuration. Temporary TryCloudflare URLs are for testing; use a named tunnel and Cloudflare Access policies for regular internet access.
+
+Remote security defaults:
+
+- New and upgraded installations default to the **Viewer** role, which exposes an explicit read-only API allowlist.
+- **Operator** permits limited server controls. **Owner** permits approved remote administration but requires password and authenticator reconfirmation every five minutes for writes.
+- Setup, credentials, configuration export, diagnostics, environment details, permissions, Market Bot configuration, and Server Manager remain local-only for every remote role.
+- Optional authenticator-app (TOTP) protection is configured only from the local Suite.
+- Remote logins, blocked requests, and write actions are recorded in the Suite admin audit log.
+- The downloaded `cloudflared.exe` must have a valid Windows publisher signature from Cloudflare, Inc.
+- Active tunnels stop automatically after 60 minutes without remote traffic.
+
 ## First-Time Setup
 
 On first launch, the Setup Wizard opens automatically.
@@ -198,6 +220,8 @@ Common fixes:
 ## Safety
 
 - Do not share receiver tokens, database passwords, SSH keys, or exported settings publicly.
+- Do not share Cloudflare tunnel tokens. Stop or rotate a tunnel if its token may have been exposed.
+- Set the remote administrator password before starting an internet tunnel, and use a unique password.
 - Use Dry-Run before Live Give.
 - Keep backups of settings before major changes.
 - Only run Live Give on servers you own or are authorized to administer.

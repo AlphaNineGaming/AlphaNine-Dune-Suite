@@ -7,7 +7,7 @@ const path = require("path");
 const source = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
 assert(source.includes("from dune.landsraad_task_rewards"), "Tier inspection must use the authoritative Landsraad reward table.");
-assert(source.includes("group by rewards.threshold\n    order by rewards.threshold"), "Tier thresholds must be grouped and ordered by the integer column, not the selected text alias.");
+assert(/group by rewards\.threshold\r?\n\s*order by rewards\.threshold/.test(source), "Tier thresholds must be grouped and ordered by the integer column, not the selected text alias.");
 assert(!source.includes("select threshold::text, count(*)::text\n    from dune.landsraad_task_rewards\n    group by threshold\n    order by threshold"), "Tier inspection must not sort the threshold::text output alias lexicographically.");
 assert(source.includes("label: `Tier ${index + 1}`"), "Unnamed database thresholds must receive stable ascending Tier labels.");
 assert(source.includes("thresholds[index] <= thresholds[index - 1]"), "Tier validation must reject duplicate or descending thresholds.");

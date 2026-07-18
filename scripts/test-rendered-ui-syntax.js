@@ -6,6 +6,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+assert.doesNotMatch(serverSource, /Â·|â€¦|â€”|â€“|â†’|Ã—|âŒ„|â—|â—†|â—‡|âœ¦|â˜¼|âœ“/, "Suite source contains mojibake text");
 
 const port = 18910 + Math.floor(Math.random() * 200);
 const httpsPort = port + 500;
@@ -52,6 +53,15 @@ async function waitForUi() {
     assert(serverSource.includes("parsePlayerSelector(query)"), "Typed player selectors are missing from backend lookup.");
     assert(html.includes('return"controller:"+p.player_controller_id'), "Progression detected players still submit ambiguous numeric identifiers.");
     assert(html.includes('getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:60000})'), "Detailed progression lookup deadline is shorter than its enrichment phases.");
+    assert(!html.includes(">Rotate Left</button>") && !html.includes(">Tilt Up</button>") && !html.includes(">Zoom In</button>"), "Blueprint viewer still exposes camera-control buttons.");
+    assert(html.includes("Drag to rotate and tilt"), "Blueprint viewer is missing its mouse-control guidance.");
+    assert(html.includes("camera.attachControl(canvas,true)"), "Blueprint viewer is not using the renderer's native mouse camera input.");
+    assert(html.includes("camera.inputs.attached.pointers.buttons=[0,1,2]"), "Blueprint viewer does not accept all mouse buttons.");
+    assert(html.includes('addEventListener("dblclick",reset)'), "Blueprint viewer is missing mouse-based reset.");
+    assert(html.includes('addEventListener("wheel",containWheel,{passive:false})'), "Blueprint viewer wheel input can still scroll the Suite page.");
+    assert(html.includes('containedEvents=["pointerdown","pointermove","pointerup","pointercancel","click","auxclick"]'), "Blueprint viewer mouse events are not contained inside the canvas.");
+    assert(html.includes("node.scaling.set(x,y,z)"), "Blueprint viewer does not replace the imported root scale.");
+    assert(!html.includes("baseScale=root.scaling.clone()"), "Blueprint viewer still preserves the loader mirror that flips asymmetric pieces.");
     const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((match) => match[1]).filter((script) => script.trim());
     assert(scripts.length, "No inline UI script was rendered.");
     for (const script of scripts) new Function(script);

@@ -16,6 +16,8 @@ const installerExe = path.join(outputDir, buildArtifactName("exe"));
 const requiredLevel = "requireAdministrator";
 
 function findRcedit() {
+  const configured = String(process.env.ALPHANINE_RCEDIT_PATH || "").trim();
+  if (configured && fs.existsSync(configured)) return configured;
   const cacheRoot = path.join(process.env.LOCALAPPDATA || "", "electron-builder", "Cache", "winCodeSign");
   if (fs.existsSync(cacheRoot)) {
     for (const entry of fs.readdirSync(cacheRoot)) {

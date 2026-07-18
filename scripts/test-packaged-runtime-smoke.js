@@ -18,6 +18,26 @@ const httpsPort = port + 500;
 
 if (!fs.existsSync(archive)) throw new Error(`Packaged archive was not found: ${archive}`);
 asar.extractAll(archive, extracted);
+const packagedServerSource = fs.readFileSync(path.join(extracted, "server.js"), "utf8");
+assert(
+  packagedServerSource.includes("dune.adjust_player_virtual_currency_balance(${controllerId}::bigint, ${HOUSE_SCRIP_CURRENCY_ID}::smallint, ${amount}::bigint)"),
+  "Packaged server is missing the schema-compatible House Scrip function call."
+);
+assert(
+  packagedServerSource.includes("font-size:clamp(14px,1.5vw,20px)"),
+  "Packaged UI is missing the responsive House Scrip balance sizing."
+);
+
+for (const relative of [
+  "assets/vendor/babylon.js",
+  "assets/vendor/babylonjs.loaders.min.js",
+  "assets/vendor/draco_wasm_wrapper_gltf.js",
+  "assets/vendor/draco_decoder_gltf.wasm",
+  "assets/blueprint-models/manifest.json",
+  "assets/blueprint-models/models/0001.glb"
+]) {
+  assert(fs.existsSync(path.join(extracted, relative)), `Packaged app is missing the offline viewer dependency: ${relative}`);
+}
 
 const child = spawn(process.execPath, [path.join(extracted, "server.js")], {
   cwd: extracted,
@@ -55,6 +75,10 @@ async function waitForUi() {
     const html = await waitForUi();
     assert(html.includes("loadSharedPlayerDirectory"), "Packaged UI is missing the shared player directory.");
     assert(html.includes("keeping the last confirmed directory"), "Packaged UI is missing stale player preservation.");
+    assert(html.includes("Exact Offline 3D Models"), "Packaged UI is missing the bundled exact-model status.");
+    assert(html.includes("bundled piece meshes and exported transforms entirely offline"), "Packaged UI is missing the exact offline blueprint viewer description.");
+    assert(html.includes("Grant Selected Ranks"), "Packaged UI is missing granular skill rank grants.");
+    assert(html.includes("House Scrip is virtual currency"), "Packaged UI is missing the House Scrip grant panel.");
     const packagedVersion = JSON.parse(fs.readFileSync(path.join(extracted, "package.json"), "utf8")).version;
     console.log(`Packaged Suite smoke test passed on isolated port ${port}; version ${packagedVersion}.`);
   } finally {

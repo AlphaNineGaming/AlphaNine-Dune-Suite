@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.0.54",
+  "version": "1.0.55",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -17,7 +17,10 @@
     "test:repair-queue": "node scripts/test-repair-queue.js",
     "test:market-listings": "node scripts/test-market-listings.js",
     "test:schematic-catalog": "node scripts/test-market-bot-schematic-catalog.js",
+    "test:construction-sets": "node scripts/test-construction-set-catalog.js",
     "test:ui-syntax": "node scripts/test-rendered-ui-syntax.js",
+    "test:blueprints": "node scripts/test-blueprints.js",
+    "test:blueprint-models": "node scripts/test-blueprint-model-pack.js",
     "test:base-cleanup": "node scripts/test-base-cleanup-override.js",
     "test:operations": "node scripts/test-operations.js",
     "test:python-discovery": "node scripts/test-python-discovery.js",
@@ -25,6 +28,7 @@
     "test:server-update": "node scripts/test-server-update-monitor.js",
     "test:vm-scheduler": "node scripts/test-vm-scheduler.js",
     "test:specialization-progression": "node scripts/test-specialization-progression.js",
+    "test:progression-grants": "node scripts/test-progression-skill-ranks-house-scrip.js",
     "test:landsraad-tiers": "node scripts/test-landsraad-tiers.js",
     "test:remote-access": "node scripts/test-remote-access.js",
     "test:internet-tunnel": "node scripts/test-internet-tunnel.js",
@@ -33,6 +37,7 @@
   "dependencies": {
     "express": "^5.2.1",
     "leaflet": "^1.9.4",
+    "node-forge": "^1.4.0",
     "selfsigned": "^3.0.1"
   },
   "devDependencies": {

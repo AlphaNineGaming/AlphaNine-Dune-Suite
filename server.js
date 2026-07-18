@@ -1,4 +1,4 @@
-const http = require("http");
+﻿const http = require("http");
 const https = require("https");
 const net = require("net");
 const { execFile, spawn, spawnSync } = require("child_process");
@@ -15,6 +15,9 @@ const { createInternetTunnel } = require("./lib/internet-tunnel");
 const { createPlayerDirectory, parsePlayerSelector } = require("./lib/player-directory");
 const { durabilityRepairCandidate } = require("./lib/durability-repair");
 const { cleanUpdateLine, parseServerUpdateMetadata, classifyServerUpdate, serverUpdateProgress } = require("./lib/server-update");
+const { createBlueprintService } = require("./lib/blueprints");
+const { createBlueprintModelPack } = require("./lib/blueprint-model-pack");
+const { createZipArchive } = require("./lib/zip-archive");
 const {
   defaultSchedulerConfig,
   normalizeSchedulerConfig,
@@ -63,6 +66,7 @@ const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progressi
 const PLAYER_RENAME_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "player-rename-backups");
 const REPAIR_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "repair-backups");
 const REPAIR_QUEUE_PATH = path.join(PROGRESSION_DATA_DIR, "repair-queue.json");
+const BLUEPRINT_MODEL_PACK_DIR = APPDATA_DIR || path.join(__dirname, "data");
 const DATABASE_TUNNEL_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "database-tunnel.log");
 let databaseTunnelStartPromise = null;
 const DB_QUERY_CACHE_TTL_MS = 120000;
@@ -776,12 +780,12 @@ function configWithSshDiagnostics(configValue = loadConfig()) {
   };
 }
 
-function readBody(req) {
+function readBody(req, maxBytes = 1024 * 1024 * 8) {
   return new Promise((resolve, reject) => {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 1024 * 1024 * 8) {
+      if (body.length > maxBytes) {
         reject(new Error("Request body is too large."));
         req.destroy();
       }
@@ -4315,7 +4319,6 @@ const GIVE_ITEM_HIDDEN_CATEGORY_KEYS = new Set([
   "atreides",
   "choam",
   "choam2",
-  "construction",
   "extrasets",
   "fabricators",
   "harkonnen",
@@ -4610,6 +4613,12 @@ function managerItemTags(item = {}) {
   return [];
 }
 
+function isConstructionSetItem(item = {}) {
+  const category = giveItemCategoryKey(item.category);
+  if (category === "construction" || category === "constructionsets") return true;
+  return managerItemTags(item).some((entry) => /^Items\.Consumables\.BuildableSets$/i.test(entry));
+}
+
 function managerSchematicType(item = {}) {
   const tags = managerItemTags(item);
   const tag = tags.find((entry) => /^Items\.Schematics\./i.test(entry)) || "";
@@ -4625,12 +4634,13 @@ function managerSchematicType(item = {}) {
 function normalizeManagerItemForUserCache(item = {}) {
   const tags = managerItemTags(item);
   const schematic = isSchematicItem(item);
+  const constructionSet = isConstructionSetItem(item);
   const tier = normalizeItemTier(item.tier, tags.find((entry) => /^LootTier\./i.test(entry))?.replace(/^LootTier\./i, ""));
   const normalized = sanitizeGearItemForUi({
     ...item,
-    category: schematic ? "Schematics" : item.category,
-    type: managerSchematicType(item),
-    subtype: schematic ? "Schematic Item" : item.subtype,
+    category: schematic ? "Schematics" : (constructionSet ? "Construction Sets" : item.category),
+    type: constructionSet ? "Buildable Set" : managerSchematicType(item),
+    subtype: schematic ? "Schematic Item" : (constructionSet ? "Buildable Set" : item.subtype),
     tier,
     detail: String(item.detail || tags.join(" / ")),
     hasDisplayName: Boolean(item.name && item.name !== item.id)
@@ -4659,14 +4669,16 @@ function loadManagerCatalogItems() {
     const sourceItems = Array.isArray(catalog) ? catalog : (Array.isArray(catalog.items) ? catalog.items : []);
     const items = sourceItems
       .map(normalizeManagerItemForUserCache)
-      .filter((item) => item.id && item.name && isSchematicItem(item));
+      .filter((item) => item.id && item.name && (isSchematicItem(item) || isConstructionSetItem(item)));
+    const constructionSets = items.filter(isConstructionSetItem).length;
     return {
       items: dedupeGearItemsById(items),
       report: {
         managerCatalogPath: MANAGER_ITEM_CATALOG_PATH,
         managerCatalogPresent: true,
         managerCatalogItems: sourceItems.length,
-        managerCatalogSchematics: items.length
+        managerCatalogSchematics: items.length - constructionSets,
+        managerCatalogConstructionSets: constructionSets
       }
     };
   } catch (error) {
@@ -5469,6 +5481,12 @@ async function dbQuery(sql, timeout = 45000, runtimeTarget = null) {
   }
   return result.stdout.trim();
 }
+
+const blueprintService = createBlueprintService({
+  query: (sql, timeout) => dbQuery(sql, timeout),
+  audit: (action, payload) => appendAdminAudit(action, payload)
+});
+const blueprintModelPack = createBlueprintModelPack({ dataDir: BLUEPRINT_MODEL_PACK_DIR });
 
 function loadMarketBotSchematicItems() {
   if (!fs.existsSync(MARKET_BOT_ITEM_DATA_PATH)) {
@@ -7487,10 +7505,12 @@ function skillPerkTagFromSkillTag(tag) {
   return text.replace(/^Skills\.Perk\./i, "Perks.");
 }
 
-function skillUnlockPointCost(skill = {}) {
+function skillUnlockPointCost(skill = {}, targetLevel = null) {
   const costs = Array.isArray(skill.costPerLevel) ? skill.costPerLevel.map((value) => Number(value) || 0).filter((value) => value > 0) : [];
-  if (costs.length) return costs.reduce((sum, value) => sum + value, 0);
-  return Math.max(1, Number(skill.maxLevel) || 1);
+  const maxLevel = Math.max(1, Number(skill.maxLevel) || 1);
+  const level = targetLevel == null ? maxLevel : Math.max(1, Math.min(maxLevel, Number(targetLevel) || 1));
+  if (costs.length) return costs.slice(0, level).reduce((sum, value) => sum + value, 0);
+  return level;
 }
 
 function jsonPathParts(pathValue) {
@@ -7508,28 +7528,71 @@ async function progressionUnlockSkills(payload) {
     });
     const catalog = loadDuneSkillsCatalog();
     if (!catalog.ok || !catalog.skills.length) return progressionUnsupported(catalog.report?.message || catalog.report?.error || "Bundled skill catalog is unavailable.");
-    const requestedSkillIds = [...new Set((Array.isArray(payload?.skillIds) ? payload.skillIds : []).map((value) => String(value || "").trim()).filter(Boolean))];
+    const rawRequests = Array.isArray(payload?.skills) && payload.skills.length
+      ? payload.skills.map((row) => ({ id: String(row?.id || row?.skillId || "").trim(), targetLevel: row?.targetLevel }))
+      : (Array.isArray(payload?.skillIds) ? payload.skillIds : []).map((value) => ({ id: String(value || "").trim(), targetLevel: null }));
+    const requestById = new Map(rawRequests.filter((row) => row.id).map((row) => [row.id, row]));
+    const requestedSkillIds = [...requestById.keys()];
     if (!requestedSkillIds.length) throw new Error("Choose at least one skill to unlock.");
     if (requestedSkillIds.length > 40) throw new Error("Choose 40 skills or fewer per unlock action.");
     const byId = new Map(catalog.skills.map((skill) => [skill.id, skill]));
-    const selectedSkills = requestedSkillIds.map((id) => byId.get(id)).filter(Boolean);
+    const selectedSkills = requestedSkillIds.map((id) => {
+      const skill = byId.get(id);
+      if (!skill) return null;
+      const maxLevel = Math.max(1, Number(skill.maxLevel) || 1);
+      const requestedLevel = requestById.get(id)?.targetLevel;
+      const targetLevel = requestedLevel == null ? maxLevel : Number(requestedLevel);
+      if (!Number.isInteger(targetLevel) || targetLevel < 1 || targetLevel > maxLevel) {
+        throw new Error(`${skill.name || id} rank must be a whole number from 1 to ${maxLevel}.`);
+      }
+      return { ...skill, targetLevel };
+    }).filter(Boolean);
     const missingSkillIds = requestedSkillIds.filter((id) => !byId.has(id));
     if (!selectedSkills.length) throw new Error("None of the selected skill ids exist in the bundled skill catalog.");
     const query = String(payload?.query || payload?.playerId || "").trim();
     const playerData = await timer.step("selected_target_validate", () => withProgressionStepTimeout(progressionPlayerLookup(query), 20000, "selected_target_validate"));
     if (!playerData.ok) return progressionUnsupported(playerData.reason || "Player lookup failed.");
     const playerOnline = String(playerData.player?.online_status || "").toLowerCase().includes("online");
-    const onlineProgressionWarning = playerOnline
-      ? "Online player progression edit applied directly to the database. Read-back verifies the saved progression JSON, but the live game server may require the player to relog or reload before the change is visible."
-      : "";
+    if (playerOnline) throw new Error("Skill rank grants require the selected player to be offline.");
     const fLevelTarget = playerData.progressionDebug?.fLevelTarget || null;
     if (!fLevelTarget?.entity_id) throw new Error("Selected FLevelComponent target is missing. Reload the player before unlocking skills.");
     const fLevelFields = fLevelTarget.fields || {};
     const fLevelBasePath = jsonPathParts(fLevelFields.TotalSkillPoints?.path || fLevelFields.TotalXPEarned?.path || fLevelFields.UnspentSkillPoints?.path || ["FLevelComponent", "1", "TotalSkillPoints"]).slice(0, -1);
     const actorId = requireInteger(playerData.player.actor_id, "actor_id", 1);
     const fLevelEntityId = requireSqlIntegerLiteral(fLevelTarget.entity_id, "fLevel_entity_id");
+    const requestedUpdates = selectedSkills.map((skill) => {
+      const tag = String(skill.tag || "").trim();
+      if (!tag) throw new Error(`Skill ${skill.name || skill.id} is missing a gameplay tag.`);
+      return {
+        id: skill.id,
+        tag,
+        name: skill.name,
+        targetLevel: skill.targetLevel,
+        targetPoints: skillUnlockPointCost(skill, skill.targetLevel),
+        maxLevel: Math.max(1, Number(skill.maxLevel) || 1),
+        perkTag: skillPerkTagFromSkillTag(tag)
+      };
+    });
+    const currentSelects = requestedUpdates.map((item, index) => `
+      coalesce(components #>> ${sqlTextArrayPath([...fLevelBasePath, "ModuleData", skillModuleTagKey(item.tag), "SkillPointsSpent"])}, '0') as module_${index},
+      coalesce(components #>> ${sqlTextArrayPath([...fLevelBasePath, "PerkData", skillModuleTagKey(item.perkTag || "__none__"), "CurrentLevel"])}, '0') as perk_${index}
+    `).join(",\n");
+    const currentOutput = await timer.step("read_current_ranks", () => withProgressionStepTimeout(dbQuery(`
+      select ${currentSelects}
+      from dune.fgl_entities
+      where entity_id = ${fLevelEntityId}
+      limit 1;
+    `, 12000), 14000, "read_current_ranks"));
+    const currentParts = String(currentOutput || "").split("\t");
+    const moduleUpdates = requestedUpdates.map((item, index) => ({
+      ...item,
+      currentPoints: Math.max(0, Number(currentParts[index * 2]) || 0),
+      currentLevel: Math.max(0, Number(currentParts[(index * 2) + 1]) || 0),
+      points: Math.max(item.targetPoints, Number(currentParts[index * 2]) || 0),
+      level: Math.max(item.targetLevel, Number(currentParts[(index * 2) + 1]) || 0)
+    }));
     const backupId = crypto.randomBytes(16).toString("hex");
-    const backupPath = progressionBackupPath(actorId, "skill_unlocks", backupId);
+    const backupPath = progressionBackupPath(actorId, "skill_ranks", backupId);
     const beforeOutput = await timer.step("read_current", () => withProgressionStepTimeout(dbQuery(`
       select jsonb_pretty(components #> ${sqlTextArrayPath(fLevelBasePath)})
       from dune.fgl_entities
@@ -7542,31 +7605,18 @@ async function progressionUnlockSkills(payload) {
         action: "skill_unlocks",
         player: playerData.player,
         fLevelTarget,
-        selectedSkills,
+        selectedSkills: moduleUpdates,
         missingSkillIds,
         beforeFLevelComponent: beforeOutput || "",
-        playerOnline,
-        onlineProgressionWarning,
-        source: playerOnline ? "direct-online-player-progression-skill-unlock" : "direct-skill-unlock"
+        playerOnline: false,
+        source: "direct-skill-rank-grant"
       }, null, 2), "utf8");
-    });
-    const moduleUpdates = selectedSkills.map((skill) => {
-      const tag = String(skill.tag || "").trim();
-      if (!tag) throw new Error(`Skill ${skill.name || skill.id} is missing a gameplay tag.`);
-      return {
-        id: skill.id,
-        tag,
-        name: skill.name,
-        points: skillUnlockPointCost(skill),
-        maxLevel: Math.max(1, Number(skill.maxLevel) || 1),
-        perkTag: skillPerkTagFromSkillTag(tag)
-      };
     });
     let expression = "components";
     for (const item of moduleUpdates) {
       expression = `jsonb_set(${expression}, ${sqlTextArrayPath([...fLevelBasePath, "ModuleData", skillModuleTagKey(item.tag)])}, jsonb_build_object('SkillPointsSpent', ${item.points}), true)`;
       if (item.perkTag) {
-        expression = `jsonb_set(${expression}, ${sqlTextArrayPath([...fLevelBasePath, "PerkData", skillModuleTagKey(item.perkTag)])}, jsonb_build_object('bIsNew', false, 'CurrentLevel', ${item.maxLevel}), true)`;
+        expression = `jsonb_set(${expression}, ${sqlTextArrayPath([...fLevelBasePath, "PerkData", skillModuleTagKey(item.perkTag)])}, jsonb_build_object('bIsNew', false, 'CurrentLevel', ${item.level}), true)`;
       }
     }
     await timer.step("unlock_update", () => withProgressionStepTimeout(dbQuery(`
@@ -7592,8 +7642,8 @@ async function progressionUnlockSkills(payload) {
       moduleSkillPointsSpent: parts[index * 2] || "",
       perkCurrentLevel: parts[(index * 2) + 1] || ""
     }));
-    const verified = readBackValues.every((item) => String(item.moduleSkillPointsSpent) === String(item.points) && (!item.perkTag || String(item.perkCurrentLevel) === String(item.maxLevel)));
-    await timer.step("audit_write", async () => progressionAudit("skill_unlocks_applied", { player: playerData.player, fLevelTarget, selectedSkills: moduleUpdates, missingSkillIds, backupFilePath: backupPath, playerOnline, onlineProgressionWarning, verified, readBackValues }));
+    const verified = readBackValues.every((item) => Number(item.moduleSkillPointsSpent) >= item.targetPoints && (!item.perkTag || Number(item.perkCurrentLevel) >= item.targetLevel));
+    await timer.step("audit_write", async () => progressionAudit("skill_ranks_granted", { player: playerData.player, fLevelTarget, selectedSkills: moduleUpdates, missingSkillIds, backupFilePath: backupPath, playerOnline: false, verified, readBackValues }));
     timer.finish({ status: verified ? "applied" : "verification_failed", action: "skill_unlocks", selected: selectedSkills.length });
     return {
       ok: verified,
@@ -7608,16 +7658,199 @@ async function progressionUnlockSkills(payload) {
       missingSkillIds,
       readBackValues,
       timings: timer.timings,
-      warning: verified ? onlineProgressionWarning : "",
+      warning: "",
       message: verified
-        ? `Unlocked ${moduleUpdates.length} selected skill(s).${onlineProgressionWarning ? ` ${onlineProgressionWarning}` : ""}`
-        : "Skill unlock write completed, but read-back verification did not match."
+        ? `Granted ${moduleUpdates.length} selected skill rank(s).`
+        : "Skill rank write completed, but read-back verification did not match."
     };
   } catch (error) {
     const timedOut = /timed out|timeout/i.test(error.message);
     const failedStep = timer.currentStep;
     timer.finish({ status: timedOut ? "timeout" : "error", action: "skill_unlocks", step: failedStep, error: error.message });
     return { ok: false, status: timedOut ? "timeout" : "error", step: failedStep, timings: timer.timings, action: "skill_unlocks", error: error.message, auditLogPath: PROGRESSION_AUDIT_LOG };
+  }
+}
+
+const HOUSE_SCRIP_CURRENCY_ID = 1;
+const HOUSE_SCRIP_CONFIRM_TEXT = "GIVE HOUSE SCRIP";
+
+async function progressionHouseScripStorageInspect() {
+  const output = await withProgressionStepTimeout(dbQuery(`
+    select 'column'::text, column_name::text, data_type::text, udt_name::text, is_nullable::text, coalesce(column_default, '')::text
+    from information_schema.columns
+    where table_schema = 'dune'
+      and table_name = 'player_virtual_currency_balances'
+
+    union all
+
+    select 'constraint'::text, tc.constraint_name::text, tc.constraint_type::text,
+      string_agg(kcu.column_name, ',' order by kcu.ordinal_position)::text, ''::text, ''::text
+    from information_schema.table_constraints tc
+    join information_schema.key_column_usage kcu
+      on kcu.constraint_schema = tc.constraint_schema
+     and kcu.constraint_name = tc.constraint_name
+     and kcu.table_schema = tc.table_schema
+     and kcu.table_name = tc.table_name
+    where tc.table_schema = 'dune'
+      and tc.table_name = 'player_virtual_currency_balances'
+      and tc.constraint_type in ('PRIMARY KEY', 'UNIQUE')
+    group by tc.constraint_name, tc.constraint_type
+
+    union all
+
+    select 'function'::text, p.proname::text, pg_get_function_identity_arguments(p.oid)::text,
+      pg_get_function_result(p.oid)::text, l.lanname::text, ''::text
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    join pg_language l on l.oid = p.prolang
+    where n.nspname = 'dune'
+      and (p.proname ilike '%virtual%currency%' or p.proname ilike '%currency%balance%')
+
+    order by 1, 2;
+  `, 12000), 14000, "house_scrip_storage_inspect");
+  const rows = parseDbRows(output, ["kind", "name", "detail", "value", "extra", "defaultValue"]);
+  return {
+    ok: true,
+    table: "dune.player_virtual_currency_balances",
+    columns: rows.filter((row) => row.kind === "column"),
+    constraints: rows.filter((row) => row.kind === "constraint"),
+    functions: rows.filter((row) => row.kind === "function")
+  };
+}
+
+function requireSupportedHouseScripStorage(storage) {
+  const columnTypes = Object.fromEntries((storage?.columns || []).map((row) => [row.name, row.detail]));
+  if (columnTypes.player_controller_id !== "bigint" || columnTypes.currency_id !== "smallint" || columnTypes.balance !== "bigint") {
+    throw new Error("House Scrip storage is unsupported: expected bigint player_controller_id, smallint currency_id, and bigint balance columns.");
+  }
+  const adjustmentFunction = (storage?.functions || []).find((row) => row.name === "adjust_player_virtual_currency_balance");
+  const identityArguments = String(adjustmentFunction?.detail || "").toLowerCase();
+  if (!adjustmentFunction || !/\bbigint\b[\s\S]*\bsmallint\b[\s\S]*\bbigint\b/.test(identityArguments)) {
+    throw new Error("House Scrip storage is unsupported: dune.adjust_player_virtual_currency_balance(bigint, smallint, bigint) was not detected.");
+  }
+  return {
+    table: storage.table,
+    function: adjustmentFunction.name,
+    identityArguments: adjustmentFunction.detail,
+    resultType: adjustmentFunction.value
+  };
+}
+
+async function progressionHouseScripBalance(queryValue) {
+  const query = String(queryValue || "").trim();
+  const playerData = await withProgressionStepTimeout(progressionPlayerLookup(query), 20000, "house_scrip_player_lookup");
+  if (!playerData.ok) return progressionUnsupported(playerData.reason || playerData.error || "Player lookup failed.");
+  const controllerId = requireInteger(playerData.player?.player_controller_id || playerData.player?.actor_id, "player_controller_id", 1);
+  const output = await withProgressionStepTimeout(dbQuery(`
+    select coalesce((
+      select balance::text
+      from dune.player_virtual_currency_balances
+      where player_controller_id = ${controllerId}
+        and currency_id = ${HOUSE_SCRIP_CURRENCY_ID}
+      limit 1
+    ), '0');
+  `, 12000), 14000, "house_scrip_balance_lookup");
+  const balance = /^\d+$/.test(String(output || "").trim()) ? String(output).trim() : "0";
+  return {
+    ok: true,
+    status: "loaded",
+    player: playerData.player,
+    playerOffline: !String(playerData.player?.online_status || "").toLowerCase().includes("online"),
+    currencyId: HOUSE_SCRIP_CURRENCY_ID,
+    balance
+  };
+}
+
+async function progressionGrantHouseScrip(payload) {
+  const timer = progressionPhaseTimer("progression/house-scrip");
+  try {
+    const configValue = await timer.step("config_load", async () => loadConfig());
+    if (!configValue.progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+    if (String(payload?.confirmText || "").trim() !== HOUSE_SCRIP_CONFIRM_TEXT) throw new Error(`Type ${HOUSE_SCRIP_CONFIRM_TEXT} to grant House Scrip.`);
+    const amount = requireInteger(payload?.amount, "House Scrip amount", 1, 1000000000);
+    const query = String(payload?.query || payload?.playerId || "").trim();
+    const playerData = await timer.step("selected_target_validate", () => withProgressionStepTimeout(progressionPlayerLookup(query), 20000, "selected_target_validate"));
+    if (!playerData.ok) return progressionUnsupported(playerData.reason || playerData.error || "Player lookup failed.");
+    const playerOnline = String(playerData.player?.online_status || "").toLowerCase().includes("online");
+    if (playerOnline) throw new Error("House Scrip grants require the selected player to be offline.");
+    const controllerId = requireInteger(playerData.player?.player_controller_id || playerData.player?.actor_id, "player_controller_id", 1);
+    const storageAdapter = await timer.step("storage_validate", async () => requireSupportedHouseScripStorage(await progressionHouseScripStorageInspect()));
+    const beforeOutput = await timer.step("read_current", () => withProgressionStepTimeout(dbQuery(`
+      select coalesce((
+        select balance::text
+        from dune.player_virtual_currency_balances
+        where player_controller_id = ${controllerId}
+          and currency_id = ${HOUSE_SCRIP_CURRENCY_ID}
+        limit 1
+      ), '0');
+    `, 12000), 14000, "read_current"));
+    const beforeBalance = /^\d+$/.test(String(beforeOutput || "").trim()) ? String(beforeOutput).trim() : "0";
+    const expectedBalance = (BigInt(beforeBalance) + BigInt(amount)).toString();
+    const backupId = crypto.randomBytes(16).toString("hex");
+    const backupPath = progressionBackupPath(controllerId, "house_scrip", backupId);
+    await timer.step("backup_create", async () => fs.writeFileSync(backupPath, JSON.stringify({
+      createdAt: new Date().toISOString(),
+      action: "house_scrip_grant",
+      player: playerData.player,
+      playerControllerId: controllerId,
+      currencyId: HOUSE_SCRIP_CURRENCY_ID,
+      beforeBalance,
+      amount,
+      expectedBalance,
+      source: "protected-house-scrip-grant"
+    }, null, 2), "utf8"));
+    await timer.step("currency_update", () => withProgressionStepTimeout(dbQuery(`
+      begin;
+      set local search_path to dune, public;
+      select dune.adjust_player_virtual_currency_balance(${controllerId}::bigint, ${HOUSE_SCRIP_CURRENCY_ID}::smallint, ${amount}::bigint);
+      commit;
+    `, 16000), 18000, "currency_update"));
+    const readBackOutput = await timer.step("verify_readback", () => withProgressionStepTimeout(dbQuery(`
+      select coalesce((
+        select balance::text
+        from dune.player_virtual_currency_balances
+        where player_controller_id = ${controllerId}
+          and currency_id = ${HOUSE_SCRIP_CURRENCY_ID}
+        limit 1
+      ), '0');
+    `, 12000), 14000, "verify_readback"));
+    const balance = String(readBackOutput || "").trim();
+    const verified = balance === expectedBalance;
+    await timer.step("audit_write", async () => progressionAudit("house_scrip_granted", {
+      player: playerData.player,
+      playerControllerId: controllerId,
+      currencyId: HOUSE_SCRIP_CURRENCY_ID,
+      amount,
+      beforeBalance,
+      expectedBalance,
+      balance,
+      verified,
+      storageAdapter,
+      backupFilePath: backupPath
+    }));
+    timer.finish({ status: verified ? "applied" : "verification_failed", action: "house_scrip_grant" });
+    return {
+      ok: verified,
+      status: verified ? "applied" : "verification_failed",
+      action: "house_scrip_grant",
+      player: playerData.player,
+      playerOffline: true,
+      currencyId: HOUSE_SCRIP_CURRENCY_ID,
+      amount,
+      beforeBalance,
+      balance,
+      expectedBalance,
+      storageAdapter,
+      backupPath,
+      auditLogPath: PROGRESSION_AUDIT_LOG,
+      timings: timer.timings,
+      message: verified ? `Granted ${amount} House Scrip.` : "House Scrip write completed, but read-back verification did not match."
+    };
+  } catch (error) {
+    const timedOut = /timed out|timeout/i.test(error.message);
+    const failedStep = timer.currentStep;
+    timer.finish({ status: timedOut ? "timeout" : "error", action: "house_scrip_grant", step: failedStep, error: error.message });
+    return { ok: false, status: timedOut ? "timeout" : "error", step: failedStep, action: "house_scrip_grant", error: error.message, timings: timer.timings, auditLogPath: PROGRESSION_AUDIT_LOG };
   }
 }
 
@@ -13288,7 +13521,7 @@ async function adminUnlockSchematicRecipe(command, options = {}) {
         ? `Dry-run passed. ${item.name || template} maps to crafting recipe ${row.recipeId}.`
         : `Crafting recipe unlocked: ${recipeDisplayName(row.recipeId)} for ${row.characterName || playerId}.`,
     stderr: online ? (dryRun ? "Player is online. Dry-run did not write anything; a live recipe unlock may require relog/server reload before it appears." : "Player is online. The recipe was written to the database, but the live game may require relog/server reload before it appears.") : "",
-    note: "Red-Blink-style schematic unlock: writes CraftingRecipesLibraryActorComponent.m_KnownItemRecipes instead of character inventory.",
+    note: "Database-backed schematic unlock: writes CraftingRecipesLibraryActorComponent.m_KnownItemRecipes instead of character inventory.",
     timings: {}
   };
   appendAdminAudit(dryRun ? "schematic_recipe_dry_run" : "schematic_recipe_unlocked", {
@@ -14710,6 +14943,16 @@ function send(res, status, type, body) {
   res.end(body);
 }
 
+function blueprintDownloadName(value, fallback = "blueprint") {
+  return String(value || fallback).replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g, "_").trim().replace(/\.+$/g, "") || fallback;
+}
+
+async function readJsonRequest(req, maxBytes = 1024 * 1024 * 8) {
+  const raw = await readBody(req, maxBytes);
+  try { return JSON.parse(raw || "{}"); }
+  catch { throw new Error("Invalid JSON payload."); }
+}
+
 async function json(res, body, status = 200) {
   send(res, status, "application/json", JSON.stringify(body));
 }
@@ -15360,6 +15603,8 @@ function appPage() {
   <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
   <script src="/vendor/leaflet/leaflet.js"></script>
   <script src="/assets/coordinate-system.js"></script>
+  <script src="/assets/vendor/babylon.js"></script>
+  <script src="/assets/vendor/babylonjs.loaders.min.js"></script>
   <style>
     :root {
       --bg:#030303; --bg-2:#12110d; --panel:rgba(8,8,7,.9); --panel-2:rgba(30,25,14,.76);
@@ -16321,6 +16566,9 @@ function appPage() {
     .progression-recent-time { width:42px; height:42px; border:1px solid rgba(240,201,106,.38); border-radius:999px; display:grid; place-items:center; color:var(--gold-bright); background:rgba(240,201,106,.06); font-size:12px; font-weight:900; text-transform:uppercase; }
     .progression-recent-item strong { display:block; color:var(--text); }
     .progression-recent-item span { display:block; margin-top:3px; color:var(--muted); font-size:12px; }
+    .progression-skill-card { grid-template-columns:auto minmax(0,1fr) auto; align-items:center; }
+    .progression-skill-rank { min-width:112px; }
+    .progression-currency-balance { min-width:0; max-width:100%; justify-self:end; font-size:clamp(14px,1.5vw,20px); line-height:1.15; color:var(--gold-bright); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; text-align:right; }
     .progression-compact-support { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:12px; }
     @media (max-width:1050px) { .progression-main-grid,.progression-profile-card{grid-template-columns:1fr}.progression-bars,.progression-editor-grid,.progression-compact-support{grid-template-columns:1fr}.progression-hero{align-items:flex-start;flex-direction:column}.progression-avatar{width:88px;height:88px;font-size:44px} }
     .ping-graph { display:flex; align-items:end; gap:3px; min-height:70px; margin-top:10px; padding:8px; border:1px solid rgba(214,166,69,.16); background:rgba(0,0,0,.22); }
@@ -16370,6 +16618,28 @@ function appPage() {
     th { color:var(--sand); font-size:12px; text-transform:uppercase; letter-spacing:.07em; }
     .table-wrap { width:100%; overflow-x:auto; }
     .table-wrap table { min-width:760px; }
+    .blueprint-toolbar { display:grid; grid-template-columns:minmax(240px,1fr) minmax(280px,1.25fr) auto; gap:10px; align-items:end; }
+    .blueprint-toolbar label { min-width:0; }
+    .blueprint-toolbar input[type="file"] { min-height:40px; padding:8px; }
+    .blueprint-summary { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; }
+    .blueprint-table th:first-child, .blueprint-table td:first-child { width:44px; text-align:center; }
+    .blueprint-table td:last-child { white-space:nowrap; }
+    .blueprint-table input[type="checkbox"] { width:18px; height:18px; }
+    .blueprint-progress { min-height:42px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .blueprint-viewer-shell { display:grid; gap:12px; }
+    .blueprint-viewer-stage { position:relative; min-height:520px; overflow:hidden; border:1px solid var(--line); background:radial-gradient(circle at 50% 30%, rgba(214,166,69,.1), transparent 42%),linear-gradient(180deg, rgba(4,7,8,.96), rgba(10,8,5,.98)); }
+    .blueprint-viewer-stage canvas { display:block; width:100%; height:clamp(420px,58vh,680px); cursor:grab; touch-action:none; }
+    .blueprint-viewer-stage canvas.dragging { cursor:grabbing; }
+    .blueprint-viewer-hint { position:absolute; left:12px; bottom:10px; padding:6px 9px; border:1px solid rgba(214,166,69,.2); background:rgba(3,5,5,.78); color:var(--muted); font-size:10.5px; pointer-events:none; }
+    .blueprint-viewer-controls { display:flex; flex-wrap:wrap; align-items:center; gap:9px; }
+    .blueprint-viewer-controls .check-row { width:auto; min-height:36px; padding:7px 10px; border:1px solid rgba(214,166,69,.18); }
+    .blueprint-viewer-legend { display:flex; flex-wrap:wrap; gap:12px; color:var(--muted); font-size:11px; }
+    .blueprint-viewer-legend span::before { content:""; display:inline-block; width:9px; height:9px; margin-right:6px; border-radius:50%; background:var(--legend); box-shadow:0 0 8px var(--legend); }
+    .blueprint-model-pack { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border:1px solid rgba(214,166,69,.2); background:rgba(214,166,69,.055); }
+    .blueprint-model-pack strong { display:block; }
+    .blueprint-model-coverage { min-height:18px; }
+    @media (max-width:900px) { .blueprint-toolbar { grid-template-columns:1fr; } }
+
     .panel { font-size:var(--font-panel-body); line-height:1.42; }
     .panel h2 { font-size:18px; line-height:1.18; letter-spacing:.07em; }
     .panel h3 { font-size:16px; line-height:1.2; letter-spacing:.055em; }
@@ -17064,6 +17334,7 @@ function appPage() {
       <div class="nav-group">
         <div class="nav-group-title">Players</div>
         <button class="tab" data-view="players">Players</button>
+        <button class="tab" data-view="blueprints">Blueprints</button>
         <button class="tab" data-view="give">Give Item</button>
         <button class="tab" data-view="repair">Repair Inspector</button>
         <button class="tab" data-view="progression">Progression Inspector</button>
@@ -17233,7 +17504,7 @@ function appPage() {
           <div class="sound-widget advanced-only" aria-label="UI sound controls">
             <div class="sound-widget-head">
               <div class="label">Interface Audio</div>
-              <button id="dashboardSoundToggle" class="sound-toggle" type="button">🔇 Sounds OFF</button>
+              <button id="dashboardSoundToggle" class="sound-toggle" type="button">ðŸ”‡ Sounds OFF</button>
             </div>
             <label class="sound-slider">Volume <input id="dashboardSoundVolume" type="range" min="0" max="100" value="100"><span id="dashboardSoundVolumeLabel" class="sound-volume-readout">100%</span></label>
           </div>
@@ -17406,6 +17677,67 @@ function appPage() {
         </div>
       </div>
     </section>
+
+    <section id="blueprints" class="view">
+      <div class="stack">
+        <div class="panel pad">
+          <div class="panel-head">
+            <div><div class="label">Player Building Blueprints</div><div class="subtle">Import, export, and remove the selected player's saved building layouts.</div></div>
+            <button type="button" onclick="refreshBlueprints()">Refresh</button>
+          </div>
+          <div class="blueprint-toolbar mt">
+            <label>Player<select id="blueprintPlayer" onchange="syncBlueprintPlayer()"><option value="">Loading players...</option></select></label>
+            <label>Blueprint JSON Files<input id="blueprintFiles" type="file" accept=".json,application/json" multiple onchange="selectBlueprintFiles(this.files)"></label>
+            <button id="blueprintImportButton" type="button" class="primary" onclick="importBlueprintFiles()" disabled>Import</button>
+          </div>
+          <div id="blueprintFileSummary" class="subtle mt">Select up to 10 JSON files.</div>
+          <div id="blueprintFilePreviewActions" class="action-row mt"></div>
+          <div class="blueprint-model-pack mt">
+            <div><strong>Exact Offline 3D Models</strong><span id="blueprintModelPackStatus" class="subtle">Checking the bundled piece catalog...</span></div>
+          </div>
+          <div class="warning mt">Imported blueprints are added to the player's backpack as Solido Replicator items. The player must relog to see them and must have every included building piece and placeable unlocked before placement.</div>
+          <div id="blueprintStatus" class="empty mt blueprint-progress">Choose a player to load blueprints.</div>
+        </div>
+        <div class="panel pad">
+          <div class="blueprint-summary">
+            <div><div class="label">Saved Blueprints</div><div id="blueprintCount" class="subtle">0 blueprints</div></div>
+            <div class="action-row">
+              <button id="blueprintExportSelected" type="button" onclick="exportSelectedBlueprints()" disabled>Export Selected</button>
+              <button id="blueprintDeleteSelected" type="button" class="danger" onclick="deleteSelectedBlueprints()" disabled>Delete Selected</button>
+              <button id="blueprintExportAll" type="button" onclick="exportAllBlueprints()" disabled>Export All</button>
+            </div>
+          </div>
+          <div class="table-wrap mt">
+            <table class="blueprint-table">
+              <thead><tr><th><input id="blueprintSelectAll" type="checkbox" aria-label="Select all blueprints" onchange="toggleAllBlueprints(this.checked)"></th><th>Name</th><th>Pieces</th><th>Placeables</th><th>Item ID</th><th>Actions</th></tr></thead>
+              <tbody id="blueprintRows"><tr><td colspan="6">No player selected.</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="blueprintViewerPanel" class="panel pad hidden">
+          <div class="blueprint-viewer-shell">
+            <div class="panel-head">
+              <div><div id="blueprintViewerTitle" class="label">Blueprint 3D View</div><div id="blueprintViewerSummary" class="subtle">Select View on a blueprint.</div></div>
+              <div class="action-row"><button type="button" onclick="resetBlueprintViewer()">Reset View</button><button type="button" onclick="closeBlueprintViewer()">Close</button></div>
+            </div>
+            <div class="blueprint-viewer-controls">
+              <label class="check-row"><input id="blueprintViewerPieces" type="checkbox" checked onchange="drawBlueprintViewer()"> Building Pieces</label>
+              <label class="check-row"><input id="blueprintViewerPlaceables" type="checkbox" checked onchange="drawBlueprintViewer()"> Placeables</label>
+              <label class="check-row"><input id="blueprintViewerShields" type="checkbox" checked onchange="drawBlueprintViewer()"> Pentashields</label>
+            </div>
+            <div class="blueprint-viewer-legend"><span style="--legend:#e0ad63">Building pieces</span><span style="--legend:#72b7d6">Placeables</span><span style="--legend:#b879e8">Pentashields</span></div>
+            <div id="blueprintModelCoverage" class="subtle blueprint-model-coverage">Detailed local-model coverage will appear here.</div>
+            <div id="blueprintViewerSelection" class="subtle blueprint-model-coverage">Click a piece to inspect its exact type and rotation.</div>
+            <div class="blueprint-viewer-stage">
+              <canvas id="blueprintViewerCanvas" role="img" aria-label="Interactive three-dimensional blueprint grid"></canvas>
+              <div class="blueprint-viewer-hint">Drag to rotate and tilt · Right or middle drag to pan · Mouse wheel to zoom · Double-click to reset</div>
+            </div>
+            <div class="subtle">The viewer uses bundled piece meshes and exported transforms entirely offline. Unrecognized piece identifiers are reported instead of being guessed; collision, snapping, and attachment geometry are not simulated.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
 
     <section id="give" class="view">
       <div class="give-layout">
@@ -17984,9 +18316,9 @@ DUNE_RECEIVER_SSH_KEY</pre>
             </details>
 
             <details class="progression-fold">
-              <summary>Skill Unlocks</summary>
+              <summary>Skill Ranks</summary>
               <div class="progression-fold-body">
-                <div class="warning">Skill unlock writes create an automatic backup and require the selected player to be offline.</div>
+                <div class="warning">Choose a target rank for every selected skill. Grants only raise ranks, use cumulative per-rank costs, create an automatic backup, and require the player to be offline.</div>
                 <div class="field-grid mt">
                   <label>Skill Search<input id="progressionSkillSearch" placeholder="Skill name, tag, tree" oninput="renderProgressionSkillCatalog()"></label>
                   <label>Skill Tree<select id="progressionSkillTreeFilter" onchange="renderProgressionSkillCatalog()"><option value="all">All trees</option></select></label>
@@ -17997,14 +18329,31 @@ DUNE_RECEIVER_SSH_KEY</pre>
                   <button type="button" onclick="selectVisibleProgressionSkills(true)">Select Visible</button>
                   <button type="button" onclick="selectVisibleProgressionSkills(false)">Clear Visible</button>
                   <button type="button" onclick="clearProgressionSkillSelection()">Clear All</button>
-                  <button type="button" class="danger" onclick="unlockSelectedProgressionSkills()">Unlock Selected Skills</button>
+                  <button type="button" class="danger" onclick="unlockSelectedProgressionSkills()">Grant Selected Ranks</button>
                 </div>
                 <div id="progressionSkillCatalogStatus" class="empty mt">Skill catalog not loaded.</div>
                 <div id="progressionSkillList" class="item-db-list mt"><div class="empty">Load the skill catalog to choose skills.</div></div>
-                <label class="mt">Type APPLY PROGRESSION<input id="progressionSkillConfirmText" placeholder="APPLY PROGRESSION"></label>
                 <details class="vm-details mt">
-                  <summary>Skill Unlock Log</summary>
-                  <pre id="progressionSkillPreviewLog" class="mt">No skill unlock action has run.</pre>
+                  <summary>Skill Rank Grant Log</summary>
+                  <pre id="progressionSkillPreviewLog" class="mt">No skill rank grant has run.</pre>
+                </details>
+              </div>
+            </details>
+
+            <details class="progression-fold">
+              <summary>House Scrip</summary>
+              <div class="progression-fold-body">
+                <div class="warning">House Scrip is virtual currency, not an inventory item. Grants create an automatic backup, use the game database adjustment function, verify the exact new balance, and require the player to be offline.</div>
+                <div class="detail-row mt"><span class="subtle">Current House Scrip</span><strong id="progressionHouseScripBalance" class="progression-currency-balance">--</strong></div>
+                <div class="field-grid mt">
+                  <label>Amount to Add<input id="progressionHouseScripAmount" type="number" min="1" max="1000000000" step="1" value="1000"></label>
+                  <label>Type GIVE HOUSE SCRIP<input id="progressionHouseScripConfirm" placeholder="GIVE HOUSE SCRIP"></label>
+                  <button type="button" onclick="refreshProgressionHouseScrip()">Refresh Balance</button>
+                  <button type="button" class="danger" onclick="grantProgressionHouseScrip()">Give House Scrip</button>
+                </div>
+                <details class="vm-details mt">
+                  <summary>House Scrip Grant Log</summary>
+                  <pre id="progressionHouseScripLog" class="mt">Load a player to read the House Scrip balance.</pre>
                 </details>
               </div>
             </details>
@@ -18743,6 +19092,7 @@ const viewCopy={
   dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
   operations:["Operations","Persistent progress, duplicate-action protection, and recent Suite work."],
   players:["Players","Search, inspect, and select characters for admin actions."],
+  blueprints:["Blueprints","Import, export, manage, and preview player building blueprints."],
   give:["Give Item","Live item grants through the configured receiver."],
   repair:["Repair Inspector","Restore item and vehicle-module durability with protected database writes."],
   market:["Market Bot","Automatic NPC stock control, player-listing purchases, and manual market tools."],
@@ -18764,10 +19114,10 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillPreviewState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,blueprintModelPackState=null,blueprintViewer={data:null,name:"",yaw:-0.72,pitch:0.68,zoom:1,panX:0,panY:0,drag:null,engine:null,scene:null,camera:null,groups:null,renderGeneration:0},liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
 let serverUpdateOperationId="",serverUpdateCheckState=null,serverUpdatePollTimer=null;
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
@@ -19202,7 +19552,7 @@ function uiSoundGain(scale=1){return Math.min(.18,(clampSoundVolume(uiSoundPrefs
 function ensureUiSoundContext(){if(!uiSoundContext){const AudioCtor=window.AudioContext||window.webkitAudioContext;if(!AudioCtor)return null;uiSoundContext=new AudioCtor();}if(uiSoundContext.state==="suspended")uiSoundContext.resume().catch(()=>{});return uiSoundContext;}
 function playTone(freq,duration=70,type="sine",delay=0,gainScale=.8,endFreq){const ctx=ensureUiSoundContext();if(!ctx||!uiSoundPrefs.enabled||uiSoundPrefs.volume<=0)return;const osc=ctx.createOscillator();const gain=ctx.createGain();const now=ctx.currentTime+delay;const level=uiSoundGain(gainScale);osc.type=type;osc.frequency.setValueAtTime(freq,now);if(endFreq)osc.frequency.exponentialRampToValueAtTime(Math.max(1,endFreq),now+duration/1000);gain.gain.setValueAtTime(0.0001,now);gain.gain.exponentialRampToValueAtTime(Math.max(0.0002,level),now+.012);gain.gain.exponentialRampToValueAtTime(0.0001,now+duration/1000);osc.connect(gain);gain.connect(ctx.destination);osc.start(now);osc.stop(now+duration/1000+.025);}
 function playUiSound(kind){if(!uiSoundPrefs.enabled||uiSoundPrefs.volume<=0)return;try{if(kind==="hover")playTone(880,45,"sine",0,.26,1040);else if(kind==="click")playTone(520,65,"triangle",0,.42,420);else if(kind==="tab"){playTone(360,55,"sine",0,.36,480);playTone(760,65,"sine",.055,.26,920);}else if(kind==="success"){playTone(520,70,"triangle",0,.38,680);playTone(920,90,"sine",.075,.28,1180);}else if(kind==="warning"){playTone(320,95,"triangle",0,.34,220);playTone(180,110,"sine",.09,.24,150);}}catch{}}
-function syncUiSoundSettings(){const enabled=document.getElementById("uiSoundsEnabled");const volume=document.getElementById("uiSoundVolume");const label=document.getElementById("uiSoundVolumeLabel");const status=document.getElementById("uiSoundStatus");const dashToggle=document.getElementById("dashboardSoundToggle");const dashVolume=document.getElementById("dashboardSoundVolume");const dashLabel=document.getElementById("dashboardSoundVolumeLabel");const pct=clampSoundVolume(uiSoundPrefs.volume);if(enabled)enabled.checked=Boolean(uiSoundPrefs.enabled);if(volume)volume.value=String(pct);if(label)label.textContent=pct+"%";if(dashToggle){dashToggle.textContent=uiSoundPrefs.enabled?"🔊 Sounds ON":"🔇 Sounds OFF";dashToggle.classList.toggle("primary",Boolean(uiSoundPrefs.enabled));}if(dashVolume)dashVolume.value=String(pct);if(dashLabel)dashLabel.textContent=pct+"%";if(status){status.className=uiSoundPrefs.enabled?"empty":"warning";status.textContent=(uiSoundPrefs.enabled?"Sounds ON. ":"Sounds OFF. ")+"Volume "+pct+"%.";}}
+function syncUiSoundSettings(){const enabled=document.getElementById("uiSoundsEnabled");const volume=document.getElementById("uiSoundVolume");const label=document.getElementById("uiSoundVolumeLabel");const status=document.getElementById("uiSoundStatus");const dashToggle=document.getElementById("dashboardSoundToggle");const dashVolume=document.getElementById("dashboardSoundVolume");const dashLabel=document.getElementById("dashboardSoundVolumeLabel");const pct=clampSoundVolume(uiSoundPrefs.volume);if(enabled)enabled.checked=Boolean(uiSoundPrefs.enabled);if(volume)volume.value=String(pct);if(label)label.textContent=pct+"%";if(dashToggle){dashToggle.textContent=uiSoundPrefs.enabled?"ðŸ”Š Sounds ON":"ðŸ”‡ Sounds OFF";dashToggle.classList.toggle("primary",Boolean(uiSoundPrefs.enabled));}if(dashVolume)dashVolume.value=String(pct);if(dashLabel)dashLabel.textContent=pct+"%";if(status){status.className=uiSoundPrefs.enabled?"empty":"warning";status.textContent=(uiSoundPrefs.enabled?"Sounds ON. ":"Sounds OFF. ")+"Volume "+pct+"%.";}}
 async function saveUiSoundSettings(){try{const current=await getJson("/api/config");const config={...current,uiSoundsEnabled:Boolean(uiSoundPrefs.enabled),uiSoundVolume:clampSoundVolume(uiSoundPrefs.volume)};await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(config)});syncUiSoundSettings();}catch(e){const status=document.getElementById("uiSoundStatus");if(status){status.className="warning";status.textContent="Could not save UI sound preference: "+betterError(e);}playUiSound("warning");}}
 function scheduleUiSoundSave(){clearTimeout(uiSoundSaveTimer);uiSoundSaveTimer=setTimeout(saveUiSoundSettings,300);}
 async function loadUiSoundSettings(){try{const cfg=await getJson("/api/config");uiSoundPrefs.enabled=cfg.uiSoundsEnabled===true;uiSoundPrefs.volume=clampSoundVolume(cfg.uiSoundVolume ?? UI_SOUND_DEFAULTS.volume);}catch{}syncUiSoundSettings();}
@@ -19301,6 +19651,165 @@ async function pollDatabaseRestoreStatus(jobId){if(window.databaseRestorePolling
 async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="IMPORT")throw new Error("Type IMPORT before importing.");await ensureBattlegroupStoppedBeforeImport();if(!(await appConfirm("Import Battlegroup backup","Import Battlegroup backup from this file? Stop the server first. A safety Battlegroup backup will be created first.","Import","Cancel")))return;setDatabaseRestoreRunning(true);el.className="warning mt";el.textContent="Import job starting...";const data=await getJson("/api/database/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:15000});if(!data.jobId)throw new Error(data.error||"Import job was not created.");renderDatabaseRestoreStatus(data);addActivity("database","Battlegroup import started",data.jobId);await pollDatabaseRestoreStatus(data.jobId);}catch(e){setDatabaseRestoreRunning(false);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup import blocked",e.message);playUiSound("warning");}}
 function wireDatabaseImportControls(){const file=document.getElementById("dbRestoreFile");const confirm=document.getElementById("dbRestoreConfirm");if(file){file.addEventListener("input",()=>refreshDatabaseImportReadiness());file.addEventListener("change",()=>refreshDatabaseImportReadiness());}if(confirm){confirm.addEventListener("input",renderDatabaseImportControls);confirm.addEventListener("change",renderDatabaseImportControls);}renderDatabaseImportControls();}
 async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,databaseReachable:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]})]);const dbReachable=probe.databaseReachable===true||probe.ok===true;adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",dbReachable?"Reachable":"Limited");tone("adminDbMirror",dbReachable?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",dbReachable?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Unknown");tone("adminDbMirror","Unknown");badge("topDb","DB status unknown");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+function blueprintPlayerLabel(player){return (player?.character_name||player?.name||player?.id||"Unknown")+" / account "+(player?.account_id||player?.id||"-");}
+function renderBlueprintPlayerSelect(){const select=document.getElementById("blueprintPlayer");if(!select)return;const current=selectedPlayerId||select.value;select.innerHTML=adminPlayers.length?adminPlayers.map(player=>'<option value="'+esc(player.id)+'">'+esc(blueprintPlayerLabel(player))+'</option>').join(""):'<option value="">No players found</option>';if(current&&adminPlayers.some(player=>String(player.id)===String(current))){select.value=String(current);selectedPlayerId=String(current);}else if(adminPlayers[0]){select.value=String(adminPlayers[0].id);selectedPlayerId=String(adminPlayers[0].id);}syncBlueprintButtons();}
+function setBlueprintStatus(text,isError=false){const status=document.getElementById("blueprintStatus");if(!status)return;status.className=(isError?"warning":"empty")+" mt blueprint-progress";status.textContent=String(text||"");}
+function selectBlueprintFiles(files){blueprintFiles=Array.from(files||[]);const summary=document.getElementById("blueprintFileSummary"),actions=document.getElementById("blueprintFilePreviewActions");if(summary)summary.textContent=blueprintFiles.length?(blueprintFiles.length+" file"+(blueprintFiles.length===1?"":"s")+" selected. Preview each layout before importing."):"Select up to 10 JSON files.";if(actions){actions.innerHTML=blueprintFiles.map((file,index)=>'<button type="button" data-blueprint-action="preview-file" data-blueprint-file-index="'+index+'">Preview '+(index+1)+': '+esc(file.name)+'</button>').join("");actions.querySelectorAll('[data-blueprint-action="preview-file"]').forEach(button=>button.addEventListener("click",()=>previewSelectedBlueprintFile(Number(button.dataset.blueprintFileIndex))));}if(blueprintFiles.length>10)setBlueprintStatus("Select no more than 10 blueprint files at a time.",true);syncBlueprintButtons();}
+function syncBlueprintButtons(){const selectedCount=blueprintSelectedIds.size;const hasPlayer=Boolean(document.getElementById("blueprintPlayer")?.value||selectedPlayerId);const importButton=document.getElementById("blueprintImportButton");const exportSelected=document.getElementById("blueprintExportSelected");const deleteSelected=document.getElementById("blueprintDeleteSelected");const exportAll=document.getElementById("blueprintExportAll");const selectAll=document.getElementById("blueprintSelectAll");if(importButton)importButton.disabled=blueprintBusy||!hasPlayer||!blueprintFiles.length||blueprintFiles.length>10;if(exportSelected)exportSelected.disabled=blueprintBusy||!selectedCount;if(deleteSelected)deleteSelected.disabled=blueprintBusy||!selectedCount;if(exportAll)exportAll.disabled=blueprintBusy||!blueprintRows.length;if(selectAll){selectAll.disabled=blueprintBusy||!blueprintRows.length;selectAll.checked=Boolean(blueprintRows.length&&selectedCount===blueprintRows.length);selectAll.indeterminate=Boolean(selectedCount&&selectedCount<blueprintRows.length);}document.querySelectorAll("[data-blueprint-action]").forEach(button=>button.disabled=blueprintBusy);}
+function renderBlueprintRows(){const body=document.getElementById("blueprintRows");const count=document.getElementById("blueprintCount");if(count)count.textContent=blueprintRows.length+" blueprint"+(blueprintRows.length===1?"":"s")+(blueprintSelectedIds.size?" / "+blueprintSelectedIds.size+" selected":"");if(!body)return;if(!blueprintRows.length){body.innerHTML='<tr><td colspan="6">No blueprints found for the selected player.</td></tr>';syncBlueprintButtons();return;}body.innerHTML=blueprintRows.map(row=>'<tr><td><input type="checkbox" data-blueprint-select="'+Number(row.id)+'" aria-label="Select '+esc(row.name||("blueprint "+row.id))+'" '+(blueprintSelectedIds.has(Number(row.id))?"checked":"")+'></td><td><strong>'+esc(row.name||("Blueprint "+row.id))+'</strong></td><td>'+Number(row.pieces||0).toLocaleString()+'</td><td>'+Number(row.placeables||0).toLocaleString()+'</td><td>'+esc(row.item_id||"-")+'</td><td><div class="action-row"><button type="button" data-blueprint-action="view" data-blueprint-id="'+Number(row.id)+'">View</button><button type="button" data-blueprint-action="export" data-blueprint-id="'+Number(row.id)+'">Export</button><button type="button" class="danger" data-blueprint-action="delete" data-blueprint-id="'+Number(row.id)+'">Delete</button></div></td></tr>').join("");body.querySelectorAll("[data-blueprint-select]").forEach(input=>input.addEventListener("change",()=>toggleBlueprint(Number(input.dataset.blueprintSelect),input.checked)));body.querySelectorAll('[data-blueprint-action="view"]').forEach(button=>button.addEventListener("click",()=>openBlueprintViewer(Number(button.dataset.blueprintId))));body.querySelectorAll('[data-blueprint-action="export"]').forEach(button=>button.addEventListener("click",()=>exportBlueprintRows([Number(button.dataset.blueprintId)],false)));body.querySelectorAll('[data-blueprint-action="delete"]').forEach(button=>button.addEventListener("click",()=>deleteBlueprintRows([Number(button.dataset.blueprintId)])));syncBlueprintButtons();}
+function toggleBlueprint(id,checked){if(checked)blueprintSelectedIds.add(id);else blueprintSelectedIds.delete(id);renderBlueprintRows();}
+function toggleAllBlueprints(checked){blueprintSelectedIds=checked?new Set(blueprintRows.map(row=>Number(row.id))):new Set();renderBlueprintRows();}
+function blueprintByteSize(value){const bytes=Math.max(0,Number(value)||0);if(bytes<1024)return bytes+" B";if(bytes<1024*1024)return(bytes/1024).toFixed(1)+" KB";if(bytes<1024*1024*1024)return(bytes/(1024*1024)).toFixed(1)+" MB";return(bytes/(1024*1024*1024)).toFixed(2)+" GB";}
+function renderBlueprintModelPackStatus(data){blueprintModelPackState=data||null;const el=document.getElementById("blueprintModelPackStatus");if(!el)return;if(!data?.ok){el.textContent="Bundled exact model catalog could not be read: "+(data?.error||"unknown error");return;}el.textContent=data.exactBundled?(Number(data.modelCount||0).toLocaleString()+" exact piece models · "+Number(data.mappingCount||0).toLocaleString()+" blueprint mappings · "+blueprintByteSize(data.totalBytes)+" · fully offline"):"Exact model catalog is unavailable.";}
+async function refreshBlueprintModelPackStatus(){try{const data=await getJson("/api/blueprint-models/status");renderBlueprintModelPackStatus(data);return data;}catch(error){const data={ok:false,error:betterError(error)};renderBlueprintModelPackStatus(data);return data;}}
+async function importBlueprintModelPack(){try{if(!window.alphaNineSuite?.chooseBlueprintModelPackFolder)throw new Error("The model-pack folder picker is available only in the desktop Suite.");const chosen=await window.alphaNineSuite.chooseBlueprintModelPackFolder();if(chosen?.canceled||!chosen?.folderPath)return;setBlueprintStatus("Copying the offline GLB model pack into Suite storage...");const data=await getJson("/api/blueprint-models/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({folderPath:chosen.folderPath}),timeoutMs:900000});renderBlueprintModelPackStatus(data);setBlueprintStatus("Offline model pack installed: "+Number(data.modelCount||0).toLocaleString()+" GLB files and "+Number(data.mappingCount||0).toLocaleString()+" mappings.");if(blueprintViewer.data)await renderBlueprintViewer3d();playUiSound("success");}catch(error){setBlueprintStatus("Model-pack import failed: "+betterError(error),true);playUiSound("warning");}}
+async function openBlueprintModelPackFolder(){try{const data=blueprintModelPackState||await refreshBlueprintModelPackStatus();if(!data?.packDir)throw new Error("The local model-pack path is unavailable.");if(!window.alphaNineSuite?.openPath)throw new Error("Opening the local folder is available only in the desktop Suite.");await window.alphaNineSuite.openPath(data.packDir);}catch(error){setBlueprintStatus(betterError(error),true);}}
+function blueprintViewerNumber(value){const number=Number(value);return Number.isFinite(number)?number:0;}
+function blueprintViewerScene(){const data=blueprintViewer.data||{};const pieces=(data.instances||[]).map(row=>({kind:"piece",id:row.instance_id,type:row.building_type||"Building piece",x:blueprintViewerNumber(row.x),y:blueprintViewerNumber(row.y),z:blueprintViewerNumber(row.z),rotation:blueprintViewerNumber(row.rotation)}));const placeables=(data.placeables||[]).map(row=>({kind:"placeable",id:row.placeable_id,type:row.building_type||"Placeable",x:blueprintViewerNumber(row.x),y:blueprintViewerNumber(row.y),z:blueprintViewerNumber(row.z),rotation:blueprintViewerNumber(row.rz)}));const placeableById=new Map(placeables.map(row=>[Number(row.id),row]));const shields=(data.pentashields||[]).map(row=>{const placeable=placeableById.get(Number(row.placeable_id));return placeable?{...placeable,kind:"shield",scale:Array.isArray(row.scale)?row.scale:[]}:null;}).filter(Boolean);const points=[...pieces,...placeables];if(!points.length)return{pieces,placeables,shields,points,bounds:{minX:-1,maxX:1,minY:-1,maxY:1,minZ:0,maxZ:1,spanX:2,spanY:2,spanZ:1,maxSpan:2,centerX:0,centerY:0,centerZ:.5}};const xs=points.map(row=>row.x),ys=points.map(row=>row.y),zs=points.map(row=>row.z);const bounds={minX:Math.min(...xs),maxX:Math.max(...xs),minY:Math.min(...ys),maxY:Math.max(...ys),minZ:Math.min(...zs),maxZ:Math.max(...zs)};bounds.spanX=Math.max(1,bounds.maxX-bounds.minX);bounds.spanY=Math.max(1,bounds.maxY-bounds.minY);bounds.spanZ=Math.max(1,bounds.maxZ-bounds.minZ);bounds.maxSpan=Math.max(bounds.spanX,bounds.spanY,bounds.spanZ*1.6,1);bounds.centerX=(bounds.minX+bounds.maxX)/2;bounds.centerY=(bounds.minY+bounds.maxY)/2;bounds.centerZ=(bounds.minZ+bounds.maxZ)/2;return{pieces,placeables,shields,points,bounds};}
+function projectBlueprintPoint(point,scene,width,height,scale){const bounds=scene.bounds;const dx=point.x-bounds.centerX,dy=point.y-bounds.centerY,dz=point.z-bounds.centerZ;const cy=Math.cos(blueprintViewer.yaw),sy=Math.sin(blueprintViewer.yaw),cp=Math.cos(blueprintViewer.pitch),sp=Math.sin(blueprintViewer.pitch);const rotatedX=dx*cy-dy*sy;const depth=dx*sy+dy*cy;const rotatedY=dz*cp-depth*sp;const rotatedDepth=dz*sp+depth*cp;return{x:width/2+blueprintViewer.panX+rotatedX*scale,y:height/2+blueprintViewer.panY-rotatedY*scale,depth:rotatedDepth};}
+function drawBlueprintGrid(ctx,scene,width,height,scale){const b=scene.bounds;const steps=10;ctx.save();ctx.lineWidth=1;ctx.strokeStyle="rgba(214,166,69,.18)";for(let index=0;index<=steps;index+=1){const ratio=index/steps;const x=b.minX+b.spanX*ratio;const y=b.minY+b.spanY*ratio;const x1=projectBlueprintPoint({x,y:b.minY,z:b.minZ},scene,width,height,scale),x2=projectBlueprintPoint({x,y:b.maxY,z:b.minZ},scene,width,height,scale);const y1=projectBlueprintPoint({x:b.minX,y,z:b.minZ},scene,width,height,scale),y2=projectBlueprintPoint({x:b.maxX,y,z:b.minZ},scene,width,height,scale);ctx.beginPath();ctx.moveTo(x1.x,x1.y);ctx.lineTo(x2.x,x2.y);ctx.stroke();ctx.beginPath();ctx.moveTo(y1.x,y1.y);ctx.lineTo(y2.x,y2.y);ctx.stroke();}const center={x:b.centerX,y:b.centerY,z:b.minZ};const axisLength=b.maxSpan*.12;const origin=projectBlueprintPoint(center,scene,width,height,scale);[["#da6e55",{x:center.x+axisLength,y:center.y,z:center.z}],["#69b987",{x:center.x,y:center.y+axisLength,z:center.z}],["#72b7d6",{x:center.x,y:center.y,z:center.z+axisLength}]].forEach(([color,target])=>{const end=projectBlueprintPoint(target,scene,width,height,scale);ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(origin.x,origin.y);ctx.lineTo(end.x,end.y);ctx.stroke();});ctx.restore();}
+function blueprintProxySpec(row){
+  const type=String(row.type||"").toLowerCase();
+  if(row.kind==="placeable")return{width:180,depth:180,height:220,color:[83,166,207],alpha:.72};
+  if(/floorlight|light_|lamp|torch/.test(type))return{width:72,depth:72,height:36,color:[111,190,224],alpha:.82};
+  if(/railing/.test(type))return{width:/wide/.test(type)?512:256,depth:34,height:150,color:[198,184,150],alpha:.68};
+  if(/pillar|column/.test(type))return{width:112,depth:112,height:/top|bottom/.test(type)?256:384,color:[194,169,119],alpha:.76};
+  if(/stairs|ramp/.test(type))return{width:512,depth:/wide/.test(type)?512:256,height:256,color:[185,164,124],alpha:.7};
+  if(/wall|window|door/.test(type))return{width:/half/.test(type)?256:512,depth:54,height:/half/.test(type)?256:384,color:[214,196,157],alpha:.72};
+  if(/foundation/.test(type))return{width:/half/.test(type)?256:512,depth:512,height:96,color:[173,146,96],alpha:.78};
+  if(/floor|roof|rooftop|ceiling/.test(type))return{width:/half/.test(type)?256:512,depth:512,height:54,color:[220,204,170],alpha:.7};
+  return{width:112,depth:112,height:112,color:[216,172,99],alpha:.74};
+}
+function blueprintProxyFaces(row,scene,width,height,scale){
+  const spec=blueprintProxySpec(row),angle=blueprintViewerNumber(row.rotation)*Math.PI/180,cos=Math.cos(angle),sin=Math.sin(angle);
+  const halfWidth=spec.width/2,halfDepth=spec.depth/2,halfHeight=spec.height/2;
+  const local=[[-halfWidth,-halfDepth,-halfHeight],[halfWidth,-halfDepth,-halfHeight],[halfWidth,halfDepth,-halfHeight],[-halfWidth,halfDepth,-halfHeight],[-halfWidth,-halfDepth,halfHeight],[halfWidth,-halfDepth,halfHeight],[halfWidth,halfDepth,halfHeight],[-halfWidth,halfDepth,halfHeight]];
+  const corners=local.map(point=>{const x=row.x+point[0]*cos-point[1]*sin,y=row.y+point[0]*sin+point[1]*cos,z=row.z+point[2];return projectBlueprintPoint({x,y,z},scene,width,height,scale);});
+  return[[4,5,6,7,1.16],[0,1,5,4,.72],[1,2,6,5,.9],[2,3,7,6,.78],[3,0,4,7,.98]].map(face=>{const points=face.slice(0,4).map(index=>corners[index]);return{points,depth:points.reduce((sum,point)=>sum+point.depth,0)/points.length,shade:face[4],spec};});
+}
+function blueprintFallbackCanvas(){
+  let canvas=document.getElementById("blueprintViewerCanvas");
+  if(blueprintViewer.engine){try{blueprintViewer.engine.stopRenderLoop();blueprintViewer.engine.dispose();}catch{}blueprintViewer.engine=null;blueprintViewer.scene=null;blueprintViewer.camera=null;blueprintViewer.groups=null;}
+  const replacement=canvas.cloneNode(false);canvas.replaceWith(replacement);canvas=replacement;blueprintViewer.fallback2d=true;
+  if(!canvas.dataset.blueprintFallbackBound){
+    canvas.dataset.blueprintFallbackBound="1";
+    canvas.addEventListener("contextmenu",event=>event.preventDefault());
+    canvas.addEventListener("pointerdown",event=>{if(event.button!==0&&event.button!==1&&event.button!==2)return;event.preventDefault();canvas.setPointerCapture(event.pointerId);blueprintViewer.drag={x:event.clientX,y:event.clientY,pan:event.button===1||event.button===2||event.shiftKey};canvas.classList.add("dragging");});
+    canvas.addEventListener("pointermove",event=>{const drag=blueprintViewer.drag;if(!drag)return;const dx=event.clientX-drag.x,dy=event.clientY-drag.y;drag.x=event.clientX;drag.y=event.clientY;if(drag.pan){blueprintViewer.panX+=dx;blueprintViewer.panY+=dy;}else{blueprintViewer.yaw+=dx*.008;blueprintViewer.pitch=Math.max(-1.25,Math.min(1.25,blueprintViewer.pitch-dy*.006));}renderBlueprintViewerFallback2d();});
+    const release=()=>{blueprintViewer.drag=null;canvas.classList.remove("dragging");};canvas.addEventListener("pointerup",release);canvas.addEventListener("pointercancel",release);
+    canvas.addEventListener("wheel",event=>{event.preventDefault();const unit=event.deltaMode===1?16:(event.deltaMode===2?canvas.clientHeight:1),delta=Math.max(-240,Math.min(240,event.deltaY*unit));blueprintViewer.zoom=Math.max(.2,Math.min(8,blueprintViewer.zoom*Math.exp(-delta*.0018)));renderBlueprintViewerFallback2d();},{passive:false});
+    canvas.addEventListener("dblclick",event=>{event.preventDefault();resetBlueprintViewer();});
+  }
+  return canvas;
+}
+function blueprintFallbackColor(spec,shade){const color=spec.color||[216,172,99];return"rgba("+color.map(value=>Math.max(0,Math.min(255,Math.round(value*shade)))).join(",")+","+(spec.alpha||.75)+")";}
+function renderBlueprintViewerFallback2d(message="Built-in offline shapes"){
+  if(!blueprintViewer.data)return;let canvas=document.getElementById("blueprintViewerCanvas");if(!blueprintViewer.fallback2d)canvas=blueprintFallbackCanvas();const ratio=Math.max(1,Math.min(2,window.devicePixelRatio||1)),width=Math.max(640,Math.round(canvas.clientWidth||900)),height=Math.max(420,Math.round(canvas.clientHeight||520));if(canvas.width!==Math.round(width*ratio)||canvas.height!==Math.round(height*ratio)){canvas.width=Math.round(width*ratio);canvas.height=Math.round(height*ratio);}const ctx=canvas.getContext("2d");ctx.setTransform(ratio,0,0,ratio,0,0);ctx.clearRect(0,0,width,height);ctx.fillStyle="#070909";ctx.fillRect(0,0,width,height);const data=blueprintViewerScene(),padding=Math.max(450,data.bounds.maxSpan*.2),baseScale=Math.min(width/(data.bounds.spanX+padding),height/(data.bounds.spanZ+data.bounds.maxSpan*.65+padding*.3)),scale=Math.max(.015,baseScale*.72)*blueprintViewer.zoom;
+  const gridSize=Math.max(700,data.bounds.maxSpan*1.25),gridZ=data.bounds.minZ-18,steps=12;ctx.lineWidth=1;ctx.strokeStyle="rgba(183,137,43,.22)";for(let index=0;index<=steps;index+=1){const offset=(index/steps-.5)*gridSize;for(const pair of [[[data.bounds.centerX-gridSize/2,data.bounds.centerY+offset],[data.bounds.centerX+gridSize/2,data.bounds.centerY+offset]],[[data.bounds.centerX+offset,data.bounds.centerY-gridSize/2],[data.bounds.centerX+offset,data.bounds.centerY+gridSize/2]]]){const a=projectBlueprintPoint({x:pair[0][0],y:pair[0][1],z:gridZ},data,width,height,scale),b=projectBlueprintPoint({x:pair[1][0],y:pair[1][1],z:gridZ},data,width,height,scale);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();}}
+  const showPieces=document.getElementById("blueprintViewerPieces")?.checked!==false,showPlaceables=document.getElementById("blueprintViewerPlaceables")?.checked!==false,showShields=document.getElementById("blueprintViewerShields")?.checked!==false,rows=[...(showPieces?data.pieces:[]),...(showPlaceables?data.placeables:[])],faces=rows.flatMap(row=>blueprintProxyFaces(row,data,width,height,scale));faces.sort((a,b)=>a.depth-b.depth);for(const face of faces){ctx.beginPath();face.points.forEach((point,index)=>index?ctx.lineTo(point.x,point.y):ctx.moveTo(point.x,point.y));ctx.closePath();ctx.fillStyle=blueprintFallbackColor(face.spec,face.shade);ctx.fill();ctx.strokeStyle="rgba(255,232,186,.3)";ctx.stroke();}
+  if(showShields)for(const shield of data.shields){const point=projectBlueprintPoint(shield,data,width,height,scale);ctx.beginPath();ctx.arc(point.x,point.y,Math.max(7,18*blueprintViewer.zoom),0,Math.PI*2);ctx.fillStyle="rgba(184,121,232,.3)";ctx.fill();ctx.strokeStyle="#c48af0";ctx.stroke();}
+  const coverage=document.getElementById("blueprintModelCoverage");if(coverage)coverage.textContent=message+" · "+rows.length.toLocaleString()+" components visible";
+}
+function blueprintSceneDisposed(scene){if(!scene)return true;const disposed=scene.isDisposed;return typeof disposed==="function"?Boolean(disposed.call(scene)):Boolean(disposed||scene._isDisposed);}
+function disposeBlueprintViewerScene(){if(blueprintViewer.cameraControlsCleanup){try{blueprintViewer.cameraControlsCleanup();}catch{}blueprintViewer.cameraControlsCleanup=null;}if(blueprintViewer.scene){try{blueprintViewer.scene.dispose();}catch{}blueprintViewer.scene=null;}blueprintViewer.camera=null;blueprintViewer.groups=null;}
+function blueprintBabylonMaterial(scene,name,color,alpha=1){const material=new BABYLON.StandardMaterial(name,scene);material.diffuseColor=BABYLON.Color3.FromHexString(color);material.emissiveColor=material.diffuseColor.scale(.08);material.specularColor=new BABYLON.Color3(.12,.12,.12);material.alpha=alpha;material.backFaceCulling=false;return material;}
+function blueprintBabylonPosition(row){return new BABYLON.Vector3(row.x,row.z,row.y);}
+function blueprintViewerGrid3d(scene,data){const bounds=data.bounds,groundY=bounds.minZ-12,size=Math.max(bounds.spanX,bounds.spanY,bounds.maxSpan*.85),steps=12,color=new BABYLON.Color3(.42,.31,.12);for(let index=0;index<=steps;index+=1){const ratio=index/steps-.5,offset=ratio*size;const horizontal=BABYLON.MeshBuilder.CreateLines("grid-h-"+index,{points:[new BABYLON.Vector3(bounds.centerX-size/2,groundY,bounds.centerY+offset),new BABYLON.Vector3(bounds.centerX+size/2,groundY,bounds.centerY+offset)]},scene);horizontal.color=color;horizontal.alpha=.32;const vertical=BABYLON.MeshBuilder.CreateLines("grid-v-"+index,{points:[new BABYLON.Vector3(bounds.centerX+offset,groundY,bounds.centerY-size/2),new BABYLON.Vector3(bounds.centerX+offset,groundY,bounds.centerY+size/2)]},scene);vertical.color=color;vertical.alpha=.32;}}
+function blueprintViewerProxyMesh(row,scene,materials){const spec=blueprintProxySpec(row),mesh=BABYLON.MeshBuilder.CreateBox("proxy-"+row.kind+"-"+row.id,{width:spec.width,depth:spec.depth,height:spec.height},scene);mesh.position=blueprintBabylonPosition(row);mesh.rotation.y=-BABYLON.Tools.ToRadians(row.rotation||0);mesh.material=row.kind==="placeable"?materials.placeable:materials.proxy;mesh.metadata={blueprintKind:row.kind,blueprintType:row.type};return mesh;}
+async function blueprintLoadModelContainers(scene,urls,generation,coverage){const containers=new Map(),queue=[...urls];let cursor=0;const worker=async()=>{while(cursor<queue.length){const url=queue[cursor++];if(generation!==blueprintViewer.renderGeneration)return;try{const slash=url.lastIndexOf("/"),root=url.slice(0,slash+1),file=decodeURIComponent(url.slice(slash+1));containers.set(url,await BABYLON.SceneLoader.LoadAssetContainerAsync(root,file,scene));}catch(error){coverage.failures.push(url+": "+betterError(error));}}};await Promise.all(Array.from({length:Math.min(6,queue.length)},worker));return containers;}
+async function renderBlueprintViewer3d(){const canvas=document.getElementById("blueprintViewerCanvas"),coverageEl=document.getElementById("blueprintModelCoverage");if(!canvas||!blueprintViewer.data)return;if(!window.BABYLON)throw new Error("The offline 3D renderer did not load.");const generation=++blueprintViewer.renderGeneration;if(coverageEl)coverageEl.textContent="Resolving local detailed models...";if(BABYLON.DracoCompression)BABYLON.DracoCompression.Configuration={decoder:{wasmUrl:"/assets/vendor/draco_wasm_wrapper_gltf.js",wasmBinaryUrl:"/assets/vendor/draco_decoder_gltf.wasm"}};if(!blueprintViewer.engine){blueprintViewer.engine=new BABYLON.Engine(canvas,true,{preserveDrawingBuffer:false,stencil:true,disableWebGL2Support:false});blueprintViewer.engine.runRenderLoop(()=>{if(!blueprintSceneDisposed(blueprintViewer.scene))blueprintViewer.scene.render();});}disposeBlueprintViewerScene();const sceneData=blueprintViewerScene(),scene=new BABYLON.Scene(blueprintViewer.engine);blueprintViewer.scene=scene;scene.clearColor=new BABYLON.Color4(.025,.03,.032,1);scene.ambientColor=new BABYLON.Color3(.25,.25,.25);const center=new BABYLON.Vector3(sceneData.bounds.centerX,sceneData.bounds.centerZ,sceneData.bounds.centerY),camera=new BABYLON.ArcRotateCamera("blueprint-camera",-.82,1.12,Math.max(900,sceneData.bounds.maxSpan*1.5),center,scene);camera.lowerRadiusLimit=Math.max(60,sceneData.bounds.maxSpan*.03);camera.upperRadiusLimit=Math.max(5000,sceneData.bounds.maxSpan*8);camera.wheelDeltaPercentage=.012;camera.panningSensibility=55;camera.attachControl(canvas,true);if(camera.inputs?.attached?.pointers)camera.inputs.attached.pointers.buttons=[0,1,2];blueprintViewer.camera=camera;new BABYLON.HemisphericLight("blueprint-sky",new BABYLON.Vector3(.2,1,.1),scene).intensity=1.05;const key=new BABYLON.DirectionalLight("blueprint-key",new BABYLON.Vector3(-.45,-1,.35),scene);key.intensity=.7;blueprintViewerGrid3d(scene,sceneData);const materials={model:blueprintBabylonMaterial(scene,"detailed-model-material","#c9cbca",1),proxy:blueprintBabylonMaterial(scene,"proxy-material","#d8bd88",.78),placeable:blueprintBabylonMaterial(scene,"placeable-material","#6eb4d3",.78),shield:blueprintBabylonMaterial(scene,"shield-material","#b879e8",.3)};const pieceGroup=new BABYLON.TransformNode("blueprint-pieces",scene),placeableGroup=new BABYLON.TransformNode("blueprint-placeables",scene),shieldGroup=new BABYLON.TransformNode("blueprint-shields",scene);blueprintViewer.groups={pieces:pieceGroup,placeables:placeableGroup,shields:shieldGroup};const objects=[...sceneData.pieces,...sceneData.placeables],types=[...new Set(objects.map(row=>row.type).filter(Boolean))],resolved=await getJson("/api/blueprint-models/resolve",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({types}),timeoutMs:60000});if(generation!==blueprintViewer.renderGeneration)return;const urls=new Set(Object.values(resolved.models||{})),coverage={detailed:0,proxy:0,failures:[]},containers=await blueprintLoadModelContainers(scene,urls,generation,coverage);if(generation!==blueprintViewer.renderGeneration)return;for(const row of objects){const url=resolved.models?.[row.type],container=url?containers.get(url):null,parent=row.kind==="placeable"?placeableGroup:pieceGroup;if(container){try{const instance=container.instantiateModelsToScene(name=>"bp-"+row.id+"-"+name,false,{doNotInstantiate:false}),wrapper=new BABYLON.TransformNode("bp-piece-"+row.id,scene);wrapper.parent=parent;wrapper.position=blueprintBabylonPosition(row);wrapper.rotation.y=-BABYLON.Tools.ToRadians(row.rotation||0);for(const root of instance.rootNodes||[]){root.parent=wrapper;const meshes=root.getChildMeshes?root.getChildMeshes(false):[];if(root.material)root.material=materials.model;for(const mesh of meshes)mesh.material=materials.model;}coverage.detailed+=1;}catch{const proxy=blueprintViewerProxyMesh(row,scene,materials);proxy.parent=parent;coverage.proxy+=1;}}else{const proxy=blueprintViewerProxyMesh(row,scene,materials);proxy.parent=parent;coverage.proxy+=1;}}
+  for(const shield of sceneData.shields){const scaleValue=Math.max(...(shield.scale||[]).map(value=>Math.abs(Number(value)||0)),1),diameter=Math.max(90,Math.min(650,90+Math.log2(scaleValue+1)*45)),mesh=BABYLON.MeshBuilder.CreateSphere("shield-"+shield.id,{diameter,segments:18},scene);mesh.position=blueprintBabylonPosition(shield);mesh.material=materials.shield;mesh.parent=shieldGroup;}
+  drawBlueprintViewer();resetBlueprintViewer();if(coverageEl)coverageEl.textContent=coverage.detailed.toLocaleString()+" detailed local models · "+coverage.proxy.toLocaleString()+" proxy fallbacks"+(coverage.failures.length?" · "+coverage.failures.length+" model files failed to load":"");}
+const renderBlueprintViewerWebgl=renderBlueprintViewer3d;
+function blueprintExactYawKey(yaw){let value=((Number(yaw||0)%360)+360)%360;if(value>180)value-=360;return String(Number(value.toFixed(4)));}
+function blueprintDefaultYawCorrection(type){const key=String(type||"");if(key==="Atreides_Outpost_Wall_Inclined_Wide_Left")return -37.5;if(key==="Atreides_Outpost_Wall_Inclined_Wide_Right")return 37.5;return 0;}
+function blueprintExactYawCorrection(type,yaw,row=null){const stored=blueprintViewer.rotationOverrides?.[String(type||"")]?.[blueprintExactYawKey(yaw)];return Number.isFinite(Number(stored))?Number(stored):blueprintDefaultYawCorrection(type)+Number(row?.autoYawCorrection||0);}
+function blueprintExactYaw(type,yaw,row=null){const key=String(type||"").toLowerCase(),corrected=Number(yaw||0)+blueprintExactYawCorrection(type,yaw,row);if(key.includes("corner"))return corrected+180;if(((key.includes("top")||key.includes("bottom"))&&(key.includes("left")||key.includes("right")))||key.includes("railing"))return corrected+90;return corrected-90;}
+function blueprintExactPosition(row){return new BABYLON.Vector3(Number(row.y||0),Number(row.z||0),Number(row.x||0));}
+function attachBlueprintCameraControls(canvas,camera){
+  canvas.tabIndex=0;canvas.style.touchAction="none";canvas.style.overscrollBehavior="contain";camera.angularSensibilityX=350;camera.angularSensibilityY=350;camera.panningSensibility=180;camera.panningMouseButton=2;camera.useCtrlForPanning=false;camera.wheelDeltaPercentage=.01;camera.pinchDeltaPercentage=.01;camera.attachControl(canvas,true);
+  if(camera.inputs?.attached?.pointers)camera.inputs.attached.pointers.buttons=[0,1,2];
+  const reset=event=>{event.preventDefault();resetBlueprintViewer();};
+  const containMouse=event=>event.stopPropagation(),containWheel=event=>{event.preventDefault();event.stopPropagation();},context=event=>{event.preventDefault();event.stopPropagation();},containedEvents=["pointerdown","pointermove","pointerup","pointercancel","click","auxclick"];
+  canvas.addEventListener("dblclick",reset);canvas.addEventListener("contextmenu",context);canvas.addEventListener("wheel",containWheel,{passive:false});for(const eventName of containedEvents)canvas.addEventListener(eventName,containMouse);
+  blueprintViewer.cameraControlsCleanup=()=>{try{camera.detachControl(canvas);}catch{}canvas.removeEventListener("dblclick",reset);canvas.removeEventListener("contextmenu",context);canvas.removeEventListener("wheel",containWheel);for(const eventName of containedEvents)canvas.removeEventListener(eventName,containMouse);};
+}
+function blueprintExactRows(){
+  const data=blueprintViewer.data||{},shields=new Map((data.pentashields||[]).map(row=>[String(row.placeable_id),row]));
+  const pieces=(data.instances||[]).map((row,index)=>({kind:"piece",id:row.instance_id??index,type:String(row.building_type||""),x:Number(row.x||0),y:Number(row.y||0),z:Number(row.z||0),yaw:Number(row.rotation||0),pitch:0,roll:0,scale:null,shield:null}));
+  const placeables=(data.placeables||[]).map((row,index)=>({kind:"placeable",id:row.placeable_id??index,type:String(row.building_type||""),x:Number(row.x||0),y:Number(row.y||0),z:Number(row.z||0),yaw:Number(row.ry??row.rotation??0),pitch:Number(row.rx||0),roll:Number(row.rz||0),scale:Array.isArray(row.scale)?row.scale:null,shield:shields.get(String(row.placeable_id??index))||null}));
+  return {pieces,placeables,objects:[...pieces,...placeables]};
+}
+function blueprintApplyStairTopologyCorrections(rows){
+  const pieces=rows?.pieces||[],walkable=pieces.filter(row=>/(foundation|floor)/i.test(row.type));let corrected=0;
+  const hasWalkable=(x,y,z)=>walkable.some(row=>Math.abs(row.x-x)<72&&Math.abs(row.y-y)<72&&Math.abs(row.z-z)<48);
+  for(const row of pieces){row.autoYawCorrection=0;const type=String(row.type||"").toLowerCase();if(!type.includes("stair"))continue;const radians=BABYLON.Tools.ToRadians(Number(row.yaw||0)),corner=type.includes("corner");let dx=corner?Math.round(-Math.cos(radians)+Math.sin(radians)):Math.round(Math.sin(radians)),dy=corner?Math.round(-Math.sin(radians)-Math.cos(radians)):Math.round(-Math.cos(radians));if(!dx&&!dy)continue;const rise=type.includes("half")?192:384,currentUpper=hasWalkable(row.x+dx*512,row.y+dy*512,row.z+rise),oppositeUpper=hasWalkable(row.x-dx*512,row.y-dy*512,row.z+rise);if(!currentUpper&&oppositeUpper){row.autoYawCorrection=180;corrected+=1;}}
+  blueprintViewer.autoStairCorrections=corrected;return corrected;
+}
+function blueprintApplyExactScale(node,row){
+  let x=100,y=100,z=100;
+  if(row.shield&&Array.isArray(row.shield.scale)){const values=row.shield.scale.map(value=>Math.abs(Number(value)||0)),vertical=String(row.type).toLowerCase().includes("vertical"),dimensions=vertical?[7.66,5.16,.4]:[7.66,.4,5.16];x=100*(values[0]||1)/dimensions[0];y=100*(values[2]||1)/dimensions[1];z=100*(values[1]||1)/dimensions[2];}
+  else if(Array.isArray(row.scale)&&row.scale.length>=3){x=100*Number(row.scale[0]||1);y=100*Number(row.scale[1]||1);z=100*Number(row.scale[2]||1);}
+  // The source viewer replaces the loader-created root scale. Multiplying by
+  // that scale preserves Babylon's handedness mirror and reverses asymmetric
+  // pieces such as stairs.
+  node.scaling.set(x,y,z);
+}
+function blueprintApplyExactRotation(root,row,baseQuaternion){root.rotationQuaternion=baseQuaternion.clone();root.addRotation(BABYLON.Tools.ToRadians(-row.pitch),BABYLON.Tools.ToRadians(blueprintExactYaw(row.type,row.yaw,row)),BABYLON.Tools.ToRadians(row.roll));}
+function blueprintRenderSelection(){const el=document.getElementById("blueprintViewerSelection"),selected=blueprintViewer.selectedExact;if(!el)return;if(!selected){el.textContent="Click a piece to inspect its exact type and rotation.";return;}const row=selected.row,offset=blueprintExactYawCorrection(row.type,row.yaw,row),automatic=Number(row.autoYawCorrection||0)&&!Number.isFinite(Number(blueprintViewer.rotationOverrides?.[String(row.type||"")]?.[blueprintExactYawKey(row.yaw)]))?" · matched to connected floor":"";el.textContent=row.type+" · source yaw "+blueprintExactYawKey(row.yaw)+"° · correction "+offset+"°"+automatic+" · R / Shift+R changes correction by 7.5° · Delete resets";}
+function blueprintSelectExact(root){if(blueprintViewer.selectedExact?.root===root)return;for(const mesh of blueprintViewer.selectedExact?.root?.getChildMeshes?.(false)||[])mesh.renderOutline=false;const info=root?.metadata?.blueprintExact||null;blueprintViewer.selectedExact=info?{root,row:info.row}:null;if(root)for(const mesh of root.getChildMeshes?.(false)||[]){mesh.renderOutline=true;mesh.outlineColor=new BABYLON.Color3(1,.72,.18);mesh.outlineWidth=.035;}blueprintRenderSelection();}
+function blueprintSaveRotationOverrides(){if(!blueprintViewer.overrideStorageKey)return;try{localStorage.setItem(blueprintViewer.overrideStorageKey,JSON.stringify(blueprintViewer.rotationOverrides||{}));}catch{}}
+function blueprintChangeSelectedRotation(direction){const selected=blueprintViewer.selectedExact;if(!selected)return;const row=selected.row,type=row.type,key=blueprintExactYawKey(row.yaw),steps=[0,7.5,15,22.5,30,37.5,45,52.5,60,67.5,75,82.5,90,97.5,105,112.5,120,127.5,135,142.5,150,157.5,165,172.5,180,-172.5,-165,-157.5,-150,-142.5,-135,-127.5,-120,-112.5,-105,-97.5,-90,-82.5,-75,-67.5,-60,-52.5,-45,-37.5,-30,-22.5,-15,-7.5],current=blueprintExactYawCorrection(type,row.yaw),index=steps.indexOf(current),next=steps[((index<0?0:index)+Number(direction||1)+steps.length)%steps.length];blueprintViewer.rotationOverrides={...(blueprintViewer.rotationOverrides||{}),[type]:{...(blueprintViewer.rotationOverrides?.[type]||{}),[key]:next}};for(const item of blueprintViewer.exactRoots||[])if(item.row.type===type&&blueprintExactYawKey(item.row.yaw)===key)blueprintApplyExactRotation(item.root,item.row,item.baseQuaternion);blueprintSaveRotationOverrides();blueprintRenderSelection();}
+function blueprintResetSelectedRotation(){const selected=blueprintViewer.selectedExact;if(!selected)return;const type=selected.row.type,key=blueprintExactYawKey(selected.row.yaw),byType={...(blueprintViewer.rotationOverrides?.[type]||{})};delete byType[key];blueprintViewer.rotationOverrides={...(blueprintViewer.rotationOverrides||{}),[type]:byType};for(const item of blueprintViewer.exactRoots||[])if(item.row.type===type&&blueprintExactYawKey(item.row.yaw)===key)blueprintApplyExactRotation(item.root,item.row,item.baseQuaternion);blueprintSaveRotationOverrides();blueprintRenderSelection();}
+async function renderBlueprintViewerExact3d(){
+  let canvas=document.getElementById("blueprintViewerCanvas"),coverageEl=document.getElementById("blueprintModelCoverage");if(!canvas||!blueprintViewer.data)return;if(!window.BABYLON)throw new Error("The bundled offline 3D renderer did not load.");
+  const generation=++blueprintViewer.renderGeneration;if(coverageEl)coverageEl.textContent="Loading exact offline piece meshes...";
+  disposeBlueprintViewerScene();if(blueprintViewer.engine){try{blueprintViewer.engine.dispose();}catch{}blueprintViewer.engine=null;}
+  const replacement=canvas.cloneNode(false);canvas.replaceWith(replacement);canvas=replacement;blueprintViewer.fallback2d=false;
+  if(BABYLON.DracoCompression)BABYLON.DracoCompression.Configuration={decoder:{wasmUrl:"/assets/vendor/draco_wasm_wrapper_gltf.js",wasmBinaryUrl:"/assets/vendor/draco_decoder_gltf.wasm"}};
+  const engine=new BABYLON.Engine(canvas,true,{preserveDrawingBuffer:true,stencil:true,adaptToDeviceRatio:true});blueprintViewer.engine=engine;
+  const scene=new BABYLON.Scene(engine);blueprintViewer.scene=scene;scene.clearColor=new BABYLON.Color4(.08,.08,.1,1);scene.ambientColor=new BABYLON.Color3(1,1,1);scene.environmentIntensity=0;if(scene.imageProcessingConfiguration)scene.imageProcessingConfiguration.isEnabled=false;
+  const rows=blueprintExactRows();blueprintApplyStairTopologyCorrections(rows);const positions=rows.objects.map(blueprintExactPosition);if(!positions.length)throw new Error("Blueprint contains no renderable pieces.");
+  const xs=positions.map(value=>value.x),ys=positions.map(value=>value.y),zs=positions.map(value=>value.z),minX=Math.min(...xs),maxX=Math.max(...xs),maxY=Math.max(...ys),minZ=Math.min(...zs),maxZ=Math.max(...zs),foundation=512;
+  const target=new BABYLON.Vector3((minX+maxX)/2,maxY*.35,(minZ+maxZ)/2),extentX=maxX-minX+foundation*2,extentY=maxY-Math.min(...ys)+foundation*2,extentZ=maxZ-minZ+foundation*2,radius=Math.max(800,Math.sqrt(extentX*extentX+extentY*extentY+extentZ*extentZ)/2/Math.tan(Math.PI/6)*.85);
+  const camera=new BABYLON.ArcRotateCamera("blueprint-camera",-Math.PI/4,Math.PI*.38,radius,target,scene);camera.minZ=5;camera.maxZ=200000;camera.lowerRadiusLimit=Math.max(80,radius*.025);camera.upperRadiusLimit=radius*8;blueprintViewer.camera=camera;blueprintViewer.initialCamera={target:target.clone(),radius};attachBlueprintCameraControls(canvas,camera);
+  const hemi=new BABYLON.HemisphericLight("blueprint-sky",new BABYLON.Vector3(0,1,0),scene);hemi.intensity=1.1;hemi.groundColor=new BABYLON.Color3(.35,.35,.38);const key=new BABYLON.DirectionalLight("blueprint-key",new BABYLON.Vector3(-.45,-1,.35),scene);key.intensity=.65;blueprintViewerGrid3d(scene,{bounds:{centerX:(minX+maxX)/2,centerY:(minZ+maxZ)/2,minZ:Math.min(...ys),maxSpan:Math.max(maxX-minX,maxZ-minZ)}});
+  BABYLON.Effect.ShadersStore.blueprintExactVertexShader=["precision highp float;","attribute vec3 position;","attribute vec3 normal;","uniform mat4 worldViewProjection;","uniform mat4 world;","varying vec3 vN;","void main(){","gl_Position=worldViewProjection*vec4(position,1.0);","vN=normalize((world*vec4(normal,0.0)).xyz);","}"].join("\n");BABYLON.Effect.ShadersStore.blueprintExactFragmentShader=["precision highp float;","varying vec3 vN;","uniform vec3 uColor;","uniform vec3 uSunDir;","void main(){","vec3 N=normalize(vN);","float kd=max(0.0,dot(N,uSunDir))*0.65;","vec3 fillDir=normalize(vec3(-uSunDir.z,0.5,uSunDir.x));","float fd=max(0.0,dot(N,fillDir))*0.28;","float bd=max(0.0,dot(N,vec3(0.0,-1.0,0.0)))*0.08;","float lum=clamp(0.28+kd+fd+bd,0.0,1.0);","gl_FragColor=vec4(uColor*lum,1.0);","}"].join("\n");const material=new BABYLON.ShaderMaterial("exact-piece-material",scene,{vertex:"blueprintExact",fragment:"blueprintExact"},{attributes:["position","normal"],uniforms:["worldViewProjection","world","uColor","uSunDir"]});material.setColor3("uColor",new BABYLON.Color3(.88,.9,.92));material.setVector3("uSunDir",new BABYLON.Vector3(-.3,1,-.5).normalize());material.backFaceCulling=true;
+  const pieceGroup=new BABYLON.TransformNode("blueprint-pieces",scene),placeableGroup=new BABYLON.TransformNode("blueprint-placeables",scene),shieldGroup=new BABYLON.TransformNode("blueprint-shields",scene);blueprintViewer.groups={pieces:pieceGroup,placeables:placeableGroup,shields:shieldGroup};
+  const types=[...new Set(rows.objects.map(row=>row.type).filter(Boolean))],resolved=await getJson("/api/blueprint-models/resolve",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({types}),timeoutMs:60000});if(generation!==blueprintViewer.renderGeneration)return;
+  const failures=[],containers=await blueprintLoadModelContainers(scene,new Set(Object.values(resolved.models||{})),generation,{failures});if(generation!==blueprintViewer.renderGeneration)return;
+  let renderedPieces=0,renderedPlaceables=0;const unrecognized=new Set(),failed=new Set();blueprintViewer.exactRoots=[];blueprintViewer.selectedExact=null;
+  for(const row of rows.objects){const url=resolved.models?.[row.type];if(!url){unrecognized.add(row.type||"(missing type)");continue;}const container=containers.get(url);if(!container){failed.add(row.type);continue;}try{const instance=container.instantiateModelsToScene(name=>"bp-"+row.id+"-"+name,false),root=instance.rootNodes?.[0];if(!root)throw new Error("Model has no root node");const baseQuaternion=(root.rotationQuaternion||BABYLON.Quaternion.Identity()).clone();root.parent=row.shield?shieldGroup:(row.kind==="placeable"?placeableGroup:pieceGroup);root.position=blueprintExactPosition(row);blueprintApplyExactScale(root,row);blueprintApplyExactRotation(root,row,baseQuaternion);root.metadata={...(root.metadata||{}),blueprintExact:{row,root}};blueprintViewer.exactRoots.push({root,row,baseQuaternion});for(const modelRoot of instance.rootNodes||[]){if(modelRoot!==root)modelRoot.parent=root;for(const mesh of [modelRoot,...(modelRoot.getChildMeshes?.(false)||[])]){if(typeof mesh.setEnabled!=="function")continue;mesh.setEnabled(true);mesh.isVisible=true;mesh.visibility=1;mesh.hasVertexAlpha=false;mesh.alwaysSelectAsActiveMesh=true;mesh.material=material;mesh.metadata={...(mesh.metadata||{}),blueprintExactRoot:root};if(mesh.sourceMesh){mesh.sourceMesh.hasVertexAlpha=false;mesh.sourceMesh.material=material;}}}if(row.kind==="piece")renderedPieces+=1;else renderedPlaceables+=1;}catch{failed.add(row.type);}}
+  scene.onPointerObservable.add(info=>{if(info.type!==BABYLON.PointerEventTypes.POINTERPICK)return;const mesh=info.pickInfo?.pickedMesh,root=mesh?.metadata?.blueprintExactRoot||mesh?.metadata?.blueprintExact?.root||null;blueprintSelectExact(root);});
+  const rotationKeyHandler=event=>{if(!blueprintViewer.selectedExact||/^(INPUT|SELECT|TEXTAREA)$/.test(event.target?.tagName||""))return;if(event.key==="r"||event.key==="R"){event.preventDefault();blueprintChangeSelectedRotation(event.shiftKey?-1:1);}else if(event.key==="Delete"||event.key==="Backspace"){event.preventDefault();blueprintResetSelectedRotation();}};document.addEventListener("keydown",rotationKeyHandler);const previousCleanup=blueprintViewer.cameraControlsCleanup;blueprintViewer.cameraControlsCleanup=()=>{previousCleanup?.();document.removeEventListener("keydown",rotationKeyHandler);};blueprintRenderSelection();
+  scene.render();const modelBounds=pieceGroup.getHierarchyBoundingVectors(true),boundMin=modelBounds.min,boundMax=modelBounds.max,boundSize=boundMax.subtract(boundMin),boundCenter=boundMin.add(boundMax).scale(.5),boundDiagonal=boundSize.length();if(Number.isFinite(boundDiagonal)&&boundDiagonal>1){camera.target.copyFrom(boundCenter);camera.radius=Math.max(800,boundDiagonal/2/Math.tan(Math.PI/6)*1.18);camera.lowerRadiusLimit=Math.max(40,camera.radius*.02);camera.upperRadiusLimit=camera.radius*8;blueprintViewer.initialCamera={target:boundCenter.clone(),radius:camera.radius};}
+  engine.runRenderLoop(()=>{if(!blueprintSceneDisposed(blueprintViewer.scene))blueprintViewer.scene.render();});engine.resize();drawBlueprintViewer();scene.render();
+  if(coverageEl){const missing=[...unrecognized],failureTypes=[...failed],stairMatches=Number(blueprintViewer.autoStairCorrections||0);coverageEl.textContent=renderedPieces.toLocaleString()+" exact pieces · "+renderedPlaceables.toLocaleString()+" exact placeables · "+missing.length.toLocaleString()+" unrecognized"+(stairMatches?" · "+stairMatches.toLocaleString()+" stair orientation"+(stairMatches===1?"":"s")+" matched to connected floors":"")+(failureTypes.length?" · "+failureTypes.length.toLocaleString()+" model types failed to load":"")+(missing.length?" · Unknown: "+missing.slice(0,8).join(", ")+(missing.length>8?"…":"") : "");}
+}
+renderBlueprintViewer3d=async function(){
+  try{if(!blueprintModelPackState)await refreshBlueprintModelPackStatus();if(!blueprintModelPackState?.exactBundled)throw new Error("The bundled exact model catalog is unavailable.");await renderBlueprintViewerExact3d();}
+  catch(error){disposeBlueprintViewerScene();const coverage=document.getElementById("blueprintModelCoverage");if(coverage)coverage.textContent="Exact offline viewer failed: "+betterError(error);throw error;}
+};
+function drawBlueprintViewer(){if(blueprintViewer.fallback2d){renderBlueprintViewerFallback2d();return;}if(!blueprintViewer.groups)return;blueprintViewer.groups.pieces.setEnabled(document.getElementById("blueprintViewerPieces")?.checked!==false);blueprintViewer.groups.placeables.setEnabled(document.getElementById("blueprintViewerPlaceables")?.checked!==false);blueprintViewer.groups.shields.setEnabled(document.getElementById("blueprintViewerShields")?.checked!==false);}
+function resetBlueprintViewer(){blueprintViewer.yaw=-.72;blueprintViewer.pitch=.68;blueprintViewer.zoom=1;blueprintViewer.panX=0;blueprintViewer.panY=0;const camera=blueprintViewer.camera,initial=blueprintViewer.initialCamera;if(camera&&initial){camera.alpha=-Math.PI/4;camera.beta=Math.PI*.38;camera.radius=initial.radius;camera.target=initial.target.clone();}drawBlueprintViewer();}
+function orbitBlueprintViewer(deltaAlpha,deltaBeta){const camera=blueprintViewer.camera;if(!camera)return;camera.alpha+=Number(deltaAlpha||0);camera.beta=Math.max(.08,Math.min(Math.PI-.08,camera.beta+Number(deltaBeta||0)));}
+function zoomBlueprintViewer(factor){if(blueprintViewer.fallback2d){blueprintViewer.zoom=Math.max(.2,Math.min(8,blueprintViewer.zoom*Number(factor||1)));renderBlueprintViewerFallback2d();return;}const camera=blueprintViewer.camera;if(camera)camera.radius=Math.max(camera.lowerRadiusLimit||1,Math.min(camera.upperRadiusLimit||Number.MAX_SAFE_INTEGER,camera.radius/Number(factor||1)));}
+function closeBlueprintViewer(){document.getElementById("blueprintViewerPanel")?.classList.add("hidden");blueprintViewer.renderGeneration+=1;blueprintViewer.data=null;blueprintViewer.drag=null;disposeBlueprintViewerScene();if(blueprintViewer.engine){try{blueprintViewer.engine.dispose();}catch{}blueprintViewer.engine=null;}}
+function showBlueprintViewerData(data,name,activityMessage="Blueprint 3D view opened"){const panel=document.getElementById("blueprintViewerPanel"),title=document.getElementById("blueprintViewerTitle"),summary=document.getElementById("blueprintViewerSummary");if(!panel)return;if(!data||typeof data!=="object"||Array.isArray(data))throw new Error("Blueprint JSON must contain an object.");const instances=Array.isArray(data.instances)?data.instances:[],placeables=Array.isArray(data.placeables)?data.placeables:[],pentashields=Array.isArray(data.pentashields)?data.pentashields:[];if(!instances.length&&!placeables.length&&!pentashields.length)throw new Error("Blueprint JSON has no instances, placeables, or pentashields to preview.");blueprintViewer.data={...data,instances,placeables,pentashields};blueprintViewer.name=String(name||data.name||"Blueprint Preview");blueprintViewer.overrideStorageKey="alphanine-blueprint-rotations:v2:"+String(data._suiteBlueprintId||blueprintViewer.name);let saved={};try{saved=JSON.parse(localStorage.getItem(blueprintViewer.overrideStorageKey)||"{}");}catch{}blueprintViewer.rotationOverrides={...(data.rotation_overrides||{}),...(saved||{})};panel.classList.remove("hidden");const scene=blueprintViewerScene();if(title)title.textContent=blueprintViewer.name+" \u00b7 Offline 3D View";if(summary)summary.textContent=scene.pieces.length.toLocaleString()+" pieces \u00b7 "+scene.placeables.length.toLocaleString()+" placeables \u00b7 "+scene.shields.length.toLocaleString()+" pentashields \u00b7 Bounds "+Math.round(scene.bounds.spanX).toLocaleString()+" \u00d7 "+Math.round(scene.bounds.spanY).toLocaleString()+" \u00d7 "+Math.round(scene.bounds.spanZ).toLocaleString();panel.scrollIntoView({behavior:"smooth",block:"start"});requestAnimationFrame(()=>renderBlueprintViewer3d().catch(error=>{const coverage=document.getElementById("blueprintModelCoverage");if(coverage)coverage.textContent="3D rendering failed: "+betterError(error);playUiSound("warning");}));addActivity("blueprints",activityMessage,blueprintViewer.name);}
+async function previewSelectedBlueprintFile(index){const file=blueprintFiles[Number(index)],panel=document.getElementById("blueprintViewerPanel"),title=document.getElementById("blueprintViewerTitle"),summary=document.getElementById("blueprintViewerSummary");try{if(!file)throw new Error("The selected blueprint file is no longer available.");if(file.size>32*1024*1024)throw new Error("File exceeds 32 MB.");if(panel)panel.classList.remove("hidden");if(title)title.textContent="Loading JSON Preview";if(summary)summary.textContent="Reading "+file.name+" locally. Nothing is being imported.";const parsed=JSON.parse(await file.text()),data=parsed?.blueprint_data||parsed?.blueprint||parsed;showBlueprintViewerData(data,data.name||parsed?.title||file.name.replace(/\.json$/i,""),"Blueprint JSON preview opened");setBlueprintStatus("Previewing "+file.name+". No data has been imported.");}catch(error){blueprintViewer.data=null;if(panel)panel.classList.remove("hidden");if(title)title.textContent="Blueprint JSON Preview Failed";if(summary)summary.textContent=betterError(error);setBlueprintStatus(betterError(error),true);playUiSound("warning");}}
+async function openBlueprintViewer(id){const panel=document.getElementById("blueprintViewerPanel"),title=document.getElementById("blueprintViewerTitle"),summary=document.getElementById("blueprintViewerSummary");if(!panel)return;panel.classList.remove("hidden");if(title)title.textContent="Loading Blueprint 3D View";if(summary)summary.textContent="Reading exported blueprint coordinates...";panel.scrollIntoView({behavior:"smooth",block:"start"});try{const data=await getJson("/api/blueprints/"+Number(id)+"/export",{timeoutMs:60000});showBlueprintViewerData({...data,_suiteBlueprintId:Number(id)},data.name||("Blueprint "+id));}catch(error){blueprintViewer.data=null;if(title)title.textContent="Blueprint 3D View Failed";if(summary)summary.textContent=betterError(error);playUiSound("warning");}}
+function wireBlueprintViewer(){const canvas=document.getElementById("blueprintViewerCanvas");if(!canvas||canvas.dataset.wired)return;canvas.dataset.wired="true";canvas.addEventListener("contextmenu",event=>event.preventDefault());if(window.ResizeObserver)new ResizeObserver(()=>blueprintViewer.engine?.resize()).observe(canvas);else window.addEventListener("resize",()=>blueprintViewer.engine?.resize());}
+async function openBlueprints(){try{if(!adminPlayers.length)await refreshGivePlayersFast();renderBlueprintPlayerSelect();await Promise.all([refreshBlueprints(),refreshBlueprintModelPackStatus()]);}catch(error){setBlueprintStatus(betterError(error),true);}}
+async function syncBlueprintPlayer(){selectedPlayerId=document.getElementById("blueprintPlayer")?.value||"";blueprintSelectedIds=new Set();const give=document.getElementById("adminPlayer");if(give)give.value=selectedPlayerId;const permission=document.getElementById("permissionPlayer");if(permission)permission.value=selectedPlayerId;renderPlayers();await refreshBlueprints();}
+async function refreshBlueprints(){const playerId=document.getElementById("blueprintPlayer")?.value||selectedPlayerId;if(!playerId){blueprintRows=[];renderBlueprintRows();setBlueprintStatus("Choose a player to load blueprints.");return;}blueprintBusy=true;syncBlueprintButtons();setBlueprintStatus("Loading blueprints...");try{const capabilities=await getJson("/api/blueprints/capabilities");if(!capabilities.supported)throw new Error("Blueprint management is unavailable. Missing database tables: "+((capabilities.missing||[]).join(", ")||"unknown"));const data=await getJson("/api/blueprints?playerId="+encodeURIComponent(playerId));blueprintRows=data.rows||[];blueprintSelectedIds=new Set([...blueprintSelectedIds].filter(id=>blueprintRows.some(row=>Number(row.id)===id)));renderBlueprintRows();setBlueprintStatus(blueprintRows.length?"Blueprints loaded. Importing or deleting requires the player to relog before the inventory view is refreshed.":"No blueprints found for the selected player.");}catch(error){blueprintRows=[];blueprintSelectedIds=new Set();renderBlueprintRows();setBlueprintStatus(betterError(error),true);}finally{blueprintBusy=false;syncBlueprintButtons();}}
+async function importBlueprintFiles(){const playerId=document.getElementById("blueprintPlayer")?.value||selectedPlayerId;const player=adminPlayers.find(row=>String(row.id)===String(playerId));if(!playerId||!blueprintFiles.length||blueprintFiles.length>10)return;const confirmed=await appConfirm("Import building blueprints","Import "+blueprintFiles.length+" blueprint"+(blueprintFiles.length===1?"":"s")+" for "+(player?.character_name||player?.name||"the selected player")+"? The player must relog before imported blueprints appear.","Import","Cancel");if(!confirmed)return;blueprintBusy=true;syncBlueprintButtons();let imported=0;const failures=[];try{for(let index=0;index<blueprintFiles.length;index+=1){const file=blueprintFiles[index];setBlueprintStatus("Importing "+(index+1)+" of "+blueprintFiles.length+": "+file.name);try{if(file.size>32*1024*1024)throw new Error("File exceeds 32 MB.");const blueprint=JSON.parse(await file.text());const result=await getJson("/api/blueprints/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,fileName:file.name,blueprint}),timeoutMs:120000});if(!result.ok)throw new Error(result.error||"Import failed.");imported+=1;}catch(error){failures.push(file.name+": "+betterError(error));}}}finally{blueprintBusy=false;blueprintFiles=[];const input=document.getElementById("blueprintFiles");if(input)input.value="";selectBlueprintFiles([]);}await refreshBlueprints();if(failures.length)setBlueprintStatus(imported+" imported and "+failures.length+" failed. The player must relog for successful imports.\n\n"+failures.join("\n"),true);else setBlueprintStatus(imported+" blueprint"+(imported===1?" was":"s were")+" imported successfully. The player must relog.");addActivity("blueprints","Blueprint import completed",imported+" imported / "+failures.length+" failed");playUiSound(failures.length?"warning":"success");}
+async function downloadBlueprintResponse(url,options,fallbackName){const response=await fetch(url,options||{});if(!response.ok){let message="Download failed with status "+response.status+".";try{const error=await response.json();message=error.error||message;}catch{}throw new Error(message);}const blob=await response.blob();const header=response.headers.get("content-disposition")||"";const match=header.match(/filename="([^"]+)"/i);const anchor=document.createElement("a");const objectUrl=URL.createObjectURL(blob);anchor.href=objectUrl;anchor.download=match?.[1]||fallbackName;document.body.appendChild(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(objectUrl),1000);}
+async function exportBlueprintRows(ids,forceArchive=false){const unique=[...new Set(ids.map(Number).filter(id=>Number.isInteger(id)&&id>0))];if(!unique.length)return;blueprintBusy=true;syncBlueprintButtons();try{setBlueprintStatus("Preparing "+unique.length+" blueprint"+(unique.length===1?"":"s")+" for download...");if(unique.length===1&&!forceArchive)await downloadBlueprintResponse("/api/blueprints/"+unique[0]+"/export",{},"blueprint_"+unique[0]+".json");else await downloadBlueprintResponse("/api/blueprints/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:unique})},"blueprints.zip");setBlueprintStatus(unique.length+" blueprint"+(unique.length===1?" was":"s were")+" exported successfully.");addActivity("blueprints","Blueprint export completed",unique.length+" blueprint(s)");playUiSound("success");}catch(error){setBlueprintStatus(betterError(error),true);playUiSound("warning");}finally{blueprintBusy=false;syncBlueprintButtons();}}
+function exportSelectedBlueprints(){return exportBlueprintRows([...blueprintSelectedIds],false);}
+function exportAllBlueprints(){return exportBlueprintRows(blueprintRows.map(row=>Number(row.id)),true);}
+async function deleteBlueprintRows(ids){const unique=[...new Set(ids.map(Number).filter(id=>Number.isInteger(id)&&id>0))];if(!unique.length)return;const rows=blueprintRows.filter(row=>unique.includes(Number(row.id)));const label=rows.length===1?'"'+(rows[0].name||("Blueprint "+rows[0].id))+'"':rows.length+" selected blueprints";const confirmed=await appConfirm("Delete building blueprint"+(rows.length===1?"":"s"),"Delete "+label+"? Associated Solido Replicator items will also be removed from the player inventory.","Delete","Cancel");if(!confirmed)return;blueprintBusy=true;syncBlueprintButtons();let deleted=0;const failures=[];for(const row of rows){try{const result=await getJson("/api/blueprints/"+row.id,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true})});if(!result.ok)throw new Error(result.error||"Delete failed.");deleted+=1;}catch(error){failures.push((row.name||("Blueprint "+row.id))+": "+betterError(error));}}blueprintBusy=false;blueprintSelectedIds=new Set();await refreshBlueprints();if(failures.length)setBlueprintStatus(deleted+" deleted and "+failures.length+" failed.\n\n"+failures.join("\n"),true);else setBlueprintStatus(deleted+" blueprint"+(deleted===1?" was":"s were")+" deleted successfully.");addActivity("blueprints","Blueprint delete completed",deleted+" deleted / "+failures.length+" failed");playUiSound(failures.length?"warning":"success");}
+function deleteSelectedBlueprints(){return deleteBlueprintRows([...blueprintSelectedIds]);}
+
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function selectedGiveStorage(){const id=document.getElementById("giveStorageTarget")?.value||"";return giveStorageTargets.find(row=>String(row.inventoryId)===String(id))||null;}
@@ -19404,14 +19913,19 @@ function filteredProgressionSkills(){const filters=progressionSkillFilters();ret
 function fillProgressionSkillFilters(){const tree=document.getElementById("progressionSkillTreeFilter");const type=document.getElementById("progressionSkillTypeFilter");if(tree){const current=tree.value||"all";const trees=[...new Set(progressionSkillCatalog.map(skill=>skill.tree).filter(Boolean))].sort();tree.innerHTML='<option value="all">All trees</option>'+trees.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tree.value=trees.includes(current)?current:"all";}if(type){const current=type.value||"all";const types=[...new Set(progressionSkillCatalog.map(skill=>skill.type).filter(Boolean))].sort();type.innerHTML='<option value="all">All types</option>'+types.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");type.value=types.includes(current)?current:"all";}}
 function progressionSkillSummary(skill){const costs=(skill.costPerLevel||[]).filter(value=>value!=null).join("/");return [skill.tree,skill.type,skill.maxLevel?("Max "+skill.maxLevel):"",costs?("Cost "+costs):""].filter(Boolean).join(" / ");}
 function progressionSkillStats(skill){const stats=(skill.stats||[]).slice(0,3).map(stat=>[stat.name||stat.key,stat.value!=null?stat.value:""].filter(value=>String(value)!=="").join(" ")).filter(Boolean);return stats.length?stats.join(" | "):(skill.tag||skill.id);}
-function renderProgressionSkillCatalog(){const list=document.getElementById("progressionSkillList");const status=document.getElementById("progressionSkillCatalogStatus");if(!list)return;const rows=filteredProgressionSkills();if(status)status.innerHTML='<strong>'+esc(progressionSkillSelectedIds.size)+' selected</strong><div class="subtle">'+esc(rows.length+" shown / "+progressionSkillCatalog.length+" skills loaded")+'</div>';list.innerHTML=rows.length?rows.slice(0,180).map(skill=>{const checked=progressionSkillSelectedIds.has(skill.id)?" checked":"";return '<label class="item-db-card progression-skill-card"><input type="checkbox" data-progression-skill-id="'+esc(skill.id)+'"'+checked+'><span><strong>'+esc(skill.name)+'</strong><span class="item-db-meta"><span>'+esc(progressionSkillSummary(skill))+'</span></span><span class="subtle env-path-value">'+esc(progressionSkillStats(skill))+'</span></span></label>';}).join(""):'<div class="empty">No skills match the current filters.</div>';list.querySelectorAll("[data-progression-skill-id]").forEach(el=>el.addEventListener("change",()=>{if(el.checked)progressionSkillSelectedIds.add(el.dataset.progressionSkillId);else progressionSkillSelectedIds.delete(el.dataset.progressionSkillId);progressionSkillPreviewState=null;renderProgressionSkillCatalog();}));}
-async function refreshProgressionSkillCatalog(){const status=document.getElementById("progressionSkillCatalogStatus");try{if(status){status.className="warning mt";status.textContent="Loading bundled skill catalog...";}const data=await getJson("/api/progression/skills");if(!data.ok)throw new Error(data.report?.message||data.report?.error||"Skill catalog unavailable.");progressionSkillCatalog=data.skills||[];const validIds=new Set(progressionSkillCatalog.map(skill=>skill.id));progressionSkillSelectedIds=new Set([...progressionSkillSelectedIds].filter(id=>validIds.has(id)));fillProgressionSkillFilters();renderProgressionSkillCatalog();if(status){status.className="empty mt";status.innerHTML='<strong>'+esc(progressionSkillCatalog.length)+' skills loaded.</strong><div class="subtle">Source: bundled game skill catalog.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Skill catalog load failed",e.message);}}
+function progressionSkillTargetLevel(skill){const max=Math.max(1,Number(skill?.maxLevel)||1);const saved=Number(progressionSkillTargetLevels.get(skill?.id));return Number.isInteger(saved)&&saved>=1&&saved<=max?saved:max;}
+function progressionSkillRankOptions(skill){const selected=progressionSkillTargetLevel(skill);const max=Math.max(1,Number(skill?.maxLevel)||1);return Array.from({length:max},(_,index)=>index+1).map(level=>'<option value="'+level+'"'+(level===selected?' selected':'')+'>Rank '+level+' / '+max+'</option>').join("");}
+function progressionSelectedSkillRequests(){return [...progressionSkillSelectedIds].map(id=>{const skill=progressionSkillCatalog.find(row=>row.id===id);return skill?{id,targetLevel:progressionSkillTargetLevel(skill)}:null;}).filter(Boolean);}
+function renderProgressionSkillCatalog(){const list=document.getElementById("progressionSkillList");const status=document.getElementById("progressionSkillCatalogStatus");if(!list)return;const rows=filteredProgressionSkills();const selected=progressionSelectedSkillRequests();if(status)status.innerHTML='<strong>'+esc(selected.length)+' selected</strong><div class="subtle">'+esc(rows.length+" shown / "+progressionSkillCatalog.length+" skills loaded")+'</div>';list.innerHTML=rows.length?rows.slice(0,180).map(skill=>{const checked=progressionSkillSelectedIds.has(skill.id)?" checked":"";return '<div class="item-db-card progression-skill-card"><input type="checkbox" aria-label="Select '+esc(skill.name)+'" data-progression-skill-id="'+esc(skill.id)+'"'+checked+'><span><strong>'+esc(skill.name)+'</strong><span class="item-db-meta"><span>'+esc(progressionSkillSummary(skill))+'</span></span><span class="subtle env-path-value">'+esc(progressionSkillStats(skill))+'</span></span><select class="progression-skill-rank" aria-label="Target rank for '+esc(skill.name)+'" data-progression-skill-level="'+esc(skill.id)+'">'+progressionSkillRankOptions(skill)+'</select></div>';}).join(""):'<div class="empty">No skills match the current filters.</div>';list.querySelectorAll("[data-progression-skill-id]").forEach(el=>el.addEventListener("change",()=>{if(el.checked)progressionSkillSelectedIds.add(el.dataset.progressionSkillId);else progressionSkillSelectedIds.delete(el.dataset.progressionSkillId);progressionSkillPreviewState=null;renderProgressionSkillCatalog();}));list.querySelectorAll("[data-progression-skill-level]").forEach(el=>el.addEventListener("change",()=>{const id=el.dataset.progressionSkillLevel;progressionSkillTargetLevels.set(id,Number(el.value));progressionSkillSelectedIds.add(id);progressionSkillPreviewState=null;renderProgressionSkillCatalog();}));}
+async function refreshProgressionSkillCatalog(){const status=document.getElementById("progressionSkillCatalogStatus");try{if(status){status.className="warning mt";status.textContent="Loading bundled skill catalog...";}const data=await getJson("/api/progression/skills");if(!data.ok)throw new Error(data.report?.message||data.report?.error||"Skill catalog unavailable.");progressionSkillCatalog=data.skills||[];const validIds=new Set(progressionSkillCatalog.map(skill=>skill.id));progressionSkillSelectedIds=new Set([...progressionSkillSelectedIds].filter(id=>validIds.has(id)));progressionSkillTargetLevels=new Map([...progressionSkillTargetLevels].filter(([id])=>validIds.has(id)));fillProgressionSkillFilters();renderProgressionSkillCatalog();if(status){status.className="empty mt";status.innerHTML='<strong>'+esc(progressionSkillCatalog.length)+' skills loaded.</strong><div class="subtle">Choose each selected skill\'s target rank.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Skill catalog load failed",e.message);}}
 function visibleProgressionSkillIds(){return filteredProgressionSkills().map(skill=>skill.id);}
 function selectVisibleProgressionSkills(selected){visibleProgressionSkillIds().forEach(id=>{if(selected)progressionSkillSelectedIds.add(id);else progressionSkillSelectedIds.delete(id);});progressionSkillPreviewState=null;renderProgressionSkillCatalog();}
-function clearProgressionSkillSelection(){progressionSkillSelectedIds.clear();progressionSkillPreviewState=null;renderProgressionSkillCatalog();}
-async function previewProgressionSkillUnlocks(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup a player before previewing skill unlocks.");const skillIds=[...progressionSkillSelectedIds];if(!skillIds.length)throw new Error("Choose at least one skill first.");const lookupId=progressionPlayerState.player?.actor_id||progressionPlayerState.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";const data=await getJson("/api/progression/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"skill_unlocks",query:lookupId,playerId:lookupId,skillIds}),timeoutMs:70000});if(!data.ok)throw new Error(data.reason||data.error||"Skill unlock preview failed.");progressionSkillPreviewState=data;setText("progressionSkillPreviewLog","Skill unlock preview generated. Backup created before any write.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nSelected skills:\\n"+JSON.stringify(data.newValues?.skills||[],null,2)+"\\n\\nStorage scan:\\n"+JSON.stringify(data.newValues?.storageScan||{},null,2)+"\\n\\nOperation:\\n"+data.sqlPreview+"\\n\\nLive apply is blocked until the skill storage adapter is verified.");pushProgressionRecent("Skill unlock preview",skillIds.length+" selected skill(s)","NOW");addActivity("progression","Skill unlock preview created",skillIds.length+" skills");playUiSound("success");}catch(e){progressionSkillPreviewState=null;setText("progressionSkillPreviewLog",betterError(e));pushProgressionRecent("Skill unlock preview failed",betterError(e),"ERR");addActivity("error","Skill unlock preview failed",e.message);playUiSound("warning");}}
-async function applyProgressionSkillUnlocks(){try{if(!progressionSkillPreviewState)throw new Error("Generate Skill Unlock Preview first.");const data=await getJson("/api/progression/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:progressionSkillPreviewState.previewId,confirmText:document.getElementById("progressionSkillConfirmText")?.value||""}),timeoutMs:45000});if(!data.ok)throw new Error((data.warning||data.error||"Skill unlock apply failed")+"\\n"+JSON.stringify(data.debug||{},null,2));setText("progressionSkillPreviewLog","Skill unlock apply succeeded.\\n"+JSON.stringify(data,null,2));pushProgressionRecent("Skill unlock applied",data.action||"Skill unlocks updated.","NOW");playUiSound("success");}catch(e){setText("progressionSkillPreviewLog",betterError(e));pushProgressionRecent("Skill unlock apply blocked",betterError(e),"ERR");addActivity("warn","Skill unlock apply blocked",e.message);playUiSound("warning");}}
-async function unlockSelectedProgressionSkills(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before unlocking skills.");const skillIds=[...progressionSkillSelectedIds];if(!skillIds.length)throw new Error("Choose at least one skill first.");const lookupId=progressionPlayerState.player?.actor_id||progressionPlayerState.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";setText("progressionSkillPreviewLog","Unlocking "+skillIds.length+" selected skill(s)...");const data=await getJson("/api/progression/skill-unlocks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:lookupId,playerId:lookupId,skillIds}),timeoutMs:90000});if(!data.ok)throw new Error((data.message||data.reason||data.error||"Skill unlock failed")+"\\n"+JSON.stringify(data.readBackValues||data.timings||{},null,2));setText("progressionSkillPreviewLog","Skill unlock completed.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nUnlocked skills:\\n"+JSON.stringify(data.selectedSkills||[],null,2)+"\\n\\nRead-back verification:\\n"+JSON.stringify(data.readBackValues||[],null,2));pushProgressionRecent("Skills unlocked",(data.selectedSkills||[]).length+" selected skill(s)","NOW");addActivity("progression","Skills unlocked",(data.selectedSkills||[]).length+" skills");await lookupProgressionPlayer();playUiSound("success");}catch(e){setText("progressionSkillPreviewLog",betterError(e));pushProgressionRecent("Skill unlock failed",betterError(e),"ERR");addActivity("error","Skill unlock failed",e.message);playUiSound("warning");}}
+function clearProgressionSkillSelection(){progressionSkillSelectedIds.clear();progressionSkillTargetLevels.clear();progressionSkillPreviewState=null;renderProgressionSkillCatalog();}
+async function previewProgressionSkillUnlocks(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup a player before previewing skill ranks.");const skills=progressionSelectedSkillRequests();if(!skills.length)throw new Error("Choose at least one skill first.");const lookupId=progressionPlayerState.player?.actor_id||progressionPlayerState.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";const data=await getJson("/api/progression/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"skill_unlocks",query:lookupId,playerId:lookupId,skillIds:skills.map(row=>row.id),skills}),timeoutMs:70000});if(!data.ok)throw new Error(data.reason||data.error||"Skill rank preview failed.");progressionSkillPreviewState=data;setText("progressionSkillPreviewLog","Skill rank preview generated.\\n"+JSON.stringify(data.newValues?.skills||skills,null,2));}catch(e){progressionSkillPreviewState=null;setText("progressionSkillPreviewLog",betterError(e));playUiSound("warning");}}
+async function unlockSelectedProgressionSkills(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before granting skill ranks.");const skills=progressionSelectedSkillRequests();if(!skills.length)throw new Error("Choose at least one skill first.");const summary=skills.map(row=>{const skill=progressionSkillCatalog.find(item=>item.id===row.id);return (skill?.name||row.id)+" -> Rank "+row.targetLevel;}).join("\\n");if(!(await appConfirm("Grant Skill Ranks","Grant these ranks to "+(progressionPlayerState.player?.character_name||"the selected player")+"?\\n\\n"+summary+"\\n\\nExisting higher ranks will not be lowered. The player must be offline.","Grant Ranks","Cancel")))return;const lookupId=progressionPlayerState.player?.actor_id||progressionPlayerState.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";setText("progressionSkillPreviewLog","Granting "+skills.length+" selected skill rank(s)...");const data=await getJson("/api/progression/skill-unlocks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:lookupId,playerId:lookupId,skills}),timeoutMs:90000});if(!data.ok)throw new Error((data.message||data.reason||data.error||"Skill rank grant failed")+"\\n"+JSON.stringify(data.readBackValues||data.timings||{},null,2));setText("progressionSkillPreviewLog","Skill rank grant completed.\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||"")+"\\n\\nGranted ranks:\\n"+JSON.stringify(data.selectedSkills||[],null,2)+"\\n\\nRead-back verification:\\n"+JSON.stringify(data.readBackValues||[],null,2));pushProgressionRecent("Skill ranks granted",(data.selectedSkills||[]).length+" selected skill(s)","NOW");addActivity("progression","Skill ranks granted",(data.selectedSkills||[]).length+" skills");playUiSound("success");}catch(e){setText("progressionSkillPreviewLog",betterError(e));pushProgressionRecent("Skill rank grant failed",betterError(e),"ERR");addActivity("error","Skill rank grant failed",e.message);playUiSound("warning");}}
+function progressionPlayerLookupId(){return progressionPlayerState?.player?.player_controller_id||progressionPlayerState?.player?.actor_id||progressionPlayerState?.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";}
+async function refreshProgressionHouseScrip(){const balance=document.getElementById("progressionHouseScripBalance");try{if(!progressionPlayerState?.ok)throw new Error("Lookup a player before loading House Scrip.");if(balance)balance.textContent="Loading...";const data=await getJson("/api/progression/house-scrip?query="+encodeURIComponent(progressionPlayerLookupId()),{timeoutMs:45000});if(!data.ok)throw new Error(data.reason||data.error||"House Scrip balance unavailable.");progressionHouseScripState=data;if(balance)balance.textContent=Number(data.balance||0).toLocaleString();setText("progressionHouseScripLog","Current balance loaded for "+(data.player?.character_name||"the selected player")+": "+Number(data.balance||0).toLocaleString()+" House Scrip.\\nCurrency ID: "+data.currencyId+"\\nPlayer: "+(data.playerOffline?"offline":"online"));return data;}catch(e){progressionHouseScripState=null;if(balance)balance.textContent="--";setText("progressionHouseScripLog",betterError(e));return null;}}
+async function grantProgressionHouseScrip(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before giving House Scrip.");const amount=Number(document.getElementById("progressionHouseScripAmount")?.value||0);if(!Number.isInteger(amount)||amount<1||amount>1000000000)throw new Error("House Scrip amount must be a whole number from 1 to 1,000,000,000.");const confirmText=document.getElementById("progressionHouseScripConfirm")?.value||"";if(confirmText!=="GIVE HOUSE SCRIP")throw new Error("Type GIVE HOUSE SCRIP exactly.");if(!(await appConfirm("Give House Scrip","Add "+amount.toLocaleString()+" House Scrip to "+(progressionPlayerState.player?.character_name||"the selected player")+"?\\n\\nAn automatic backup and exact read-back verification will be created. The player must be offline.","Give House Scrip","Cancel")))return;setText("progressionHouseScripLog","Creating backup and granting House Scrip...");const data=await getJson("/api/progression/house-scrip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:progressionPlayerLookupId(),amount,confirmText}),timeoutMs:90000});if(!data.ok)throw new Error((data.message||data.reason||data.error||"House Scrip grant failed")+"\\n"+JSON.stringify(data.timings||{},null,2));progressionHouseScripState=data;setText("progressionHouseScripBalance",Number(data.balance||0).toLocaleString());setValue("progressionHouseScripConfirm","");setText("progressionHouseScripLog","House Scrip grant completed.\\nAdded: "+Number(data.amount||0).toLocaleString()+"\\nPrevious balance: "+Number(data.beforeBalance||0).toLocaleString()+"\\nVerified balance: "+Number(data.balance||0).toLocaleString()+"\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||""));pushProgressionRecent("House Scrip granted",Number(data.amount||0).toLocaleString()+" added","NOW");addActivity("progression","House Scrip granted",String(data.amount||0));playUiSound("success");}catch(e){setText("progressionHouseScripLog",betterError(e));pushProgressionRecent("House Scrip grant failed",betterError(e),"ERR");addActivity("error","House Scrip grant failed",e.message);playUiSound("warning");}}
 async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(!progressionSkillCatalog.length)refreshProgressionSkillCatalog();if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});if(!progressionSkillCatalog.length)refreshProgressionSkillCatalog();addActivity("warn","Progression database unavailable",e.message);}}
 function detailRows(rows){return Object.entries(rows||{}).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value||"--")+'</strong></div>').join("");}
 function renderProgressionPlayer(data){
@@ -19420,7 +19934,10 @@ function renderProgressionPlayer(data){
   progressionFactionPreviewState=null;
   progressionSpecializationPreviewState=null;
   progressionSkillPreviewState=null;
-  setValue("progressionSkillConfirmText","");
+  progressionHouseScripState=null;
+  setText("progressionHouseScripBalance","--");
+  setText("progressionHouseScripLog",data?.ok?"Loading House Scrip balance...":"Load a player to read the House Scrip balance.");
+  setValue("progressionHouseScripConfirm","");
   setValue("progressionSpecializationConfirmText","");
   const status=document.getElementById("progressionPlayerStatus");
   if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Current values loaded into the guarded editor.":(data?.reason||data?.error||"Progression player lookup failed.");}
@@ -19449,6 +19966,7 @@ function renderProgressionPlayer(data){
   const factions=document.getElementById("progressionFactionRows");
   if(factions){const groups=progressionFactionGroups(data);factions.innerHTML=data?.ok?(groups.length?groups.map(row=>'<tr><td>'+esc(progressionFactionLabel(row))+'<div class="subtle">Targets: '+esc(row.actorIds.join(", "))+'</div></td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';}
   renderProgressionFactionEditor(data);
+  if(data?.ok)refreshProgressionHouseScrip();
 }
 function progressionSpecializationRow(track){return (progressionPlayerState?.specializationTracks||[]).find(row=>String(row.track_type||"").toLowerCase()===String(track||"").toLowerCase())||null;}
 function renderProgressionSpecializationEditor(data){const select=document.getElementById("progressionSpecializationTrack");if(!select)return;const current=select.value||"Crafting";const known=["Crafting","Gathering","Exploration","Combat","Sabotage"];const detected=(data?.specializationTracks||[]).map(row=>String(row.track_type||"").trim()).filter(Boolean);const tracks=[...new Set([...known,...detected])];select.innerHTML=tracks.map(track=>'<option value="'+esc(track)+'">'+esc(track)+'</option>').join("");select.value=tracks.includes(current)?current:tracks[0];syncProgressionSpecializationEditor();}
@@ -19636,7 +20154,7 @@ function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>res
 async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
 async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
+renderActivity();wireBlueprintViewer();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 setInterval(()=>{if(document.getElementById("repair")?.classList.contains("active"))refreshRepairQueue();},10000);
@@ -19668,7 +20186,7 @@ function isRemotePortalRequest(req) {
 
 const REMOTE_LOCAL_ONLY_PREFIXES = [
   "/api/config", "/api/setup/", "/api/test/", "/api/settings/", "/api/ssh-key/", "/api/server-install-path/",
-  "/api/live-give/env", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/",
+  "/api/live-give/env", "/api/blueprints", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/",
   "/api/admin/probe", "/api/admin/tuned-channels", "/api/admin/permissions", "/api/gear/discovery", "/api/discovery",
   "/api/market-bot/config", "/api/market-bot/logs", "/api/director", "/manager-api/"
 ];
@@ -19679,7 +20197,7 @@ const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/live-map/vehicles", "/api/live-map/bases", "/api/live-map/teleport/presets", "/api/live-map/teleport/status",
   "/api/admin/players", "/api/admin/repair/inspect", "/api/admin/repair/queue", "/api/players/feed", "/api/admin/items",
   "/api/give-items", "/api/gear-codex/items", "/api/item-database/items", "/api/items/catalog/status", "/api/give-items/capabilities",
-  "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/landsraad/tiers",
+  "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/progression/house-scrip", "/api/landsraad/tiers",
   "/api/landsraad/weekly-rewards/inspect", "/api/admin/skill-reputation", "/api/market-bot/overview",
   "/api/market/status", "/api/market/listings", "/api/live-give/queue-presets", "/api/live-give/queue-presets/get",
   "/api/sietches", "/api/vm/status", "/api/updates/check"
@@ -20357,6 +20875,118 @@ async function route(req, res) {
     catch (error) { await json(res, adminProbeUnavailable(error)); }
     return;
   }
+  if (url.pathname === "/api/blueprint-models/status" && req.method === "GET") {
+    const status = blueprintModelPack.status();
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) delete status.packDir;
+    await json(res, status, status.ok ? 200 : 500);
+    return;
+  }
+  if (url.pathname === "/api/blueprint-models/import" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) { await json(res, { ok: false, error: "Offline model-pack import is available only on the local desktop Suite." }, 403); return; }
+    try {
+      const body = await readJsonRequest(req);
+      const result = blueprintModelPack.importFromDirectory(body.folderPath);
+      appendAdminAudit("blueprint_model_pack_imported", { modelCount: result.modelCount, mappingCount: result.mappingCount, totalBytes: result.totalBytes });
+      await json(res, result);
+    } catch (error) {
+      appendAdminAudit("blueprint_model_pack_import_failed", { error: error.message });
+      await json(res, { ok: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/blueprint-models/resolve" && req.method === "POST") {
+    try { const body = await readJsonRequest(req); await json(res, blueprintModelPack.resolveTypes(body.types)); }
+    catch (error) { await json(res, { ok: false, models: {}, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname.startsWith("/api/blueprint-models/files/") && req.method === "GET") {
+    const filePath = blueprintModelPack.resolveFile(url.pathname.slice("/api/blueprint-models/files/".length));
+    if (!filePath) { send(res, 404, "text/plain", "Model not found"); return; }
+    const stat = fs.statSync(filePath);
+    res.writeHead(200, { "Content-Type": "model/gltf-binary", "Content-Length": String(stat.size), "Cache-Control": "public, max-age=31536000, immutable" });
+    fs.createReadStream(filePath).pipe(res);
+    return;
+  }
+  if (url.pathname === "/api/blueprints/capabilities" && req.method === "GET") {
+    try { await json(res, await blueprintService.capabilities()); }
+    catch (error) { await json(res, { supported: false, missing: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/blueprints" && req.method === "GET") {
+    try { await json(res, { ok: true, rows: await blueprintService.list(url.searchParams.get("playerId") || "") }); }
+    catch (error) { await json(res, { ok: false, rows: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/blueprints/import" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req, 32 * 1024 * 1024);
+      const result = await blueprintService.importBlueprint(body.playerId, body.blueprint, body.fileName || "");
+      await json(res, result);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, /invalid|must|choose|required|no instances/i.test(error.message) ? 400 : 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/blueprints/export" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req);
+      const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map(Number))];
+      if (!ids.length || ids.some((id) => !Number.isSafeInteger(id) || id < 1)) throw new Error("Select at least one valid blueprint to export.");
+      if (ids.length > 500) throw new Error("A maximum of 500 blueprints can be exported at once.");
+      const usedNames = new Set();
+      const entries = [];
+      for (const id of ids) {
+        const data = await blueprintService.exportBlueprint(id);
+        const baseName = blueprintDownloadName(data.name || `blueprint_${id}`).replace(/\.json$/i, "") || `blueprint_${id}`;
+        let filename = `${baseName}.json`;
+        let suffix = 2;
+        while (usedNames.has(filename.toLowerCase())) filename = `${baseName}_${suffix++}.json`;
+        usedNames.add(filename.toLowerCase());
+        entries.push({ name: filename, content: Buffer.from(`${JSON.stringify(data, null, 2)}\n`, "utf8") });
+      }
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/T/, "-").slice(0, 15);
+      const archive = createZipArchive(entries);
+      res.writeHead(200, {
+        "Content-Type": "application/zip",
+        "Content-Length": String(archive.length),
+        "Content-Disposition": `attachment; filename="blueprints-${stamp}.zip"`,
+        "Cache-Control": "no-store"
+      });
+      res.end(archive);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, /select|maximum|valid/i.test(error.message) ? 400 : 500);
+    }
+    return;
+  }
+  const blueprintExportMatch = url.pathname.match(/^\/api\/blueprints\/(\d+)\/export$/);
+  if (blueprintExportMatch && req.method === "GET") {
+    try {
+      const data = await blueprintService.exportBlueprint(blueprintExportMatch[1]);
+      const body = `${JSON.stringify(data, null, 2)}\n`;
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${blueprintDownloadName(data.name || `blueprint_${blueprintExportMatch[1]}`)}.json"`,
+        "Cache-Control": "no-store"
+      });
+      res.end(body);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, /not found/i.test(error.message) ? 404 : 500);
+    }
+    return;
+  }
+  const blueprintDeleteMatch = url.pathname.match(/^\/api\/blueprints\/(\d+)$/);
+  if (blueprintDeleteMatch && req.method === "DELETE") {
+    try {
+      const body = await readJsonRequest(req);
+      if (body.confirmed !== true) throw new Error("Blueprint deletion must be confirmed.");
+      const result = await blueprintService.deleteBlueprint(blueprintDeleteMatch[1]);
+      await json(res, result.ok ? result : { ...result, error: "Blueprint not found." }, result.ok ? 200 : 404);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, /confirmed|valid|whole number/i.test(error.message) ? 400 : 500);
+    }
+    return;
+  }
+
   if (url.pathname === "/api/live-give/env" && req.method === "GET") {
     try { await json(res, await liveGiveEnvStatus()); }
     catch (error) { await json(res, { ok: false, liveGiveAvailable: false, missingEnv: [], message: error.message, error: error.message }, 500); }
@@ -20615,6 +21245,25 @@ async function route(req, res) {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
       const result = await progressionUnlockSkills(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/house-scrip" && req.method === "GET") {
+    try {
+      const result = await progressionHouseScripBalance(url.searchParams.get("query"));
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/house-scrip" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await progressionGrantHouseScrip(body);
       await json(res, result, result.ok ? 200 : 400);
     } catch (error) {
       await json(res, { ok: false, status: "error", error: error.message }, 400);

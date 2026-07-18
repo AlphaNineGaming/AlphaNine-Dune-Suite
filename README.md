@@ -14,6 +14,7 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - First-launch setup wizard
 - Integrated receiver start, stop, restart, and status
 - Player feed and player management
+- Player blueprint import, export, deletion, pre-import JSON preview, and interactive offline 3D viewing
 - Give Item with Dry-Run and Live Give modes
 - Live Map with player, vehicle, and base markers when position data is available
 - Server Management view
@@ -71,6 +72,16 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - Database access through the configured Dune server environment
 
 Node.js is only required for developers running from source. Installed users should use the Windows installer.
+
+## Offline Blueprint Models
+
+The blueprint viewer works without an internet connection. Version 1.0.55 bundles 538 exact piece meshes and 551 blueprint-type mappings; no extra model folder or download is required.
+
+1. Open **Blueprints**.
+2. Select **View** for a saved blueprint, or choose a JSON file and select its **Preview** button before importing.
+3. Orbit, pan, and zoom the exact mesh-based layout on the 3D grid.
+
+The viewer uses the exported game coordinates, rotations, and scale values. If a blueprint contains an unknown piece type, the coverage line reports its ID instead of drawing an invented substitute.
 
 ## Installation
 

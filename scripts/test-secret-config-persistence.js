@@ -187,11 +187,18 @@ function assertNoPlaceholders(filePath) {
     assert.match(startupEnv, /DUNE_RECEIVER_SSH_KEY=".*config-only-ssh-key"/);
     await assertReceiverRuntime(receiverPort, "receiver-original-real");
 
+    fs.writeFileSync(configOnlySshKeyPath, "config-only-release-test-key");
+    await postConfig(baseUrl, { receiverSshHost: "updated-receiver-host" });
+    const reconciledReceiver = await getJson(`${baseUrl}/api/receiver/start`, { method: "POST" });
+    assert.equal(reconciledReceiver.response.ok, true, JSON.stringify(reconciledReceiver.payload));
+    assert.equal(reconciledReceiver.payload.ok, true, JSON.stringify(reconciledReceiver.payload));
+    const reconciledHealth = await getJson(`http://127.0.0.1:${receiverPort}/health`);
+    assert.equal(reconciledHealth.payload.config?.sshHost, "updated-receiver-host", JSON.stringify(reconciledHealth.payload));
+
     await stopSuite(child, baseUrl);
     child = await startServer({ port, configPath, appData });
     await waitForReceiver(baseUrl);
     await assertReceiverRuntime(receiverPort, "receiver-original-real");
-    fs.writeFileSync(configOnlySshKeyPath, "config-only-release-test-key");
 
     await postConfig(baseUrl, {
       uiMode: "advanced",

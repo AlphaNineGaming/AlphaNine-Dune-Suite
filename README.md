@@ -26,6 +26,13 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.62
+
+- Fixed imported blueprint items that could report "base not found" because their inventory metadata still referenced blueprint ID 0.
+- Added automatic repair for previously imported blueprint items whose stored reference does not match their database blueprint.
+- Improved Live Teleport routing for offline players and allowed more time for receiver-backed teleport operations to complete.
+- Restarted the managed receiver automatically when its active SSH, battlegroup, or teleport configuration is stale.
+
 ### 1.0.4
 
 - Added a Give Item popup when admins select Grade 1-5, explaining that the player must relog before database-granted items appear in inventory.

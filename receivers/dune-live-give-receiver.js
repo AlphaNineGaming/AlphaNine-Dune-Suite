@@ -395,6 +395,7 @@ function validateTeleport(payload) {
   const dryRun = payload.dryRun === true || payload.dryRun === "true" || payload.test === true || payload.test === "true";
   const test = payload.test === true || payload.test === "true";
   const commandMode = String(payload.commandMode || "exact").trim().toLowerCase();
+  const playerOnlineStatus = String(payload.playerOnlineStatus || payload.onlineStatus || "unknown").trim().toLowerCase();
   const frontendRequestMode = String(payload.frontendRequestMode || "unspecified").trim().toLowerCase();
   const backendRequestMode = String(payload.backendRequestMode || (dryRun || test ? "preview" : "execute")).trim().toLowerCase();
 
@@ -435,6 +436,7 @@ function validateTeleport(payload) {
     dryRun,
     test,
     commandMode,
+    playerOnlineStatus,
     frontendRequestMode,
     backendRequestMode,
     warning: zInfo.warning
@@ -497,6 +499,21 @@ function buildTeleportPreview(pathname, request) {
 }
 
 async function processTeleportCoords(request) {
+  if (isExplicitOfflinePlayerStatus(request.playerOnlineStatus)) {
+    logReceiver("teleport routing directly to offline DB", {
+      requestId: request.requestId,
+      flsId: request.flsId,
+      playerOnlineStatus: request.playerOnlineStatus
+    });
+    const result = await updateOfflinePlayerPosition(request);
+    return {
+      path: "db",
+      message: `Offline player ${request.flsId} position updated for next login.`,
+      target: { x: request.x, y: request.y, z: request.z, partition_id: result.partitionId },
+      command: result.sql,
+      onlineStatusSource: "suite-database"
+    };
+  }
   let rmqError = null;
   try {
     const result = await publishTeleport(request);
@@ -534,6 +551,10 @@ async function processTeleportCoords(request) {
     target: { x: request.x, y: request.y, z: request.z, partition_id: result.partitionId },
     command: result.sql
   };
+}
+
+function isExplicitOfflinePlayerStatus(value) {
+  return /^(offline|disconnected|inactive|false|f|0|no)$/i.test(String(value || "").trim());
 }
 
 async function publishTeleport(request) {

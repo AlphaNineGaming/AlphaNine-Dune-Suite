@@ -124,6 +124,7 @@ async function post(baseUrl, route, body) {
     assert.match(mapClick.resolution.diagnostics.partitionReason, /source player/i);
     assert.equal(mapClick.request.z, 5000);
     assert.equal(mapClick.request.commandMode, "safe-ground");
+    assert.equal(mapClick.request.playerOnlineStatus, "Online");
     assert.equal(mapClick.request.dryRun, true);
     assert.equal(mapClick.request.test, true);
     assert.equal(mapClick.resolution.diagnostics.frontendRequestMode, "preview");
@@ -170,6 +171,15 @@ async function post(baseUrl, route, body) {
     assert.equal(playerSelection.includes("liveMap.setView"), false, "Selecting a player must not change map zoom.");
     assert.equal(playerSelection.includes("liveMap.panTo"), false, "Selecting a player must not move the camera.");
     assert.match(page, /async function executeLiveTeleport\(requireExactPreview=false,suppliedPayload=null\)/);
+    const serverSource = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+    const receiverSource = fs.readFileSync(path.join(ROOT, "receivers", "dune-live-give-receiver.js"), "utf8");
+    assert.match(serverSource, /body: preview\.request,\s*timeout: 75000,\s*label: "Teleport receiver"/);
+    assert.match(page, /\/api\/live-map\/teleport\/execute[\s\S]*?timeoutMs:90000/);
+    assert.match(serverSource, /function receiverRuntimeConfigMismatch[\s\S]*?Restarting stale receiver configuration/);
+    assert.match(serverSource, /startupVmSync\.then\(\(\) => startManagedReceiver\(\)\)/);
+    assert.match(serverSource, /requestPayload\.playerOnlineStatus = plan\.source\.onlineStatus \|\| "unknown"/);
+    assert.match(receiverSource, /isExplicitOfflinePlayerStatus\(request\.playerOnlineStatus\)[\s\S]*?updateOfflinePlayerPosition\(request\)/);
+    assert.match(receiverSource, /teleport routing directly to offline DB/);
     assert.match(page, /dryRun:false,test:false/);
     assert.match(page, /Player Saved Locations/);
     assert.match(page, /Enable click-to-teleport/);

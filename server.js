@@ -1253,21 +1253,51 @@ async function waitForReceiverOffline(urlValue, timeout = 8000) {
   return !(await requestStatus(urlValue, 750)).ok;
 }
 
+function receiverRuntimeConfigMismatch(configValue, healthPayload) {
+  const runtime = healthPayload?.config || healthPayload || {};
+  const dedicatedHost = String(configValue.receiverSshHost || "").trim();
+  const expectedHost = String(dedicatedHost || configValue.sshHost || configValue.vmIp || "").trim();
+  const expectedUser = String(dedicatedHost
+    ? (configValue.receiverSshUser || configValue.sshUser || "dune")
+    : (configValue.sshUser || configValue.receiverSshUser || "dune")).trim();
+  const selected = normalizeSelectedBattlegroup(configValue.selectedBattlegroup);
+  const checks = [
+    ["SSH host", runtime.sshHost, expectedHost],
+    ["SSH user", runtime.sshUser, expectedUser],
+    ["battlegroup namespace", runtime.battlegroupNamespace, selected?.namespace || ""],
+    ["battlegroup name", runtime.battlegroupName, selected?.name || ""]
+  ];
+  const reasons = checks
+    .filter(([, actual, expected]) => actual !== undefined && String(expected || "").trim() && String(actual || "").trim().toLowerCase() !== String(expected).trim().toLowerCase())
+    .map(([label, actual, expected]) => `${label} ${String(actual || "<empty>")} -> ${expected}`);
+  const runtimeTeleport = runtime.teleport?.liveTeleportEnabled;
+  if (runtimeTeleport !== undefined && Boolean(runtimeTeleport) !== Boolean(configValue.liveTeleportEnabled)) {
+    reasons.push(`live teleport ${Boolean(runtimeTeleport)} -> ${Boolean(configValue.liveTeleportEnabled)}`);
+  }
+  return { changed: reasons.length > 0, reasons, runtime, expectedHost, expectedUser, selected };
+}
+
 async function startManagedReceiver() {
   receiverManagedLastError = "";
   const ensured = ensureReceiverTokenSaved();
+  const cfg = ensured.config;
   const startupUrls = receiverUrls(ensured.config);
   if (startupUrls.port === PORT) throw new Error("Receiver port is configured to the Suite backend port. Update DUNE_RECEIVER_PORT or Receiver Port before restarting the receiver.");
   const before = await receiverStatus();
   const beforeHealth = before.ok ? await receiverHealthJson(ensured.config) : null;
   const beforeTokenConfigured = Boolean(beforeHealth?.data?.config?.tokenConfigured ?? beforeHealth?.data?.tokenConfigured ?? beforeHealth?.data?.config?.tokenConfig ?? beforeHealth?.data?.tokenConfig);
-  if (before.ok && beforeTokenConfigured) return { ok: true, message: "Receiver is already online.", receiver: before };
-  if (before.ok && !beforeTokenConfigured && !receiverManagedProcess) {
+  const runtimeMismatch = receiverRuntimeConfigMismatch(cfg, beforeHealth?.data);
+  if (before.ok && beforeTokenConfigured && !runtimeMismatch.changed) return { ok: true, message: "Receiver is already online with the current configuration.", receiver: before };
+  if (before.ok && runtimeMismatch.changed) {
+    appendReceiverLog(`Restarting stale receiver configuration: ${runtimeMismatch.reasons.join("; ")}`);
+    const stopped = await stopManagedReceiver();
+    if (!stopped.ok) throw new Error(stopped.message || "Stale receiver did not stop cleanly.");
+  }
+  if (before.ok && !runtimeMismatch.changed && !beforeTokenConfigured && !receiverManagedProcess) {
     return { ok: false, message: "Receiver started without a configured authentication token. Stop the existing receiver or restart the Suite so it can be launched with the current configuration.", receiver: before };
   }
   const receiverFile = packagedAssetPath("receivers", "dune-live-give-receiver.js");
   if (!fs.existsSync(receiverFile)) throw new Error(`Receiver was not found: ${receiverFile}`);
-  const cfg = ensured.config;
   const urls = receiverUrls(cfg);
   const receiverToken = String(cfg.receiverToken || process.env.DUNE_RECEIVER_TOKEN || "").trim();
   const suiteToken = String(cfg.adminGiveItemToken || process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN || receiverToken || "").trim();
@@ -9290,9 +9320,10 @@ function redactUrl(value) {
 
 function httpRequestJson(urlValue, options = {}) {
   return new Promise((resolve, reject) => {
+    const transportLabel = String(options.label || "Give-item").trim() || "Receiver";
     let parsed;
     try { parsed = new URL(urlValue); }
-    catch { reject(new Error("Give-item transport URL is invalid.")); return; }
+    catch { reject(new Error(`${transportLabel} transport URL is invalid.`)); return; }
     const client = parsed.protocol === "https:" ? https : http;
     const body = options.body == null ? null : Buffer.from(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
     const req = client.request(parsed, {
@@ -9312,11 +9343,11 @@ function httpRequestJson(urlValue, options = {}) {
         resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, statusCode: res.statusCode, data, text });
       });
     });
-    req.on("timeout", () => req.destroy(new Error("Give-item transport timed out.")));
+    req.on("timeout", () => req.destroy(new Error(`${transportLabel} transport timed out.`)));
     req.on("error", (error) => {
       const target = redactUrl(urlValue);
       const detail = error.code ? `${error.code}: ${error.message}` : error.message;
-      reject(new Error(`Give-item transport request failed for ${target}: ${detail}`));
+      reject(new Error(`${transportLabel} transport request failed for ${target}: ${detail}`));
     });
     if (body) req.write(body);
     req.end();
@@ -12008,6 +12039,10 @@ async function liveMapTeleportRequest(payload, options = {}) {
   applyTeleportRequestMode(requestPayload, { frontendRequestMode, execution: options.execution === true });
   requestPayload.commandMode = plan.commandMode;
   requestPayload.targetKind = plan.targetKind;
+  // Presence is resolved from the database by the Suite, not trusted from the
+  // browser. The receiver uses it to avoid an online RabbitMQ attempt for a
+  // player who must be moved through the offline database routine instead.
+  requestPayload.playerOnlineStatus = plan.source.onlineStatus || "unknown";
   const result = {
     endpoint: teleportReceiverUrl(cfg),
     command,
@@ -12098,7 +12133,8 @@ async function liveMapTeleportExecute(payload) {
       method: "POST",
       headers,
       body: preview.request,
-      timeout: 10000
+      timeout: 75000,
+      label: "Teleport receiver"
     });
     const failedStatus = response.data?.status || `http-${response.statusCode}`;
     if (!response.ok || response.data?.ok !== true) {
@@ -19449,7 +19485,7 @@ async function refreshAfterTeleport(payload,data){
 }
 async function refreshTeleportReadiness(){const status=document.getElementById("teleportReadiness");try{const data=await getJson("/api/live-map/teleport/status");liveTeleportReady=Boolean(data.canTeleport);syncTeleportButtons();if(status){status.className=(liveTeleportReady?"empty mt":"warning mt")+" advanced-status";status.textContent=!liveTeleportReady?(data.reasons||["Live Teleport unavailable."]).join(" "):"Live Teleport ready. Select a player row, then click the map destination; exact player targets still use resolved preview.";}return data;}catch(e){liveTeleportReady=false;syncTeleportButtons();if(status){status.className="warning mt advanced-status";status.textContent=betterError(e);}return null;}}
 async function previewTeleport(){const payload={...teleportPayload(),requestMode:"preview"};invalidateTeleportPreview();document.getElementById("teleportLog").textContent="Preview requested. No command will be sent.";try{const data=await getJson("/api/live-map/teleport",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||null;const sent=liveTeleportResolutionDiagnostics?.sent;if(sent){setValue("teleportX",sent.x);setValue("teleportY",sent.y);setValue("teleportZ",sent.z!==null&&sent.z!==""&&Number.isFinite(Number(sent.z))?sent.z:"");}liveTeleportPreviewExecutable=data.canExecute===true;liveTeleportPreviewSignature=teleportPayloadSignature(teleportPayload());document.getElementById("teleportLog").textContent=renderTeleportResult(data);updateLiveMapDebug();await refreshTeleportReadiness();playUiSound(data.canExecute?"success":"warning");}catch(e){document.getElementById("teleportLog").textContent=betterError(e);playUiSound("warning");}}
-async function executeLiveTeleport(requireExactPreview=false,suppliedPayload=null){const payload=suppliedPayload?{...suppliedPayload,requestMode:"execute"}:{...teleportPayload(),requestMode:"execute"};try{if(requireExactPreview&&(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload)))throw new Error("Exact player target changed or has not been previewed. Preview the current target before live teleport.");if(requireExactPreview&&!liveTeleportPreviewExecutable)throw new Error("Exact player teleport is blocked because preview did not resolve a valid target and partition.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));showLiveMapResultBadge("Teleport: sending live command...","working");document.getElementById("teleportLog").textContent="Destination clicked. Sending the live command immediately...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:20000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";showLiveMapResultBadge("Last teleport: Sent — verifying database position","working");await refreshAfterTeleport(payload,data);playUiSound("success");return true;}catch(e){document.getElementById("teleportLog").textContent=betterError(e);showLiveMapResultBadge("Last teleport: Failed — "+betterError(e),"fail");playUiSound("warning");return false;}finally{refreshTeleportReadiness();}}
+async function executeLiveTeleport(requireExactPreview=false,suppliedPayload=null){const payload=suppliedPayload?{...suppliedPayload,requestMode:"execute"}:{...teleportPayload(),requestMode:"execute"};try{if(requireExactPreview&&(!liveTeleportPreviewSignature||liveTeleportPreviewSignature!==teleportPayloadSignature(payload)))throw new Error("Exact player target changed or has not been previewed. Preview the current target before live teleport.");if(requireExactPreview&&!liveTeleportPreviewExecutable)throw new Error("Exact player teleport is blocked because preview did not resolve a valid target and partition.");const ready=await refreshTeleportReadiness();if(!ready?.canTeleport)throw new Error((ready?.reasons||["Live Teleport unavailable."]).join(" "));showLiveMapResultBadge("Teleport: sending live command...","working");document.getElementById("teleportLog").textContent="Destination clicked. Sending the live command immediately...";const data=await getJson("/api/live-map/teleport/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:90000});invalidateTeleportPreview();if(!data.ok)throw new Error(data.error||data.message||"Teleport failed.");liveTeleportResolutionDiagnostics=data.resolution?.diagnostics||liveTeleportResolutionDiagnostics;document.getElementById("teleportLog").textContent=renderTeleportResult(data)+"\n\nTeleport sent, verifying database position...";showLiveMapResultBadge("Last teleport: Sent — verifying database position","working");await refreshAfterTeleport(payload,data);playUiSound("success");return true;}catch(e){document.getElementById("teleportLog").textContent=betterError(e);showLiveMapResultBadge("Last teleport: Failed — "+betterError(e),"fail");playUiSound("warning");return false;}finally{refreshTeleportReadiness();}}
 function operationDurationText(value){const seconds=Math.max(0,Math.floor(Number(value||0)/1000));if(seconds<60)return seconds+"s";const minutes=Math.floor(seconds/60);return minutes<60?minutes+"m "+(seconds%60)+"s":Math.floor(minutes/60)+"h "+(minutes%60)+"m";}
 function operationTimeText(value){if(!value)return"--";const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString();}
 function renderOperations(data=operationsState){operationsState=data||{active:[],operations:[]};const rows=operationsState.operations||[];const active=rows.filter(row=>row.status==="pending"||row.status==="running");const success=rows.filter(row=>row.status==="success");const failed=rows.filter(row=>row.status==="failed");const interrupted=rows.filter(row=>row.status==="interrupted");tone("operationsActiveCount",active.length);tone("operationsSuccessCount",success.length);tone("operationsFailedCount",failed.length);tone("operationsInterruptedCount",interrupted.length);const nav=document.getElementById("operationsNavCount");if(nav)nav.textContent=active.length?String(active.length):"";const status=document.getElementById("operationsStatus");if(status){status.className=active.length?"warning mt":"empty mt";status.textContent=active.length?(active.length+" operation(s) running. Conflicting duplicate actions are blocked."):"No active operation. Recent results remain available after restarting the Suite.";}const wrap=document.getElementById("operationsRows");if(!wrap)return;wrap.innerHTML=rows.length?rows.map(row=>'<div class="operation-row"><div><strong>'+esc(row.title||row.key||"Operation")+'</strong><div class="subtle">'+esc(row.category||"system")+' / '+esc(row.id||"")+'</div></div><div><span class="operation-status '+esc(row.status||"unknown")+'">'+esc(row.status||"unknown")+'</span><div class="subtle mt">'+esc(row.stage||"")+'</div></div><div><strong>'+esc(row.detail||row.error||"No additional details.")+'</strong>'+(row.error?'<div class="subtle">'+esc(row.error)+'</div>':'')+'</div><div><strong>'+esc(operationDurationText(row.durationMs))+'</strong><div class="subtle">'+esc(operationTimeText(row.startedAt))+'</div></div></div>').join(""):'<div class="empty">No operations recorded yet.</div>';}
@@ -21720,7 +21756,7 @@ server.listen(PORT, LOCAL_HOST, async () => {
   }
   setTimeout(() => attemptConfiguredServerStart("startup"), 1000);
   setTimeout(() => {
-    startManagedReceiver().then((result) => {
+    startupVmSync.then(() => startManagedReceiver()).then((result) => {
       appendAdminAudit(result?.ok ? "receiver_startup_ready" : "receiver_startup_degraded", {
         message: result?.message || "",
         receiver: result?.receiver?.status || result?.receiver?.reason || ""

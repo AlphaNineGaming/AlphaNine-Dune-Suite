@@ -51,19 +51,27 @@ async function testServiceSqlFlow() {
   assert.equal(result.blueprintId, 18);
   assert.match(queries[1], /BuildingBlueprint_CopyDevice/);
   assert.match(queries[1], /Base \(2\)/);
-  assert.match(queries[1], /!!bbp#/);
+  assert.match(queries[1], /nextval\('dune\.building_blueprints_id_seq'::regclass\)/);
+  assert.match(queries[1], /'!!bbp#' \|\| blueprint_key\.id::text/);
   assert.match(queries[1], /\[0:3\]=\{/);
-  assert.match(queries[1], /select inserted_item\.id, null::bigint, '' from inserted_item/);
+  assert.match(queries[1], /insert into dune\.building_blueprints \(id, item_id, player_id, building_blueprint_map\)/);
+  assert.match(queries[1], /select blueprint_key\.id, inserted_item\.id, null::bigint, '' from inserted_item, blueprint_key/);
+  assert.doesNotMatch(queries[1], /updated_item as/);
+  assert.doesNotMatch(queries[1], /!!bbp#0/);
   assert.doesNotMatch(queries[1], /PlayerBaseBackupId/);
   assert.equal(audits[0].action, "blueprints.import");
 }
 
 async function testNativeSolidoOwnershipFallback() {
-  let sql = "";
-  const service = createBlueprintService({ query: async (value) => { sql = value; return "[]"; } });
+  const queries = [];
+  const service = createBlueprintService({ query: async (value) => { queries.push(value); return "[]"; } });
   assert.deepEqual(await service.list("2"), []);
-  assert.match(sql, /left join dune\.inventories inv on inv\.id = i\.inventory_id/);
-  assert.match(sql, /coalesce\(bb\.player_id, inv\.actor_id\)/);
+  assert.equal(queries.length, 2);
+  assert.match(queries[0], /update dune\.items i/);
+  assert.match(queries[0], /jsonb_set/);
+  assert.match(queries[0], /'!!bbp#' \|\| bb\.id::text/);
+  assert.match(queries[1], /left join dune\.inventories inv on inv\.id = i\.inventory_id/);
+  assert.match(queries[1], /coalesce\(bb\.player_id, inv\.actor_id\)/);
 }
 
 async function testNativeTransformArrayBounds() {

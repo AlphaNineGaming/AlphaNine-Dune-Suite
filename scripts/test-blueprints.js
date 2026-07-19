@@ -53,6 +53,8 @@ async function testServiceSqlFlow() {
   assert.match(queries[1], /Base \(2\)/);
   assert.match(queries[1], /!!bbp#/);
   assert.match(queries[1], /\[0:3\]=\{/);
+  assert.match(queries[1], /select inserted_item\.id, null::bigint, '' from inserted_item/);
+  assert.doesNotMatch(queries[1], /PlayerBaseBackupId/);
   assert.equal(audits[0].action, "blueprints.import");
 }
 

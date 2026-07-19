@@ -794,6 +794,7 @@ async function boot() {
   appendLog("desktop", `Booting AlphaNine Dune Suite. packaged=${app.isPackaged} appPath=${app.getAppPath()} resourcesPath=${process.resourcesPath || ""}`);
   createFirstRunFiles();
   loadEnvironment();
+  await startReceiverIfNeeded();
   await startServer();
   createWindow();
   createTray();

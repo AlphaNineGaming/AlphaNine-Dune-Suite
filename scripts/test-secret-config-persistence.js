@@ -178,6 +178,9 @@ function assertNoPlaceholders(filePath) {
     child = await startServer({ port, configPath, appData });
     await waitForReceiver(baseUrl);
     assert.equal(fs.existsSync(envPath), true, "Suite startup did not regenerate the managed .env file.");
+    const receiverLogPath = path.join(appData, "AlphaNine Dune Suite", "logs", "receiver.log");
+    assert.equal(fs.existsSync(receiverLogPath), true, "Suite receiver startup did not create a receiver log.");
+    assert.match(fs.readFileSync(receiverLogPath, "utf8"), /Dune live give-item receiver listening/);
     const startupEnv = fs.readFileSync(envPath, "utf8");
     assert.match(startupEnv, /DUNE_RECEIVER_SSH_HOST="config-only-host"/);
     assert.match(startupEnv, /DUNE_RECEIVER_SSH_USER="config-user"/);

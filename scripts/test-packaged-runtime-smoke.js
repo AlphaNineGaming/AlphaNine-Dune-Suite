@@ -19,6 +19,11 @@ const httpsPort = port + 500;
 if (!fs.existsSync(archive)) throw new Error(`Packaged archive was not found: ${archive}`);
 asar.extractAll(archive, extracted);
 const packagedServerSource = fs.readFileSync(path.join(extracted, "server.js"), "utf8");
+const packagedDesktopSource = fs.readFileSync(path.join(extracted, "electron", "main.js"), "utf8");
+assert(
+  /loadEnvironment\(\);\s*await startReceiverIfNeeded\(\);\s*await startServer\(\);/.test(packagedDesktopSource),
+  "Packaged desktop boot does not start the receiver before the Suite backend."
+);
 assert(
   packagedServerSource.includes("dune.adjust_player_virtual_currency_balance(${controllerId}::bigint, ${HOUSE_SCRIP_CURRENCY_ID}::smallint, ${amount}::bigint)"),
   "Packaged server is missing the schema-compatible House Scrip function call."

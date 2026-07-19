@@ -68,6 +68,7 @@ const REPAIR_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "repair-backups");
 const REPAIR_QUEUE_PATH = path.join(PROGRESSION_DATA_DIR, "repair-queue.json");
 const BLUEPRINT_MODEL_PACK_DIR = APPDATA_DIR || path.join(__dirname, "data");
 const DATABASE_TUNNEL_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "database-tunnel.log");
+const RECEIVER_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "receiver.log");
 let databaseTunnelStartPromise = null;
 const DB_QUERY_CACHE_TTL_MS = 120000;
 let dbRuntimeTargetCache = null;
@@ -875,6 +876,7 @@ let managerReadinessPromise = null;
 let loggedPythonCommand = "";
 let managerSpawnDiagnostics = null;
 let receiverManagedProcess = null;
+let receiverManagedLastError = "";
 const vmMonitorPingHistory = [];
 let vmMonitorLastSuccess = "";
 
@@ -1160,9 +1162,19 @@ async function receiverStatus() {
     status: health.ok ? "Online" : "Offline",
     managed: Boolean(receiverManagedProcess && !receiverManagedProcess.killed),
     pid: receiverManagedProcess?.pid || null,
+    lastError: receiverManagedLastError,
     ...cfg,
     health
   };
+}
+
+function appendReceiverLog(message) {
+  const text = String(message || "").trimEnd();
+  if (!text) return;
+  try {
+    fs.mkdirSync(path.dirname(RECEIVER_LOG), { recursive: true });
+    fs.appendFileSync(RECEIVER_LOG, `[${new Date().toISOString()}] ${text}\n`, "utf8");
+  } catch {}
 }
 
 async function receiverHealthJson(configValue = loadConfig()) {
@@ -1242,6 +1254,7 @@ async function waitForReceiverOffline(urlValue, timeout = 8000) {
 }
 
 async function startManagedReceiver() {
+  receiverManagedLastError = "";
   const ensured = ensureReceiverTokenSaved();
   const startupUrls = receiverUrls(ensured.config);
   if (startupUrls.port === PORT) throw new Error("Receiver port is configured to the Suite backend port. Update DUNE_RECEIVER_PORT or Receiver Port before restarting the receiver.");
@@ -1286,16 +1299,33 @@ async function startManagedReceiver() {
     DUNE_ADMIN_GIVE_ITEM_HEALTH_URL: urls.healthUrl,
     DUNE_ADMIN_GIVE_ITEM_TOKEN: suiteToken
   };
-  receiverManagedProcess = spawn(process.execPath, [receiverFile], {
+  const child = spawn(process.execPath, [receiverFile], {
     cwd: packagedChildCwd(),
     env,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     detached: false
   });
-  receiverManagedProcess.on("exit", () => { receiverManagedProcess = null; });
+  receiverManagedProcess = child;
+  appendReceiverLog(`Starting receiver: ${receiverFile}`);
+  child.stdout?.on("data", (chunk) => appendReceiverLog(String(chunk)));
+  child.stderr?.on("data", (chunk) => appendReceiverLog(String(chunk)));
+  child.on("error", (error) => {
+    receiverManagedLastError = error?.message || "Receiver process failed to start.";
+    appendReceiverLog(`spawn error: ${receiverManagedLastError}`);
+  });
+  child.on("exit", (code, signal) => {
+    if (receiverManagedProcess === child) receiverManagedProcess = null;
+    if (code !== 0) {
+      receiverManagedLastError = `Receiver exited with code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}.`;
+      appendReceiverLog(receiverManagedLastError);
+    }
+  });
   const ready = await waitForReceiver(urls.healthUrl);
-  return { ok: ready.ok, message: ready.ok ? "Receiver started." : "Receiver did not become healthy.", receiver: await receiverStatus() };
+  const message = ready.ok
+    ? "Receiver started."
+    : `Receiver did not become healthy.${receiverManagedLastError ? ` ${receiverManagedLastError}` : ` See ${RECEIVER_LOG}.`}`;
+  return { ok: ready.ok, message, receiver: await receiverStatus() };
 }
 
 async function stopManagedReceiver() {

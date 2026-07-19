@@ -21,6 +21,10 @@ if (!fs.existsSync(archive)) throw new Error(`Packaged archive was not found: ${
 asar.extractAll(archive, extracted);
 const packagedServerSource = fs.readFileSync(path.join(extracted, "server.js"), "utf8");
 const packagedDesktopSource = fs.readFileSync(path.join(extracted, "electron", "main.js"), "utf8");
+assert(
+  packagedServerSource.includes("query: (sql, timeout) => dbQueryStreamed(sql, timeout)"),
+  "Packaged blueprint imports are not using streamed SQL."
+);
 const packagedVmScheduler = require(path.join(extracted, "lib", "vm-scheduler.js"));
 const packagedSchedulerInstall = packagedVmScheduler.buildInstallCommand({
   config: packagedVmScheduler.defaultSchedulerConfig("abc"),

@@ -5513,7 +5513,7 @@ async function dbQuery(sql, timeout = 45000, runtimeTarget = null) {
 }
 
 const blueprintService = createBlueprintService({
-  query: (sql, timeout) => dbQuery(sql, timeout),
+  query: (sql, timeout) => dbQueryStreamed(sql, timeout),
   audit: (action, payload) => appendAdminAudit(action, payload)
 });
 const blueprintModelPack = createBlueprintModelPack({ dataDir: BLUEPRINT_MODEL_PACK_DIR });

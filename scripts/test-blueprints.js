@@ -81,6 +81,11 @@ function testZip() {
 
 function testInlineUiSyntax() {
   const source = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.match(
+    source,
+    /const blueprintService = createBlueprintService\(\{[\s\S]*?query: \(sql, timeout\) => dbQueryStreamed\(sql, timeout\)/,
+    "Blueprint database operations must stream SQL over stdin so large imports do not exceed Windows command-line limits."
+  );
   const marker = source.indexOf("const WEB_PORTAL_URLS=");
   const start = source.lastIndexOf("<script>", marker);
   const end = source.indexOf("</script>", start);

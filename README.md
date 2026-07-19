@@ -190,6 +190,7 @@ Live Map can show:
 - Base markers when discovered
 - Clicked map coordinates
 - Coordinate search
+- Player-list teleport: select a player without changing the camera, then click the map destination
 - Debug details for marker and player position sources
 
 If the map says `Loaded 1 player, 0 with coordinates`, the suite found player identity data but did not find a usable live position source yet.

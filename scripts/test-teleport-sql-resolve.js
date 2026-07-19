@@ -155,20 +155,24 @@ async function post(baseUrl, route, body) {
 
     const page = await (await fetch(baseUrl)).text();
     assert.equal(page.includes('id="teleportPartitionId"'), false, "Partition input must not be exposed in the UI.");
-    assert.match(page, /Map-click and dragged-marker destinations send immediately with safe-ground mode and dispatch altitude Z 5000/);
+    assert.match(page, /Select a player row without changing the camera, then click the map destination/);
     assert.match(page, /id="liveTeleportButton" onclick="executeLiveTeleport\(\)" disabled>Teleport</);
     assert.equal(page.includes('onclick="previewTeleport()">Preview Teleport'), false, "Map-click must not require a preview button.");
-    assert.match(page, /function liveMapDragTeleportPayload[\s\S]*?z:5000[\s\S]*?commandMode:"safe-ground"/);
-    const dragHandler = page.match(/async function handleLiveMapPlayerDrag[\s\S]*?\nfunction addLiveMapMarkers/)?.[0] || "";
-    assert.equal(dragHandler.includes("appConfirm"), false, "Drag teleport must not show a confirmation dialog.");
-    assert.match(page, /draggable:kind==="players"/);
-    assert.match(dragHandler, /\/api\/live-map\/teleport\/execute/);
-    assert.match(dragHandler, /showToast\(payload\.characterName\+" teleported\."/);
+    assert.match(page, /function liveMapClickTeleportPayload[\s\S]*?z:5000[\s\S]*?commandMode:"safe-ground"/);
+    const clickHandler = page.match(/async function handleLiveMapDestinationClick[\s\S]*?\nfunction liveMapClusterRows/)?.[0] || "";
+    assert.equal(clickHandler.includes("appConfirm"), false, "Map-click teleport must not show a confirmation dialog.");
+    assert.match(page, /draggable:false,bubblingMouseEvents:false/);
+    assert.equal(page.includes('draggable:kind==="players"'), false, "Player markers must not be draggable.");
+    assert.match(page, /liveMap\.on\("click",event=>handleLiveMapDestinationClick\(event\.latlng\)\)/);
+    const playerSelection = page.match(/function selectLiveMapTeleportPlayer[\s\S]*?\nasync function handleLiveMapDestinationClick/)?.[0] || "";
+    assert.match(playerSelection, /setValue\("teleportPlayerId",playerId\)/);
+    assert.match(page, /function selectLiveMapMarkerFromTable[\s\S]*?selectLiveMapTeleportPlayer\(row,key\)/);
+    assert.equal(playerSelection.includes("liveMap.setView"), false, "Selecting a player must not change map zoom.");
+    assert.equal(playerSelection.includes("liveMap.panTo"), false, "Selecting a player must not move the camera.");
+    assert.match(page, /async function executeLiveTeleport\(requireExactPreview=false,suppliedPayload=null\)/);
     assert.match(page, /dryRun:false,test:false/);
     assert.match(page, /Player Saved Locations/);
-    assert.match(page, /Clicked World Coordinates[\s\S]*?panel pad advanced-only|panel pad advanced-only[\s\S]*?Clicked World Coordinates/);
-    assert.match(page, /Coordinate Search[\s\S]*?advanced-only|advanced-only[\s\S]*?Coordinate Search/);
-    assert.match(page, /Enable drag-to-teleport/);
+    assert.match(page, /Enable click-to-teleport/);
     assert.equal(fake.queries.some((sql) => /dune\.player_state[\s\S]+dune\.actors[\s\S]+dune\.world_partition/.test(sql)), true);
     console.log("Teleport SQL resolution tests passed.");
   } finally {

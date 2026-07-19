@@ -4,6 +4,7 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const zlib = require("zlib");
 const {
   CRON_BEGIN,
   CRON_END,
@@ -54,6 +55,17 @@ assert(install.includes("alphanine-scheduler.sh' initialize"));
 assert(install.includes("alphanine-scheduler.sh' self-test"));
 assert(!install.includes("battlegroup backup"), "Installer must not execute a backup.");
 assert(!install.includes("battlegroup restart"), "Installer must not execute a restart.");
+
+const crlfInstall = buildInstallCommand({
+  config,
+  scriptSource: "#!/bin/bash\r\nlog_line() {\r\n  printf '%s\\n' ok\r\n}\r\n",
+  appVersion: "line-ending-test"
+});
+const runtimePayload = crlfInstall.match(/printf %s '([^']+)' \| base64 -d \| gzip -d > \/tmp\/alphanine-scheduler\.sh/)?.[1];
+assert(runtimePayload, "Installer runtime payload was not found.");
+const decodedRuntime = zlib.gunzipSync(Buffer.from(runtimePayload, "base64")).toString("utf8");
+assert.equal(decodedRuntime, "#!/bin/bash\nlog_line() {\n  printf '%s\\n' ok\n}\n");
+assert.equal(decodedRuntime.includes("\r"), false, "VM scheduler payload must use Unix LF line endings.");
 
 assert(buildStatusCommand().includes("alphanine-scheduler.sh"));
 assert(buildStatusCommand().includes("base64 -d"));

@@ -4,6 +4,7 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const zlib = require("zlib");
 const { spawn } = require("child_process");
 const asar = require("@electron/asar");
 
@@ -20,6 +21,16 @@ if (!fs.existsSync(archive)) throw new Error(`Packaged archive was not found: ${
 asar.extractAll(archive, extracted);
 const packagedServerSource = fs.readFileSync(path.join(extracted, "server.js"), "utf8");
 const packagedDesktopSource = fs.readFileSync(path.join(extracted, "electron", "main.js"), "utf8");
+const packagedVmScheduler = require(path.join(extracted, "lib", "vm-scheduler.js"));
+const packagedSchedulerInstall = packagedVmScheduler.buildInstallCommand({
+  config: packagedVmScheduler.defaultSchedulerConfig("abc"),
+  scriptSource: "#!/bin/bash\r\nlog_line() {\r\n  printf ok\r\n}\r\n",
+  appVersion: "packaged-smoke"
+});
+const packagedSchedulerPayload = packagedSchedulerInstall.match(/printf %s '([^']+)' \| base64 -d \| gzip -d > \/tmp\/alphanine-scheduler\.sh/)?.[1];
+assert(packagedSchedulerPayload, "Packaged scheduler installer payload was not found.");
+const packagedSchedulerRuntime = zlib.gunzipSync(Buffer.from(packagedSchedulerPayload, "base64")).toString("utf8");
+assert.equal(packagedSchedulerRuntime.includes("\r"), false, "Packaged scheduler payload still contains Windows CRLF line endings.");
 assert(
   /loadEnvironment\(\);\s*await startReceiverIfNeeded\(\);\s*await startServer\(\);/.test(packagedDesktopSource),
   "Packaged desktop boot does not start the receiver before the Suite backend."

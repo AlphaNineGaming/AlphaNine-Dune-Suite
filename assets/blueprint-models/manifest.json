@@ -1,7 +1,11 @@
 {
   "version": 1,
-  "modelCount": 538,
+  "modelCount": 542,
   "mappings": {
+    "Generator_Placeable": "models/0539.glb",
+    "SpiceSilo_Placeable": "models/0540.glb",
+    "Choam_PentashieldSurfaceHorizontal_Placeable": "models/0541.glb",
+    "Choam_PentashieldSurfaceVertical_Placeable": "models/0542.glb",
     "Choam_Shelter_Door_Frame": "models/0349.glb",
     "Choam_Shelter_Floor": "models/0350.glb",
     "Choam_Shelter_Floor_Round_Corner": "models/0351.glb",

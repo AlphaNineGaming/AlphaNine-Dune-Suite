@@ -75,7 +75,7 @@ Node.js is only required for developers running from source. Installed users sho
 
 ## Offline Blueprint Models
 
-The blueprint viewer works without an internet connection. Version 1.0.55 bundles 538 exact piece meshes and 551 blueprint-type mappings; no extra model folder or download is required.
+The blueprint viewer works without an internet connection. The bundled catalog includes 542 exact meshes and 555 blueprint-type mappings, including supported building placeables and pentashields; no extra model folder or download is required.
 
 1. Open **Blueprints**.
 2. Select **View** for a saved blueprint, or choose a JSON file and select its **Preview** button before importing.

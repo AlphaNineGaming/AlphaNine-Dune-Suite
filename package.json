@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.0.62",
+  "version": "1.0.63",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -13,6 +13,7 @@
     "test:player-rename": "node scripts/test-player-rename.js",
     "test:player-directory": "node scripts/test-player-directory.js",
     "test:packaged": "node scripts/test-packaged-runtime-smoke.js",
+    "test:app-icon": "node scripts/test-app-icon.js",
     "test:durability-repair": "node scripts/test-durability-repair.js",
     "test:repair-queue": "node scripts/test-repair-queue.js",
     "test:market-listings": "node scripts/test-market-listings.js",
@@ -32,7 +33,7 @@
     "test:landsraad-tiers": "node scripts/test-landsraad-tiers.js",
     "test:remote-access": "node scripts/test-remote-access.js",
     "test:internet-tunnel": "node scripts/test-internet-tunnel.js",
-    "build:win": "electron-builder --win nsis --x64 --publish never --config.win.signAndEditExecutable=false && node scripts/ensure-admin-manifest.js"
+    "build:win": "npm run test:app-icon && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=false && node scripts/ensure-admin-manifest.js"
   },
   "dependencies": {
     "express": "^5.2.1",
@@ -102,11 +103,13 @@
     ],
     "afterPack": "scripts/ensure-admin-manifest.js",
     "win": {
+      "icon": "assets/alphanine-suite-icon-v2.png",
       "target": [
         "nsis"
       ],
       "requestedExecutionLevel": "requireAdministrator",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": true,
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,

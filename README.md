@@ -26,6 +26,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.63
+
+- Added a new royal AlphaNine Suite icon to the application, installer, taskbar, tray, and installed shortcuts.
+- Added immediate Live Map destination feedback with a pulsing target marker while a teleport is being sent, followed by clear success or failure feedback.
+- Allowed click-to-teleport destinations directly on player, vehicle, base, and clustered map markers instead of requiring an empty point beside them.
+- Fixed offline-player teleport failures caused by the game database function being unable to resolve its schema-local `is_player_offline(text)` helper.
+- Added receiver checks for every database routine required by offline teleport and validated the corrected schema resolution against a live server database.
+
 ### 1.0.62
 
 - Fixed imported blueprint items that could report "base not found" because their inventory metadata still referenced blueprint ID 0.

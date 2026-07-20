@@ -171,6 +171,12 @@ async function post(baseUrl, route, body) {
     assert.equal(playerSelection.includes("liveMap.setView"), false, "Selecting a player must not change map zoom.");
     assert.equal(playerSelection.includes("liveMap.panTo"), false, "Selecting a player must not move the camera.");
     assert.match(page, /async function executeLiveTeleport\(requireExactPreview=false,suppliedPayload=null\)/);
+    assert.match(page, /function showLiveMapTeleportDestinationMarker\(latlng\)/);
+    assert.match(page, /live-map-teleport-target/);
+    assert.match(page, /Destination accepted - teleporting/);
+    assert.match(page, /function captureLiveMapMarkerAsTeleport\(event,marker\)/);
+    assert.match(page, /if\(captureLiveMapMarkerAsTeleport\(event,marker\)\)return/);
+    assert.match(page, /durationMs=type==="working"\?20000:4000/);
     const serverSource = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
     const receiverSource = fs.readFileSync(path.join(ROOT, "receivers", "dune-live-give-receiver.js"), "utf8");
     assert.match(serverSource, /body: preview\.request,\s*timeout: 75000,\s*label: "Teleport receiver"/);
@@ -180,6 +186,8 @@ async function post(baseUrl, route, body) {
     assert.match(serverSource, /requestPayload\.playerOnlineStatus = plan\.source\.onlineStatus \|\| "unknown"/);
     assert.match(receiverSource, /isExplicitOfflinePlayerStatus\(request\.playerOnlineStatus\)[\s\S]*?updateOfflinePlayerPosition\(request\)/);
     assert.match(receiverSource, /teleport routing directly to offline DB/);
+    assert.match(receiverSource, /begin; set local search_path = dune, public; /);
+    assert.match(receiverSource, /hasDbRoutine\(bg, "is_player_offline"\)/);
     assert.match(page, /dryRun:false,test:false/);
     assert.match(page, /Player Saved Locations/);
     assert.match(page, /Enable click-to-teleport/);

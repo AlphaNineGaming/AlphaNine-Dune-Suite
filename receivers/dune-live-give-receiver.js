@@ -606,6 +606,7 @@ async function updateOfflinePlayerPosition(request) {
   }
   const partitionId = request.partitionId || await resolveTeleportPartitionId(bg, request.flsId);
   const sql = [
+    "begin; set local search_path = dune, public; ",
     "select dune.admin_move_offline_player_to_partition(",
     sqlLiteral(request.flsId),
     ", ",
@@ -616,10 +617,10 @@ async function updateOfflinePlayerPosition(request) {
     sqlNumber(request.y),
     ", ",
     sqlNumber(request.z),
-    ")::dune.vector)"
+    ")::dune.vector); commit"
   ].join("");
   await runDuneSql(bg, sql);
-  return { partitionId, sql: "select dune.admin_move_offline_player_to_partition(<fls_id>, <partition_id>, row(<x>, <y>, <z>)::dune.vector)" };
+  return { partitionId, sql: "begin; set local search_path = dune, public; select dune.admin_move_offline_player_to_partition(<fls_id>, <partition_id>, row(<x>, <y>, <z>)::dune.vector); commit" };
 }
 
 async function detectOfflineTeleportSchema(bg) {
@@ -628,16 +629,18 @@ async function detectOfflineTeleportSchema(bg) {
   const hasDuneAccounts = names.has("dune.accounts");
   const hasDunePlayerState = names.has("dune.player_state");
   const hasMoveFunction = await hasDbRoutine(bg, "admin_move_offline_player_to_partition");
-  const ok = hasDuneAccounts && hasDunePlayerState && hasMoveFunction;
+  const hasOfflineCheckFunction = await hasDbRoutine(bg, "is_player_offline");
+  const ok = hasDuneAccounts && hasDunePlayerState && hasMoveFunction && hasOfflineCheckFunction;
   if (!ok) {
     logReceiver("teleport offline DB schema not detected", {
       hasDuneAccounts,
       hasDunePlayerState,
       hasMoveFunction,
+      hasOfflineCheckFunction,
       candidates
     });
   }
-  return { ok, hasDuneAccounts, hasDunePlayerState, hasMoveFunction, candidates };
+  return { ok, hasDuneAccounts, hasDunePlayerState, hasMoveFunction, hasOfflineCheckFunction, candidates };
 }
 
 async function discoverTeleportDbCandidatesSafe(bg) {

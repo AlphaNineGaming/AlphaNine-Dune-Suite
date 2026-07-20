@@ -11,6 +11,7 @@ const APP_PORT = Number(process.env.PORT || 8810);
 const RECEIVER_DEFAULT_HOST = "127.0.0.1";
 const RECEIVER_DEFAULT_PORT = 5055;
 const START_TIMEOUT_MS = 45000;
+const SUITE_ICON_PATH = path.join("assets", "alphanine-suite-icon-v2.png");
 
 app.setName("AlphaNine Dune Suite");
 app.setAppUserModelId("com.alphanine.dunesuite");
@@ -652,7 +653,7 @@ function quitSuite() {
 
 function createTray() {
   if (tray) return;
-  const iconPath = appPath("assets", "alphanine-logo.jpg");
+  const iconPath = appPath(...SUITE_ICON_PATH.split(path.sep));
   if (!fs.existsSync(iconPath)) {
     appendLog("desktop", `Tray icon was not found: ${iconPath}`);
     return;
@@ -765,6 +766,7 @@ ipcMain.handle("self-update-install", async (_event, update) => {
 });
 
 function createWindow() {
+  const iconPath = appPath(...SUITE_ICON_PATH.split(path.sep));
   mainWindow = new BrowserWindow({
     width: 1380,
     height: 900,
@@ -772,6 +774,7 @@ function createWindow() {
     minHeight: 720,
     backgroundColor: "#07090c",
     title: "AlphaNine Dune Suite",
+    icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

@@ -26,6 +26,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.64
+
+- Expanded the fully offline blueprint viewer from 542 to 637 exact GLB models and from 555 to 655 blueprint-type mappings.
+- Added 100 exact mappings for functional and decorative placeables from the separate placeable asset registry that was previously omitted from the installer.
+- Added exact offline models for water cisterns, wind turbines, windtraps, storage containers, spice refineries, lighting, furniture, decorations, crafting stations, and other supported base placeables.
+- Added regression coverage for the reported placeable identifiers and representative Atreides, CHOAM, Fremen, and downloadable-content placeables.
+- Kept unsupported identifiers unmapped when no authoritative exact mesh exists, preventing visually incorrect substitutions in the viewer.
+
 ### 1.0.63
 
 - Added a new royal AlphaNine Suite icon to the application, installer, taskbar, tray, and installed shortcuts.
@@ -90,7 +98,7 @@ Node.js is only required for developers running from source. Installed users sho
 
 ## Offline Blueprint Models
 
-The blueprint viewer works without an internet connection. The bundled catalog includes 542 exact meshes and 555 blueprint-type mappings, including supported building placeables and pentashields; no extra model folder or download is required.
+The blueprint viewer works without an internet connection. The bundled catalog includes 637 exact meshes and 655 blueprint-type mappings, including building pieces, supported functional and decorative placeables, and pentashields; no extra model folder or download is required.
 
 1. Open **Blueprints**.
 2. Select **View** for a saved blueprint, or choose a JSON file and select its **Preview** button before importing.

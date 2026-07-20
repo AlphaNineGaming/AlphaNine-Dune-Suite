@@ -34,8 +34,8 @@ try {
   const bundled = createBlueprintModelPack({ dataDir: path.join(root, "bundled-data") });
   const bundledStatus = bundled.status();
   assert.strictEqual(bundledStatus.exactBundled, true);
-  assert.strictEqual(bundledStatus.modelCount, 542);
-  assert.strictEqual(bundledStatus.mappingCount, 555);
+  assert.strictEqual(bundledStatus.modelCount, 637);
+  assert.strictEqual(bundledStatus.mappingCount, 655);
   assert.strictEqual(bundled.resolveTypes(["Atreides_Outpost_Wall_02"]).matchedCount, 1);
   assert.strictEqual(bundled.resolveTypes([
     "Generator_Placeable",
@@ -43,6 +43,20 @@ try {
     "Choam_PentashieldSurfaceHorizontal_Placeable",
     "Choam_PentashieldSurfaceVertical_Placeable"
   ]).matchedCount, 4);
+  const exactPlaceables = [
+    "Atre_LightFloor_Placeable",
+    "Choam_LightWall_Placeable",
+    "MediumStorageContainer_Placeable",
+    "LargeWaterCistern_Placeable",
+    "LargeSpiceRefinery_Placeable",
+    "LargeWindtrap_Placeable",
+    "WindTurbineDirectional_Placeable",
+    "Atre_Bed_Placeable",
+    "Choam_OfficeTable_Placeable",
+    "Deathstill_Placeable",
+    "MTX_Neut_MuadDibCage_Placeable"
+  ];
+  assert.strictEqual(bundled.resolveTypes(exactPlaceables).matchedCount, exactPlaceables.length);
   console.log("Blueprint offline model-pack tests passed.");
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

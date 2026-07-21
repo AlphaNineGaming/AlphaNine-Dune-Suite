@@ -1,11 +1,12 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.0.65",
+  "version": "1.0.67",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
   "scripts": {
     "build:item-catalog": "node scripts/build-item-catalog.js",
+    "test:item-catalog-offline": "node scripts/test-item-catalog-offline.js && node scripts/test-item-server-discovery.js",
     "build:skill-catalog": "node scripts/build-skill-catalog.js",
     "test:secret-persistence": "node scripts/test-secret-config-persistence.js",
     "test:setup-paths": "node scripts/test-setup-path-persistence.js",
@@ -17,11 +18,10 @@
     "test:durability-repair": "node scripts/test-durability-repair.js",
     "test:repair-queue": "node scripts/test-repair-queue.js",
     "test:market-listings": "node scripts/test-market-listings.js",
-    "test:schematic-catalog": "node scripts/test-market-bot-schematic-catalog.js",
+    "test:market-automator": "node scripts/test-market-automator.js",
     "test:construction-sets": "node scripts/test-construction-set-catalog.js",
     "test:ui-syntax": "node scripts/test-rendered-ui-syntax.js",
     "test:blueprints": "node scripts/test-blueprints.js",
-    "test:blueprint-models": "node scripts/test-blueprint-model-pack.js",
     "test:base-cleanup": "node scripts/test-base-cleanup-override.js",
     "test:operations": "node scripts/test-operations.js",
     "test:python-discovery": "node scripts/test-python-discovery.js",
@@ -60,8 +60,10 @@
       "package.json",
       "package-lock.json",
       "README.md",
-      "RELEASE_NOTES_1.0.65.md",
-      "MARKET_BOT_USER_GUIDE.md",
+      "RELEASE_NOTES_1.0.67.md",
+      "RELEASE_NOTES_1.0.66.md",
+      "MARKET_AUTOMATOR_GUIDE.md",
+      "THIRD_PARTY_NOTICES.md",
       "LICENSE",
       "manifest.webmanifest",
       "service-worker.js",
@@ -101,8 +103,7 @@
       "!**/*.log"
     ],
     "asarUnpack": [
-      "manager/**",
-      "assets/market-bot/**"
+      "manager/**"
     ],
     "afterPack": "scripts/ensure-admin-manifest.js",
     "win": {

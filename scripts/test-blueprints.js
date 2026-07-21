@@ -24,7 +24,9 @@ function testNormalization() {
     pentashields: [{ placeable_id: 0, scale: [1, 2, 3] }]
   });
   assert.equal(normalized.instances[0].id, 1);
-  assert.equal(normalized.instances[0].stability, true);
+  assert.equal(normalized.instances[0].stability, false);
+  const explicitStability = normalizeBlueprint({ instances: [{ building_type: "Foundation", x: 0, y: 0, z: 0, provides_stability: true }] });
+  assert.equal(explicitStability.instances[0].stability, true);
   assert.equal(normalized.placeables[0].id, 1);
   assert.equal(normalized.pentashields[0].placeableId, 1);
   assert.throws(() => normalizeBlueprint({ instances: "bad", placeables: [] }), /instances must be an array/);
@@ -107,41 +109,13 @@ function testInlineUiSyntax() {
   assert.doesNotThrow(() => new Function(script));
   assert.match(script, /function openBlueprints\(/);
   assert.match(script, /function importBlueprintFiles\(/);
-  assert.match(script, /function openBlueprintViewer\(/);
-  assert.match(script, /function renderBlueprintViewerExact3d\(/);
-  assert.match(script, /function blueprintExactYawCorrection\(/);
-  assert.match(script, /Atreides_Outpost_Wall_Inclined_Wide_Left"\)return -37\.5/);
-  assert.match(script, /Atreides_Outpost_Wall_Inclined_Wide_Right"\)return 37\.5/);
-  assert.match(script, /Number\(yaw\|\|0\)\+blueprintExactYawCorrection\(type,yaw,row\)/);
-  assert.match(script, /function blueprintApplyStairTopologyCorrections\(/);
-  assert.match(script, /!currentUpper&&oppositeUpper/);
-  assert.match(script, /row\.autoYawCorrection=180/);
-  assert.match(script, /alphanine-blueprint-rotations:v2:/);
-  assert.match(script, /function blueprintChangeSelectedRotation\(/);
-  assert.match(script, /function blueprintResetSelectedRotation\(/);
-  assert.match(script, /PointerEventTypes\.POINTERPICK/);
-  assert.match(script, /localStorage\.setItem\(blueprintViewer\.overrideStorageKey/);
-  assert.match(script, /event\.key==="r"\|\|event\.key==="R"/);
-  assert.match(script, /function attachBlueprintCameraControls\(/);
-  assert.match(script, /function blueprintSceneDisposed\(/);
-  assert.match(script, /if\(!blueprintSceneDisposed\(blueprintViewer\.scene\)\)blueprintViewer\.scene\.render\(\)/);
-  assert.doesNotMatch(script, /baseScale=root\.scaling\.clone\(\)/);
-  assert.match(script, /blueprintApplyExactScale\(root,row\)/);
-  assert.match(script, /node\.scaling\.set\(x,y,z\)/);
-  assert.match(script, /root\.rotationQuaternion=baseQuaternion/);
-  assert.match(script, /root\.addRotation\(BABYLON\.Tools\.ToRadians\(-row\.pitch\)/);
-  assert.doesNotMatch(script, /wrapper\.addRotation\(BABYLON\.Tools\.ToRadians\(-row\.pitch\)/);
-  assert.match(script, /camera\.beta=Math\.PI\*\.38/);
-  assert.match(script, /camera\.attachControl\(canvas,true\)/);
-  assert.match(script, /camera\.inputs\.attached\.pointers\.buttons=\[0,1,2\]/);
-  assert.match(script, /camera\.panningMouseButton=2/);
-  assert.match(script, /addEventListener\("dblclick",reset\)/);
-  assert.match(script, /addEventListener\("wheel",containWheel,\{passive:false\}\)/);
-  assert.match(script, /containedEvents=\["pointerdown","pointermove","pointerup","pointercancel","click","auxclick"\]/);
-  assert.match(script, /function previewSelectedBlueprintFile\(/);
-  assert.match(script, /function showBlueprintViewerData\(/);
-  assert.match(source, /id="blueprintViewerCanvas"/);
-  assert.doesNotMatch(source, />Rotate Left<|>Rotate Right<|>Tilt Up<|>Tilt Down<|>Zoom In<|>Zoom Out</);
+  assert.match(script, /function exportBlueprintRows\(/);
+  assert.match(script, /function exportSelectedBlueprints\(/);
+  assert.match(script, /function exportAllBlueprints\(/);
+  assert.match(source, /id="blueprintExportSelected"/);
+  assert.match(source, /id="blueprintExportAll"/);
+  assert.doesNotMatch(source, /blueprintViewer|BABYLON|blueprintProcedural|blueprint-piece-catalog|blueprint-viewer-transform/);
+  assert.doesNotMatch(source, /data-blueprint-action="view"|>View<\/button>|blueprintDeleteSelected|deleteBlueprint/);
 }
 
 async function main() {

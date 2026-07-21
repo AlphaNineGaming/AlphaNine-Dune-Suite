@@ -15,7 +15,7 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - First-launch setup wizard
 - Integrated receiver start, stop, restart, and status
 - Player feed and player management
-- Player blueprint import, export, deletion, pre-import JSON preview, and interactive offline 3D viewing
+- Player blueprint listing, validated inventory import, individual JSON export, selected export, and all-blueprint ZIP export
 - Give Item with Dry-Run and Live Give modes
 - Live Map with player, vehicle, and base markers when position data is available
 - Server Management view
@@ -27,6 +27,19 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.67
+
+- Added deterministic per-item Market Automator pricing with fixed, dynamic, category-base, metadata-multiplier, and exact manual-override controls.
+- Preserved legacy Automator pricing as fixed on upgrade and required operators to review the pricing preview before enabling Dynamic mode.
+- Added offline-first Item Database and Give Item catalog loading with read-only server discovery and raw-template fallback.
+- Kept existing market listings unchanged and added pricing audit records plus regression coverage through both database price columns.
+
+### 1.0.66
+
+- Limited Blueprint management to saved-blueprint listing, validated inventory import, and JSON/ZIP export.
+- Preserved player selection, inventory-capacity checks, protected database transactions, relog guidance, and audit records.
+- Removed unused rendering dependencies, catalogs, assets, fixtures, and package content.
+
 ### 1.0.65
 
 - Added a local-only Database Explorer for safely browsing the selected battlegroup PostgreSQL database.
@@ -34,14 +47,6 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - Added bounded row browsing with parameterized filters, sorting, pagination, selected-row details, and current-page CSV/JSON export.
 - Enforced read-only PostgreSQL transactions, query and lock timeouts, metadata allowlists, cell truncation, and a 5 MB response limit.
 - Blocked Database Explorer UI and API access from LAN, HTTPS, and internet portal sessions, including authenticated Owner sessions.
-
-### 1.0.64
-
-- Expanded the fully offline blueprint viewer from 542 to 637 exact GLB models and from 555 to 655 blueprint-type mappings.
-- Added 100 exact mappings for functional and decorative placeables from the separate placeable asset registry that was previously omitted from the installer.
-- Added exact offline models for water cisterns, wind turbines, windtraps, storage containers, spice refineries, lighting, furniture, decorations, crafting stations, and other supported base placeables.
-- Added regression coverage for the reported placeable identifiers and representative Atreides, CHOAM, Fremen, and downloadable-content placeables.
-- Kept unsupported identifiers unmapped when no authoritative exact mesh exists, preventing visually incorrect substitutions in the viewer.
 
 ### 1.0.63
 
@@ -105,15 +110,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 Node.js is only required for developers running from source. Installed users should use the Windows installer.
 
-## Offline Blueprint Models
+## Blueprint Management
 
-The blueprint viewer works without an internet connection. The bundled catalog includes 637 exact meshes and 655 blueprint-type mappings, including building pieces, supported functional and decorative placeables, and pentashields; no extra model folder or download is required.
+1. Open **Blueprints** and select a player.
+2. Review the player's saved blueprints.
+3. Import validated blueprint JSON files into the selected player's inventory.
+4. Export one blueprint as JSON, export selected blueprints, or export all blueprints as a ZIP archive.
 
-1. Open **Blueprints**.
-2. Select **View** for a saved blueprint, or choose a JSON file and select its **Preview** button before importing.
-3. Orbit, pan, and zoom the exact mesh-based layout on the 3D grid.
-
-The viewer uses the exported game coordinates, rotations, and scale values. If a blueprint contains an unknown piece type, the coverage line reports its ID instead of drawing an invented substitute.
+Imported blueprint items require the player to relog before the inventory view refreshes.
 
 ## Installation
 
@@ -151,7 +155,7 @@ Remote security defaults:
 
 - New and upgraded installations default to the **Viewer** role, which exposes an explicit read-only API allowlist.
 - **Operator** permits limited server controls. **Owner** permits approved remote administration but requires password and authenticator reconfirmation every five minutes for writes.
-- Setup, credentials, configuration export, diagnostics, environment details, permissions, Market Bot configuration, and Server Manager remain local-only for every remote role.
+- Setup, credentials, configuration export, diagnostics, environment details, permissions, market automation configuration, and Server Manager remain local-only for every remote role.
 - Optional authenticator-app (TOTP) protection is configured only from the local Suite.
 - Remote logins, blocked requests, and write actions are recorded in the Suite admin audit log.
 - The downloaded `cloudflared.exe` must have a valid Windows publisher signature from Cloudflare, Inc.

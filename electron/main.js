@@ -712,15 +712,6 @@ ipcMain.handle("choose-database-backup-file", async () => {
   return { canceled: false, filePath: result.filePaths[0] };
 });
 
-ipcMain.handle("choose-blueprint-model-pack-folder", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select offline blueprint GLB model pack",
-    properties: ["openDirectory"]
-  });
-  if (result.canceled || !result.filePaths.length) return { canceled: true };
-  return { canceled: false, folderPath: result.filePaths[0] };
-});
-
 ipcMain.handle("open-path", async (_event, targetPath) => {
   const value = String(targetPath || "").trim();
   if (!value) return { ok: false, error: "Path is empty." };

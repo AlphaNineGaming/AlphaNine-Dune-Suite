@@ -2,6 +2,12 @@
 
 This release adds a safe, local-only Database Explorer for inspecting the selected Dune: Awakening battlegroup PostgreSQL database without exposing generic database editing.
 
+## Independent market component
+
+- Removed the external market service binary, deployment manifest, bundled item-data file, API proxy, and setup controls.
+- Replaced them with a disabled-by-default Suite-native market automator using the Suite's existing market operations and explicit operator limits.
+- Added third-party notices, including the complete Dune-Admin MIT notice.
+
 ## Read-only Database Explorer
 
 - Browse the live database by schema, table, and view.

@@ -6,7 +6,6 @@ contextBridge.exposeInMainWorld("alphaNineSuite", {
   chooseServerInstallFolder: () => ipcRenderer.invoke("choose-server-install-folder"),
   chooseDatabaseBackupFolder: () => ipcRenderer.invoke("choose-database-backup-folder"),
   chooseDatabaseBackupFile: () => ipcRenderer.invoke("choose-database-backup-file"),
-  chooseBlueprintModelPackFolder: () => ipcRenderer.invoke("choose-blueprint-model-pack-folder"),
   openPath: (targetPath) => ipcRenderer.invoke("open-path", targetPath),
   installSelfUpdate: (update) => ipcRenderer.invoke("self-update-install", update),
   onSelfUpdateProgress: (callback) => {

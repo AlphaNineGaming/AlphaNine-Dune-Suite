@@ -32,9 +32,9 @@ try {
     assert.equal(failed.status, "failed");
     assert.equal(failed.error, "simulated failure");
 
-    registry.begin("market-bot:deployment", "Install Market Bot");
+    registry.begin("maintenance:deployment", "Install maintenance component");
     const restarted = new OperationRegistry(filePath, { maxHistory: 10 });
-    const interrupted = restarted.snapshot().operations.find((operation) => operation.key === "market-bot:deployment");
+    const interrupted = restarted.snapshot().operations.find((operation) => operation.key === "maintenance:deployment");
     assert.equal(interrupted.status, "interrupted");
     assert.match(interrupted.error, /Verify the target state before retrying/);
 

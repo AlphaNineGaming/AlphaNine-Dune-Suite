@@ -50,13 +50,15 @@ assert(
 
 for (const relative of [
   "assets/vendor/babylon.js",
-  "assets/vendor/babylonjs.loaders.min.js",
-  "assets/vendor/draco_wasm_wrapper_gltf.js",
-  "assets/vendor/draco_decoder_gltf.wasm",
-  "assets/blueprint-models/manifest.json",
-  "assets/blueprint-models/models/0001.glb"
+  "assets/vendor/BABYLONJS-LICENSE.md",
+  "assets/blueprint-piece-catalog.json",
+  "lib/blueprint-piece-catalog.js",
+  "lib/blueprint-viewer-transform.js",
+  "scripts/test-procedural-blueprint-viewer.js",
+  "scripts/test-blueprint-piece-catalog.js",
+  "scripts/fixtures/blueprint-viewer-rotations.json"
 ]) {
-  assert(fs.existsSync(path.join(extracted, relative)), `Packaged app is missing the offline viewer dependency: ${relative}`);
+  assert(!fs.existsSync(path.join(extracted, relative)), `Packaged app still contains removed blueprint visualization content: ${relative}`);
 }
 
 const child = spawn(process.execPath, [path.join(extracted, "server.js")], {
@@ -95,8 +97,11 @@ async function waitForUi() {
     const html = await waitForUi();
     assert(html.includes("loadSharedPlayerDirectory"), "Packaged UI is missing the shared player directory.");
     assert(html.includes("keeping the last confirmed directory"), "Packaged UI is missing stale player preservation.");
-    assert(html.includes("Exact Offline 3D Models"), "Packaged UI is missing the bundled exact-model status.");
-    assert(html.includes("bundled piece meshes and exported transforms entirely offline"), "Packaged UI is missing the exact offline blueprint viewer description.");
+    assert(html.includes("Player Building Blueprints"), "Packaged UI is missing blueprint management.");
+    assert(html.includes("Export Selected"), "Packaged UI is missing selected-blueprint export.");
+    assert(html.includes("Export All"), "Packaged UI is missing all-blueprint ZIP export.");
+    assert(!/blueprintViewer|BABYLON|blueprintProcedural|blueprint-piece-catalog|blueprint-viewer-transform/.test(html), "Packaged UI still contains blueprint visualization code.");
+    assert(!html.includes('data-blueprint-action="view"'), "Packaged UI still contains a blueprint View action.");
     assert(html.includes("Grant Selected Ranks"), "Packaged UI is missing granular skill rank grants.");
     assert(html.includes("House Scrip is virtual currency"), "Packaged UI is missing the House Scrip grant panel.");
     const packagedVersion = JSON.parse(fs.readFileSync(path.join(extracted, "package.json"), "utf8")).version;

@@ -16,8 +16,10 @@ const { createPlayerDirectory, parsePlayerSelector } = require("./lib/player-dir
 const { durabilityRepairCandidate } = require("./lib/durability-repair");
 const { cleanUpdateLine, parseServerUpdateMetadata, classifyServerUpdate, serverUpdateProgress } = require("./lib/server-update");
 const { createBlueprintService } = require("./lib/blueprints");
-const { createBlueprintModelPack } = require("./lib/blueprint-model-pack");
 const { createDatabaseBrowser } = require("./lib/database-browser");
+const { createMarketAutomator } = require("./lib/market-automator");
+const { createItemCatalogProvider, isValidTemplateId, rawFallback } = require("./lib/item-catalog-provider");
+const { createItemServerDiscovery } = require("./lib/item-server-discovery");
 const { createZipArchive } = require("./lib/zip-archive");
 const {
   defaultSchedulerConfig,
@@ -67,7 +69,6 @@ const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progressi
 const PLAYER_RENAME_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "player-rename-backups");
 const REPAIR_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "repair-backups");
 const REPAIR_QUEUE_PATH = path.join(PROGRESSION_DATA_DIR, "repair-queue.json");
-const BLUEPRINT_MODEL_PACK_DIR = APPDATA_DIR || path.join(__dirname, "data");
 const DATABASE_TUNNEL_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "database-tunnel.log");
 const RECEIVER_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "receiver.log");
 let databaseTunnelStartPromise = null;
@@ -118,15 +119,20 @@ const BUNDLED_UI_OVERRIDE_CSS_PATH = path.join(BUNDLED_DATA_DIR, "ui-overrides.c
 const DUNE_ITEMS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-items-catalog.json");
 const DUNE_SKILLS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-skills-catalog.json");
 const MANAGER_ITEM_CATALOG_PATH = path.join(MANAGER_DIR, "dune-item-catalog.json");
-const MARKET_BOT_ITEM_DATA_PATH = packagedAssetPath("assets", "market-bot", "item-data.json");
 const DUNE_ITEMS_CACHE_PATH = path.join(DATA_DIR, "dune-items-cache.json");
+const SERVER_DISCOVERED_ITEMS_PATH = path.join(DATA_DIR, "server-discovered-items.json");
 const GEAR_IMAGE_CACHE_DIR = path.join(DATA_DIR, "gear-images");
 const BUNDLED_GEAR_IMAGE_DIR = path.join(BUNDLED_DATA_DIR, "gear-images");
-const GEAR_IMPORT_URL = "https://dune.gaming.tools/items";
-const GEAR_DATA_ENTITIES_URL = "https://cdn-hosted.gaming.tools/dune/data/en/entities.d.json";
-const GEAR_CDN_ASSET_URL = "https://cdn-hosted.gaming.tools/dune";
+const itemCatalogProvider = createItemCatalogProvider({
+  bundledCatalogPath: DUNE_ITEMS_CATALOG_PATH,
+  bundledImageDir: BUNDLED_GEAR_IMAGE_DIR,
+  managerCatalogPath: MANAGER_ITEM_CATALOG_PATH,
+  learnedCatalogPath: SERVER_DISCOVERED_ITEMS_PATH,
+  legacyCachePath: DUNE_ITEMS_CACHE_PATH
+});
+const ITEM_CATALOG_STARTUP_REPORT = itemCatalogProvider.validate();
+const ITEM_SERVER_DISCOVERY_DISABLED = process.env.ALPHANINE_DISABLE_SERVER_ITEM_DISCOVERY === "1";
 const ITEM_GRADES = ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Unique", "Research", "Recipe", "Unknown"];
-const CATALOG_MAIN_CATEGORIES = new Set(["items", "buildables", "placeables", "customizations"]);
 const LOCALAPPDATA_DIR = process.env.LOCALAPPDATA || process.env.APPDATA || APPDATA_DIR || "";
 const MANAGER_DATA_DIR = process.env.ALPHANINE_MANAGER_DATA_DIR
   || (IS_WINDOWS && LOCALAPPDATA_DIR ? path.join(LOCALAPPDATA_DIR, "AlphaNine Dune Awakening Manager") : "")
@@ -165,8 +171,6 @@ const defaultConfig = {
   updateRepo: "AlphaNineGaming/alphanine-dune-suite",
   panelTitle: "AlphaNine Dune Suite",
   panelSubtitle: "Unified local tools for your self-hosted server",
-  marketBotApiUrl: "",
-  marketBotApiToken: "",
   pythonPath: "",
   serverInstallPath: "",
   awakeningServerPath: "",
@@ -581,7 +585,7 @@ function normalizeSelectedBattlegroup(value) {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "marketBotApiUrl", "marketBotApiToken", "pythonPath", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "dragTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "pythonPath", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "dragTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
   const current = loadConfig();
   const clean = {};
   for (const key of allowed) {
@@ -627,8 +631,6 @@ function saveConfig(nextConfig) {
   clean.updateRepo = String(clean.updateRepo || "AlphaNineGaming/alphanine-dune-suite").trim();
   clean.panelTitle = String(clean.panelTitle || "AlphaNine Dune Suite").trim();
   clean.panelSubtitle = String(clean.panelSubtitle || "Unified local tools for your self-hosted server").trim();
-  clean.marketBotApiUrl = String(clean.marketBotApiUrl || "").trim().replace(/\/+$/, "");
-  clean.marketBotApiToken = String(clean.marketBotApiToken || "").trim();
   clean.pythonPath = normalizeExecutablePath(clean.pythonPath || detectPythonPath(clean) || "");
   clean.serverInstallPath = String(clean.serverInstallPath || "").trim();
   clean.awakeningServerPath = String(clean.awakeningServerPath || "").trim();
@@ -757,7 +759,6 @@ function publicConfig(configValue = loadConfig()) {
   copy.databasePasswordSet = Boolean(copy.databasePassword);
   copy.receiverTokenSet = Boolean(copy.receiverToken);
   copy.adminGiveItemTokenSet = Boolean(copy.adminGiveItemToken);
-  copy.marketBotApiTokenSet = Boolean(copy.marketBotApiToken);
   copy.sshKeyStatus = sshKeyStatus(copy.sshKey || defaultSshKeyPath());
   copy.receiverSshKeyStatus = sshKeyStatus(copy.receiverSshKey || copy.sshKey || defaultSshKeyPath());
   copy.serverInstallPathStatus = serverInstallPathStatus(copy.serverInstallPath);
@@ -766,7 +767,6 @@ function publicConfig(configValue = loadConfig()) {
   copy.databasePassword = copy.databasePassword ? "********" : "";
   copy.receiverToken = copy.receiverToken ? "********" : "";
   copy.adminGiveItemToken = copy.adminGiveItemToken ? "********" : "";
-  copy.marketBotApiToken = copy.marketBotApiToken ? "********" : "";
   return copy;
 }
 
@@ -3633,21 +3633,6 @@ function isLocalHyperVConfig(configValue = loadConfig()) {
   return !serverType || ["local-hyperv", "local-windows", "hyperv", "hyper-v", "local"].includes(serverType);
 }
 
-function syncedMarketBotApiUrl(configValue, detectedIp) {
-  const current = String(configValue?.marketBotApiUrl || "").trim().replace(/\/+$/, "");
-  const nextIp = normalizeIpv4(detectedIp);
-  if (!current || !nextIp || !isLocalHyperVConfig(configValue)) return { url: current, changed: false, savedIp: "" };
-  try {
-    const parsed = new URL(current);
-    const savedIp = normalizeIpv4(parsed.hostname);
-    if (!savedIp || savedIp === nextIp) return { url: current, changed: false, savedIp };
-    parsed.hostname = nextIp;
-    return { url: parsed.toString().replace(/\/+$/, ""), changed: true, savedIp };
-  } catch {
-    return { url: current, changed: false, savedIp: "" };
-  }
-}
-
 function resetVmDependentRuntime(detectedIp = "") {
   invalidateDatabaseQueryCache();
   Object.assign(databaseTunnelRuntime, {
@@ -3667,8 +3652,6 @@ function syncedVmIpConfig(cfg, detectedIp) {
     const currentIp = normalizeIpv4(current);
     if (!current || currentIp && oldIps.has(currentIp)) next[field] = detectedIp;
   }
-  const marketBotUrl = syncedMarketBotApiUrl(cfg, detectedIp);
-  if (marketBotUrl.changed) next.marketBotApiUrl = marketBotUrl.url;
   return next;
 }
 
@@ -3686,10 +3669,6 @@ async function autoSyncVmIpFromHyperV(options = {}) {
   const changedFields = Object.entries(savedFields)
     .filter(([, value]) => value && value !== detectedIp)
     .map(([field, value]) => ({ field, saved: value, detected: detectedIp }));
-  const marketBotUrl = syncedMarketBotApiUrl(cfg, detectedIp);
-  if (marketBotUrl.changed) {
-    changedFields.push({ field: "marketBotApiUrl", saved: cfg.marketBotApiUrl, detected: marketBotUrl.url });
-  }
   const missingVmIp = !savedFields.vmIp;
   if (!missingVmIp && !changedFields.length) return { ok: true, synced: false, config: cfg, detectedIp, savedFields, changedFields, vm };
   const nextConfig = syncedVmIpConfig(cfg, detectedIp);
@@ -4283,29 +4262,14 @@ async function setMapMemoryLimit(mapName, memoryLimitValue = "") {
 }
 
 function gearCatalog() {
-  const cache = loadDuneItemsCache();
-  return cache.items || [];
+  return itemCatalogProvider.snapshot().items.map(sanitizeGearItemForUi);
 }
 
-let storageItemMetadataCache = null;
 function storageItemMetadata(template) {
-  if (!storageItemMetadataCache) {
-    try {
-      const source = JSON.parse(fs.readFileSync(packagedPath("assets", "market-bot", "item-data.json"), "utf8"));
-      const items = source?.items && typeof source.items === "object" ? source.items : {};
-      storageItemMetadataCache = {};
-      for (const [id, row] of Object.entries(items)) {
-        storageItemMetadataCache[id] = row;
-        storageItemMetadataCache[id.toLowerCase()] = row;
-      }
-    } catch {
-      storageItemMetadataCache = {};
-    }
-  }
-  const key = String(template || "");
-  const row = storageItemMetadataCache[key] || storageItemMetadataCache[key.toLowerCase()] || {};
+  const key = String(template || "").trim().toLowerCase();
+  const row = gearCatalog().find((item) => String(item.id || "").trim().toLowerCase() === key) || {};
   return {
-    stackMax: Math.max(1, Number(row.stack_max) || 1),
+    stackMax: Math.max(1, Number(row.maxStack) || 1),
     volume: Math.max(0, Number(row.volume) || 0)
   };
 }
@@ -4631,7 +4595,9 @@ function gearImageUrlFromPath(localPath) {
 
 function sanitizeGearItemForUi(item = {}) {
   const imageLocalPath = String(item.imageLocalPath || "");
-  const icon = gearImageUrlFromPath(imageLocalPath);
+  const explicitLocalIcon = String(item.icon || "").trim();
+  const icon = gearImageUrlFromPath(imageLocalPath)
+    || (explicitLocalIcon.startsWith("/") && !explicitLocalIcon.startsWith("//") ? explicitLocalIcon : rawFallback(item.id)?.icon || "");
   const category = isSchematicItem(item) ? "Schematics" : normalizeItemCategory(item.category);
   return {
     id: String(item.id || ""),
@@ -4652,106 +4618,6 @@ function sanitizeGearItemForUi(item = {}) {
     hasDisplayName: item.hasDisplayName === true,
     spawnable: item.spawnable !== false
   };
-}
-
-function normalizeBundledItemForUserCache(item = {}) {
-  const normalized = sanitizeGearItemForUi(item);
-  return {
-    ...item,
-    ...normalized,
-    detailUrl: String(item.detailUrl || ""),
-    imageUrl: String(item.imageUrl || ""),
-    imageStatus: String(item.imageStatus || ""),
-    imageError: String(item.imageError || ""),
-    source: "bundled"
-  };
-}
-
-function managerItemTags(item = {}) {
-  const raw = item.tags;
-  if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
-  if (raw && Array.isArray(raw.value)) return raw.value.map(String).filter(Boolean);
-  return [];
-}
-
-function isConstructionSetItem(item = {}) {
-  const category = giveItemCategoryKey(item.category);
-  if (category === "construction" || category === "constructionsets") return true;
-  return managerItemTags(item).some((entry) => /^Items\.Consumables\.BuildableSets$/i.test(entry));
-}
-
-function managerSchematicType(item = {}) {
-  const tags = managerItemTags(item);
-  const tag = tags.find((entry) => /^Items\.Schematics\./i.test(entry)) || "";
-  if (/RangedWeapons|MeleeWeapons|Weapons/i.test(tag)) return "Weapons / Ammo";
-  if (/Clothes|Armor|Stillsuit|Wearables/i.test(tag)) return "Armor / Wearables";
-  if (/Vehicles|Deployables\.Vehicle/i.test(tag)) return "Vehicles";
-  if (/Tools|Consumables/i.test(tag)) return "Tools / Consumables";
-  if (/Buildings|Structures|Placeables/i.test(tag)) return "Structures / Base";
-  if (/Components|Materials/i.test(tag)) return "Materials / Components";
-  return isSchematicItem(item) ? "Unique Schematics" : String(item.type || item.subtype || "");
-}
-
-function normalizeManagerItemForUserCache(item = {}) {
-  const tags = managerItemTags(item);
-  const schematic = isSchematicItem(item);
-  const constructionSet = isConstructionSetItem(item);
-  const tier = normalizeItemTier(item.tier, tags.find((entry) => /^LootTier\./i.test(entry))?.replace(/^LootTier\./i, ""));
-  const normalized = sanitizeGearItemForUi({
-    ...item,
-    category: schematic ? "Schematics" : (constructionSet ? "Construction Sets" : item.category),
-    type: constructionSet ? "Buildable Set" : managerSchematicType(item),
-    subtype: schematic ? "Schematic Item" : (constructionSet ? "Buildable Set" : item.subtype),
-    tier,
-    detail: String(item.detail || tags.join(" / ")),
-    hasDisplayName: Boolean(item.name && item.name !== item.id)
-  });
-  return {
-    ...item,
-    ...normalized,
-    tier,
-    grade: normalized.grade,
-    itemGrade: normalized.grade,
-    detailUrl: String(item.detailUrl || ""),
-    imageUrl: String(item.imageUrl || ""),
-    imageStatus: String(item.imageStatus || ""),
-    imageError: String(item.imageError || ""),
-    source: "manager-catalog"
-  };
-}
-
-function loadManagerCatalogItems() {
-  if (!fs.existsSync(MANAGER_ITEM_CATALOG_PATH)) {
-    return { items: [], report: { managerCatalogPath: MANAGER_ITEM_CATALOG_PATH, managerCatalogPresent: false } };
-  }
-  try {
-    const raw = fs.readFileSync(MANAGER_ITEM_CATALOG_PATH, "utf8").replace(/^\uFEFF/, "");
-    const catalog = JSON.parse(raw);
-    const sourceItems = Array.isArray(catalog) ? catalog : (Array.isArray(catalog.items) ? catalog.items : []);
-    const items = sourceItems
-      .map(normalizeManagerItemForUserCache)
-      .filter((item) => item.id && item.name && (isSchematicItem(item) || isConstructionSetItem(item)));
-    const constructionSets = items.filter(isConstructionSetItem).length;
-    return {
-      items: dedupeGearItemsById(items),
-      report: {
-        managerCatalogPath: MANAGER_ITEM_CATALOG_PATH,
-        managerCatalogPresent: true,
-        managerCatalogItems: sourceItems.length,
-        managerCatalogSchematics: items.length - constructionSets,
-        managerCatalogConstructionSets: constructionSets
-      }
-    };
-  } catch (error) {
-    return {
-      items: [],
-      report: {
-        managerCatalogPath: MANAGER_ITEM_CATALOG_PATH,
-        managerCatalogPresent: true,
-        managerCatalogError: error.message
-      }
-    };
-  }
 }
 
 function gearItemDedupeScore(item = {}) {
@@ -4779,119 +4645,13 @@ function dedupeGearItemsById(items = []) {
   return [...byId.values()];
 }
 
-function copyBundledGearImages() {
-  const result = { copied: 0, reused: 0, missingSource: false, errors: [] };
-  fs.mkdirSync(GEAR_IMAGE_CACHE_DIR, { recursive: true });
-  if (!fs.existsSync(BUNDLED_GEAR_IMAGE_DIR)) {
-    result.missingSource = true;
-    return result;
-  }
-  for (const entry of fs.readdirSync(BUNDLED_GEAR_IMAGE_DIR, { withFileTypes: true })) {
-    if (!entry.isFile()) continue;
-    const source = path.join(BUNDLED_GEAR_IMAGE_DIR, entry.name);
-    const target = path.join(GEAR_IMAGE_CACHE_DIR, entry.name);
-    try {
-      if (fs.existsSync(target)) result.reused += 1;
-      else {
-        fs.copyFileSync(source, target);
-        result.copied += 1;
-      }
-    } catch (error) {
-      result.errors.push(`${entry.name}: ${error.message}`);
-    }
-  }
-  return result;
-}
-
-function seedDuneItemsCacheFromBundledCatalog({ force = false } = {}) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DUNE_ITEMS_CATALOG_PATH)) return { seeded: false, reason: "Bundled item catalog is not present.", catalogPath: DUNE_ITEMS_CATALOG_PATH };
-  let catalog = null;
-  try {
-    catalog = JSON.parse(fs.readFileSync(DUNE_ITEMS_CATALOG_PATH, "utf8"));
-  } catch (error) {
-    return { seeded: false, reason: `Bundled item catalog could not be read: ${error.message}`, catalogPath: DUNE_ITEMS_CATALOG_PATH };
-  }
-  const rawCatalogItems = Array.isArray(catalog.items) ? catalog.items.map(normalizeBundledItemForUserCache).filter((item) => item.id && item.name) : [];
-  const catalogItems = dedupeGearItemsById(rawCatalogItems);
-  if (!catalogItems.length) {
-    return { seeded: false, reason: "Bundled item catalog is empty. Run scripts/build-item-catalog.js during development/build before packaging.", catalogPath: DUNE_ITEMS_CATALOG_PATH };
-  }
-  let shouldSeed = force || !fs.existsSync(DUNE_ITEMS_CACHE_PATH);
-  if (!shouldSeed) {
-    try {
-      const existing = JSON.parse(fs.readFileSync(DUNE_ITEMS_CACHE_PATH, "utf8"));
-      const existingItems = Array.isArray(existing.items) ? existing.items.length : 0;
-      const existingGenerated = Date.parse(existing.generatedAt || "1970-01-01T00:00:00Z") || 0;
-      const bundledGenerated = Date.parse(catalog.generatedAt || "1970-01-01T00:00:00Z") || 0;
-      shouldSeed = existingItems === 0 || bundledGenerated > existingGenerated;
-    } catch {
-      shouldSeed = true;
-    }
-  }
-  const imageCopy = copyBundledGearImages();
-  if (!shouldSeed) return { seeded: false, reason: "User item cache is current.", catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCopy };
-  const cache = {
-    ok: true,
-    generatedAt: catalog.generatedAt || new Date().toISOString(),
-    version: APP_VERSION,
-    source: "bundled-catalog",
-    items: catalogItems,
-    report: {
-      ...(catalog.report || {}),
-      cachePath: DUNE_ITEMS_CACHE_PATH,
-      catalogPath: DUNE_ITEMS_CATALOG_PATH,
-      imageCacheDir: GEAR_IMAGE_CACHE_DIR,
-      bundledImageDir: BUNDLED_GEAR_IMAGE_DIR,
-      totalItemsFound: catalogItems.length,
-      duplicateItemsRemoved: Math.max(0, rawCatalogItems.length - catalogItems.length),
-      gradeCounts: itemGradeCounts(catalogItems),
-      tierCounts: itemTierCounts(catalogItems),
-      imageCopy
-    }
-  };
-  fs.writeFileSync(DUNE_ITEMS_CACHE_PATH, JSON.stringify(cache, null, 2));
-  return { seeded: true, items: catalogItems.length, imageCopy, catalogPath: DUNE_ITEMS_CATALOG_PATH };
-}
-
 function loadDuneItemsCache() {
-  const seeded = seedDuneItemsCacheFromBundledCatalog();
-  if (!fs.existsSync(DUNE_ITEMS_CACHE_PATH)) {
-    return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, totalItemsFound: 0, totalImagesDownloaded: 0, totalImagesReused: 0, failedImageDownloads: 0, message: seeded.reason || "Bundled item catalog has not been generated yet. Run scripts/build-item-catalog.js during development/build." } };
-  }
   try {
-    const data = JSON.parse(fs.readFileSync(DUNE_ITEMS_CACHE_PATH, "utf8"));
-    const rawItems = (data.items || []).map(sanitizeGearItemForUi).filter((item) => item.id && item.name);
-    const managerCatalog = loadManagerCatalogItems();
-    const marketBotSchematics = loadMarketBotSchematicItems();
-    const mergedRawItems = [...rawItems, ...managerCatalog.items, ...marketBotSchematics.items];
-    const items = dedupeGearItemsById(mergedRawItems);
-    const rawItemIds = new Set(rawItems.map((item) => String(item.id || "").trim().toLowerCase()).filter(Boolean));
-    const managerItemIds = new Set(managerCatalog.items.map((item) => String(item.id || "").trim().toLowerCase()).filter(Boolean));
-    const managerOnlySchematics = managerCatalog.items.filter((item) => !rawItemIds.has(String(item.id || "").trim().toLowerCase())).length;
-    const marketBotOnlySchematics = marketBotSchematics.items.filter((item) => {
-      const key = String(item.id || "").trim().toLowerCase();
-      return !rawItemIds.has(key) && !managerItemIds.has(key);
-    }).length;
-    return {
-      ok: true,
-      items,
-      report: {
-        ...(data.report || {}),
-        ...managerCatalog.report,
-        ...marketBotSchematics.report,
-        totalItemsFound: items.length,
-        managerCatalogMergedSchematics: managerCatalog.items.length,
-        managerOnlySchematics,
-        marketBotMergedSchematics: marketBotSchematics.items.length,
-        marketBotOnlySchematics,
-        duplicateItemsRemoved: Math.max(0, mergedRawItems.length - items.length)
-      },
-      generatedAt: data.generatedAt || "",
-      seeded
-    };
+    const snapshot = itemCatalogProvider.snapshot();
+    const items = snapshot.items.map(sanitizeGearItemForUi);
+    return { ok: true, items, report: { ...snapshot.report, cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR }, generatedAt: snapshot.generatedAt || "" };
   } catch (error) {
-    return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, error: error.message, totalItemsFound: 0 } };
+    return { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, error: error.message, totalItemsFound: 0 } };
   }
 }
 
@@ -4949,577 +4709,6 @@ function loadDuneSkillsCatalog() {
   }
 }
 
-function itemCandidateRoots() {
-  const cfg = loadConfig();
-  return [
-    cfg.serverInstallPath,
-    process.env.DUNE_SERVER_INSTALL_PATH,
-    process.env.DUNE_AWAKENING_SERVER_PATH,
-    process.env.DUNE_GAME_PATH,
-    process.env.STEAM_APPS
-  ].filter(Boolean).map((entry) => path.resolve(String(entry))).filter((entry, index, list) => fs.existsSync(entry) && list.indexOf(entry) === index);
-}
-
-function isLikelyItemFile(filePath) {
-  const lower = filePath.toLowerCase();
-  return /\.(json|jsonc|csv|tsv|txt|ini|cfg|dat|bin|uasset|uexp|pak|utoc|ucas|vhd|vhdx)$/i.test(lower);
-}
-
-function walkItemFiles(root, limit = 12000) {
-  const files = [];
-  let truncated = false;
-  const stack = [root];
-  while (stack.length && files.length < limit) {
-    const current = stack.pop();
-    let entries = [];
-    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        if (!/node_modules|installer-output|\.git|logs|backups|screenshots/i.test(full)) stack.push(full);
-      } else if (entry.isFile() && isLikelyItemFile(full)) {
-        files.push(full);
-      }
-    }
-  }
-  if (stack.length || files.length >= limit) truncated = true;
-  files.truncated = truncated;
-  return files;
-}
-
-function cleanItemText(value) {
-  return String(value || "").replace(/\u0000/g, "").trim();
-}
-
-function looksLikeItemId(value) {
-  const text = cleanItemText(value);
-  return /^[A-Za-z0-9_:.\/-]{3,220}$/.test(text) && /(item|items\.|inventory|loot|weapon|armor|resource|equipment|template|gear)/i.test(text);
-}
-
-function addDiscoveredItem(items, raw) {
-  const id = cleanItemText(raw.id || raw.template || raw.path || raw.internalId);
-  if (!id || !looksLikeItemId(id)) return;
-  const existing = items.get(id);
-  const display = cleanItemText(raw.name || raw.displayName || raw.label || raw.title);
-  const hasDisplayName = Boolean(display && display !== id && !looksLikeItemId(display));
-  const item = {
-    id,
-    name: hasDisplayName ? display : id,
-    category: cleanItemText(raw.category || raw.type || raw.class || ""),
-    detail: cleanItemText(raw.detail || raw.description || raw.source || ""),
-    tier: cleanItemText(raw.tier || ""),
-    rarity: cleanItemText(raw.rarity || ""),
-    maxStack: cleanItemText(raw.maxStack || raw.stackSize || ""),
-    icon: "",
-    source: cleanItemText(raw.source || ""),
-    hasDisplayName
-  };
-  if (!existing || (!existing.hasDisplayName && item.hasDisplayName)) items.set(id, { ...existing, ...item });
-}
-
-function scanJsonForItems(value, source, items, depth = 0) {
-  if (depth > 18 || value == null) return;
-  if (Array.isArray(value)) {
-    value.forEach((entry) => scanJsonForItems(entry, source, items, depth + 1));
-    return;
-  }
-  if (typeof value !== "object") return;
-  const id = value.id || value.itemId || value.ItemId || value.template || value.Template || value.nameId || value.assetId || value.path || value.objectPath || value.ObjectPath || value.primaryAssetId;
-  const name = value.displayName || value.DisplayName || value.name || value.Name || value.title || value.Title || value.localizedName;
-  if (id || looksLikeItemId(name)) {
-    addDiscoveredItem(items, {
-      id: id || name,
-      name,
-      category: value.category || value.Category || value.itemType || value.ItemType || value.type || value.Type,
-      detail: value.description || value.Description || value.tooltip || value.Tooltip,
-      tier: value.tier || value.Tier,
-      rarity: value.rarity || value.Rarity,
-      maxStack: value.maxStack || value.MaxStack || value.stackSize || value.StackSize,
-      source
-    });
-  }
-  for (const child of Object.values(value)) scanJsonForItems(child, source, items, depth + 1);
-}
-
-function scanTextForItems(text, source, items) {
-  const patterns = [
-    /\bItems\.[A-Za-z0-9_.:-]{2,180}\b/g,
-    /\b(?:Item|Weapon|Armor|Resource|Inventory)[A-Za-z0-9_.:-]{3,180}\b/g,
-    /\/Game\/[A-Za-z0-9_\/.-]*(?:Item|Weapon|Armor|Resource|Inventory|Gear)[A-Za-z0-9_\/.-]*/g
-  ];
-  for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) addDiscoveredItem(items, { id: match[0], source });
-  }
-}
-
-function scanItemFile(filePath, items) {
-  const ext = path.extname(filePath).toLowerCase();
-  const stat = fs.statSync(filePath);
-  const report = { path: filePath, size: stat.size, format: ext.replace(".", "") || "unknown", itemsFound: 0, status: "scanned" };
-  const before = items.size;
-  if (stat.size > 250 * 1024 * 1024) {
-    report.status = "skipped-too-large";
-    report.note = "File exceeds scanner limit. No items were silently skipped; this file requires a dedicated Unreal extraction tool.";
-    return report;
-  }
-  try {
-    if ([".json", ".jsonc"].includes(ext)) {
-      const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
-      scanJsonForItems(JSON.parse(raw), filePath, items);
-    } else if ([".pak", ".utoc", ".ucas", ".uasset", ".uexp"].includes(ext)) {
-      const raw = fs.readFileSync(filePath);
-      scanTextForItems(raw.toString("latin1"), filePath, items);
-      report.status = "binary-inspected";
-      report.note = "Unreal binary/container inspected for item identifiers. Display names require exported metadata/localization.";
-    } else {
-      scanTextForItems(fs.readFileSync(filePath, "utf8"), filePath, items);
-    }
-  } catch (error) {
-    report.status = "error";
-    report.error = error.message;
-  }
-  report.itemsFound = items.size - before;
-  return report;
-}
-
-async function scanRemoteDuneItems(items) {
-  const script = [
-    "set +e",
-    "roots='/home/dune /funcom /mnt /opt /var/lib/rancher/k3s/storage'",
-    "pattern='Items\\.[A-Za-z0-9_.:-]{2,180}|/Game/[A-Za-z0-9_./-]*(Item|Weapon|Armor|Resource|Inventory|Gear)[A-Za-z0-9_./-]*'",
-    "for root in $roots; do",
-    "  [ -d \"$root\" ] || continue",
-    "  find \"$root\" -type f \\( -iname '*.json' -o -iname '*.csv' -o -iname '*.ini' -o -iname '*.txt' -o -iname '*.uasset' -o -iname '*.uexp' -o -iname '*.pak' -o -iname '*.utoc' -o -iname '*.ucas' \\) -size -300M -print 2>/dev/null",
-    "done | head -n 2000 | while IFS= read -r file; do",
-    "  echo __ALPHANINE_FILE__:$file",
-    "  grep -aEo \"$pattern\" \"$file\" 2>/dev/null | sort -u | head -n 5000",
-    "done"
-  ].join("\n");
-  const result = await sshCommand(script, 120000, { maxBuffer: 1024 * 1024 * 12 });
-  const report = { source: "ssh-vm", status: result.ok ? "scanned" : "unavailable", filesScanned: [], itemsFound: 0, error: result.ok ? "" : (result.stderr || result.error || result.stdout || "Remote VM item scan failed.") };
-  if (!result.ok) return report;
-  let current = "";
-  const before = items.size;
-  for (const line of String(result.stdout || "").split(/\r?\n/)) {
-    if (line.startsWith("__ALPHANINE_FILE__:")) {
-      current = line.slice("__ALPHANINE_FILE__:".length);
-      report.filesScanned.push({ path: current, status: "remote-scanned" });
-      continue;
-    }
-    if (line.trim()) addDiscoveredItem(items, { id: line.trim(), source: current ? `ssh:${current}` : "ssh" });
-  }
-  report.itemsFound = items.size - before;
-  return report;
-}
-
-function decodeHtmlEntities(value = "") {
-  return String(value || "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
-}
-
-function stripTags(value = "") {
-  return decodeHtmlEntities(String(value || "").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
-}
-
-function parseHtmlAttrs(tag = "") {
-  const attrs = {};
-  for (const match of String(tag || "").matchAll(/([a-zA-Z_:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)) {
-    attrs[match[1].toLowerCase()] = decodeHtmlEntities(match[2] || match[3] || match[4] || "");
-  }
-  return attrs;
-}
-
-function absoluteUrl(href, base = GEAR_IMPORT_URL) {
-  try { return new URL(String(href || ""), base).toString(); } catch { return ""; }
-}
-
-function stableGearIdFromUrl(urlValue, fallback = "") {
-  try {
-    const url = new URL(urlValue);
-    const segment = url.pathname.split("/").filter(Boolean).pop() || fallback;
-    return decodeURIComponent(segment).trim() || fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function safeGearFileName(value) {
-  return String(value || "item").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "item";
-}
-
-function cleanGearDisplayName(value, fallback = "") {
-  const clean = stripTags(value)
-    .replace(/\s+[\-|]\s*(Dune Awakening|Dune: Awakening|Gaming\.Tools|Dune Gaming Tools).*$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return clean || fallback;
-}
-
-function gearImageExtension(urlValue = "", contentType = "") {
-  const type = String(contentType || "").toLowerCase();
-  if (type.includes("webp")) return ".webp";
-  if (type.includes("jpeg") || type.includes("jpg")) return ".jpg";
-  if (type.includes("png")) return ".png";
-  try {
-    const ext = path.extname(new URL(urlValue).pathname).toLowerCase();
-    if ([".png", ".jpg", ".jpeg", ".webp"].includes(ext)) return ext === ".jpeg" ? ".jpg" : ext;
-  } catch {}
-  return ".png";
-}
-
-function httpRequestBuffer(urlValue, options = {}) {
-  const timeoutMs = Number(options.timeoutMs || 20000);
-  const redirects = Number(options.redirects ?? 4);
-  return new Promise((resolve, reject) => {
-    let parsed;
-    try { parsed = new URL(urlValue); } catch (error) { reject(error); return; }
-    const client = parsed.protocol === "http:" ? http : https;
-    const req = client.request(parsed, {
-      method: "GET",
-      headers: {
-        "User-Agent": `AlphaNine-Dune-Suite/${APP_VERSION} item-cache-importer`,
-        "Accept": options.accept || "*/*"
-      }
-    }, (response) => {
-      const location = response.headers.location;
-      if ([301, 302, 303, 307, 308].includes(response.statusCode) && location && redirects > 0) {
-        response.resume();
-        httpRequestBuffer(absoluteUrl(location, urlValue), { ...options, redirects: redirects - 1 }).then(resolve, reject);
-        return;
-      }
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
-      response.on("end", () => {
-        const body = Buffer.concat(chunks);
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new Error(`HTTP ${response.statusCode}`));
-          return;
-        }
-        resolve({ buffer: body, contentType: String(response.headers["content-type"] || ""), statusCode: response.statusCode });
-      });
-    });
-    req.on("error", reject);
-    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Request timed out after ${timeoutMs}ms`)));
-    req.end();
-  });
-}
-
-async function httpRequestText(urlValue, timeoutMs = 25000) {
-  const result = await httpRequestBuffer(urlValue, { timeoutMs, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" });
-  return result.buffer.toString("utf8");
-}
-
-async function mapWithConcurrency(items, limit, worker) {
-  const results = new Array(items.length);
-  let index = 0;
-  const count = Math.max(1, Math.min(Number(limit) || 1, items.length || 1));
-  await Promise.all(Array.from({ length: count }, async () => {
-    while (index < items.length) {
-      const current = index++;
-      results[current] = await worker(items[current], current);
-    }
-  }));
-  return results;
-}
-
-function parseGearTextMetadata(text = "") {
-  const clean = stripTags(text);
-  const result = { name: cleanGearDisplayName(clean, clean), category: "", subtype: "", type: "", tier: "", rarity: "" };
-  const rarityMatch = clean.match(/\b(Common|Uncommon|Rare|Epic|Legendary|Unique)\b/i);
-  if (rarityMatch) result.rarity = rarityMatch[1];
-  const tierMatch = clean.match(/\bTier\s+([0-9IVX]+)\b/i);
-  if (tierMatch) result.tier = `Tier ${tierMatch[1]}`;
-  const structured = clean.match(/^(.*?)\s+([A-Za-z][A-Za-z &/]+?)\s+-\s+([A-Za-z][A-Za-z &/]+?)(?:\s+Tier\s+[0-9IVX]+)?(?:\s+(?:Common|Uncommon|Rare|Epic|Legendary|Unique))?$/i);
-  if (structured) {
-    result.name = cleanGearDisplayName(structured[1], structured[1]).trim();
-    result.category = structured[2].trim();
-    result.subtype = structured[3].trim();
-    result.type = result.subtype;
-  }
-  return result;
-}
-
-function metaContent(html, selectorName) {
-  const escaped = selectorName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regexes = [
-    new RegExp(`<meta[^>]+property=["']${escaped}["'][^>]+content=["']([^"']+)["'][^>]*>`, "i"),
-    new RegExp(`<meta[^>]+name=["']${escaped}["'][^>]+content=["']([^"']+)["'][^>]*>`, "i"),
-    new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${escaped}["'][^>]*>`, "i")
-  ];
-  for (const regex of regexes) {
-    const match = String(html || "").match(regex);
-    if (match) return decodeHtmlEntities(match[1]);
-  }
-  return "";
-}
-
-function parseDuneGamingToolsItemLinks(html) {
-  const items = new Map();
-  for (const match of String(html || "").matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
-    const attrs = parseHtmlAttrs(match[1]);
-    const href = attrs.href || "";
-    if (!/\/items\/[^/?#]+/i.test(href)) continue;
-    const detailUrl = absoluteUrl(href, GEAR_IMPORT_URL);
-    const id = stableGearIdFromUrl(detailUrl);
-    if (!id || items.has(id)) continue;
-    const parsed = parseGearTextMetadata(match[2]);
-    const name = parsed.name && parsed.name.length < 140 ? cleanGearDisplayName(parsed.name, id) : id;
-    items.set(id, {
-      id,
-      name,
-      category: parsed.category,
-      subtype: parsed.subtype,
-      type: parsed.type,
-      tier: parsed.tier,
-      rarity: parsed.rarity,
-      detail: "",
-      detailUrl,
-      imageUrl: "",
-      imageLocalPath: "",
-      maxStack: "",
-      hasDisplayName: Boolean(name && name !== id)
-    });
-  }
-  return Array.from(items.values());
-}
-
-function parseDuneGamingToolsDetail(html, item) {
-  const h1 = String(html || "").match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  const title = cleanGearDisplayName(metaContent(html, "og:title") || (h1 ? stripTags(h1[1]) : ""), item.name);
-  const description = metaContent(html, "description") || metaContent(html, "og:description");
-  const imageUrl = metaContent(html, "og:image") || metaContent(html, "twitter:image") || (() => {
-    for (const match of String(html || "").matchAll(/<img\b([^>]*)>/gi)) {
-      const attrs = parseHtmlAttrs(match[1]);
-      const src = attrs.src || attrs["data-src"] || "";
-      if (src && !/logo|avatar|favicon/i.test(src)) return absoluteUrl(src, item.detailUrl);
-    }
-    return "";
-  })();
-  const combined = [title, description, stripTags(html).slice(0, 800)].filter(Boolean).join(" ");
-  const parsed = parseGearTextMetadata(`${title || item.name} ${description || ""}`);
-  return {
-    ...item,
-    name: title && title.length < 140 ? cleanGearDisplayName(title, item.name) : item.name,
-    detail: description || item.detail || "",
-    category: item.category || parsed.category,
-    subtype: item.subtype || parsed.subtype,
-    type: item.type || parsed.type,
-    tier: item.tier || parsed.tier || (combined.match(/\bTier\s+([0-9IVX]+)\b/i) ? `Tier ${combined.match(/\bTier\s+([0-9IVX]+)\b/i)[1]}` : ""),
-    rarity: item.rarity || parsed.rarity || ((combined.match(/\b(Common|Uncommon|Rare|Epic|Legendary|Unique)\b/i) || [])[1] || ""),
-    imageUrl: imageUrl ? absoluteUrl(imageUrl, item.detailUrl) : item.imageUrl,
-    hasDisplayName: Boolean((title || item.name) && (title || item.name) !== item.id)
-  };
-}
-
-async function downloadGearImage(item) {
-  if (!item.imageUrl) return { ...item, imageStatus: "missing", imageError: "No image URL found." };
-  fs.mkdirSync(GEAR_IMAGE_CACHE_DIR, { recursive: true });
-  const hash = crypto.createHash("sha1").update(item.imageUrl).digest("hex").slice(0, 12);
-  const stem = safeGearFileName(`${item.id}-${item.name}-${hash}`);
-  const existing = fs.readdirSync(GEAR_IMAGE_CACHE_DIR).find((file) => file.startsWith(`${stem}.`));
-  if (existing) {
-    return { ...item, imageLocalPath: path.join(GEAR_IMAGE_CACHE_DIR, existing), imageStatus: "reused" };
-  }
-  let lastError = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const response = await httpRequestBuffer(item.imageUrl, { timeoutMs: 20000, accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" });
-      const ext = gearImageExtension(item.imageUrl, response.contentType);
-      const filePath = path.join(GEAR_IMAGE_CACHE_DIR, `${stem}${ext}`);
-      fs.writeFileSync(filePath, response.buffer);
-      return { ...item, imageLocalPath: filePath, imageStatus: "downloaded" };
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 350 * attempt));
-    }
-  }
-  return { ...item, imageStatus: "failed", imageError: lastError ? lastError.message : "Image download failed." };
-}
-
-function parseSvelteDevalueJson(text) {
-  const UNDEFINED = -1;
-  const HOLE = -2;
-  const NAN = -3;
-  const POSITIVE_INFINITY = -4;
-  const NEGATIVE_INFINITY = -5;
-  const NEGATIVE_ZERO = -6;
-  const SPARSE_ARRAY = -7;
-  const values = JSON.parse(String(text || ""));
-  const hydrated = new Array(values.length);
-  function hydrate(index, strict = false) {
-    if (index === UNDEFINED) return undefined;
-    if (index === NAN) return NaN;
-    if (index === POSITIVE_INFINITY) return Infinity;
-    if (index === NEGATIVE_INFINITY) return -Infinity;
-    if (index === NEGATIVE_ZERO) return -0;
-    if (strict || typeof index !== "number") throw new Error("Invalid devalue reference.");
-    if (index in hydrated) return hydrated[index];
-    const value = values[index];
-    if (!value || typeof value !== "object") {
-      hydrated[index] = value;
-    } else if (Array.isArray(value)) {
-      if (typeof value[0] === "string") {
-        const type = value[0];
-        if (type === "Date") hydrated[index] = new Date(value[1]);
-        else if (type === "Set") {
-          const set = new Set();
-          hydrated[index] = set;
-          for (let i = 1; i < value.length; i++) set.add(hydrate(value[i]));
-        } else if (type === "Map") {
-          const map = new Map();
-          hydrated[index] = map;
-          for (let i = 1; i < value.length; i += 2) map.set(hydrate(value[i]), hydrate(value[i + 1]));
-        } else if (type === "Object") {
-          hydrated[index] = Object(value[1]);
-        } else {
-          hydrated[index] = value;
-        }
-      } else if (value[0] === SPARSE_ARRAY) {
-        const sparse = new Array(value[1]);
-        hydrated[index] = sparse;
-        for (let i = 2; i < value.length; i += 2) sparse[value[i]] = hydrate(value[i + 1]);
-      } else {
-        const array = new Array(value.length);
-        hydrated[index] = array;
-        for (let i = 0; i < value.length; i++) if (value[i] !== HOLE) array[i] = hydrate(value[i]);
-      }
-    } else {
-      const object = {};
-      hydrated[index] = object;
-      for (const key of Object.keys(value)) {
-        if (key !== "__proto__") object[key] = hydrate(value[key]);
-      }
-    }
-    return hydrated[index];
-  }
-  return hydrate(0);
-}
-
-function titleCaseGearCategory(value = "") {
-  return String(value || "")
-    .replace(/^items\//, "")
-    .split("/")
-    .pop()
-    .replace(/[_-]+/g, " ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/\b\w/g, (ch) => ch.toUpperCase())
-    .trim();
-}
-
-function gearItemCategory(entity = {}) {
-  const categories = Array.isArray(entity.categories) ? entity.categories : [];
-  const main = String(entity.mainCategoryId || "").toLowerCase();
-  const primary = categories.find((entry) => new RegExp(`^${main || "items"}\\/[^/]+$`, "i").test(entry))
-    || categories.find((entry) => /^items\/[^/]+$/i.test(entry))
-    || categories[0]
-    || "";
-  return titleCaseGearCategory(primary || entity.mainCategoryId || "");
-}
-
-function gearItemSubtype(entity = {}) {
-  const categories = Array.isArray(entity.categories) ? entity.categories : [];
-  const deepest = categories.slice().sort((a, b) => b.length - a.length)[0] || "";
-  const subtype = titleCaseGearCategory(deepest);
-  const category = gearItemCategory(entity);
-  return subtype && subtype !== category ? subtype : "";
-}
-
-function gearItemDetail(entity = {}) {
-  const lines = [];
-  if (entity.description) lines.push(stripTags(entity.description));
-  if (Array.isArray(entity.stats) && entity.stats.length) {
-    for (const stat of entity.stats) {
-      if (!stat || stat.value == null) continue;
-      lines.push(`${String(stat.name || stat.key || "Stat").replace(/:+$/, "")}: ${stat.value}`);
-    }
-  }
-  return lines.filter(Boolean).join("\n");
-}
-
-function gearImageUrlFromIconPath(iconPath = "") {
-  const clean = String(iconPath || "").trim();
-  if (!clean) return "";
-  if (/^https?:\/\//i.test(clean)) return clean;
-  return `${GEAR_CDN_ASSET_URL}${clean.startsWith("/") ? clean : `/${clean}`}`;
-}
-
-async function discoverDuneItems() {
-  const startedAt = Date.now();
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.mkdirSync(GEAR_IMAGE_CACHE_DIR, { recursive: true });
-  const entityResponse = await httpRequestText(GEAR_DATA_ENTITIES_URL, 45000);
-  const entities = parseSvelteDevalueJson(entityResponse);
-  const listItems = (Array.isArray(entities) ? entities : []).filter((entity) => entity && CATALOG_MAIN_CATEGORIES.has(String(entity.mainCategoryId || "").toLowerCase()));
-  if (!listItems.length) throw new Error("No items were found in the online item entity feed.");
-  const normalized = listItems.map((entity) => ({
-    id: String(entity.id || ""),
-    name: cleanGearDisplayName(entity.name || entity.id || "", entity.id || ""),
-    category: gearItemCategory(entity),
-    subtype: gearItemSubtype(entity),
-    type: gearItemSubtype(entity),
-    detail: gearItemDetail(entity),
-    tier: entity.tier ? `Tier ${entity.tier}` : "",
-    rarity: String(entity.rarity || ""),
-    grade: normalizeItemGrade(entity.grade, entity.rarity, entity.quality, entity.tier, entity.itemGrade, entity.itemRarity),
-    maxStack: String(entity.maxStack || entity.maxStackSize || entity.stackSize || ""),
-    detailUrl: `${GEAR_IMPORT_URL.replace(/\/items$/i, "")}/${CATALOG_MAIN_CATEGORIES.has(String(entity.mainCategoryId || "").toLowerCase()) ? String(entity.mainCategoryId || "items").toLowerCase() : "items"}/${encodeURIComponent(String(entity.id || ""))}`,
-    imageUrl: gearImageUrlFromIconPath(entity.iconPath),
-    imageLocalPath: "",
-    hasDisplayName: Boolean(entity.name && entity.name !== entity.id),
-    detailStatus: "loaded"
-  })).filter((item) => item.id && item.name);
-  const withImages = await mapWithConcurrency(normalized, 4, downloadGearImage);
-  const discoveredItems = withImages
-    .map((item) => ({
-      id: String(item.id || ""),
-      name: String(item.name || item.id || ""),
-      category: String(item.category || ""),
-      subtype: String(item.subtype || item.type || ""),
-      type: String(item.type || item.subtype || ""),
-      detail: String(item.detail || ""),
-      tier: String(item.tier || ""),
-      rarity: String(item.rarity || ""),
-      grade: normalizeItemGrade(item.grade, item.rarity, item.quality, item.tier, item.itemGrade, item.itemRarity),
-      maxStack: String(item.maxStack || ""),
-      detailUrl: String(item.detailUrl || ""),
-      imageUrl: String(item.imageUrl || ""),
-      imageLocalPath: String(item.imageLocalPath || ""),
-      hasDisplayName: item.hasDisplayName === true,
-      imageStatus: String(item.imageStatus || "missing"),
-      imageError: String(item.imageError || ""),
-      detailStatus: String(item.detailStatus || "")
-    }))
-    .filter((item) => item.id && item.name)
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const report = {
-    cachePath: DUNE_ITEMS_CACHE_PATH,
-    imageCacheDir: GEAR_IMAGE_CACHE_DIR,
-    filesScanned: [{ label: "entity feed", status: "loaded", itemsFound: listItems.length }],
-    totalFilesScanned: 1,
-    totalItemsFound: discoveredItems.length,
-    itemsWithDisplayNames: discoveredItems.filter((item) => item.hasDisplayName).length,
-    unknownOrUnclassifiedItems: discoveredItems.filter((item) => !item.hasDisplayName || !item.category).length,
-    totalImagesDownloaded: discoveredItems.filter((item) => item.imageStatus === "downloaded").length,
-    totalImagesReused: discoveredItems.filter((item) => item.imageStatus === "reused").length,
-    failedImageDownloads: discoveredItems.filter((item) => item.imageStatus === "failed").length,
-    missingImages: discoveredItems.filter((item) => item.imageStatus === "missing").length,
-    gradeCounts: itemGradeCounts(discoveredItems),
-    tierCounts: itemTierCounts(discoveredItems),
-    durationMs: Date.now() - startedAt
-  };
-  const cache = { ok: true, generatedAt: new Date().toISOString(), version: APP_VERSION, items: discoveredItems, report };
-  fs.writeFileSync(DUNE_ITEMS_CACHE_PATH, JSON.stringify(cache, null, 2));
-  appendAdminAudit("gear_item_import_completed", report);
-  return { ...cache, items: discoveredItems.map(sanitizeGearItemForUi) };
-}
-
 async function dbQuery(sql, timeout = 45000, runtimeTarget = null) {
   const target = runtimeTarget || await cachedDatabaseRuntimeTarget();
   const { namespace, dbPod, dbSvc } = target;
@@ -5554,60 +4743,58 @@ const databaseBrowser = createDatabaseBrowser({
   },
   audit: (action, payload) => appendAdminAudit(action, payload)
 });
-const blueprintModelPack = createBlueprintModelPack({ dataDir: BLUEPRINT_MODEL_PACK_DIR });
+const itemServerDiscovery = createItemServerDiscovery({
+  getConnectionConfig: async () => {
+    const settings = await liveMapDirectDbSettings();
+    return { ...settings, password: String(loadConfig().databasePassword || "") };
+  },
+  audit: (action, payload) => appendAdminAudit(action, payload)
+});
+let itemCatalogDiscoveryPromise = null;
+let itemCatalogLastDiscoveryAt = 0;
+let liveDynamicItemCatalog = [];
 
-function loadMarketBotSchematicItems() {
-  if (!fs.existsSync(MARKET_BOT_ITEM_DATA_PATH)) {
-    return { items: [], report: { marketBotCatalogPath: MARKET_BOT_ITEM_DATA_PATH, marketBotCatalogPresent: false } };
+async function refreshServerDiscoveredItemCatalog({ force = false } = {}) {
+  if (ITEM_SERVER_DISCOVERY_DISABLED) return { ok: true, readOnly: true, skipped: "disabled", catalog: loadDuneItemsCache() };
+  if (itemCatalogDiscoveryPromise) return itemCatalogDiscoveryPromise;
+  if (!force && Date.now() - itemCatalogLastDiscoveryAt < 5 * 60 * 1000) {
+    return { ok: true, skipped: "recent", catalog: loadDuneItemsCache() };
   }
-  try {
-    const raw = fs.readFileSync(MARKET_BOT_ITEM_DATA_PATH, "utf8").replace(/^\uFEFF/, "");
-    const catalog = JSON.parse(raw);
-    const sourceItems = catalog?.items && typeof catalog.items === "object" && !Array.isArray(catalog.items) ? catalog.items : {};
-    const names = catalog?.names && typeof catalog.names === "object" ? catalog.names : {};
-    const items = Object.entries(sourceItems)
-      .filter(([, row]) => row && row.is_schematic === true)
-      .map(([id, row]) => {
-        const name = String(row.name || names[id] || id).trim();
-        const tier = normalizeItemTier(row.tier);
-        const grade = normalizeItemGrade(row.rarity, "Unique");
-        return sanitizeGearItemForUi({
-          id,
-          name,
-          category: "Schematics",
-          type: "Unique Schematics",
-          subtype: "Unique Schematic",
-          tier,
-          rarity: grade,
-          grade,
-          detail: String(row.category || ""),
-          maxStack: String(row.stack_max || 1),
-          hasDisplayName: Boolean(name && name !== id),
-          spawnable: true,
-          source: "market-bot-catalog"
-        });
-      })
-      .filter((item) => item.id && item.name);
-    return {
-      items: dedupeGearItemsById(items),
-      report: {
-        marketBotCatalogPath: MARKET_BOT_ITEM_DATA_PATH,
-        marketBotCatalogPresent: true,
-        marketBotCatalogItems: Object.keys(sourceItems).length,
-        marketBotCatalogSchematics: items.length
-      }
-    };
-  } catch (error) {
-    return {
-      items: [],
-      report: {
-        marketBotCatalogPath: MARKET_BOT_ITEM_DATA_PATH,
-        marketBotCatalogPresent: true,
-        marketBotCatalogError: error.message
-      }
-    };
-  }
+  itemCatalogDiscoveryPromise = (async () => {
+    const discovery = await itemServerDiscovery.discover(5000);
+    const learned = itemCatalogProvider.learn(discovery.records);
+    const dynamic = await Promise.all([
+      knownTechKnowledgeCatalogItems().catch(() => []),
+      knownCraftingRecipeCatalogItems().catch(() => [])
+    ]);
+    liveDynamicItemCatalog = dedupeGearItemsById(dynamic.flat().map(sanitizeGearItemForUi));
+    itemCatalogLastDiscoveryAt = Date.now();
+    itemCatalogProvider.snapshot({ refresh: true });
+    return { ok: true, readOnly: true, discovery, learned, dynamicItems: liveDynamicItemCatalog.length, catalog: loadDuneItemsCache() };
+  })().catch((error) => {
+    appendAdminAudit("item_catalog_server_discovery_unavailable", { readOnly: true, error: error.message });
+    return { ok: false, readOnly: true, error: error.message, catalog: loadDuneItemsCache() };
+  }).finally(() => { itemCatalogDiscoveryPromise = null; });
+  return itemCatalogDiscoveryPromise;
 }
+
+function scheduleServerDiscoveredItemCatalog() {
+  if (ITEM_SERVER_DISCOVERY_DISABLED) return;
+  refreshServerDiscoveredItemCatalog().catch(() => {});
+}
+const marketAutomator = createMarketAutomator({
+  dataDir: DATA_DIR,
+  inspect: () => marketPostingStatus(),
+  list: (payload) => marketListings(payload),
+  publish: (payload) => postMarketListing(payload),
+  purchase: (orderId) => buyMarketListingAsAdmin(orderId),
+  catalog: () => gearCatalog()
+    .filter((item) => item?.id && item.spawnable !== false && !isTechKnowledgeItem(item) && !isRecipeSchematicItem(item)),
+  battlegroup: () => {
+    const selected = loadConfig().selectedBattlegroup;
+    return selected?.name || selected?.namespace || "";
+  }
+});
 
 async function dbQueryStreamed(sql, timeout = 45000, runtimeTarget = null) {
   const target = runtimeTarget || await cachedDatabaseRuntimeTarget();
@@ -9606,11 +8793,7 @@ function validateGiveItemPayload(payload) {
   const quality = hasQuality ? Number(payload.quality) : 0;
   if (!playerId) throw new Error("Choose a player first.");
   if (playerId.length > 128 || !/^[A-Za-z0-9_:.+\-# @]+$/.test(playerId)) throw new Error("Player name/id contains unsupported characters.");
-  if (!template || template.length > 240 || !/^[A-Za-z0-9_:.()+-]+$/.test(template)) throw new Error("Choose a valid item template.");
-  const catalogMatch = gearCatalog().some((item) => item.id === template)
-    || /^recipe:[A-Za-z0-9_().+\-]+$/.test(template)
-    || /^tech:[A-Za-z0-9_().+\-]+$/.test(template);
-  if (!catalogMatch) throw new Error("Item template was not found in the local Gear Codex catalog.");
+  if (!isValidTemplateId(template)) throw new Error("Choose a valid exact item template identifier.");
   if (!Number.isInteger(qty) || qty < 1 || qty > 50000) throw new Error("Quantity must be a whole number between 1 and 50000.");
   if (hasQuality && !capabilities.qualitySupported) throw new Error("Grade giving is not supported by the current receiver method.");
   if (hasQuality && (!Number.isInteger(quality) || quality < 0 || quality > 5)) throw new Error("Grade must be a whole number between 0 and 5.");
@@ -10382,6 +9565,7 @@ function repairDecodeStats(value) {
 
 function repairPublicTarget(row) {
   const candidate = durabilityRepairCandidate(row.kind, row.currentDurability, row.decayedMaxDurability);
+  const catalogItem = itemCatalogProvider.resolve(row.templateId);
   return {
     targetId: `${row.kind}:${row.id}`,
     kind: row.kind,
@@ -10391,6 +9575,9 @@ function repairPublicTarget(row) {
     vehicleId: row.vehicleId || "",
     vehicleName: row.vehicleName || "",
     templateId: row.templateId || "",
+    displayName: catalogItem?.name || row.templateId || row.id,
+    catalogSource: catalogItem?.source || "raw-id",
+    icon: catalogItem?.icon || "",
     currentDurability: candidate.current,
     allowedMaximum: candidate.maximum,
     repairable: candidate.repairable,
@@ -12257,7 +11444,7 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
   const mode = String(options.mode || "dry-run").toLowerCase();
   const dryRun = mode !== "execute";
   if (!playerId) throw new Error("Choose a player first.");
-  if (!template || !/^[A-Za-z0-9_:.()+-]+$/.test(template)) throw new Error("Choose a valid item template.");
+  if (!isValidTemplateId(template)) throw new Error("Choose a valid exact item template identifier.");
   const targetPredicate = [
     `ps.account_id::text = ${sqlString(playerId)}`,
     `ps.player_controller_id::text = ${sqlString(playerId)}`,
@@ -12628,7 +11815,49 @@ function validateMarketListingPayload(payload) {
     quality,
     listingCount,
     expiryDays,
+    pricing: normalizeMarketPricingAudit(payload?.pricing, template, price),
     requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  };
+}
+
+function normalizeMarketPricingAudit(value, template, finalPrice) {
+  if (!value || typeof value !== "object") return null;
+  const safeNumber = (candidate, fallback = 1) => {
+    const number = Number(candidate);
+    return Number.isFinite(number) && number >= 0 ? number : fallback;
+  };
+  const cleanText = (candidate, fallback = "") => String(candidate ?? fallback).slice(0, 500);
+  return {
+    template: cleanText(template),
+    pricingMode: ["fixed", "dynamic"].includes(value.pricingMode) ? value.pricingMode : "dynamic",
+    basePrice: safeNumber(value.basePrice, finalPrice),
+    globalBasePrice: safeNumber(value.globalBasePrice, finalPrice),
+    baseSource: cleanText(value.baseSource, "global-base"),
+    metadata: {
+      grade: cleanText(value.metadata?.grade, "Unknown"),
+      tier: cleanText(value.metadata?.tier, "Unknown"),
+      rarity: cleanText(value.metadata?.rarity, "Unknown"),
+      category: cleanText(value.metadata?.category, "Unknown")
+    },
+    factors: {
+      item: safeNumber(value.factors?.item),
+      grade: safeNumber(value.factors?.grade),
+      tier: safeNumber(value.factors?.tier),
+      rarity: safeNumber(value.factors?.rarity),
+      cycle: safeNumber(value.factors?.cycle)
+    },
+    variation: {
+      itemPercent: safeNumber(value.variation?.itemPercent, 0),
+      cyclePercent: safeNumber(value.variation?.cyclePercent, 0)
+    },
+    seed: {
+      item: cleanText(value.seed?.item),
+      cycle: cleanText(value.seed?.cycle),
+      battlegroup: cleanText(value.seed?.battlegroup),
+      cycleId: cleanText(value.seed?.cycleId)
+    },
+    calculatedPrice: safeNumber(value.calculatedPrice, finalPrice),
+    finalSubmittedPrice: finalPrice
   };
 }
 
@@ -13236,6 +12465,7 @@ async function postMarketListing(payload) {
       expiryDays: command.expiryDays,
       expirationTime: expiryTime
     },
+    pricing: command.pricing,
     durationMs: Date.now() - started,
     message: `Posted ${created} live market listing(s) for ${command.name} at ${command.price} Solari.`
   };
@@ -13248,6 +12478,7 @@ async function postMarketListing(payload) {
     listingCount: command.listingCount,
     expiryDays: command.expiryDays,
     expirationTime: expiryTime,
+    pricing: command.pricing,
     result: result.market,
     durationMs: result.durationMs
   });
@@ -13257,7 +12488,7 @@ async function postMarketListing(payload) {
 function giveItemDisplayName(template) {
   if (/^recipe:/i.test(String(template || ""))) return recipeDisplayName(String(template || "").replace(/^recipe:/i, ""));
   if (/^tech:/i.test(String(template || ""))) return techKnowledgeDisplayName(techKnowledgeKeyFromTemplate(template));
-  const item = gearCatalog().find((row) => row.id === template);
+  const item = itemCatalogProvider.resolve(template);
   return item?.name || template;
 }
 
@@ -13736,7 +12967,7 @@ function normalizeGiveQueuePresetItems(items) {
     const template = String(item?.template || item?.itemId || item?.id || "").trim();
     const qty = Number(item?.qty ?? item?.quantity ?? 1);
     if (!template) throw new Error(`Preset item ${index + 1} is missing an item template.`);
-    if (!gearCatalog().some((row) => row.id === template)) throw new Error(`Preset item ${index + 1} template was not found in the local Gear Codex catalog: ${template}`);
+    if (!isValidTemplateId(template)) throw new Error(`Preset item ${index + 1} has an invalid exact template identifier: ${template}`);
     if (!Number.isInteger(qty) || qty < 1 || qty > 50000) throw new Error(`Preset item ${index + 1} quantity must be a whole number between 1 and 50000.`);
     const normalized = {
       template,
@@ -14763,6 +13994,10 @@ async function adminStorageTargets() {
       let storedItems = {};
       try { storedItems = JSON.parse(row.items || "{}"); } catch {}
       const usedVolume = Object.entries(storedItems).reduce((sum, [template, count]) => sum + storageItemMetadata(template).volume * Math.max(0, Number(count) || 0), 0);
+      const contents = Object.entries(storedItems).map(([template, count]) => {
+        const item = itemCatalogProvider.resolve(template);
+        return { template, name: item?.name || template, count: Number(count) || 0, source: item?.source || "raw-id", icon: item?.icon || "" };
+      }).sort((a, b) => a.name.localeCompare(b.name));
       return {
         actorId: row.actorId,
         inventoryId: row.inventoryId,
@@ -14778,7 +14013,8 @@ async function adminStorageTargets() {
         maxItemCount: Number(row.maxItemCount || 0),
         usedVolume: Math.round(usedVolume * 100) / 100,
         maxItemVolume: Number(row.maxItemVolume || 0),
-        volumeVerified: Object.keys(storedItems).every((template) => storageItemMetadata(template).volume > 0)
+        volumeVerified: Object.keys(storedItems).every((template) => storageItemMetadata(template).volume > 0),
+        contents
       };
     })
   };
@@ -14794,7 +14030,7 @@ async function adminGiveItemToStorage(payload = {}) {
   const mode = String(payload.mode || "dry-run").toLowerCase();
   const dryRun = mode !== "execute";
   if (!playerId) throw new Error("Choose the player associated with this storage deposit.");
-  if (!template || !/^[A-Za-z0-9_:.()+-]+$/.test(template)) throw new Error("Choose a valid item template.");
+  if (!isValidTemplateId(template)) throw new Error("Choose a valid exact item template identifier.");
   if (!dryRun && payload.confirmed !== true) throw new Error("Confirm the storage deposit before writing to the database.");
   const playerPredicate = [
     `ps.account_id::text = ${sqlString(playerId)}`,
@@ -15204,459 +14440,6 @@ async function proxyToManager(req, res, pathname) {
   }
 }
 
-function marketBotBaseUrl(configValue = loadConfig()) {
-  const explicit = String(configValue.marketBotApiUrl || process.env.MARKET_BOT_API_URL || "").trim().replace(/\/+$/, "");
-  const host = String(configValue.vmIp || configValue.sshHost || process.env.DUNE_VM_IP || "").trim();
-  if (explicit) {
-    const synced = syncedMarketBotApiUrl({ ...configValue, marketBotApiUrl: explicit }, host);
-    return synced.url || explicit;
-  }
-  return host ? `http://${host}:8081` : "http://127.0.0.1:8081";
-}
-
-function marketBotToken(configValue = loadConfig()) {
-  return usableSecretValue(configValue.marketBotApiToken)
-    || usableSecretValue(process.env.MARKET_BOT_API_TOKEN)
-    || usableSecretValue(process.env.API_TOKEN);
-}
-
-function generateMarketBotApiToken() {
-  return crypto.randomBytes(32).toString("base64url");
-}
-
-async function discoverMarketBotApiToken() {
-  const command = "sudo kubectl get secret market-bot-secret -n dune-market-bot -o jsonpath='{.data.API_TOKEN}' 2>/dev/null";
-  const result = await sshCommand(command, 15000, { maxBuffer: 1024 * 16 });
-  if (!result.ok) return "";
-  const encoded = String(result.stdout || "").trim();
-  if (!encoded) return "";
-  try {
-    const token = Buffer.from(encoded, "base64").toString("utf8").trim();
-    return isMaskedSecretValue(token) ? "" : token;
-  } catch {
-    return "";
-  }
-}
-
-async function provisionMarketBotApiToken(token = generateMarketBotApiToken()) {
-  const safeToken = String(token || "").trim();
-  if (!safeToken || isMaskedSecretValue(safeToken)) throw new Error("Could not create a Market Bot API token.");
-  const command = [
-    "sudo kubectl create namespace dune-market-bot --dry-run=client -o yaml | sudo kubectl apply -f - >/dev/null",
-    `sudo kubectl create secret generic market-bot-secret -n dune-market-bot --from-literal=API_TOKEN=${shQuote(safeToken)} --dry-run=client -o yaml | sudo kubectl apply -f - >/dev/null`,
-    "sudo kubectl rollout restart deployment/market-bot -n dune-market-bot >/dev/null 2>&1 || true",
-    "sudo kubectl rollout status deployment/market-bot -n dune-market-bot --timeout=90s >/dev/null 2>&1 || true"
-  ].join("; ");
-  const result = await sshCommand(command, 120000, { maxBuffer: 1024 * 128 });
-  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Could not configure the Market Bot API token on the VM.");
-  appendAdminAudit("market_bot_token_provisioned", { source: "suite-generated", namespace: "dune-market-bot", secret: "market-bot-secret", tokenConfigured: true });
-  return safeToken;
-}
-
-async function ensureMarketBotTokenConfigured(configValue = loadConfig(), options = {}) {
-  const existingToken = marketBotToken(configValue);
-  if (existingToken && options.force !== true) {
-    if (!usableSecretValue(configValue.marketBotApiToken)) {
-      const saved = saveConfig({ ...configValue, marketBotApiToken: existingToken });
-      appendAdminAudit("market_bot_token_auto_configured", { source: "runtime-env", namespace: "dune-market-bot", secret: "market-bot-secret", tokenConfigured: true });
-      return saved;
-    }
-    return configValue;
-  }
-  let token = await discoverMarketBotApiToken();
-  let source = "kubernetes-secret";
-  if (!token && options.provision !== false) {
-    token = await provisionMarketBotApiToken();
-    source = "suite-generated";
-  }
-  if (!token) return configValue;
-  const next = { ...configValue, marketBotApiToken: token };
-  const saved = saveConfig(next);
-  appendAdminAudit("market_bot_token_auto_configured", { source, namespace: "dune-market-bot", secret: "market-bot-secret", tokenConfigured: true });
-  return saved;
-}
-
-function decodeChunkedHttpBody(body) {
-  let offset = 0;
-  const chunks = [];
-  while (offset < body.length) {
-    const lineEnd = body.indexOf("\r\n", offset);
-    if (lineEnd === -1) break;
-    const sizeText = body.slice(offset, lineEnd).split(";", 1)[0].trim();
-    const size = Number.parseInt(sizeText, 16);
-    if (!Number.isFinite(size)) break;
-    offset = lineEnd + 2;
-    if (size === 0) break;
-    chunks.push(body.slice(offset, offset + size));
-    offset += size + 2;
-  }
-  return chunks.join("");
-}
-
-function parseRawHttpResponse(raw, target) {
-  const text = String(raw || "");
-  const splitAt = text.indexOf("\r\n\r\n");
-  const headerText = splitAt >= 0 ? text.slice(0, splitAt) : "";
-  let bodyText = splitAt >= 0 ? text.slice(splitAt + 4) : text;
-  const headerLines = headerText.split(/\r?\n/).filter(Boolean);
-  const statusMatch = String(headerLines.shift() || "").match(/^HTTP\/\S+\s+(\d+)/i);
-  const status = statusMatch ? Number(statusMatch[1]) : 0;
-  const headers = {};
-  for (const line of headerLines) {
-    const index = line.indexOf(":");
-    if (index > 0) headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim();
-  }
-  if (/chunked/i.test(headers["transfer-encoding"] || "")) bodyText = decodeChunkedHttpBody(bodyText);
-  let data = {};
-  try { data = bodyText ? JSON.parse(bodyText) : {}; } catch { data = { raw: bodyText }; }
-  if (status < 200 || status >= 300) {
-    const error = new Error(data.error || data.message || bodyText || `Market bot returned HTTP ${status || "unknown"}`);
-    error.status = status;
-    error.target = target;
-    throw error;
-  }
-  if (data && typeof data === "object" && !Array.isArray(data)) data.transport = data.transport || "vm-ssh";
-  return data;
-}
-
-function marketBotNetworkError(error) {
-  const message = String(error?.message || error || "");
-  return error?.name === "AbortError" || /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|network|timed out/i.test(message);
-}
-
-function marketBotAuthError(error) {
-  return /unauthorized|forbidden|HTTP 401|HTTP 403/i.test(String(error?.message || error || ""));
-}
-
-async function marketBotRequestViaVm(pathname, options = {}, configValue = loadConfig(), body = undefined) {
-  const method = String(options.method || "GET").toUpperCase();
-  const path = pathname.startsWith("/") ? pathname : `/${pathname}`;
-  const token = marketBotToken(configValue);
-  const bodyText = body === undefined ? "" : String(body);
-  const timeoutSeconds = Math.max(5, Math.ceil(Number(options.timeoutMs || 15000) / 1000));
-  const headers = [
-    `Host: 127.0.0.1:8081`,
-    `User-Agent: AlphaNine-Dune-Suite/${APP_VERSION}`,
-    "Accept: application/json",
-    "Connection: close"
-  ];
-  if (options.auth !== false && token) headers.push(`Authorization: Bearer ${token}`);
-  if (body !== undefined) {
-    headers.push(`Content-Type: ${options.headers?.["Content-Type"] || options.headers?.["content-type"] || "application/json"}`);
-    headers.push(`Content-Length: ${Buffer.byteLength(bodyText)}`);
-  }
-  const requestText = [
-    `${method} ${path} HTTP/1.1`,
-    ...headers,
-    "",
-    bodyText
-  ].join("\r\n");
-  const curlHeaderArgs = headers.map((header) => `-H ${shQuote(header)}`).join(" ");
-  const curlDataArg = body !== undefined ? "--data-binary @-" : "";
-  const curlUrl = `http://127.0.0.1:8081${path}`;
-  const command = [
-    `pfPath=${shQuote(path)}`,
-    "curlBody=$(mktemp)",
-    `printf %s ${shQuote(bodyText)} > "$curlBody"`,
-    `if command -v curl >/dev/null 2>&1 && curl -i -sS --max-time ${timeoutSeconds} -X ${shQuote(method)} ${curlHeaderArgs} ${curlDataArg} ${shQuote(curlUrl)} < "$curlBody"; then rm -f "$curlBody"; exit 0; fi`,
-    "rm -f \"$curlBody\"",
-    "tmp=$(mktemp)",
-    `if command -v nc >/dev/null 2>&1 && printf %s ${shQuote(requestText)} | nc -w ${timeoutSeconds} 127.0.0.1 8081 > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then cat "$tmp"; rm -f "$tmp"; exit 0; fi`,
-    "rm -f \"$tmp\"",
-    "pfLog=$(mktemp)",
-    "pfOut=$(mktemp)",
-    "pfPort=$((18081 + ($$ % 1000)))",
-    "sudo kubectl -n dune-market-bot port-forward svc/market-bot ${pfPort}:8081 > \"$pfLog\" 2>&1 & pfPid=$!",
-    "for i in 1 2 3 4 5 6 7 8 9 10; do grep -q 'Forwarding from' \"$pfLog\" && break; kill -0 \"$pfPid\" 2>/dev/null || break; sleep 0.3; done",
-    `if kill -0 "$pfPid" 2>/dev/null && command -v curl >/dev/null 2>&1 && curl -i -sS --max-time ${timeoutSeconds} -X ${shQuote(method)} ${curlHeaderArgs} ${curlDataArg} "http://127.0.0.1:$pfPort$pfPath" < "$curlBody"; then kill "$pfPid" 2>/dev/null || true; rm -f "$pfLog" "$pfOut" "$curlBody"; exit 0; fi`,
-    `if kill -0 "$pfPid" 2>/dev/null && command -v nc >/dev/null 2>&1 && printf %s ${shQuote(requestText)} | nc -w ${timeoutSeconds} 127.0.0.1 "$pfPort" > "$pfOut" 2>/dev/null && [ -s "$pfOut" ]; then cat "$pfOut"; kill "$pfPid" 2>/dev/null || true; rm -f "$pfLog" "$pfOut" "$curlBody"; exit 0; fi`,
-    "kill \"$pfPid\" 2>/dev/null || true",
-    "pfError=$(cat \"$pfLog\" 2>/dev/null)",
-    "rm -f \"$pfLog\" \"$pfOut\" \"$curlBody\"",
-    "line=$(sudo kubectl get pods -A -l app=market-bot --field-selector=status.phase=Running --no-headers 2>/dev/null | awk '$4==\"Running\"{print $1\" \"$2; exit}')",
-    "if [ -z \"$line\" ]; then line=$(sudo kubectl get pods -A --field-selector=status.phase=Running --no-headers 2>/dev/null | awk '$4==\"Running\" && tolower($2) ~ /market[-]?bot|marketbot/ {print $1\" \"$2; exit}'); fi",
-    "if [ -z \"$line\" ]; then echo 'AlphaNine Market Bot pod not found in Kubernetes. Deploy or start the Market Bot first.' >&2; exit 1; fi",
-    "ns=${line%% *}",
-    "pod=${line#* }",
-    "echo \"AlphaNine Market Bot pod found at $ns/$pod, but the API could not be reached through VM localhost or the market-bot Kubernetes Service. $pfError\" >&2; exit 1"
-  ].join("; ");
-  const result = await sshCommand(command, Number(options.timeoutMs || 15000) + 15000, { maxBuffer: 1024 * 1024 * 4 });
-  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot VM fallback failed.");
-  return parseRawHttpResponse(result.stdout, `vm-ssh:${path}`);
-}
-
-async function marketBotRequest(pathname, options = {}) {
-  const configValue = options.discoverToken === false ? loadConfig() : await ensureMarketBotTokenConfigured(loadConfig(), { provision: options.auth !== false });
-  let body = options.body;
-  if (body !== undefined && typeof body !== "string" && !Buffer.isBuffer(body)) {
-    body = JSON.stringify(body);
-  }
-  const send = async (cfg) => {
-    const baseUrl = marketBotBaseUrl(cfg);
-    const target = `${baseUrl}${pathname.startsWith("/") ? pathname : `/${pathname}`}`;
-    const headers = { ...(options.headers || {}) };
-    if (body !== undefined && typeof body === "string") headers["Content-Type"] = headers["Content-Type"] || "application/json";
-    const token = marketBotToken(cfg);
-    if (options.auth !== false && token) headers.Authorization = `Bearer ${token}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Number(options.timeoutMs || 15000));
-    try {
-      const response = await fetch(target, { method: options.method || "GET", headers, body, signal: controller.signal });
-      const text = await response.text();
-      let data = {};
-      try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-      if (!response.ok) {
-        const error = new Error(data.error || data.message || text || `Market bot returned HTTP ${response.status}`);
-        error.status = response.status;
-        error.target = target;
-        throw error;
-      }
-      return data;
-    } finally {
-      clearTimeout(timeout);
-    }
-  };
-  try {
-    return await send(configValue);
-  } catch (error) {
-    if (marketBotNetworkError(error)) {
-      try {
-        return await marketBotRequestViaVm(pathname, options, configValue, body);
-      } catch (fallbackError) {
-        if (options.auth !== false && options.retryToken !== false && marketBotAuthError(fallbackError)) {
-          const refreshed = await ensureMarketBotTokenConfigured(loadConfig(), { force: true, provision: true });
-          return await marketBotRequestViaVm(pathname, { ...options, retryToken: false }, refreshed, body);
-        }
-        throw new Error(`Market bot API unreachable from this PC and VM fallback failed: ${fallbackError.message}`);
-      }
-    }
-    if (options.auth !== false && options.retryToken !== false && marketBotAuthError(error)) {
-      const refreshed = await ensureMarketBotTokenConfigured(loadConfig(), { force: true, provision: true });
-      try {
-        return await send(refreshed);
-      } catch (retryError) {
-        if (marketBotNetworkError(retryError)) return await marketBotRequestViaVm(pathname, options, refreshed, body);
-        throw retryError;
-      }
-    }
-    throw error;
-  }
-}
-
-async function marketBotOverview() {
-  const configValue = await ensureMarketBotTokenConfigured(loadConfig(), { provision: true });
-  const overview = {
-    ok: true,
-    baseUrl: marketBotBaseUrl(configValue),
-    tokenConfigured: Boolean(marketBotToken(configValue)),
-    configuredUrl: String(configValue.marketBotApiUrl || ""),
-    health: null,
-    status: null,
-    config: null,
-    errors: []
-  };
-  for (const [key, pathname, auth, timeoutMs] of [
-    ["health", "/health", false, 5000],
-    ["status", "/status", true, 10000],
-    ["config", "/config", true, 10000]
-  ]) {
-    try { overview[key] = await marketBotRequest(pathname, { auth, timeoutMs }); }
-    catch (error) { overview.errors.push({ target: key, error: error.message }); }
-  }
-  overview.ok = Boolean(overview.health?.ok || overview.status || overview.config);
-  return overview;
-}
-
-async function saveMarketBotSettings(payload) {
-  const current = loadConfig();
-  const next = { ...current };
-  if (Object.prototype.hasOwnProperty.call(payload || {}, "apiUrl")) {
-    next.marketBotApiUrl = String(payload.apiUrl || "").trim().replace(/\/+$/, "");
-  }
-  if (Object.prototype.hasOwnProperty.call(payload || {}, "apiToken")) {
-    const token = String(payload.apiToken || "").trim();
-    if (token && !isMaskedSecretValue(token)) next.marketBotApiToken = token;
-  }
-  const saved = saveConfig(next);
-  return await ensureMarketBotTokenConfigured(saved);
-}
-
-function yamlString(value) {
-  return `"${String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-function setYamlKeyValue(manifest, key, value) {
-  const pattern = new RegExp(`(^\\s*${key}:\\s*).*$`, "m");
-  if (!pattern.test(manifest)) throw new Error(`Market Bot manifest is missing ${key}.`);
-  return manifest.replace(pattern, `$1${yamlString(value)}`);
-}
-
-async function marketBotSshTarget() {
-  const sync = await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
-  const cfg = sync.config || loadConfig();
-  const info = sync.vm || await vmInfo(cfg.vmName || configuredVmName());
-  const ip = normalizeIpv4(info.ip) || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
-  if (!info.exists && !ip) throw new Error(info.error || "VM not found.");
-  if (info.exists && info.state !== "Running") throw new Error("VM is not running.");
-  if (!ip) throw new Error("VM IP address was not found.");
-  const key = sshKeyStatus(cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
-  if (!key.exists) throw new Error(key.message);
-  const user = String(cfg.sshUser || cfg.receiverSshUser || "dune").trim();
-  return { ip, user, keyPath: key.path };
-}
-
-async function uploadMarketBotFile(localPath, remotePath, target) {
-  if (!fs.existsSync(localPath)) throw new Error(`Bundled Market Bot asset was not found: ${path.basename(localPath)}`);
-  const result = await runWithStdin("ssh", [
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "LogLevel=QUIET",
-    "-i", target.keyPath,
-    `${target.user}@${target.ip}`,
-    `cat > ${shQuote(remotePath)}`
-  ], localPath, { timeout: 180000, maxBuffer: 1024 * 1024 * 4 });
-  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || `Could not upload ${path.basename(localPath)}.`);
-  return { localPath, remotePath, size: fs.statSync(localPath).size };
-}
-
-async function installMarketBot() {
-  const binaryPath = packagedPath("assets", "market-bot", "market-bot-linux");
-  const itemDataPath = packagedPath("assets", "market-bot", "item-data.json");
-  const manifestPath = packagedPath("assets", "market-bot", "market-bot.yaml");
-  for (const filePath of [binaryPath, itemDataPath, manifestPath]) {
-    if (!fs.existsSync(filePath)) throw new Error(`Bundled Market Bot asset was not found: ${path.basename(filePath)}`);
-  }
-
-  const target = await databaseRuntimeTarget();
-  const passwordInfo = await cachedDatabasePassword(target, { ignoreConfig: true });
-  const apiToken = marketBotToken(loadConfig()) || generateMarketBotApiToken();
-  const sshTarget = await marketBotSshTarget();
-  const dbHost = `${target.dbSvc}.${target.namespace}.svc.cluster.local`;
-  const dbPort = "15432";
-  const dbUser = "postgres";
-  const dbName = "dune";
-  const remoteDir = "/opt/market-bot";
-  const steps = [];
-
-  const prepare = await sshCommand(`sudo mkdir -p ${remoteDir}/data ${remoteDir}/cache ${remoteDir}/bin && sudo chown -R ${shQuote(sshTarget.user)}:${shQuote(sshTarget.user)} ${remoteDir}`, 60000, { maxBuffer: 1024 * 128 });
-  if (!prepare.ok) throw new Error(prepare.stderr || prepare.stdout || prepare.error || "Could not prepare Market Bot directories on the VM.");
-  steps.push("prepared remote directories");
-
-  const binaryUpload = await uploadMarketBotFile(binaryPath, "/tmp/market-bot-new", sshTarget);
-  const itemUpload = await uploadMarketBotFile(itemDataPath, `${remoteDir}/data/item-data.json`, sshTarget);
-  steps.push(`uploaded binary (${binaryUpload.size} bytes)`);
-  steps.push(`uploaded item data (${itemUpload.size} bytes)`);
-
-  const promote = await sshCommand(`sudo mv /tmp/market-bot-new ${remoteDir}/bin/market-bot && sudo chmod +x ${remoteDir}/bin/market-bot`, 60000, { maxBuffer: 1024 * 128 });
-  if (!promote.ok) throw new Error(promote.stderr || promote.stdout || promote.error || "Could not install Market Bot binary on the VM.");
-  steps.push("installed binary");
-
-  let manifest = fs.readFileSync(manifestPath, "utf8");
-  manifest = setYamlKeyValue(manifest, "DB_HOST", dbHost);
-  manifest = setYamlKeyValue(manifest, "DB_PORT", dbPort);
-  manifest = setYamlKeyValue(manifest, "DB_USER", dbUser);
-  manifest = setYamlKeyValue(manifest, "DB_NAME", dbName);
-  manifest = setYamlKeyValue(manifest, "DB_PASS", passwordInfo.password);
-  manifest = setYamlKeyValue(manifest, "API_TOKEN", apiToken);
-  const manifestFile = path.join(os.tmpdir(), `alphanine-market-bot-${Date.now()}.yaml`);
-  fs.writeFileSync(manifestFile, manifest, "utf8");
-  try {
-    const applyManifest = () => runWithStdin("ssh", [
-      "-o", "StrictHostKeyChecking=no",
-      "-o", "LogLevel=QUIET",
-      "-i", sshTarget.keyPath,
-      `${sshTarget.user}@${sshTarget.ip}`,
-      "sudo kubectl apply -f -"
-    ], manifestFile, { timeout: 120000, maxBuffer: 1024 * 1024 * 4 });
-    let apply = await applyManifest();
-    if (!apply.ok && /immutable|object has been deleted|object is being deleted/i.test(String(apply.stderr || apply.stdout || apply.error || ""))) {
-      const recreate = await sshCommand("sudo kubectl delete deployment/market-bot -n dune-market-bot --ignore-not-found=true --wait=true", 120000, { maxBuffer: 1024 * 1024 });
-      if (!recreate.ok) throw new Error(recreate.stderr || recreate.stdout || recreate.error || "Could not recreate the existing Market Bot deployment.");
-      apply = await applyManifest();
-      steps.push("recreated Kubernetes deployment");
-    }
-    if (!apply.ok) throw new Error(apply.stderr || apply.stdout || apply.error || "Could not apply Market Bot Kubernetes manifest.");
-    steps.push("applied Kubernetes manifest");
-  } finally {
-    fs.rmSync(manifestFile, { force: true });
-  }
-
-  const restart = await sshCommand("sudo kubectl rollout restart deployment/market-bot -n dune-market-bot", 60000, { maxBuffer: 1024 * 1024 });
-  if (!restart.ok) throw new Error(restart.stderr || restart.stdout || restart.error || "Could not restart the Market Bot deployment.");
-  steps.push("restarted deployment");
-
-  const rollout = await sshCommand("sudo kubectl rollout status deployment/market-bot -n dune-market-bot --timeout=120s", 150000, { maxBuffer: 1024 * 1024 });
-  if (!rollout.ok) {
-    const diagCommand = [
-      "echo 'Pods:'",
-      "sudo kubectl get pods -n dune-market-bot -o wide 2>&1",
-      "echo ''",
-      "echo 'Service/endpoints:'",
-      "sudo kubectl get svc,endpoints -n dune-market-bot -o wide 2>&1",
-      "echo ''",
-      "echo 'Recent pod describe:'",
-      "pod=$(sudo kubectl get pods -n dune-market-bot -l app=market-bot --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null | tail -n 1 | awk '{print $1}')",
-      "if [ -n \"$pod\" ]; then sudo kubectl describe pod -n dune-market-bot \"$pod\" 2>&1 | tail -n 120; fi",
-      "echo ''",
-      "echo 'Recent logs:'",
-      "sudo kubectl logs -n dune-market-bot -l app=market-bot --all-containers=true --tail=120 2>&1"
-    ].join("; ");
-    const diag = await sshCommand(diagCommand, 60000, { maxBuffer: 1024 * 1024 * 2 });
-    const base = rollout.stderr || rollout.stdout || rollout.error || "Market Bot deployment did not become ready.";
-    const detail = diag.stdout || diag.stderr || diag.error || "";
-    throw new Error(`${base}${detail ? `\n\n${detail}` : ""}`);
-  }
-  steps.push("deployment ready");
-
-  const saved = saveConfig({ ...loadConfig(), marketBotApiToken: apiToken });
-  appendAdminAudit("market_bot_installed", { namespace: "dune-market-bot", dbNamespace: target.namespace, dbService: target.dbSvc, binaryBytes: binaryUpload.size, itemDataBytes: itemUpload.size });
-  return {
-    ok: true,
-    status: "installed",
-    message: "AlphaNine Market Bot installed and running on the VM.",
-    namespace: "dune-market-bot",
-    deployment: "market-bot",
-    dbHost,
-    tokenConfigured: Boolean(marketBotToken(saved)),
-    steps
-  };
-}
-
-async function uninstallMarketBot() {
-  const sshTarget = await marketBotSshTarget();
-  const steps = [];
-  const commands = [
-    ["stopped deployment", "sudo kubectl scale deployment/market-bot -n dune-market-bot --replicas=0 2>/dev/null || true"],
-    ["removed deployment", "sudo kubectl delete deployment/market-bot -n dune-market-bot --ignore-not-found=true --wait=true"],
-    ["removed service", "sudo kubectl delete service/market-bot -n dune-market-bot --ignore-not-found=true"],
-    ["removed config", "sudo kubectl delete configmap/market-bot-config -n dune-market-bot --ignore-not-found=true"],
-    ["removed secret", "sudo kubectl delete secret/market-bot-secret -n dune-market-bot --ignore-not-found=true"],
-    ["removed namespace", "sudo kubectl delete namespace dune-market-bot --ignore-not-found=true --wait=false"],
-    ["removed VM files", "sudo rm -rf /opt/market-bot"]
-  ];
-  for (const [label, command] of commands) {
-    const result = await run("ssh", [
-      "-o", "StrictHostKeyChecking=no",
-      "-o", "LogLevel=QUIET",
-      "-i", sshTarget.keyPath,
-      `${sshTarget.user}@${sshTarget.ip}`,
-      command
-    ], { timeout: 120000, maxBuffer: 1024 * 1024 });
-    if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || `Could not ${label}.`);
-    steps.push(label);
-  }
-  const saved = saveConfig({ ...loadConfig(), marketBotApiToken: "" });
-  appendAdminAudit("market_bot_uninstalled", { namespace: "dune-market-bot", deployment: "market-bot" });
-  return {
-    ok: true,
-    status: "uninstalled",
-    message: "AlphaNine Market Bot was removed from the VM. Existing market listings were not deleted.",
-    namespace: "dune-market-bot",
-    deployment: "market-bot",
-    tokenConfigured: Boolean(marketBotToken(saved)),
-    steps
-  };
-}
-
 function appPage() {
   const portalUrls = webPortalUrls();
   return String.raw`<!doctype html>
@@ -15677,8 +14460,6 @@ function appPage() {
   <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
   <script src="/vendor/leaflet/leaflet.js"></script>
   <script src="/assets/coordinate-system.js"></script>
-  <script src="/assets/vendor/babylon.js"></script>
-  <script src="/assets/vendor/babylonjs.loaders.min.js"></script>
   <style>
     :root {
       --bg:#030303; --bg-2:#12110d; --panel:rgba(8,8,7,.9); --panel-2:rgba(30,25,14,.76);
@@ -16516,6 +15297,11 @@ function appPage() {
     .market-listing-meta .item-grade-badge { margin-top:0; }
     #marketListings { overflow-x:auto; border:1px solid rgba(214,166,69,.3); background:rgba(0,0,0,.12); }
     .market-listing-grid { min-width:1180px; }
+    .market-pricing-grid { min-width:1320px; overflow-x:auto; }
+    .market-pricing-grid .market-listing-header,.market-pricing-grid .market-listing-row { grid-template-columns:minmax(220px,2fr) 100px 80px minmax(130px,1fr) 90px 105px 105px 95px 135px 120px; }
+    .market-pricing-simple { min-width:760px; }
+    .market-pricing-simple .market-listing-header,.market-pricing-simple .market-listing-row { grid-template-columns:minmax(240px,2fr) 110px 90px minmax(150px,1fr) 140px; }
+    #marketAutomatorOverrideResults { display:grid; gap:7px; max-height:260px; overflow:auto; }
     .market-listing-header,.market-listing-row { display:grid; grid-template-columns:34px minmax(260px,2fr) minmax(130px,.8fr) 86px 72px minmax(150px,1fr) 120px minmax(155px,1fr) minmax(170px,auto); }
     .market-listing-header { position:sticky; top:0; z-index:1; color:var(--gold-bright); background:var(--panel-strong); border-bottom:1px solid rgba(214,166,69,.42); font-size:10px; font-weight:900; text-transform:uppercase; }
     .market-listing-header > span,.market-listing-cell { min-width:0; padding:9px 10px; border-right:1px solid rgba(214,166,69,.18); }
@@ -16724,18 +15510,6 @@ function appPage() {
     .blueprint-table td:last-child { white-space:nowrap; }
     .blueprint-table input[type="checkbox"] { width:18px; height:18px; }
     .blueprint-progress { min-height:42px; white-space:pre-wrap; overflow-wrap:anywhere; }
-    .blueprint-viewer-shell { display:grid; gap:12px; }
-    .blueprint-viewer-stage { position:relative; min-height:520px; overflow:hidden; border:1px solid var(--line); background:radial-gradient(circle at 50% 30%, rgba(214,166,69,.1), transparent 42%),linear-gradient(180deg, rgba(4,7,8,.96), rgba(10,8,5,.98)); }
-    .blueprint-viewer-stage canvas { display:block; width:100%; height:clamp(420px,58vh,680px); cursor:grab; touch-action:none; }
-    .blueprint-viewer-stage canvas.dragging { cursor:grabbing; }
-    .blueprint-viewer-hint { position:absolute; left:12px; bottom:10px; padding:6px 9px; border:1px solid rgba(214,166,69,.2); background:rgba(3,5,5,.78); color:var(--muted); font-size:10.5px; pointer-events:none; }
-    .blueprint-viewer-controls { display:flex; flex-wrap:wrap; align-items:center; gap:9px; }
-    .blueprint-viewer-controls .check-row { width:auto; min-height:36px; padding:7px 10px; border:1px solid rgba(214,166,69,.18); }
-    .blueprint-viewer-legend { display:flex; flex-wrap:wrap; gap:12px; color:var(--muted); font-size:11px; }
-    .blueprint-viewer-legend span::before { content:""; display:inline-block; width:9px; height:9px; margin-right:6px; border-radius:50%; background:var(--legend); box-shadow:0 0 8px var(--legend); }
-    .blueprint-model-pack { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border:1px solid rgba(214,166,69,.2); background:rgba(214,166,69,.055); }
-    .blueprint-model-pack strong { display:block; }
-    .blueprint-model-coverage { min-height:18px; }
     @media (max-width:900px) { .blueprint-toolbar { grid-template-columns:1fr; } }
 
     .panel { font-size:var(--font-panel-body); line-height:1.42; }
@@ -17445,7 +16219,7 @@ function appPage() {
       </div>
       <div class="nav-group">
         <div class="nav-group-title">Economy</div>
-        <button class="tab" data-view="market">Market Bot</button>
+        <button class="tab" data-view="market">Market Automation</button>
       </div>
       <div class="nav-group">
         <div class="nav-group-title">Data</div>
@@ -17594,7 +16368,7 @@ function appPage() {
           <div class="panel-head"><div class="label">Quick Actions</div><div class="micro">Command deck</div></div>
           <div class="action-row mt">
             <button class="primary" data-open="give">Give Item</button>
-            <button data-open="market">Market Bot</button>
+            <button data-open="market">Market Automation</button>
             <button data-open="players">Players</button>
             <button data-open="server">Server Control</button>
             <button data-open="operations">Operations</button>
@@ -17781,7 +16555,7 @@ function appPage() {
       <div class="stack">
         <div class="panel pad">
           <div class="panel-head">
-            <div><div class="label">Player Building Blueprints</div><div class="subtle">Import, export, and remove the selected player's saved building layouts.</div></div>
+            <div><div class="label">Player Building Blueprints</div><div class="subtle">Import and export the selected player's saved building layouts.</div></div>
             <button type="button" onclick="refreshBlueprints()">Refresh</button>
           </div>
           <div class="blueprint-toolbar mt">
@@ -17789,11 +16563,7 @@ function appPage() {
             <label>Blueprint JSON Files<input id="blueprintFiles" type="file" accept=".json,application/json" multiple onchange="selectBlueprintFiles(this.files)"></label>
             <button id="blueprintImportButton" type="button" class="primary" onclick="importBlueprintFiles()" disabled>Import</button>
           </div>
-          <div id="blueprintFileSummary" class="subtle mt">Select up to 10 JSON files.</div>
-          <div id="blueprintFilePreviewActions" class="action-row mt"></div>
-          <div class="blueprint-model-pack mt">
-            <div><strong>Exact Offline 3D Models</strong><span id="blueprintModelPackStatus" class="subtle">Checking the bundled piece catalog...</span></div>
-          </div>
+          <div id="blueprintFileSummary" class="subtle mt">Select up to 10 validated JSON files.</div>
           <div class="warning mt">Imported blueprints are added to the player's backpack as Solido Replicator items. The player must relog to see them and must have every included building piece and placeable unlocked before placement.</div>
           <div id="blueprintStatus" class="empty mt blueprint-progress">Choose a player to load blueprints.</div>
         </div>
@@ -17802,7 +16572,6 @@ function appPage() {
             <div><div class="label">Saved Blueprints</div><div id="blueprintCount" class="subtle">0 blueprints</div></div>
             <div class="action-row">
               <button id="blueprintExportSelected" type="button" onclick="exportSelectedBlueprints()" disabled>Export Selected</button>
-              <button id="blueprintDeleteSelected" type="button" class="danger" onclick="deleteSelectedBlueprints()" disabled>Delete Selected</button>
               <button id="blueprintExportAll" type="button" onclick="exportAllBlueprints()" disabled>Export All</button>
             </div>
           </div>
@@ -17811,27 +16580,6 @@ function appPage() {
               <thead><tr><th><input id="blueprintSelectAll" type="checkbox" aria-label="Select all blueprints" onchange="toggleAllBlueprints(this.checked)"></th><th>Name</th><th>Pieces</th><th>Placeables</th><th>Item ID</th><th>Actions</th></tr></thead>
               <tbody id="blueprintRows"><tr><td colspan="6">No player selected.</td></tr></tbody>
             </table>
-          </div>
-        </div>
-        <div id="blueprintViewerPanel" class="panel pad hidden">
-          <div class="blueprint-viewer-shell">
-            <div class="panel-head">
-              <div><div id="blueprintViewerTitle" class="label">Blueprint 3D View</div><div id="blueprintViewerSummary" class="subtle">Select View on a blueprint.</div></div>
-              <div class="action-row"><button type="button" onclick="resetBlueprintViewer()">Reset View</button><button type="button" onclick="closeBlueprintViewer()">Close</button></div>
-            </div>
-            <div class="blueprint-viewer-controls">
-              <label class="check-row"><input id="blueprintViewerPieces" type="checkbox" checked onchange="drawBlueprintViewer()"> Building Pieces</label>
-              <label class="check-row"><input id="blueprintViewerPlaceables" type="checkbox" checked onchange="drawBlueprintViewer()"> Placeables</label>
-              <label class="check-row"><input id="blueprintViewerShields" type="checkbox" checked onchange="drawBlueprintViewer()"> Pentashields</label>
-            </div>
-            <div class="blueprint-viewer-legend"><span style="--legend:#e0ad63">Building pieces</span><span style="--legend:#72b7d6">Placeables</span><span style="--legend:#b879e8">Pentashields</span></div>
-            <div id="blueprintModelCoverage" class="subtle blueprint-model-coverage">Detailed local-model coverage will appear here.</div>
-            <div id="blueprintViewerSelection" class="subtle blueprint-model-coverage">Click a piece to inspect its exact type and rotation.</div>
-            <div class="blueprint-viewer-stage">
-              <canvas id="blueprintViewerCanvas" role="img" aria-label="Interactive three-dimensional blueprint grid"></canvas>
-              <div class="blueprint-viewer-hint">Drag to rotate and tilt · Right or middle drag to pan · Mouse wheel to zoom · Double-click to reset</div>
-            </div>
-            <div class="subtle">The viewer uses bundled piece meshes and exported transforms entirely offline. Unrecognized piece identifiers are reported instead of being guessed; collision, snapping, and attachment geometry are not simulated.</div>
           </div>
         </div>
       </div>
@@ -17850,6 +16598,7 @@ function appPage() {
             <label>Player Search<input id="givePlayerSearch" placeholder="Search player or account" oninput="renderPlayerSelect()"></label>
             <label>Player<select id="adminPlayer" onchange="syncSelectedPlayerFromSelect()"></select></label>
             <label>Destination<select id="giveDestination" onchange="syncGiveDestination()"><option value="player">Player Inventory</option><option value="storage">Storage Container</option></select></label>
+            <label style="grid-column:1/-1">Exact Template ID (optional)<input id="adminRawTemplate" maxlength="240" placeholder="Atreides_Outpost_Column" oninput="selectRawGiveItem(false)"></label>
             <label>Quantity<input id="adminQty" type="number" min="1" max="50000" value="1" oninput="updateGiveTargetSummary()"></label>
             <label id="adminQualityWrap">Grade<input id="adminQuality" type="number" min="0" max="5" value="0" oninput="syncQualityWarning()"></label>
             <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute" selected>Live Give</option></select></label>
@@ -17896,7 +16645,7 @@ function appPage() {
             <summary>Catalog Diagnostics</summary>
             <div id="gearDiscoveryStatus" class="empty mt">Item cache status unknown.</div>
             <div class="action-row mt">
-              <button onclick="discoverGearItems()">Import Gear Items</button>
+              <button onclick="discoverGearItems()">Discover Server IDs</button>
               <button onclick="refreshAdmin()">Reload Cache</button>
             </div>
           </details>
@@ -17981,58 +16730,44 @@ function appPage() {
 
     <section id="market" class="view">
       <div class="grid four">
-        <div class="panel pad metric-tile"><div class="label">Bot API</div><div id="marketBotApiState" class="value">Checking...</div><div id="marketBotApiUrlLabel" class="subtle">Waiting for refresh.</div></div>
-        <div class="panel pad metric-tile"><div class="label">NPC Listings</div><div id="marketBotListingCount" class="value">--</div><div id="marketBotLastList" class="subtle">Last list: --</div></div>
-        <div class="panel pad metric-tile"><div class="label">Player Buys</div><div id="marketBotBoughtCount" class="value">--</div><div id="marketBotLastBuy" class="subtle">Last buy: --</div></div>
-        <div class="panel pad metric-tile"><div class="label">NPC Stock Range</div><div id="marketBotStockState" class="value">--</div><div id="marketBotStockRange" class="subtle">Target: --</div></div>
+        <div class="panel pad metric-tile"><div class="label">Automation</div><div id="marketAutomatorState" class="value">Loading...</div><div class="subtle">Runs inside Suite; no external bot.</div></div>
+        <div class="panel pad metric-tile"><div class="label">NPC Listings</div><div id="marketAutomatorListings" class="value">--</div><div id="marketAutomatorLastList" class="subtle">No listing cycle yet.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Purchases</div><div id="marketAutomatorPurchases" class="value">--</div><div id="marketAutomatorLastBuy" class="subtle">No buyer cycle yet.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Errors</div><div id="marketAutomatorErrors" class="value">--</div><div class="subtle">Recorded locally.</div></div>
       </div>
-      <div class="layout-3 mt">
+      <div class="layout-2 mt">
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Market Bot Connection</div><div class="subtle">Install or control the standalone AlphaNine Market Bot service on the VM.</div></div><button onclick="refreshMarketBotPage()">Refresh Bot</button></div>
+          <div class="panel-head"><div><div class="label">AlphaNine Market Automator</div><div class="subtle">Original Suite-native scheduler using your selected template IDs and the existing live-market controls.</div></div><button onclick="refreshMarketAutomator()">Refresh</button></div>
           <div class="field-grid mt">
-            <label>Bot API URL<input id="marketBotApiUrl" placeholder="http://VM-IP:8081"></label>
-            <label>API Token<input id="marketBotApiToken" type="password" placeholder="Leave blank to keep saved token"></label>
+            <label class="check-row"><input id="marketAutomatorEnabled" type="checkbox">Automation enabled</label>
+            <label>Target NPC listings<input id="marketAutomatorTarget" type="number" min="0" max="500" value="40"></label>
+            <label>Creates per cycle<input id="marketAutomatorCreates" type="number" min="0" max="25" value="5"></label>
+            <label>Listing interval (minutes)<input id="marketAutomatorListMinutes" type="number" min="1" max="1440" value="30"></label>
+            <label>Buyer interval (minutes)<input id="marketAutomatorBuyMinutes" type="number" min="1" max="1440" value="20"></label>
+            <label>Player buys per cycle<input id="marketAutomatorBuyCount" type="number" min="0" max="20" value="0"></label>
+            <label>Maximum unit price<input id="marketAutomatorUnitPrice" type="number" min="0" max="999999999" value="0"></label>
+            <label>Maximum spend per cycle<input id="marketAutomatorSpend" type="number" min="0" max="999999999" value="0"></label>
+            <label>Listing stack<input id="marketAutomatorStack" type="number" min="1" max="50000" value="1"></label>
+            <label>Pricing mode<select id="marketAutomatorPricingMode" onchange="marketAutomatorPricingModeChanged()"><option value="dynamic">Dynamic per item</option><option value="fixed">Fixed price</option></select></label>
+            <label>Base price<input id="marketAutomatorBasePrice" type="number" min="1" max="999999999" value="1000"></label>
+            <label>Grade<input id="marketAutomatorQuality" type="number" min="0" max="5" value="0"></label>
+            <label>Expiration<select id="marketAutomatorExpiry"><option value="1">1 day</option><option value="3" selected>3 days</option><option value="7">7 days</option><option value="14">14 days</option></select></label>
           </div>
-          <div class="action-row mt">
-            <button class="primary" onclick="installMarketBot()">Install / Update Bot</button>
-            <button onclick="uninstallMarketBot()">Uninstall Bot</button>
-            <button class="primary" onclick="saveMarketBotConnection()">Save Connection</button>
-            <button onclick="refreshMarketBotLogs()">View Bot Logs</button>
-          </div>
-          <div id="marketBotConnectionResult" class="empty mt">Connection not checked.</div>
+          <div class="mt"><div class="label">Dynamic pricing preset</div><div class="action-row mt"><button onclick="applyMarketAutomatorPreset('casual')">Casual</button><button onclick="applyMarketAutomatorPreset('vanilla')">Vanilla</button><button onclick="applyMarketAutomatorPreset('hardcore')">Hardcore</button><button onclick="applyMarketAutomatorPreset('economy')">Economy</button></div><div id="marketAutomatorPresetHelp" class="subtle mt">Vanilla uses the local item catalog’s grade, tier, and rarity automatically.</div></div>
+          <div class="action-row mt"><button class="primary" onclick="refreshMarketAutomatorPricingPreview()">Generate Preview</button><span class="subtle">Shows 20 sample catalog items. It does not create or change listings.</span></div>
+          <div id="marketAutomatorPricingPreview" class="mt"><div class="empty">Generate a preview to see sample item prices.</div></div>
+          <div class="mt"><div class="label">Optional item price override</div><label class="mt">Find an item<input id="marketAutomatorOverrideSearch" placeholder="Search the local item catalog by name" oninput="searchMarketAutomatorOverridesSoon()"></label><div id="marketAutomatorOverrideResults" class="mt empty">Search for an item to set an exact price.</div><div class="field-grid mt"><label>Selected item<input id="marketAutomatorOverrideSelectedName" readonly placeholder="No item selected"></label><label>Exact price<input id="marketAutomatorOverridePrice" type="number" min="1" max="999999999" placeholder="Optional"></label></div><div class="action-row mt"><button onclick="saveMarketAutomatorItemOverride()">Set Item Override</button><button onclick="removeMarketAutomatorItemOverride()">Remove Override</button></div></div>
+          <details class="mt"><summary>Advanced pricing settings</summary><div class="subtle mt">Optional controls for administrators. Presets already use local catalog metadata automatically.</div><div class="field-grid mt"><label>Minimum price<input id="marketAutomatorMinimumPrice" type="number" min="1" max="999999999" value="1"></label><label>Maximum price<input id="marketAutomatorMaximumPrice" type="number" min="1" max="999999999" value="999999999"></label><label>Rounding increment<input id="marketAutomatorRoundingIncrement" type="number" min="1" max="999999999" value="1"></label><label>Item variation %<input id="marketAutomatorItemVariation" type="number" min="0" max="100" step="0.1" value="15"></label><label>Cycle variation %<input id="marketAutomatorCycleVariation" type="number" min="0" max="100" step="0.1" value="5"></label></div><label class="mt">Optional template allowlist, one per line<textarea id="marketAutomatorTemplates" rows="7" placeholder="Leave empty to rotate automatically through marketable items in the Suite catalog"></textarea></label><div class="field-grid mt"><label>Grade multipliers<textarea id="marketAutomatorGradeMultipliers" rows="5" placeholder="Rare=1.25&#10;Epic=1.5"></textarea></label><label>Tier multipliers<textarea id="marketAutomatorTierMultipliers" rows="5" placeholder="T4=1.15&#10;T5=1.35"></textarea></label><label>Rarity multipliers<textarea id="marketAutomatorRarityMultipliers" rows="5" placeholder="Legendary=1.5"></textarea></label><label>Category base prices<textarea id="marketAutomatorCategoryPrices" rows="5" placeholder="Weapons=2500&#10;Armor=1800"></textarea></label></div><label class="mt">Advanced JSON/config item overrides, one Template_ID=Price per line<textarea id="marketAutomatorItemOverrides" rows="6" placeholder="Item_A=100&#10;Item_B=275&#10;Item_C=900"></textarea></label></details>
+          <div id="marketAutomatorPricingMigrationNotice" class="warning mt hidden">Dynamic item pricing is now available. Review the pricing preview and enable it when ready.</div>
+          <div class="action-row mt"><button class="primary" onclick="saveMarketAutomator()">Save Automation</button><button onclick="runMarketAutomator('list')">Run Listing Cycle</button><button onclick="runMarketAutomator('buy')">Run Buyer Cycle</button><button onclick="runMarketAutomator('all')">Run Both</button></div>
+          <div id="marketAutomatorResult" class="empty mt">Automation is disabled until you configure and enable it.</div>
+          <div class="warning mt">Dynamic or fixed pricing applies only to newly created orders. Existing 1000-price listings are not modified, removed, or reposted.</div>
         </div>
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Economy Controls</div><div class="subtle">Run bot work immediately without waiting for the next interval.</div></div></div>
-          <div class="action-row mt">
-            <button onclick="runMarketBotTick('buy')">Run Buyer Cycle</button>
-            <button onclick="runMarketBotTick('list')">Restock Market</button>
-            <button class="primary" onclick="runMarketBotTick('all')">Run Full Cycle</button>
-          </div>
-          <div id="marketBotActionResult" class="empty mt">No manual tick run yet.</div>
+          <div class="panel-head"><div><div class="label">Local Automation Log</div><div class="subtle">Only actions performed by this replacement are shown.</div></div><button onclick="refreshMarketAutomatorLogs()">Refresh Log</button></div>
+          <pre id="marketAutomatorLog" class="mt">No automation activity yet.</pre>
+          <div class="warning mt">Automatic purchasing is disabled unless all three buyer limits are greater than zero. Keep limits conservative and review live listings before enabling.</div>
         </div>
-        <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Runtime</div><div class="subtle">Current counters from the bot.</div></div></div>
-          <div class="detail-list">
-            <div class="detail-row"><span class="subtle">Uptime</span><strong id="marketBotUptime">--</strong></div>
-            <div class="detail-row"><span class="subtle">Solari Balance</span><strong id="marketBotBalance">--</strong></div>
-            <div class="detail-row"><span class="subtle">NPC Order Range</span><strong id="marketBotRuntimeStockRange">--</strong></div>
-            <div class="detail-row"><span class="subtle">Player Buys Per Cycle</span><strong id="marketBotRuntimeBuyLimit">--</strong></div>
-            <div class="detail-row"><span class="subtle">NPC Listings Sold</span><strong id="marketBotNPCSales">--</strong></div>
-          </div>
-        </div>
-      </div>
-      <div class="panel pad mt">
-        <div class="panel-head"><div><div class="label">Editable Bot Config</div><div class="subtle">Maintain random NPC stock while buyer cycles purchase player listings and remove 1-2 NPC listings.</div></div><button class="primary" onclick="saveMarketBotConfig()">Save Bot Config</button></div>
-        <div class="field-grid mt">
-          <label class="check-row"><input id="marketBotEnabled" type="checkbox">Bot Enabled</label>
-          <label>BUY_TIMER<input id="marketBotBuyInterval" placeholder="20m"></label>
-          <label>LIST_TIMER<input id="marketBotListInterval" placeholder="30m"></label>
-          <label>AI_ORDER_MIN<input id="marketBotAIOrderMin" type="number" min="1" step="1" placeholder="30"></label>
-          <label>AI_ORDER_MAX<input id="marketBotAIOrderMax" type="number" min="1" step="1" placeholder="60"></label>
-          <label>MAX_PLAYER_ORDER_BUYS<input id="marketBotMaxPlayerBuys" type="number" min="0" step="1" placeholder="2"></label>
-        </div>
-        <div id="marketBotConfigResult" class="empty mt">Load the bot config to edit automatic stock and player-buy settings.</div>
-        <pre id="marketBotLog" class="mt">Bot logs not loaded.</pre>
       </div>
       <div class="layout-2">
         <div class="panel pad">
@@ -19240,10 +17975,10 @@ const viewCopy={
   dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
   operations:["Operations","Persistent progress, duplicate-action protection, and recent Suite work."],
   players:["Players","Search, inspect, and select characters for admin actions."],
-  blueprints:["Blueprints","Import, export, manage, and preview player building blueprints."],
+  blueprints:["Blueprints","Import and export player building blueprints."],
   give:["Give Item","Live item grants through the configured receiver."],
   repair:["Repair Inspector","Restore item and vehicle-module durability with protected database writes."],
-  market:["Market Bot","Automatic NPC stock control, player-listing purchases, and manual market tools."],
+  market:["Market Automation","Suite-native NPC stock control, limited purchasing, and manual market tools."],
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
   database:["Database","Battlegroup backup, import, and backup location management."],
@@ -19263,10 +17998,10 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketBotPage();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketAutomator();refreshMarketAutomatorLogs();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,blueprintModelPackState=null,blueprintViewer={data:null,name:"",yaw:-0.72,pitch:0.68,zoom:1,panX:0,panY:0,drag:null,engine:null,scene:null,camera:null,groups:null,renderGeneration:0},liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
 let databaseExplorerState={schemas:[],tables:[],metadata:null,rows:[],selectedTable:"",selectedRow:-1,offset:0,pageSize:50,hasMore:false,loading:false};
 let serverUpdateOperationId="",serverUpdateCheckState=null,serverUpdatePollTimer=null;
@@ -19611,18 +18346,36 @@ function renderActivity(){const html=activity.length?activity.map(a=>'<div class
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 function csrfCookie(){const match=document.cookie.match(/(?:^|;\s*)alphanine_csrf=([^;]+)/);return match?decodeURIComponent(match[1]):"";}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||30000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;delete request._reauthTried;const method=String(request.method||"GET").toUpperCase();if(!["GET","HEAD","OPTIONS"].includes(method)){request.headers={...(request.headers||{}),"X-CSRF-Token":csrfCookie()};}r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(r.status===428&&location.protocol==="https:"&&!options._reauthTried){const password=window.prompt("Confirm the Remote Owner password to continue:");if(password===null)throw new Error("Owner confirmation cancelled.");const totp=window.prompt("Authenticator code, or leave blank if 2FA is disabled:")||"";const confirmResponse=await fetch("/api/auth/reauth",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfCookie()},body:JSON.stringify({password,totp})});const confirmData=await confirmResponse.json().catch(()=>({}));if(!confirmResponse.ok)throw new Error(confirmData.error||"Owner confirmation failed.");return await getJson(url,{...options,_reauthTried:true});}if(r.status===401&&location.protocol==="https:"){location.href="/login";throw new Error("Remote session expired. Sign in again.");}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
-function formatMarketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"--";}
-function marketBotHealthLabel(data){if(data?.health?.ok&&data.tokenConfigured===false)return"Token Needed";if(data?.status?.exchange_ready===false||data?.health?.ready===false)return"Waiting for Exchange";if(data?.health?.ok)return"Online";if(data?.status||data?.config)return"Online";return"Offline";}
-function renderMarketBotConfig(config){if(!config)return;setChecked("marketBotEnabled",config.enabled!==false);setValue("marketBotBuyInterval",config.buy_interval||"");setValue("marketBotListInterval",config.list_interval||"");setValue("marketBotAIOrderMin",config.ai_order_min??30);setValue("marketBotAIOrderMax",config.ai_order_max??60);setValue("marketBotMaxPlayerBuys",config.max_buys??2);setText("marketBotConfigResult","Loaded bot config. Changes apply on the next scheduler check.");}
-let marketBotLastOverview=null;const marketBotActionLabels={buy:"Run Buyer Cycle",list:"Enforce NPC Stock",all:"Run Full Cycle"};function renderMarketBotOverview(data){marketBotLastOverview=data||null;const status=data?.status||{};const config=data?.config||null;const waiting=status.exchange_ready===false||data?.health?.ready===false;const waitingMessage=status.exchange_message||data?.health?.exchange_message||"The bot is online and waiting for the game to create a usable Exchange.";const label=marketBotHealthLabel(data||{});const count=Number(status.listing_count);const min=Number(config?.ai_order_min??30);const max=Number(config?.ai_order_max??60);const stockLabel=waiting?"Waiting":(Number.isFinite(count)?(count<min?"Below Minimum":(count>max?"Above Maximum":"In Range")):"--");tone("marketBotApiState",label);setText("marketBotApiUrlLabel",data?.baseUrl||"Unknown API URL");setText("marketBotListingCount",formatMarketBotNumber(status.listing_count));setText("marketBotBoughtCount",formatMarketBotNumber(status.bought_orders));setText("marketBotLastBuy","Last buyer cycle: "+(status.last_buy_tick||"--"));setText("marketBotLastList","Last stock check: "+(status.last_list_tick||"--"));tone("marketBotStockState",stockLabel);setText("marketBotStockRange",waiting?"Target activates after Exchange discovery.":("Target: "+min+"-"+max));setText("marketBotUptime",status.uptime||"--");setText("marketBotBalance",formatMarketBotNumber(status.balance));setText("marketBotRuntimeStockRange",min+"-"+max);setText("marketBotRuntimeBuyLimit",formatMarketBotNumber(config?.max_buys));setText("marketBotNPCSales",formatMarketBotNumber(status.npc_listings_sold));if(data?.configuredUrl)setValue("marketBotApiUrl",data.configuredUrl);if(config)renderMarketBotConfig(config);const errors=(data?.errors||[]).map(row=>row.target+": "+row.error).join(" / ");setText("marketBotConnectionResult",errors?("Partial connection: "+errors):(waiting?waitingMessage:("Connected to "+(data?.baseUrl||"market bot"))));if(data?.tokenConfigured===false)setText("marketBotConnectionResult","Health endpoint answered, but token is not configured for status/config actions.");}
-async function refreshMarketBotPage(){try{setText("marketBotConnectionResult","Checking market bot...");const data=await getJson("/api/market-bot/overview",{timeoutMs:25000});renderMarketBotOverview(data);}catch(error){tone("marketBotApiState","Offline");setText("marketBotConnectionResult",betterError(error));}}
-async function saveMarketBotConnection(){try{const payload={apiUrl:document.getElementById("marketBotApiUrl")?.value||"",apiToken:document.getElementById("marketBotApiToken")?.value||""};const data=await getJson("/api/market-bot/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:15000});setText("marketBotConnectionResult","Saved connection: "+(data.baseUrl||"market bot"));setValue("marketBotApiToken","");showToast("Market bot connection saved.","success");await refreshMarketBotPage();}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
-async function installMarketBot(){try{const ok=await appConfirm("Install Market Bot","Install or update the standalone AlphaNine Market Bot service on the configured VM?","Install","Cancel");if(!ok)return;setText("marketBotConnectionResult","Installing Market Bot on the VM...");const data=await getJson("/api/market-bot/install",{method:"POST",timeoutMs:240000});const installMessage=(data.message||"Market Bot installed.")+" Steps: "+(data.steps||[]).join(", ");setText("marketBotConnectionResult",installMessage);showToast("Market Bot installed.","success");try{await refreshMarketBotPage();await refreshMarketBotLogs();}catch(refreshError){tone("marketBotApiState","Online");setText("marketBotConnectionResult",installMessage+" Refresh after install failed: "+betterError(refreshError));showToast("Market Bot installed; refresh failed.","warning");}}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
-async function uninstallMarketBot(){try{const ok=await appConfirm("Uninstall Market Bot","Remove the AlphaNine Market Bot service and /opt/market-bot files from the configured VM? Existing market listings are not deleted.","Uninstall","Cancel");if(!ok)return;setText("marketBotConnectionResult","Uninstalling Market Bot from the VM...");const data=await getJson("/api/market-bot/uninstall",{method:"POST",timeoutMs:180000});const message=(data.message||"Market Bot uninstalled.")+" Steps: "+(data.steps||[]).join(", ");setText("marketBotConnectionResult",message);tone("marketBotApiState","Offline");showToast("Market Bot uninstalled.","success");try{await refreshMarketBotLogs();}catch{}}catch(error){setText("marketBotConnectionResult",betterError(error));showToast(betterError(error),"error");}}
-function collectMarketBotConfig(){return{enabled:document.getElementById("marketBotEnabled")?.checked===true,simulation_enabled:false,buy_interval:document.getElementById("marketBotBuyInterval")?.value.trim()||"20m",list_interval:document.getElementById("marketBotListInterval")?.value.trim()||"30m",ai_order_min:Number(document.getElementById("marketBotAIOrderMin")?.value||30),ai_order_max:Number(document.getElementById("marketBotAIOrderMax")?.value||60),max_buys:Number(document.getElementById("marketBotMaxPlayerBuys")?.value||0)};}
-async function saveMarketBotConfig(){try{const config=collectMarketBotConfig();if(config.ai_order_min<1)throw new Error("AI Order Minimum must be at least 1.");if(config.ai_order_max<config.ai_order_min)throw new Error("AI Order Maximum must be greater than or equal to the minimum.");if(config.max_buys<0)throw new Error("Maximum Player Order Buys cannot be negative.");setText("marketBotConfigResult","Saving bot config...");await getJson("/api/market-bot/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(config),timeoutMs:25000});setText("marketBotConfigResult","Bot config saved. Stock and player-buy limits apply on the next scheduler check.");showToast("Market bot config saved.","success");await refreshMarketBotPage();}catch(error){setText("marketBotConfigResult",betterError(error));showToast(betterError(error),"error");}}
-async function runMarketBotTick(kind){const label=marketBotActionLabels[kind]||kind;const listingCount=Number(marketBotLastOverview?.status?.listing_count||0);const previousNPCSales=Number(marketBotLastOverview?.status?.npc_listings_sold||0);if((kind==="list"||kind==="all")&&listingCount>500&&!confirm("The bot already has "+formatMarketBotNumber(listingCount)+" NPC listings. Restocking can add more items. Continue?"))return;try{setText("marketBotActionResult","Running "+label+"...");const data=await getJson("/api/market-bot/tick/"+encodeURIComponent(kind),{method:"POST",timeoutMs:70000});const cleaned=(Number(data?.expiredCleanup?.before?.removedOrders||0)||0)+(Number(data?.expiredCleanup?.after?.removedOrders||0)||0);const npcSold=Math.max(0,Number(data?.status?.npc_listings_sold||0)-previousNPCSales);setText("marketBotActionResult","Completed "+(marketBotActionLabels[data.tick]||label)+"."+(npcSold?" Sold "+npcSold+" NPC listing(s).":"")+(cleaned?" Cleaned "+cleaned+" expired listing(s).":""));showToast(label+" completed.","success");await refreshMarketBotPage();await refreshMarketPanel();}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
-async function refreshMarketBotLogs(){try{setText("marketBotLog","Loading logs...");const data=await getJson("/api/market-bot/logs",{timeoutMs:50000});setText("marketBotLog",(data.stdout||data.stderr||"No log output.").trim());}catch(error){setText("marketBotLog",betterError(error));}}
+function formatMarketAutomatorNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"--";}
+let marketAutomatorDynamicPricingNeedsReview=false,marketAutomatorDynamicPreviewToken="";
+function invalidateMarketAutomatorPricingPreview(){marketAutomatorDynamicPreviewToken="";}
+function syncMarketAutomatorPricingMigration(config={}){marketAutomatorDynamicPricingNeedsReview=config.dynamicPricingNeedsReview===true;if(!marketAutomatorDynamicPricingNeedsReview)marketAutomatorDynamicPreviewToken="";const notice=document.getElementById("marketAutomatorPricingMigrationNotice");if(notice)notice.classList.toggle("hidden",!marketAutomatorDynamicPricingNeedsReview);}
+function formatMarketAutomatorMap(value){return Object.entries(value||{}).map(([key,number])=>key+"="+number).join("\n");}
+function parseMarketAutomatorMap(id){const text=document.getElementById(id)?.value||"";const result={};for(const line of text.split(/\r?\n/)){const match=line.match(/^\s*(.+?)\s*=\s*([^=]+)\s*$/);if(!match)continue;const number=Number(match[2]);if(match[1]&&Number.isFinite(number))result[match[1]]=number;}return result;}
+let marketAutomatorPresets={},marketAutomatorSelectedOverride="";
+function renderMarketAutomator(data){const config=data?.config||{},status=data?.status||{};marketAutomatorPresets=data?.pricingPresets||marketAutomatorPresets;tone("marketAutomatorState",status.running?"Running":(status.enabled?"Enabled":"Disabled"));setText("marketAutomatorListings",formatMarketAutomatorNumber(status.npcListings));setText("marketAutomatorPurchases",formatMarketAutomatorNumber(status.counters?.purchased));setText("marketAutomatorErrors",formatMarketAutomatorNumber(status.counters?.errors));setText("marketAutomatorLastList",status.lastListingCycleAt?"Last: "+status.lastListingCycleAt:"No listing cycle yet.");setText("marketAutomatorLastBuy",status.lastBuyerCycleAt?"Last: "+status.lastBuyerCycleAt:"No buyer cycle yet.");setChecked("marketAutomatorEnabled",config.enabled===true);setValue("marketAutomatorTarget",config.targetNpcListings??40);setValue("marketAutomatorCreates",config.maxCreatesPerCycle??5);setValue("marketAutomatorListMinutes",config.listingIntervalMinutes??30);setValue("marketAutomatorBuyMinutes",config.buyerIntervalMinutes??20);setValue("marketAutomatorBuyCount",config.maxPlayerBuysPerCycle??0);setValue("marketAutomatorUnitPrice",config.maxPlayerUnitPrice??0);setValue("marketAutomatorSpend",config.maxPlayerSpendPerCycle??0);setValue("marketAutomatorStack",config.stackSize??1);setValue("marketAutomatorPricingMode",config.pricingMode||"dynamic");setValue("marketAutomatorBasePrice",config.basePrice??1000);setValue("marketAutomatorMinimumPrice",config.minimumPrice??1);setValue("marketAutomatorMaximumPrice",config.maximumPrice??999999999);setValue("marketAutomatorRoundingIncrement",config.roundingIncrement??1);setValue("marketAutomatorItemVariation",config.itemVariationPercent??15);setValue("marketAutomatorCycleVariation",config.cycleVariationPercent??5);setValue("marketAutomatorGradeMultipliers",formatMarketAutomatorMap(config.gradeMultipliers));setValue("marketAutomatorTierMultipliers",formatMarketAutomatorMap(config.tierMultipliers));setValue("marketAutomatorRarityMultipliers",formatMarketAutomatorMap(config.rarityMultipliers));setValue("marketAutomatorCategoryPrices",formatMarketAutomatorMap(config.categoryBasePrices));setValue("marketAutomatorItemOverrides",formatMarketAutomatorMap(config.itemOverrides));setValue("marketAutomatorQuality",config.quality??0);setValue("marketAutomatorExpiry",config.expiryDays??3);setValue("marketAutomatorTemplates",(config.templates||[]).join("\n"));const preset=marketAutomatorPresets[config.pricingPreset];setText("marketAutomatorPresetHelp",preset?.description||"Choose a preset to apply local catalog metadata automatically.");const templateSummary=status.templateMode==="automatic-catalog"?(formatMarketAutomatorNumber(status.availableTemplateCount)+" marketable catalog template(s) will rotate automatically."):(formatMarketAutomatorNumber(status.availableTemplateCount)+" configured template(s) will rotate.");setText("marketAutomatorResult",status.marketReady?("Market schema ready. "+templateSummary+" Existing listings remain unchanged."):(status.catalogError?("Item catalog unavailable: "+status.catalogError):("Market unavailable: "+(status.marketError||"unknown reason"))));}
+async function refreshMarketAutomator(){try{const data=await getJson("/api/market-automator/overview",{timeoutMs:25000});renderMarketAutomator(data);syncMarketAutomatorPricingMigration(data.config);}catch(error){tone("marketAutomatorState","Unavailable");setText("marketAutomatorResult",betterError(error));}}
+function collectMarketAutomator(){return{enabled:document.getElementById("marketAutomatorEnabled")?.checked===true,targetNpcListings:Number(document.getElementById("marketAutomatorTarget")?.value||0),maxCreatesPerCycle:Number(document.getElementById("marketAutomatorCreates")?.value||0),listingIntervalMinutes:Number(document.getElementById("marketAutomatorListMinutes")?.value||30),buyerIntervalMinutes:Number(document.getElementById("marketAutomatorBuyMinutes")?.value||20),maxPlayerBuysPerCycle:Number(document.getElementById("marketAutomatorBuyCount")?.value||0),maxPlayerUnitPrice:Number(document.getElementById("marketAutomatorUnitPrice")?.value||0),maxPlayerSpendPerCycle:Number(document.getElementById("marketAutomatorSpend")?.value||0),stackSize:Number(document.getElementById("marketAutomatorStack")?.value||1),pricingMode:document.getElementById("marketAutomatorPricingMode")?.value||"dynamic",pricingPreset:document.getElementById("marketAutomatorPricingPreset")?.value||"custom",basePrice:Number(document.getElementById("marketAutomatorBasePrice")?.value||1000),minimumPrice:Number(document.getElementById("marketAutomatorMinimumPrice")?.value||1),maximumPrice:Number(document.getElementById("marketAutomatorMaximumPrice")?.value||999999999),roundingIncrement:Number(document.getElementById("marketAutomatorRoundingIncrement")?.value||1),itemVariationPercent:Number(document.getElementById("marketAutomatorItemVariation")?.value||0),cycleVariationPercent:Number(document.getElementById("marketAutomatorCycleVariation")?.value||0),gradeMultipliers:parseMarketAutomatorMap("marketAutomatorGradeMultipliers"),tierMultipliers:parseMarketAutomatorMap("marketAutomatorTierMultipliers"),rarityMultipliers:parseMarketAutomatorMap("marketAutomatorRarityMultipliers"),categoryBasePrices:parseMarketAutomatorMap("marketAutomatorCategoryPrices"),itemOverrides:parseMarketAutomatorMap("marketAutomatorItemOverrides"),quality:Number(document.getElementById("marketAutomatorQuality")?.value||0),expiryDays:Number(document.getElementById("marketAutomatorExpiry")?.value||3),templates:(document.getElementById("marketAutomatorTemplates")?.value||"").split(/\r?\n/)};}
+function collectMarketAutomatorForPricing(){return{...collectMarketAutomator(),dynamicPricingNeedsReview:marketAutomatorDynamicPricingNeedsReview,dynamicPricingPreviewToken:marketAutomatorDynamicPreviewToken};}
+async function saveMarketAutomator(){try{const data=await getJson("/api/market-automator/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectMarketAutomatorForPricing()),timeoutMs:15000});renderMarketAutomator(data);syncMarketAutomatorPricingMigration(data.config);await refreshMarketAutomatorPricingPreview();showToast("Market automation saved. Existing listings were not changed.","success");}catch(error){setText("marketAutomatorResult",betterError(error));showToast(betterError(error),"error");}}
+function marketAutomatorFactor(value){const number=Number(value);return Number.isFinite(number)?number.toFixed(4):"1.0000";}
+function renderMarketAutomatorPricingPreview(data){const wrap=document.getElementById("marketAutomatorPricingPreview");if(!wrap)return;const rows=data?.items||[];const header='<div class="market-listing-header"><span>Item</span><span>Grade</span><span>Tier</span><span>Category</span><span>Base</span><span>Item factor</span><span>Grade factor</span><span>Tier factor</span><span>Random variation</span><span>Final price</span></div>';const body=rows.map(row=>{const p=row.pricing||{},m=p.metadata||{},f=p.factors||{};return '<div class="market-listing-row"><div class="market-listing-cell"><strong>'+esc(row.name||row.id)+'</strong><span class="subtle env-path-value">'+esc(row.id)+'</span></div><div class="market-listing-cell">'+esc(m.grade||"Unknown")+'</div><div class="market-listing-cell">'+esc(m.tier||"Unknown")+'</div><div class="market-listing-cell">'+esc(m.category||"Unknown")+'</div><div class="market-listing-cell">'+esc(p.basePrice)+'</div><div class="market-listing-cell">'+esc(marketAutomatorFactor(f.item))+'</div><div class="market-listing-cell">'+esc(marketAutomatorFactor(f.grade))+'</div><div class="market-listing-cell">'+esc(marketAutomatorFactor(f.tier))+'</div><div class="market-listing-cell">'+esc(marketAutomatorFactor(f.cycle))+'</div><div class="market-listing-cell"><strong class="market-listing-price">'+esc(p.finalPrice)+' Solari</strong></div></div>';}).join('');wrap.innerHTML=rows.length?'<div class="market-listing-grid market-pricing-grid">'+header+body+'</div>':'<div class="empty">No catalog items match this pricing preview.</div>';}
+async function refreshMarketAutomatorPricingPreview(){const wrap=document.getElementById("marketAutomatorPricingPreview");try{if(wrap)wrap.innerHTML='<div class="warning">Calculating deterministic pricing preview...</div>';const search=document.getElementById("marketAutomatorOverrideSearch")?.value||"";const data=await getJson("/api/market-automator/pricing-preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({config:collectMarketAutomatorForPricing(),search,limit:100}),timeoutMs:25000});marketAutomatorDynamicPreviewToken=data.dynamicPricingPreviewToken||"";renderMarketAutomatorPricingPreview(data);return data;}catch(error){marketAutomatorDynamicPreviewToken="";if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(error))+'</div>';return null;}}
+let marketAutomatorPreviewTimer=null;
+function refreshMarketAutomatorPricingPreviewSoon(){clearTimeout(marketAutomatorPreviewTimer);marketAutomatorPreviewTimer=setTimeout(refreshMarketAutomatorPricingPreview,300);}
+function marketAutomatorPricingModeChanged(){invalidateMarketAutomatorPricingPreview();if(document.getElementById("marketAutomatorPricingMode")?.value==="dynamic"&&Object.keys(marketAutomatorPresets).length)applyMarketAutomatorPreset("vanilla");}
+function applyMarketAutomatorPreset(key){const preset=marketAutomatorPresets[key];if(!preset){showToast("Pricing presets are still loading.","error");return;}setValue("marketAutomatorPricingMode","dynamic");setValue("marketAutomatorBasePrice",preset.basePrice);setValue("marketAutomatorItemVariation",preset.itemVariationPercent);setValue("marketAutomatorCycleVariation",preset.cycleVariationPercent);setValue("marketAutomatorGradeMultipliers",formatMarketAutomatorMap(preset.gradeMultipliers));setValue("marketAutomatorTierMultipliers",formatMarketAutomatorMap(preset.tierMultipliers));setValue("marketAutomatorRarityMultipliers",formatMarketAutomatorMap(preset.rarityMultipliers));setText("marketAutomatorPresetHelp",preset.description||"Uses the local item catalog automatically.");invalidateMarketAutomatorPricingPreview();showToast((preset.label||key)+" pricing preset applied. Generate a preview when ready.","success");}
+function renderMarketAutomatorPricingPreview(data){const wrap=document.getElementById("marketAutomatorPricingPreview");if(!wrap)return;const rows=data?.items||[];const header='<div class="market-listing-header"><span>Item</span><span>Grade</span><span>Tier</span><span>Category</span><span>Price</span></div>';const body=rows.map(row=>{const p=row.pricing||{},m=p.metadata||{};return '<div class="market-listing-row"><div class="market-listing-cell"><strong>'+esc(row.name||row.id)+'</strong></div><div class="market-listing-cell">'+esc(m.grade||"Unknown")+'</div><div class="market-listing-cell">'+esc(m.tier||"Unknown")+'</div><div class="market-listing-cell">'+esc(m.category||"Unknown")+'</div><div class="market-listing-cell"><strong class="market-listing-price">'+esc(p.finalPrice)+' Solari</strong></div></div>';}).join("");wrap.innerHTML=rows.length?'<div class="market-listing-grid market-pricing-grid market-pricing-simple">'+header+body+'</div>':'<div class="empty">No catalog items are available for this pricing preview.</div>';}
+async function refreshMarketAutomatorPricingPreview(){const wrap=document.getElementById("marketAutomatorPricingPreview");try{if(wrap)wrap.innerHTML='<div class="warning">Calculating 20 sample prices from the local catalog...</div>';const data=await getJson("/api/market-automator/pricing-preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({config:collectMarketAutomatorForPricing(),limit:20,sample:true}),timeoutMs:25000});marketAutomatorDynamicPreviewToken=data.dynamicPricingPreviewToken||"";renderMarketAutomatorPricingPreview(data);return data;}catch(error){marketAutomatorDynamicPreviewToken="";if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(error))+'</div>';return null;}}
+function renderMarketAutomatorOverrideResults(items){const wrap=document.getElementById("marketAutomatorOverrideResults");if(!wrap)return;wrap.innerHTML=(items||[]).length?(items||[]).map(item=>'<button class="admin-item" type="button" onclick="selectMarketAutomatorOverride('+esc(JSON.stringify(item.id))+','+esc(JSON.stringify(item.name||item.id))+')"><div class="avatar">+</div><div><strong>'+esc(item.name||item.id)+'</strong><span>'+esc([item.grade,item.tier,item.category].filter(Boolean).join(" · ")||"Catalog item")+'</span></div></button>').join(""):'<div class="empty">No matching local catalog items.</div>';}
+function selectMarketAutomatorOverride(id,name){marketAutomatorSelectedOverride=String(id||"");setValue("marketAutomatorOverrideSelectedName",name||id);const overrides=parseMarketAutomatorMap("marketAutomatorItemOverrides");setValue("marketAutomatorOverridePrice",overrides[marketAutomatorSelectedOverride]||"");}
+async function searchMarketAutomatorOverrides(){const query=document.getElementById("marketAutomatorOverrideSearch")?.value||"";const wrap=document.getElementById("marketAutomatorOverrideResults");if(!query.trim()){if(wrap)wrap.innerHTML='<div class="empty">Search for an item to set an exact price.</div>';return;}try{if(wrap)wrap.innerHTML='<div class="warning">Searching the local catalog...</div>';const data=await getJson("/api/market-automator/catalog-search",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,limit:20}),timeoutMs:15000});renderMarketAutomatorOverrideResults(data.items);}catch(error){if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(error))+'</div>';}}
+function saveMarketAutomatorItemOverride(){if(!marketAutomatorSelectedOverride){showToast("Choose an item from the search results first.","error");return;}const price=Number(document.getElementById("marketAutomatorOverridePrice")?.value);if(!Number.isSafeInteger(price)||price<1||price>999999999){showToast("Enter a whole positive price.","error");return;}const overrides=parseMarketAutomatorMap("marketAutomatorItemOverrides");overrides[marketAutomatorSelectedOverride]=price;setValue("marketAutomatorItemOverrides",formatMarketAutomatorMap(overrides));invalidateMarketAutomatorPricingPreview();showToast("Item override prepared. Save Automation to keep it.","success");}
+function removeMarketAutomatorItemOverride(){if(!marketAutomatorSelectedOverride){showToast("Choose an item first.","error");return;}const overrides=parseMarketAutomatorMap("marketAutomatorItemOverrides");delete overrides[marketAutomatorSelectedOverride];setValue("marketAutomatorItemOverrides",formatMarketAutomatorMap(overrides));setValue("marketAutomatorOverridePrice","");invalidateMarketAutomatorPricingPreview();showToast("Item override removed. Save Automation to keep it.","success");}
+let marketAutomatorOverrideSearchTimer=null;
+function searchMarketAutomatorOverridesSoon(){clearTimeout(marketAutomatorOverrideSearchTimer);marketAutomatorOverrideSearchTimer=setTimeout(searchMarketAutomatorOverrides,250);}
+async function runMarketAutomator(kind){try{setText("marketAutomatorResult","Running "+kind+" cycle...");const data=await getJson("/api/market-automator/run/"+encodeURIComponent(kind),{method:"POST",timeoutMs:120000});setText("marketAutomatorResult","Cycle completed. "+JSON.stringify(data));await Promise.all([refreshMarketAutomator(),refreshMarketAutomatorLogs(),refreshMarketPanel()]);showToast("Market automation cycle completed.","success");}catch(error){setText("marketAutomatorResult",betterError(error));showToast(betterError(error),"error");}}
+async function refreshMarketAutomatorLogs(){try{const data=await getJson("/api/market-automator/logs",{timeoutMs:15000});setText("marketAutomatorLog",data.text||"No market automation activity yet.");}catch(error){setText("marketAutomatorLog",betterError(error));}}
 function setValue(id,value){const el=document.getElementById(id);if(el)el.value=value==null?"":String(value);}
 function getValue(id){return document.getElementById(id)?.value||"";}
 function setChecked(id,value){const el=document.getElementById(id);if(el)el.checked=Boolean(value);}
@@ -19811,168 +18564,25 @@ async function refreshAdmin(){const log=document.getElementById("adminLog");log.
 function blueprintPlayerLabel(player){return (player?.character_name||player?.name||player?.id||"Unknown")+" / account "+(player?.account_id||player?.id||"-");}
 function renderBlueprintPlayerSelect(){const select=document.getElementById("blueprintPlayer");if(!select)return;const current=selectedPlayerId||select.value;select.innerHTML=adminPlayers.length?adminPlayers.map(player=>'<option value="'+esc(player.id)+'">'+esc(blueprintPlayerLabel(player))+'</option>').join(""):'<option value="">No players found</option>';if(current&&adminPlayers.some(player=>String(player.id)===String(current))){select.value=String(current);selectedPlayerId=String(current);}else if(adminPlayers[0]){select.value=String(adminPlayers[0].id);selectedPlayerId=String(adminPlayers[0].id);}syncBlueprintButtons();}
 function setBlueprintStatus(text,isError=false){const status=document.getElementById("blueprintStatus");if(!status)return;status.className=(isError?"warning":"empty")+" mt blueprint-progress";status.textContent=String(text||"");}
-function selectBlueprintFiles(files){blueprintFiles=Array.from(files||[]);const summary=document.getElementById("blueprintFileSummary"),actions=document.getElementById("blueprintFilePreviewActions");if(summary)summary.textContent=blueprintFiles.length?(blueprintFiles.length+" file"+(blueprintFiles.length===1?"":"s")+" selected. Preview each layout before importing."):"Select up to 10 JSON files.";if(actions){actions.innerHTML=blueprintFiles.map((file,index)=>'<button type="button" data-blueprint-action="preview-file" data-blueprint-file-index="'+index+'">Preview '+(index+1)+': '+esc(file.name)+'</button>').join("");actions.querySelectorAll('[data-blueprint-action="preview-file"]').forEach(button=>button.addEventListener("click",()=>previewSelectedBlueprintFile(Number(button.dataset.blueprintFileIndex))));}if(blueprintFiles.length>10)setBlueprintStatus("Select no more than 10 blueprint files at a time.",true);syncBlueprintButtons();}
-function syncBlueprintButtons(){const selectedCount=blueprintSelectedIds.size;const hasPlayer=Boolean(document.getElementById("blueprintPlayer")?.value||selectedPlayerId);const importButton=document.getElementById("blueprintImportButton");const exportSelected=document.getElementById("blueprintExportSelected");const deleteSelected=document.getElementById("blueprintDeleteSelected");const exportAll=document.getElementById("blueprintExportAll");const selectAll=document.getElementById("blueprintSelectAll");if(importButton)importButton.disabled=blueprintBusy||!hasPlayer||!blueprintFiles.length||blueprintFiles.length>10;if(exportSelected)exportSelected.disabled=blueprintBusy||!selectedCount;if(deleteSelected)deleteSelected.disabled=blueprintBusy||!selectedCount;if(exportAll)exportAll.disabled=blueprintBusy||!blueprintRows.length;if(selectAll){selectAll.disabled=blueprintBusy||!blueprintRows.length;selectAll.checked=Boolean(blueprintRows.length&&selectedCount===blueprintRows.length);selectAll.indeterminate=Boolean(selectedCount&&selectedCount<blueprintRows.length);}document.querySelectorAll("[data-blueprint-action]").forEach(button=>button.disabled=blueprintBusy);}
-function renderBlueprintRows(){const body=document.getElementById("blueprintRows");const count=document.getElementById("blueprintCount");if(count)count.textContent=blueprintRows.length+" blueprint"+(blueprintRows.length===1?"":"s")+(blueprintSelectedIds.size?" / "+blueprintSelectedIds.size+" selected":"");if(!body)return;if(!blueprintRows.length){body.innerHTML='<tr><td colspan="6">No blueprints found for the selected player.</td></tr>';syncBlueprintButtons();return;}body.innerHTML=blueprintRows.map(row=>'<tr><td><input type="checkbox" data-blueprint-select="'+Number(row.id)+'" aria-label="Select '+esc(row.name||("blueprint "+row.id))+'" '+(blueprintSelectedIds.has(Number(row.id))?"checked":"")+'></td><td><strong>'+esc(row.name||("Blueprint "+row.id))+'</strong></td><td>'+Number(row.pieces||0).toLocaleString()+'</td><td>'+Number(row.placeables||0).toLocaleString()+'</td><td>'+esc(row.item_id||"-")+'</td><td><div class="action-row"><button type="button" data-blueprint-action="view" data-blueprint-id="'+Number(row.id)+'">View</button><button type="button" data-blueprint-action="export" data-blueprint-id="'+Number(row.id)+'">Export</button><button type="button" class="danger" data-blueprint-action="delete" data-blueprint-id="'+Number(row.id)+'">Delete</button></div></td></tr>').join("");body.querySelectorAll("[data-blueprint-select]").forEach(input=>input.addEventListener("change",()=>toggleBlueprint(Number(input.dataset.blueprintSelect),input.checked)));body.querySelectorAll('[data-blueprint-action="view"]').forEach(button=>button.addEventListener("click",()=>openBlueprintViewer(Number(button.dataset.blueprintId))));body.querySelectorAll('[data-blueprint-action="export"]').forEach(button=>button.addEventListener("click",()=>exportBlueprintRows([Number(button.dataset.blueprintId)],false)));body.querySelectorAll('[data-blueprint-action="delete"]').forEach(button=>button.addEventListener("click",()=>deleteBlueprintRows([Number(button.dataset.blueprintId)])));syncBlueprintButtons();}
+function selectBlueprintFiles(files){blueprintFiles=Array.from(files||[]);const summary=document.getElementById("blueprintFileSummary");if(summary)summary.textContent=blueprintFiles.length?(blueprintFiles.length+" file"+(blueprintFiles.length===1?"":"s")+" selected and ready for validation during import."):"Select up to 10 validated JSON files.";if(blueprintFiles.length>10)setBlueprintStatus("Select no more than 10 blueprint files at a time.",true);syncBlueprintButtons();}
+function syncBlueprintButtons(){const selectedCount=blueprintSelectedIds.size;const hasPlayer=Boolean(document.getElementById("blueprintPlayer")?.value||selectedPlayerId);const importButton=document.getElementById("blueprintImportButton");const exportSelected=document.getElementById("blueprintExportSelected");const exportAll=document.getElementById("blueprintExportAll");const selectAll=document.getElementById("blueprintSelectAll");if(importButton)importButton.disabled=blueprintBusy||!hasPlayer||!blueprintFiles.length||blueprintFiles.length>10;if(exportSelected)exportSelected.disabled=blueprintBusy||!selectedCount;if(exportAll)exportAll.disabled=blueprintBusy||!blueprintRows.length;if(selectAll){selectAll.disabled=blueprintBusy||!blueprintRows.length;selectAll.checked=Boolean(blueprintRows.length&&selectedCount===blueprintRows.length);selectAll.indeterminate=Boolean(selectedCount&&selectedCount<blueprintRows.length);}document.querySelectorAll("[data-blueprint-action]").forEach(button=>button.disabled=blueprintBusy);}
+function renderBlueprintRows(){const body=document.getElementById("blueprintRows");const count=document.getElementById("blueprintCount");if(count)count.textContent=blueprintRows.length+" blueprint"+(blueprintRows.length===1?"":"s")+(blueprintSelectedIds.size?" / "+blueprintSelectedIds.size+" selected":"");if(!body)return;if(!blueprintRows.length){body.innerHTML='<tr><td colspan="6">No blueprints found for the selected player.</td></tr>';syncBlueprintButtons();return;}body.innerHTML=blueprintRows.map(row=>'<tr><td><input type="checkbox" data-blueprint-select="'+Number(row.id)+'" aria-label="Select '+esc(row.name||("blueprint "+row.id))+'" '+(blueprintSelectedIds.has(Number(row.id))?"checked":"")+'></td><td><strong>'+esc(row.name||("Blueprint "+row.id))+'</strong></td><td>'+Number(row.pieces||0).toLocaleString()+'</td><td>'+Number(row.placeables||0).toLocaleString()+'</td><td>'+esc(row.item_id||"-")+'</td><td><div class="action-row"><button type="button" data-blueprint-action="export" data-blueprint-id="'+Number(row.id)+'">Export</button></div></td></tr>').join("");body.querySelectorAll("[data-blueprint-select]").forEach(input=>input.addEventListener("change",()=>toggleBlueprint(Number(input.dataset.blueprintSelect),input.checked)));body.querySelectorAll('[data-blueprint-action="export"]').forEach(button=>button.addEventListener("click",()=>exportBlueprintRows([Number(button.dataset.blueprintId)],false)));syncBlueprintButtons();}
 function toggleBlueprint(id,checked){if(checked)blueprintSelectedIds.add(id);else blueprintSelectedIds.delete(id);renderBlueprintRows();}
 function toggleAllBlueprints(checked){blueprintSelectedIds=checked?new Set(blueprintRows.map(row=>Number(row.id))):new Set();renderBlueprintRows();}
-function blueprintByteSize(value){const bytes=Math.max(0,Number(value)||0);if(bytes<1024)return bytes+" B";if(bytes<1024*1024)return(bytes/1024).toFixed(1)+" KB";if(bytes<1024*1024*1024)return(bytes/(1024*1024)).toFixed(1)+" MB";return(bytes/(1024*1024*1024)).toFixed(2)+" GB";}
-function renderBlueprintModelPackStatus(data){blueprintModelPackState=data||null;const el=document.getElementById("blueprintModelPackStatus");if(!el)return;if(!data?.ok){el.textContent="Bundled exact model catalog could not be read: "+(data?.error||"unknown error");return;}el.textContent=data.exactBundled?(Number(data.modelCount||0).toLocaleString()+" exact piece models · "+Number(data.mappingCount||0).toLocaleString()+" blueprint mappings · "+blueprintByteSize(data.totalBytes)+" · fully offline"):"Exact model catalog is unavailable.";}
-async function refreshBlueprintModelPackStatus(){try{const data=await getJson("/api/blueprint-models/status");renderBlueprintModelPackStatus(data);return data;}catch(error){const data={ok:false,error:betterError(error)};renderBlueprintModelPackStatus(data);return data;}}
-async function importBlueprintModelPack(){try{if(!window.alphaNineSuite?.chooseBlueprintModelPackFolder)throw new Error("The model-pack folder picker is available only in the desktop Suite.");const chosen=await window.alphaNineSuite.chooseBlueprintModelPackFolder();if(chosen?.canceled||!chosen?.folderPath)return;setBlueprintStatus("Copying the offline GLB model pack into Suite storage...");const data=await getJson("/api/blueprint-models/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({folderPath:chosen.folderPath}),timeoutMs:900000});renderBlueprintModelPackStatus(data);setBlueprintStatus("Offline model pack installed: "+Number(data.modelCount||0).toLocaleString()+" GLB files and "+Number(data.mappingCount||0).toLocaleString()+" mappings.");if(blueprintViewer.data)await renderBlueprintViewer3d();playUiSound("success");}catch(error){setBlueprintStatus("Model-pack import failed: "+betterError(error),true);playUiSound("warning");}}
-async function openBlueprintModelPackFolder(){try{const data=blueprintModelPackState||await refreshBlueprintModelPackStatus();if(!data?.packDir)throw new Error("The local model-pack path is unavailable.");if(!window.alphaNineSuite?.openPath)throw new Error("Opening the local folder is available only in the desktop Suite.");await window.alphaNineSuite.openPath(data.packDir);}catch(error){setBlueprintStatus(betterError(error),true);}}
-function blueprintViewerNumber(value){const number=Number(value);return Number.isFinite(number)?number:0;}
-function blueprintViewerScene(){const data=blueprintViewer.data||{};const pieces=(data.instances||[]).map(row=>({kind:"piece",id:row.instance_id,type:row.building_type||"Building piece",x:blueprintViewerNumber(row.x),y:blueprintViewerNumber(row.y),z:blueprintViewerNumber(row.z),rotation:blueprintViewerNumber(row.rotation)}));const placeables=(data.placeables||[]).map(row=>({kind:"placeable",id:row.placeable_id,type:row.building_type||"Placeable",x:blueprintViewerNumber(row.x),y:blueprintViewerNumber(row.y),z:blueprintViewerNumber(row.z),rotation:blueprintViewerNumber(row.rz)}));const placeableById=new Map(placeables.map(row=>[Number(row.id),row]));const shields=(data.pentashields||[]).map(row=>{const placeable=placeableById.get(Number(row.placeable_id));return placeable?{...placeable,kind:"shield",scale:Array.isArray(row.scale)?row.scale:[]}:null;}).filter(Boolean);const points=[...pieces,...placeables];if(!points.length)return{pieces,placeables,shields,points,bounds:{minX:-1,maxX:1,minY:-1,maxY:1,minZ:0,maxZ:1,spanX:2,spanY:2,spanZ:1,maxSpan:2,centerX:0,centerY:0,centerZ:.5}};const xs=points.map(row=>row.x),ys=points.map(row=>row.y),zs=points.map(row=>row.z);const bounds={minX:Math.min(...xs),maxX:Math.max(...xs),minY:Math.min(...ys),maxY:Math.max(...ys),minZ:Math.min(...zs),maxZ:Math.max(...zs)};bounds.spanX=Math.max(1,bounds.maxX-bounds.minX);bounds.spanY=Math.max(1,bounds.maxY-bounds.minY);bounds.spanZ=Math.max(1,bounds.maxZ-bounds.minZ);bounds.maxSpan=Math.max(bounds.spanX,bounds.spanY,bounds.spanZ*1.6,1);bounds.centerX=(bounds.minX+bounds.maxX)/2;bounds.centerY=(bounds.minY+bounds.maxY)/2;bounds.centerZ=(bounds.minZ+bounds.maxZ)/2;return{pieces,placeables,shields,points,bounds};}
-function projectBlueprintPoint(point,scene,width,height,scale){const bounds=scene.bounds;const dx=point.x-bounds.centerX,dy=point.y-bounds.centerY,dz=point.z-bounds.centerZ;const cy=Math.cos(blueprintViewer.yaw),sy=Math.sin(blueprintViewer.yaw),cp=Math.cos(blueprintViewer.pitch),sp=Math.sin(blueprintViewer.pitch);const rotatedX=dx*cy-dy*sy;const depth=dx*sy+dy*cy;const rotatedY=dz*cp-depth*sp;const rotatedDepth=dz*sp+depth*cp;return{x:width/2+blueprintViewer.panX+rotatedX*scale,y:height/2+blueprintViewer.panY-rotatedY*scale,depth:rotatedDepth};}
-function drawBlueprintGrid(ctx,scene,width,height,scale){const b=scene.bounds;const steps=10;ctx.save();ctx.lineWidth=1;ctx.strokeStyle="rgba(214,166,69,.18)";for(let index=0;index<=steps;index+=1){const ratio=index/steps;const x=b.minX+b.spanX*ratio;const y=b.minY+b.spanY*ratio;const x1=projectBlueprintPoint({x,y:b.minY,z:b.minZ},scene,width,height,scale),x2=projectBlueprintPoint({x,y:b.maxY,z:b.minZ},scene,width,height,scale);const y1=projectBlueprintPoint({x:b.minX,y,z:b.minZ},scene,width,height,scale),y2=projectBlueprintPoint({x:b.maxX,y,z:b.minZ},scene,width,height,scale);ctx.beginPath();ctx.moveTo(x1.x,x1.y);ctx.lineTo(x2.x,x2.y);ctx.stroke();ctx.beginPath();ctx.moveTo(y1.x,y1.y);ctx.lineTo(y2.x,y2.y);ctx.stroke();}const center={x:b.centerX,y:b.centerY,z:b.minZ};const axisLength=b.maxSpan*.12;const origin=projectBlueprintPoint(center,scene,width,height,scale);[["#da6e55",{x:center.x+axisLength,y:center.y,z:center.z}],["#69b987",{x:center.x,y:center.y+axisLength,z:center.z}],["#72b7d6",{x:center.x,y:center.y,z:center.z+axisLength}]].forEach(([color,target])=>{const end=projectBlueprintPoint(target,scene,width,height,scale);ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(origin.x,origin.y);ctx.lineTo(end.x,end.y);ctx.stroke();});ctx.restore();}
-function blueprintProxySpec(row){
-  const type=String(row.type||"").toLowerCase();
-  if(row.kind==="placeable")return{width:180,depth:180,height:220,color:[83,166,207],alpha:.72};
-  if(/floorlight|light_|lamp|torch/.test(type))return{width:72,depth:72,height:36,color:[111,190,224],alpha:.82};
-  if(/railing/.test(type))return{width:/wide/.test(type)?512:256,depth:34,height:150,color:[198,184,150],alpha:.68};
-  if(/pillar|column/.test(type))return{width:112,depth:112,height:/top|bottom/.test(type)?256:384,color:[194,169,119],alpha:.76};
-  if(/stairs|ramp/.test(type))return{width:512,depth:/wide/.test(type)?512:256,height:256,color:[185,164,124],alpha:.7};
-  if(/wall|window|door/.test(type))return{width:/half/.test(type)?256:512,depth:54,height:/half/.test(type)?256:384,color:[214,196,157],alpha:.72};
-  if(/foundation/.test(type))return{width:/half/.test(type)?256:512,depth:512,height:96,color:[173,146,96],alpha:.78};
-  if(/floor|roof|rooftop|ceiling/.test(type))return{width:/half/.test(type)?256:512,depth:512,height:54,color:[220,204,170],alpha:.7};
-  return{width:112,depth:112,height:112,color:[216,172,99],alpha:.74};
-}
-function blueprintProxyFaces(row,scene,width,height,scale){
-  const spec=blueprintProxySpec(row),angle=blueprintViewerNumber(row.rotation)*Math.PI/180,cos=Math.cos(angle),sin=Math.sin(angle);
-  const halfWidth=spec.width/2,halfDepth=spec.depth/2,halfHeight=spec.height/2;
-  const local=[[-halfWidth,-halfDepth,-halfHeight],[halfWidth,-halfDepth,-halfHeight],[halfWidth,halfDepth,-halfHeight],[-halfWidth,halfDepth,-halfHeight],[-halfWidth,-halfDepth,halfHeight],[halfWidth,-halfDepth,halfHeight],[halfWidth,halfDepth,halfHeight],[-halfWidth,halfDepth,halfHeight]];
-  const corners=local.map(point=>{const x=row.x+point[0]*cos-point[1]*sin,y=row.y+point[0]*sin+point[1]*cos,z=row.z+point[2];return projectBlueprintPoint({x,y,z},scene,width,height,scale);});
-  return[[4,5,6,7,1.16],[0,1,5,4,.72],[1,2,6,5,.9],[2,3,7,6,.78],[3,0,4,7,.98]].map(face=>{const points=face.slice(0,4).map(index=>corners[index]);return{points,depth:points.reduce((sum,point)=>sum+point.depth,0)/points.length,shade:face[4],spec};});
-}
-function blueprintFallbackCanvas(){
-  let canvas=document.getElementById("blueprintViewerCanvas");
-  if(blueprintViewer.engine){try{blueprintViewer.engine.stopRenderLoop();blueprintViewer.engine.dispose();}catch{}blueprintViewer.engine=null;blueprintViewer.scene=null;blueprintViewer.camera=null;blueprintViewer.groups=null;}
-  const replacement=canvas.cloneNode(false);canvas.replaceWith(replacement);canvas=replacement;blueprintViewer.fallback2d=true;
-  if(!canvas.dataset.blueprintFallbackBound){
-    canvas.dataset.blueprintFallbackBound="1";
-    canvas.addEventListener("contextmenu",event=>event.preventDefault());
-    canvas.addEventListener("pointerdown",event=>{if(event.button!==0&&event.button!==1&&event.button!==2)return;event.preventDefault();canvas.setPointerCapture(event.pointerId);blueprintViewer.drag={x:event.clientX,y:event.clientY,pan:event.button===1||event.button===2||event.shiftKey};canvas.classList.add("dragging");});
-    canvas.addEventListener("pointermove",event=>{const drag=blueprintViewer.drag;if(!drag)return;const dx=event.clientX-drag.x,dy=event.clientY-drag.y;drag.x=event.clientX;drag.y=event.clientY;if(drag.pan){blueprintViewer.panX+=dx;blueprintViewer.panY+=dy;}else{blueprintViewer.yaw+=dx*.008;blueprintViewer.pitch=Math.max(-1.25,Math.min(1.25,blueprintViewer.pitch-dy*.006));}renderBlueprintViewerFallback2d();});
-    const release=()=>{blueprintViewer.drag=null;canvas.classList.remove("dragging");};canvas.addEventListener("pointerup",release);canvas.addEventListener("pointercancel",release);
-    canvas.addEventListener("wheel",event=>{event.preventDefault();const unit=event.deltaMode===1?16:(event.deltaMode===2?canvas.clientHeight:1),delta=Math.max(-240,Math.min(240,event.deltaY*unit));blueprintViewer.zoom=Math.max(.2,Math.min(8,blueprintViewer.zoom*Math.exp(-delta*.0018)));renderBlueprintViewerFallback2d();},{passive:false});
-    canvas.addEventListener("dblclick",event=>{event.preventDefault();resetBlueprintViewer();});
-  }
-  return canvas;
-}
-function blueprintFallbackColor(spec,shade){const color=spec.color||[216,172,99];return"rgba("+color.map(value=>Math.max(0,Math.min(255,Math.round(value*shade)))).join(",")+","+(spec.alpha||.75)+")";}
-function renderBlueprintViewerFallback2d(message="Built-in offline shapes"){
-  if(!blueprintViewer.data)return;let canvas=document.getElementById("blueprintViewerCanvas");if(!blueprintViewer.fallback2d)canvas=blueprintFallbackCanvas();const ratio=Math.max(1,Math.min(2,window.devicePixelRatio||1)),width=Math.max(640,Math.round(canvas.clientWidth||900)),height=Math.max(420,Math.round(canvas.clientHeight||520));if(canvas.width!==Math.round(width*ratio)||canvas.height!==Math.round(height*ratio)){canvas.width=Math.round(width*ratio);canvas.height=Math.round(height*ratio);}const ctx=canvas.getContext("2d");ctx.setTransform(ratio,0,0,ratio,0,0);ctx.clearRect(0,0,width,height);ctx.fillStyle="#070909";ctx.fillRect(0,0,width,height);const data=blueprintViewerScene(),padding=Math.max(450,data.bounds.maxSpan*.2),baseScale=Math.min(width/(data.bounds.spanX+padding),height/(data.bounds.spanZ+data.bounds.maxSpan*.65+padding*.3)),scale=Math.max(.015,baseScale*.72)*blueprintViewer.zoom;
-  const gridSize=Math.max(700,data.bounds.maxSpan*1.25),gridZ=data.bounds.minZ-18,steps=12;ctx.lineWidth=1;ctx.strokeStyle="rgba(183,137,43,.22)";for(let index=0;index<=steps;index+=1){const offset=(index/steps-.5)*gridSize;for(const pair of [[[data.bounds.centerX-gridSize/2,data.bounds.centerY+offset],[data.bounds.centerX+gridSize/2,data.bounds.centerY+offset]],[[data.bounds.centerX+offset,data.bounds.centerY-gridSize/2],[data.bounds.centerX+offset,data.bounds.centerY+gridSize/2]]]){const a=projectBlueprintPoint({x:pair[0][0],y:pair[0][1],z:gridZ},data,width,height,scale),b=projectBlueprintPoint({x:pair[1][0],y:pair[1][1],z:gridZ},data,width,height,scale);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();}}
-  const showPieces=document.getElementById("blueprintViewerPieces")?.checked!==false,showPlaceables=document.getElementById("blueprintViewerPlaceables")?.checked!==false,showShields=document.getElementById("blueprintViewerShields")?.checked!==false,rows=[...(showPieces?data.pieces:[]),...(showPlaceables?data.placeables:[])],faces=rows.flatMap(row=>blueprintProxyFaces(row,data,width,height,scale));faces.sort((a,b)=>a.depth-b.depth);for(const face of faces){ctx.beginPath();face.points.forEach((point,index)=>index?ctx.lineTo(point.x,point.y):ctx.moveTo(point.x,point.y));ctx.closePath();ctx.fillStyle=blueprintFallbackColor(face.spec,face.shade);ctx.fill();ctx.strokeStyle="rgba(255,232,186,.3)";ctx.stroke();}
-  if(showShields)for(const shield of data.shields){const point=projectBlueprintPoint(shield,data,width,height,scale);ctx.beginPath();ctx.arc(point.x,point.y,Math.max(7,18*blueprintViewer.zoom),0,Math.PI*2);ctx.fillStyle="rgba(184,121,232,.3)";ctx.fill();ctx.strokeStyle="#c48af0";ctx.stroke();}
-  const coverage=document.getElementById("blueprintModelCoverage");if(coverage)coverage.textContent=message+" · "+rows.length.toLocaleString()+" components visible";
-}
-function blueprintSceneDisposed(scene){if(!scene)return true;const disposed=scene.isDisposed;return typeof disposed==="function"?Boolean(disposed.call(scene)):Boolean(disposed||scene._isDisposed);}
-function disposeBlueprintViewerScene(){if(blueprintViewer.cameraControlsCleanup){try{blueprintViewer.cameraControlsCleanup();}catch{}blueprintViewer.cameraControlsCleanup=null;}if(blueprintViewer.scene){try{blueprintViewer.scene.dispose();}catch{}blueprintViewer.scene=null;}blueprintViewer.camera=null;blueprintViewer.groups=null;}
-function blueprintBabylonMaterial(scene,name,color,alpha=1){const material=new BABYLON.StandardMaterial(name,scene);material.diffuseColor=BABYLON.Color3.FromHexString(color);material.emissiveColor=material.diffuseColor.scale(.08);material.specularColor=new BABYLON.Color3(.12,.12,.12);material.alpha=alpha;material.backFaceCulling=false;return material;}
-function blueprintBabylonPosition(row){return new BABYLON.Vector3(row.x,row.z,row.y);}
-function blueprintViewerGrid3d(scene,data){const bounds=data.bounds,groundY=bounds.minZ-12,size=Math.max(bounds.spanX,bounds.spanY,bounds.maxSpan*.85),steps=12,color=new BABYLON.Color3(.42,.31,.12);for(let index=0;index<=steps;index+=1){const ratio=index/steps-.5,offset=ratio*size;const horizontal=BABYLON.MeshBuilder.CreateLines("grid-h-"+index,{points:[new BABYLON.Vector3(bounds.centerX-size/2,groundY,bounds.centerY+offset),new BABYLON.Vector3(bounds.centerX+size/2,groundY,bounds.centerY+offset)]},scene);horizontal.color=color;horizontal.alpha=.32;const vertical=BABYLON.MeshBuilder.CreateLines("grid-v-"+index,{points:[new BABYLON.Vector3(bounds.centerX+offset,groundY,bounds.centerY-size/2),new BABYLON.Vector3(bounds.centerX+offset,groundY,bounds.centerY+size/2)]},scene);vertical.color=color;vertical.alpha=.32;}}
-function blueprintViewerProxyMesh(row,scene,materials){const spec=blueprintProxySpec(row),mesh=BABYLON.MeshBuilder.CreateBox("proxy-"+row.kind+"-"+row.id,{width:spec.width,depth:spec.depth,height:spec.height},scene);mesh.position=blueprintBabylonPosition(row);mesh.rotation.y=-BABYLON.Tools.ToRadians(row.rotation||0);mesh.material=row.kind==="placeable"?materials.placeable:materials.proxy;mesh.metadata={blueprintKind:row.kind,blueprintType:row.type};return mesh;}
-async function blueprintLoadModelContainers(scene,urls,generation,coverage){const containers=new Map(),queue=[...urls];let cursor=0;const worker=async()=>{while(cursor<queue.length){const url=queue[cursor++];if(generation!==blueprintViewer.renderGeneration)return;try{const slash=url.lastIndexOf("/"),root=url.slice(0,slash+1),file=decodeURIComponent(url.slice(slash+1));containers.set(url,await BABYLON.SceneLoader.LoadAssetContainerAsync(root,file,scene));}catch(error){coverage.failures.push(url+": "+betterError(error));}}};await Promise.all(Array.from({length:Math.min(6,queue.length)},worker));return containers;}
-async function renderBlueprintViewer3d(){const canvas=document.getElementById("blueprintViewerCanvas"),coverageEl=document.getElementById("blueprintModelCoverage");if(!canvas||!blueprintViewer.data)return;if(!window.BABYLON)throw new Error("The offline 3D renderer did not load.");const generation=++blueprintViewer.renderGeneration;if(coverageEl)coverageEl.textContent="Resolving local detailed models...";if(BABYLON.DracoCompression)BABYLON.DracoCompression.Configuration={decoder:{wasmUrl:"/assets/vendor/draco_wasm_wrapper_gltf.js",wasmBinaryUrl:"/assets/vendor/draco_decoder_gltf.wasm"}};if(!blueprintViewer.engine){blueprintViewer.engine=new BABYLON.Engine(canvas,true,{preserveDrawingBuffer:false,stencil:true,disableWebGL2Support:false});blueprintViewer.engine.runRenderLoop(()=>{if(!blueprintSceneDisposed(blueprintViewer.scene))blueprintViewer.scene.render();});}disposeBlueprintViewerScene();const sceneData=blueprintViewerScene(),scene=new BABYLON.Scene(blueprintViewer.engine);blueprintViewer.scene=scene;scene.clearColor=new BABYLON.Color4(.025,.03,.032,1);scene.ambientColor=new BABYLON.Color3(.25,.25,.25);const center=new BABYLON.Vector3(sceneData.bounds.centerX,sceneData.bounds.centerZ,sceneData.bounds.centerY),camera=new BABYLON.ArcRotateCamera("blueprint-camera",-.82,1.12,Math.max(900,sceneData.bounds.maxSpan*1.5),center,scene);camera.lowerRadiusLimit=Math.max(60,sceneData.bounds.maxSpan*.03);camera.upperRadiusLimit=Math.max(5000,sceneData.bounds.maxSpan*8);camera.wheelDeltaPercentage=.012;camera.panningSensibility=55;camera.attachControl(canvas,true);if(camera.inputs?.attached?.pointers)camera.inputs.attached.pointers.buttons=[0,1,2];blueprintViewer.camera=camera;new BABYLON.HemisphericLight("blueprint-sky",new BABYLON.Vector3(.2,1,.1),scene).intensity=1.05;const key=new BABYLON.DirectionalLight("blueprint-key",new BABYLON.Vector3(-.45,-1,.35),scene);key.intensity=.7;blueprintViewerGrid3d(scene,sceneData);const materials={model:blueprintBabylonMaterial(scene,"detailed-model-material","#c9cbca",1),proxy:blueprintBabylonMaterial(scene,"proxy-material","#d8bd88",.78),placeable:blueprintBabylonMaterial(scene,"placeable-material","#6eb4d3",.78),shield:blueprintBabylonMaterial(scene,"shield-material","#b879e8",.3)};const pieceGroup=new BABYLON.TransformNode("blueprint-pieces",scene),placeableGroup=new BABYLON.TransformNode("blueprint-placeables",scene),shieldGroup=new BABYLON.TransformNode("blueprint-shields",scene);blueprintViewer.groups={pieces:pieceGroup,placeables:placeableGroup,shields:shieldGroup};const objects=[...sceneData.pieces,...sceneData.placeables],types=[...new Set(objects.map(row=>row.type).filter(Boolean))],resolved=await getJson("/api/blueprint-models/resolve",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({types}),timeoutMs:60000});if(generation!==blueprintViewer.renderGeneration)return;const urls=new Set(Object.values(resolved.models||{})),coverage={detailed:0,proxy:0,failures:[]},containers=await blueprintLoadModelContainers(scene,urls,generation,coverage);if(generation!==blueprintViewer.renderGeneration)return;for(const row of objects){const url=resolved.models?.[row.type],container=url?containers.get(url):null,parent=row.kind==="placeable"?placeableGroup:pieceGroup;if(container){try{const instance=container.instantiateModelsToScene(name=>"bp-"+row.id+"-"+name,false,{doNotInstantiate:false}),wrapper=new BABYLON.TransformNode("bp-piece-"+row.id,scene);wrapper.parent=parent;wrapper.position=blueprintBabylonPosition(row);wrapper.rotation.y=-BABYLON.Tools.ToRadians(row.rotation||0);for(const root of instance.rootNodes||[]){root.parent=wrapper;const meshes=root.getChildMeshes?root.getChildMeshes(false):[];if(root.material)root.material=materials.model;for(const mesh of meshes)mesh.material=materials.model;}coverage.detailed+=1;}catch{const proxy=blueprintViewerProxyMesh(row,scene,materials);proxy.parent=parent;coverage.proxy+=1;}}else{const proxy=blueprintViewerProxyMesh(row,scene,materials);proxy.parent=parent;coverage.proxy+=1;}}
-  for(const shield of sceneData.shields){const scaleValue=Math.max(...(shield.scale||[]).map(value=>Math.abs(Number(value)||0)),1),diameter=Math.max(90,Math.min(650,90+Math.log2(scaleValue+1)*45)),mesh=BABYLON.MeshBuilder.CreateSphere("shield-"+shield.id,{diameter,segments:18},scene);mesh.position=blueprintBabylonPosition(shield);mesh.material=materials.shield;mesh.parent=shieldGroup;}
-  drawBlueprintViewer();resetBlueprintViewer();if(coverageEl)coverageEl.textContent=coverage.detailed.toLocaleString()+" detailed local models · "+coverage.proxy.toLocaleString()+" proxy fallbacks"+(coverage.failures.length?" · "+coverage.failures.length+" model files failed to load":"");}
-const renderBlueprintViewerWebgl=renderBlueprintViewer3d;
-function blueprintExactYawKey(yaw){let value=((Number(yaw||0)%360)+360)%360;if(value>180)value-=360;return String(Number(value.toFixed(4)));}
-function blueprintDefaultYawCorrection(type){const key=String(type||"");if(key==="Atreides_Outpost_Wall_Inclined_Wide_Left")return -37.5;if(key==="Atreides_Outpost_Wall_Inclined_Wide_Right")return 37.5;return 0;}
-function blueprintExactYawCorrection(type,yaw,row=null){const stored=blueprintViewer.rotationOverrides?.[String(type||"")]?.[blueprintExactYawKey(yaw)];return Number.isFinite(Number(stored))?Number(stored):blueprintDefaultYawCorrection(type)+Number(row?.autoYawCorrection||0);}
-function blueprintExactYaw(type,yaw,row=null){const key=String(type||"").toLowerCase(),corrected=Number(yaw||0)+blueprintExactYawCorrection(type,yaw,row);if(key.includes("corner"))return corrected+180;if(((key.includes("top")||key.includes("bottom"))&&(key.includes("left")||key.includes("right")))||key.includes("railing"))return corrected+90;return corrected-90;}
-function blueprintExactPosition(row){return new BABYLON.Vector3(Number(row.y||0),Number(row.z||0),Number(row.x||0));}
-function attachBlueprintCameraControls(canvas,camera){
-  canvas.tabIndex=0;canvas.style.touchAction="none";canvas.style.overscrollBehavior="contain";camera.angularSensibilityX=350;camera.angularSensibilityY=350;camera.panningSensibility=180;camera.panningMouseButton=2;camera.useCtrlForPanning=false;camera.wheelDeltaPercentage=.01;camera.pinchDeltaPercentage=.01;camera.attachControl(canvas,true);
-  if(camera.inputs?.attached?.pointers)camera.inputs.attached.pointers.buttons=[0,1,2];
-  const reset=event=>{event.preventDefault();resetBlueprintViewer();};
-  const containMouse=event=>event.stopPropagation(),containWheel=event=>{event.preventDefault();event.stopPropagation();},context=event=>{event.preventDefault();event.stopPropagation();},containedEvents=["pointerdown","pointermove","pointerup","pointercancel","click","auxclick"];
-  canvas.addEventListener("dblclick",reset);canvas.addEventListener("contextmenu",context);canvas.addEventListener("wheel",containWheel,{passive:false});for(const eventName of containedEvents)canvas.addEventListener(eventName,containMouse);
-  blueprintViewer.cameraControlsCleanup=()=>{try{camera.detachControl(canvas);}catch{}canvas.removeEventListener("dblclick",reset);canvas.removeEventListener("contextmenu",context);canvas.removeEventListener("wheel",containWheel);for(const eventName of containedEvents)canvas.removeEventListener(eventName,containMouse);};
-}
-function blueprintExactRows(){
-  const data=blueprintViewer.data||{},shields=new Map((data.pentashields||[]).map(row=>[String(row.placeable_id),row]));
-  const pieces=(data.instances||[]).map((row,index)=>({kind:"piece",id:row.instance_id??index,type:String(row.building_type||""),x:Number(row.x||0),y:Number(row.y||0),z:Number(row.z||0),yaw:Number(row.rotation||0),pitch:0,roll:0,scale:null,shield:null}));
-  const placeables=(data.placeables||[]).map((row,index)=>({kind:"placeable",id:row.placeable_id??index,type:String(row.building_type||""),x:Number(row.x||0),y:Number(row.y||0),z:Number(row.z||0),yaw:Number(row.ry??row.rotation??0),pitch:Number(row.rx||0),roll:Number(row.rz||0),scale:Array.isArray(row.scale)?row.scale:null,shield:shields.get(String(row.placeable_id??index))||null}));
-  return {pieces,placeables,objects:[...pieces,...placeables]};
-}
-function blueprintApplyStairTopologyCorrections(rows){
-  const pieces=rows?.pieces||[],walkable=pieces.filter(row=>/(foundation|floor)/i.test(row.type));let corrected=0;
-  const hasWalkable=(x,y,z)=>walkable.some(row=>Math.abs(row.x-x)<72&&Math.abs(row.y-y)<72&&Math.abs(row.z-z)<48);
-  for(const row of pieces){row.autoYawCorrection=0;const type=String(row.type||"").toLowerCase();if(!type.includes("stair"))continue;const radians=BABYLON.Tools.ToRadians(Number(row.yaw||0)),corner=type.includes("corner");let dx=corner?Math.round(-Math.cos(radians)+Math.sin(radians)):Math.round(Math.sin(radians)),dy=corner?Math.round(-Math.sin(radians)-Math.cos(radians)):Math.round(-Math.cos(radians));if(!dx&&!dy)continue;const rise=type.includes("half")?192:384,currentUpper=hasWalkable(row.x+dx*512,row.y+dy*512,row.z+rise),oppositeUpper=hasWalkable(row.x-dx*512,row.y-dy*512,row.z+rise);if(!currentUpper&&oppositeUpper){row.autoYawCorrection=180;corrected+=1;}}
-  blueprintViewer.autoStairCorrections=corrected;return corrected;
-}
-function blueprintApplyExactScale(node,row){
-  let x=100,y=100,z=100;
-  if(row.shield&&Array.isArray(row.shield.scale)){const values=row.shield.scale.map(value=>Math.abs(Number(value)||0)),vertical=String(row.type).toLowerCase().includes("vertical"),dimensions=vertical?[7.66,5.16,.4]:[7.66,.4,5.16];x=100*(values[0]||1)/dimensions[0];y=100*(values[2]||1)/dimensions[1];z=100*(values[1]||1)/dimensions[2];}
-  else if(Array.isArray(row.scale)&&row.scale.length>=3){x=100*Number(row.scale[0]||1);y=100*Number(row.scale[1]||1);z=100*Number(row.scale[2]||1);}
-  // The source viewer replaces the loader-created root scale. Multiplying by
-  // that scale preserves Babylon's handedness mirror and reverses asymmetric
-  // pieces such as stairs.
-  node.scaling.set(x,y,z);
-}
-function blueprintApplyExactRotation(root,row,baseQuaternion){root.rotationQuaternion=baseQuaternion.clone();root.addRotation(BABYLON.Tools.ToRadians(-row.pitch),BABYLON.Tools.ToRadians(blueprintExactYaw(row.type,row.yaw,row)),BABYLON.Tools.ToRadians(row.roll));}
-function blueprintRenderSelection(){const el=document.getElementById("blueprintViewerSelection"),selected=blueprintViewer.selectedExact;if(!el)return;if(!selected){el.textContent="Click a piece to inspect its exact type and rotation.";return;}const row=selected.row,offset=blueprintExactYawCorrection(row.type,row.yaw,row),automatic=Number(row.autoYawCorrection||0)&&!Number.isFinite(Number(blueprintViewer.rotationOverrides?.[String(row.type||"")]?.[blueprintExactYawKey(row.yaw)]))?" · matched to connected floor":"";el.textContent=row.type+" · source yaw "+blueprintExactYawKey(row.yaw)+"° · correction "+offset+"°"+automatic+" · R / Shift+R changes correction by 7.5° · Delete resets";}
-function blueprintSelectExact(root){if(blueprintViewer.selectedExact?.root===root)return;for(const mesh of blueprintViewer.selectedExact?.root?.getChildMeshes?.(false)||[])mesh.renderOutline=false;const info=root?.metadata?.blueprintExact||null;blueprintViewer.selectedExact=info?{root,row:info.row}:null;if(root)for(const mesh of root.getChildMeshes?.(false)||[]){mesh.renderOutline=true;mesh.outlineColor=new BABYLON.Color3(1,.72,.18);mesh.outlineWidth=.035;}blueprintRenderSelection();}
-function blueprintSaveRotationOverrides(){if(!blueprintViewer.overrideStorageKey)return;try{localStorage.setItem(blueprintViewer.overrideStorageKey,JSON.stringify(blueprintViewer.rotationOverrides||{}));}catch{}}
-function blueprintChangeSelectedRotation(direction){const selected=blueprintViewer.selectedExact;if(!selected)return;const row=selected.row,type=row.type,key=blueprintExactYawKey(row.yaw),steps=[0,7.5,15,22.5,30,37.5,45,52.5,60,67.5,75,82.5,90,97.5,105,112.5,120,127.5,135,142.5,150,157.5,165,172.5,180,-172.5,-165,-157.5,-150,-142.5,-135,-127.5,-120,-112.5,-105,-97.5,-90,-82.5,-75,-67.5,-60,-52.5,-45,-37.5,-30,-22.5,-15,-7.5],current=blueprintExactYawCorrection(type,row.yaw),index=steps.indexOf(current),next=steps[((index<0?0:index)+Number(direction||1)+steps.length)%steps.length];blueprintViewer.rotationOverrides={...(blueprintViewer.rotationOverrides||{}),[type]:{...(blueprintViewer.rotationOverrides?.[type]||{}),[key]:next}};for(const item of blueprintViewer.exactRoots||[])if(item.row.type===type&&blueprintExactYawKey(item.row.yaw)===key)blueprintApplyExactRotation(item.root,item.row,item.baseQuaternion);blueprintSaveRotationOverrides();blueprintRenderSelection();}
-function blueprintResetSelectedRotation(){const selected=blueprintViewer.selectedExact;if(!selected)return;const type=selected.row.type,key=blueprintExactYawKey(selected.row.yaw),byType={...(blueprintViewer.rotationOverrides?.[type]||{})};delete byType[key];blueprintViewer.rotationOverrides={...(blueprintViewer.rotationOverrides||{}),[type]:byType};for(const item of blueprintViewer.exactRoots||[])if(item.row.type===type&&blueprintExactYawKey(item.row.yaw)===key)blueprintApplyExactRotation(item.root,item.row,item.baseQuaternion);blueprintSaveRotationOverrides();blueprintRenderSelection();}
-async function renderBlueprintViewerExact3d(){
-  let canvas=document.getElementById("blueprintViewerCanvas"),coverageEl=document.getElementById("blueprintModelCoverage");if(!canvas||!blueprintViewer.data)return;if(!window.BABYLON)throw new Error("The bundled offline 3D renderer did not load.");
-  const generation=++blueprintViewer.renderGeneration;if(coverageEl)coverageEl.textContent="Loading exact offline piece meshes...";
-  disposeBlueprintViewerScene();if(blueprintViewer.engine){try{blueprintViewer.engine.dispose();}catch{}blueprintViewer.engine=null;}
-  const replacement=canvas.cloneNode(false);canvas.replaceWith(replacement);canvas=replacement;blueprintViewer.fallback2d=false;
-  if(BABYLON.DracoCompression)BABYLON.DracoCompression.Configuration={decoder:{wasmUrl:"/assets/vendor/draco_wasm_wrapper_gltf.js",wasmBinaryUrl:"/assets/vendor/draco_decoder_gltf.wasm"}};
-  const engine=new BABYLON.Engine(canvas,true,{preserveDrawingBuffer:true,stencil:true,adaptToDeviceRatio:true});blueprintViewer.engine=engine;
-  const scene=new BABYLON.Scene(engine);blueprintViewer.scene=scene;scene.clearColor=new BABYLON.Color4(.08,.08,.1,1);scene.ambientColor=new BABYLON.Color3(1,1,1);scene.environmentIntensity=0;if(scene.imageProcessingConfiguration)scene.imageProcessingConfiguration.isEnabled=false;
-  const rows=blueprintExactRows();blueprintApplyStairTopologyCorrections(rows);const positions=rows.objects.map(blueprintExactPosition);if(!positions.length)throw new Error("Blueprint contains no renderable pieces.");
-  const xs=positions.map(value=>value.x),ys=positions.map(value=>value.y),zs=positions.map(value=>value.z),minX=Math.min(...xs),maxX=Math.max(...xs),maxY=Math.max(...ys),minZ=Math.min(...zs),maxZ=Math.max(...zs),foundation=512;
-  const target=new BABYLON.Vector3((minX+maxX)/2,maxY*.35,(minZ+maxZ)/2),extentX=maxX-minX+foundation*2,extentY=maxY-Math.min(...ys)+foundation*2,extentZ=maxZ-minZ+foundation*2,radius=Math.max(800,Math.sqrt(extentX*extentX+extentY*extentY+extentZ*extentZ)/2/Math.tan(Math.PI/6)*.85);
-  const camera=new BABYLON.ArcRotateCamera("blueprint-camera",-Math.PI/4,Math.PI*.38,radius,target,scene);camera.minZ=5;camera.maxZ=200000;camera.lowerRadiusLimit=Math.max(80,radius*.025);camera.upperRadiusLimit=radius*8;blueprintViewer.camera=camera;blueprintViewer.initialCamera={target:target.clone(),radius};attachBlueprintCameraControls(canvas,camera);
-  const hemi=new BABYLON.HemisphericLight("blueprint-sky",new BABYLON.Vector3(0,1,0),scene);hemi.intensity=1.1;hemi.groundColor=new BABYLON.Color3(.35,.35,.38);const key=new BABYLON.DirectionalLight("blueprint-key",new BABYLON.Vector3(-.45,-1,.35),scene);key.intensity=.65;blueprintViewerGrid3d(scene,{bounds:{centerX:(minX+maxX)/2,centerY:(minZ+maxZ)/2,minZ:Math.min(...ys),maxSpan:Math.max(maxX-minX,maxZ-minZ)}});
-  BABYLON.Effect.ShadersStore.blueprintExactVertexShader=["precision highp float;","attribute vec3 position;","attribute vec3 normal;","uniform mat4 worldViewProjection;","uniform mat4 world;","varying vec3 vN;","void main(){","gl_Position=worldViewProjection*vec4(position,1.0);","vN=normalize((world*vec4(normal,0.0)).xyz);","}"].join("\n");BABYLON.Effect.ShadersStore.blueprintExactFragmentShader=["precision highp float;","varying vec3 vN;","uniform vec3 uColor;","uniform vec3 uSunDir;","void main(){","vec3 N=normalize(vN);","float kd=max(0.0,dot(N,uSunDir))*0.65;","vec3 fillDir=normalize(vec3(-uSunDir.z,0.5,uSunDir.x));","float fd=max(0.0,dot(N,fillDir))*0.28;","float bd=max(0.0,dot(N,vec3(0.0,-1.0,0.0)))*0.08;","float lum=clamp(0.28+kd+fd+bd,0.0,1.0);","gl_FragColor=vec4(uColor*lum,1.0);","}"].join("\n");const material=new BABYLON.ShaderMaterial("exact-piece-material",scene,{vertex:"blueprintExact",fragment:"blueprintExact"},{attributes:["position","normal"],uniforms:["worldViewProjection","world","uColor","uSunDir"]});material.setColor3("uColor",new BABYLON.Color3(.88,.9,.92));material.setVector3("uSunDir",new BABYLON.Vector3(-.3,1,-.5).normalize());material.backFaceCulling=true;
-  const pieceGroup=new BABYLON.TransformNode("blueprint-pieces",scene),placeableGroup=new BABYLON.TransformNode("blueprint-placeables",scene),shieldGroup=new BABYLON.TransformNode("blueprint-shields",scene);blueprintViewer.groups={pieces:pieceGroup,placeables:placeableGroup,shields:shieldGroup};
-  const types=[...new Set(rows.objects.map(row=>row.type).filter(Boolean))],resolved=await getJson("/api/blueprint-models/resolve",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({types}),timeoutMs:60000});if(generation!==blueprintViewer.renderGeneration)return;
-  const failures=[],containers=await blueprintLoadModelContainers(scene,new Set(Object.values(resolved.models||{})),generation,{failures});if(generation!==blueprintViewer.renderGeneration)return;
-  let renderedPieces=0,renderedPlaceables=0;const unrecognized=new Set(),failed=new Set();blueprintViewer.exactRoots=[];blueprintViewer.selectedExact=null;
-  for(const row of rows.objects){const url=resolved.models?.[row.type];if(!url){unrecognized.add(row.type||"(missing type)");continue;}const container=containers.get(url);if(!container){failed.add(row.type);continue;}try{const instance=container.instantiateModelsToScene(name=>"bp-"+row.id+"-"+name,false),root=instance.rootNodes?.[0];if(!root)throw new Error("Model has no root node");const baseQuaternion=(root.rotationQuaternion||BABYLON.Quaternion.Identity()).clone();root.parent=row.shield?shieldGroup:(row.kind==="placeable"?placeableGroup:pieceGroup);root.position=blueprintExactPosition(row);blueprintApplyExactScale(root,row);blueprintApplyExactRotation(root,row,baseQuaternion);root.metadata={...(root.metadata||{}),blueprintExact:{row,root}};blueprintViewer.exactRoots.push({root,row,baseQuaternion});for(const modelRoot of instance.rootNodes||[]){if(modelRoot!==root)modelRoot.parent=root;for(const mesh of [modelRoot,...(modelRoot.getChildMeshes?.(false)||[])]){if(typeof mesh.setEnabled!=="function")continue;mesh.setEnabled(true);mesh.isVisible=true;mesh.visibility=1;mesh.hasVertexAlpha=false;mesh.alwaysSelectAsActiveMesh=true;mesh.material=material;mesh.metadata={...(mesh.metadata||{}),blueprintExactRoot:root};if(mesh.sourceMesh){mesh.sourceMesh.hasVertexAlpha=false;mesh.sourceMesh.material=material;}}}if(row.kind==="piece")renderedPieces+=1;else renderedPlaceables+=1;}catch{failed.add(row.type);}}
-  scene.onPointerObservable.add(info=>{if(info.type!==BABYLON.PointerEventTypes.POINTERPICK)return;const mesh=info.pickInfo?.pickedMesh,root=mesh?.metadata?.blueprintExactRoot||mesh?.metadata?.blueprintExact?.root||null;blueprintSelectExact(root);});
-  const rotationKeyHandler=event=>{if(!blueprintViewer.selectedExact||/^(INPUT|SELECT|TEXTAREA)$/.test(event.target?.tagName||""))return;if(event.key==="r"||event.key==="R"){event.preventDefault();blueprintChangeSelectedRotation(event.shiftKey?-1:1);}else if(event.key==="Delete"||event.key==="Backspace"){event.preventDefault();blueprintResetSelectedRotation();}};document.addEventListener("keydown",rotationKeyHandler);const previousCleanup=blueprintViewer.cameraControlsCleanup;blueprintViewer.cameraControlsCleanup=()=>{previousCleanup?.();document.removeEventListener("keydown",rotationKeyHandler);};blueprintRenderSelection();
-  scene.render();const modelBounds=pieceGroup.getHierarchyBoundingVectors(true),boundMin=modelBounds.min,boundMax=modelBounds.max,boundSize=boundMax.subtract(boundMin),boundCenter=boundMin.add(boundMax).scale(.5),boundDiagonal=boundSize.length();if(Number.isFinite(boundDiagonal)&&boundDiagonal>1){camera.target.copyFrom(boundCenter);camera.radius=Math.max(800,boundDiagonal/2/Math.tan(Math.PI/6)*1.18);camera.lowerRadiusLimit=Math.max(40,camera.radius*.02);camera.upperRadiusLimit=camera.radius*8;blueprintViewer.initialCamera={target:boundCenter.clone(),radius:camera.radius};}
-  engine.runRenderLoop(()=>{if(!blueprintSceneDisposed(blueprintViewer.scene))blueprintViewer.scene.render();});engine.resize();drawBlueprintViewer();scene.render();
-  if(coverageEl){const missing=[...unrecognized],failureTypes=[...failed],stairMatches=Number(blueprintViewer.autoStairCorrections||0);coverageEl.textContent=renderedPieces.toLocaleString()+" exact pieces · "+renderedPlaceables.toLocaleString()+" exact placeables · "+missing.length.toLocaleString()+" unrecognized"+(stairMatches?" · "+stairMatches.toLocaleString()+" stair orientation"+(stairMatches===1?"":"s")+" matched to connected floors":"")+(failureTypes.length?" · "+failureTypes.length.toLocaleString()+" model types failed to load":"")+(missing.length?" · Unknown: "+missing.slice(0,8).join(", ")+(missing.length>8?"…":"") : "");}
-}
-renderBlueprintViewer3d=async function(){
-  try{if(!blueprintModelPackState)await refreshBlueprintModelPackStatus();if(!blueprintModelPackState?.exactBundled)throw new Error("The bundled exact model catalog is unavailable.");await renderBlueprintViewerExact3d();}
-  catch(error){disposeBlueprintViewerScene();const coverage=document.getElementById("blueprintModelCoverage");if(coverage)coverage.textContent="Exact offline viewer failed: "+betterError(error);throw error;}
-};
-function drawBlueprintViewer(){if(blueprintViewer.fallback2d){renderBlueprintViewerFallback2d();return;}if(!blueprintViewer.groups)return;blueprintViewer.groups.pieces.setEnabled(document.getElementById("blueprintViewerPieces")?.checked!==false);blueprintViewer.groups.placeables.setEnabled(document.getElementById("blueprintViewerPlaceables")?.checked!==false);blueprintViewer.groups.shields.setEnabled(document.getElementById("blueprintViewerShields")?.checked!==false);}
-function resetBlueprintViewer(){blueprintViewer.yaw=-.72;blueprintViewer.pitch=.68;blueprintViewer.zoom=1;blueprintViewer.panX=0;blueprintViewer.panY=0;const camera=blueprintViewer.camera,initial=blueprintViewer.initialCamera;if(camera&&initial){camera.alpha=-Math.PI/4;camera.beta=Math.PI*.38;camera.radius=initial.radius;camera.target=initial.target.clone();}drawBlueprintViewer();}
-function orbitBlueprintViewer(deltaAlpha,deltaBeta){const camera=blueprintViewer.camera;if(!camera)return;camera.alpha+=Number(deltaAlpha||0);camera.beta=Math.max(.08,Math.min(Math.PI-.08,camera.beta+Number(deltaBeta||0)));}
-function zoomBlueprintViewer(factor){if(blueprintViewer.fallback2d){blueprintViewer.zoom=Math.max(.2,Math.min(8,blueprintViewer.zoom*Number(factor||1)));renderBlueprintViewerFallback2d();return;}const camera=blueprintViewer.camera;if(camera)camera.radius=Math.max(camera.lowerRadiusLimit||1,Math.min(camera.upperRadiusLimit||Number.MAX_SAFE_INTEGER,camera.radius/Number(factor||1)));}
-function closeBlueprintViewer(){document.getElementById("blueprintViewerPanel")?.classList.add("hidden");blueprintViewer.renderGeneration+=1;blueprintViewer.data=null;blueprintViewer.drag=null;disposeBlueprintViewerScene();if(blueprintViewer.engine){try{blueprintViewer.engine.dispose();}catch{}blueprintViewer.engine=null;}}
-function showBlueprintViewerData(data,name,activityMessage="Blueprint 3D view opened"){const panel=document.getElementById("blueprintViewerPanel"),title=document.getElementById("blueprintViewerTitle"),summary=document.getElementById("blueprintViewerSummary");if(!panel)return;if(!data||typeof data!=="object"||Array.isArray(data))throw new Error("Blueprint JSON must contain an object.");const instances=Array.isArray(data.instances)?data.instances:[],placeables=Array.isArray(data.placeables)?data.placeables:[],pentashields=Array.isArray(data.pentashields)?data.pentashields:[];if(!instances.length&&!placeables.length&&!pentashields.length)throw new Error("Blueprint JSON has no instances, placeables, or pentashields to preview.");blueprintViewer.data={...data,instances,placeables,pentashields};blueprintViewer.name=String(name||data.name||"Blueprint Preview");blueprintViewer.overrideStorageKey="alphanine-blueprint-rotations:v2:"+String(data._suiteBlueprintId||blueprintViewer.name);let saved={};try{saved=JSON.parse(localStorage.getItem(blueprintViewer.overrideStorageKey)||"{}");}catch{}blueprintViewer.rotationOverrides={...(data.rotation_overrides||{}),...(saved||{})};panel.classList.remove("hidden");const scene=blueprintViewerScene();if(title)title.textContent=blueprintViewer.name+" \u00b7 Offline 3D View";if(summary)summary.textContent=scene.pieces.length.toLocaleString()+" pieces \u00b7 "+scene.placeables.length.toLocaleString()+" placeables \u00b7 "+scene.shields.length.toLocaleString()+" pentashields \u00b7 Bounds "+Math.round(scene.bounds.spanX).toLocaleString()+" \u00d7 "+Math.round(scene.bounds.spanY).toLocaleString()+" \u00d7 "+Math.round(scene.bounds.spanZ).toLocaleString();panel.scrollIntoView({behavior:"smooth",block:"start"});requestAnimationFrame(()=>renderBlueprintViewer3d().catch(error=>{const coverage=document.getElementById("blueprintModelCoverage");if(coverage)coverage.textContent="3D rendering failed: "+betterError(error);playUiSound("warning");}));addActivity("blueprints",activityMessage,blueprintViewer.name);}
-async function previewSelectedBlueprintFile(index){const file=blueprintFiles[Number(index)],panel=document.getElementById("blueprintViewerPanel"),title=document.getElementById("blueprintViewerTitle"),summary=document.getElementById("blueprintViewerSummary");try{if(!file)throw new Error("The selected blueprint file is no longer available.");if(file.size>32*1024*1024)throw new Error("File exceeds 32 MB.");if(panel)panel.classList.remove("hidden");if(title)title.textContent="Loading JSON Preview";if(summary)summary.textContent="Reading "+file.name+" locally. Nothing is being imported.";const parsed=JSON.parse(await file.text()),data=parsed?.blueprint_data||parsed?.blueprint||parsed;showBlueprintViewerData(data,data.name||parsed?.title||file.name.replace(/\.json$/i,""),"Blueprint JSON preview opened");setBlueprintStatus("Previewing "+file.name+". No data has been imported.");}catch(error){blueprintViewer.data=null;if(panel)panel.classList.remove("hidden");if(title)title.textContent="Blueprint JSON Preview Failed";if(summary)summary.textContent=betterError(error);setBlueprintStatus(betterError(error),true);playUiSound("warning");}}
-async function openBlueprintViewer(id){const panel=document.getElementById("blueprintViewerPanel"),title=document.getElementById("blueprintViewerTitle"),summary=document.getElementById("blueprintViewerSummary");if(!panel)return;panel.classList.remove("hidden");if(title)title.textContent="Loading Blueprint 3D View";if(summary)summary.textContent="Reading exported blueprint coordinates...";panel.scrollIntoView({behavior:"smooth",block:"start"});try{const data=await getJson("/api/blueprints/"+Number(id)+"/export",{timeoutMs:60000});showBlueprintViewerData({...data,_suiteBlueprintId:Number(id)},data.name||("Blueprint "+id));}catch(error){blueprintViewer.data=null;if(title)title.textContent="Blueprint 3D View Failed";if(summary)summary.textContent=betterError(error);playUiSound("warning");}}
-function wireBlueprintViewer(){const canvas=document.getElementById("blueprintViewerCanvas");if(!canvas||canvas.dataset.wired)return;canvas.dataset.wired="true";canvas.addEventListener("contextmenu",event=>event.preventDefault());if(window.ResizeObserver)new ResizeObserver(()=>blueprintViewer.engine?.resize()).observe(canvas);else window.addEventListener("resize",()=>blueprintViewer.engine?.resize());}
-async function openBlueprints(){try{if(!adminPlayers.length)await refreshGivePlayersFast();renderBlueprintPlayerSelect();await Promise.all([refreshBlueprints(),refreshBlueprintModelPackStatus()]);}catch(error){setBlueprintStatus(betterError(error),true);}}
+async function openBlueprints(){try{if(!adminPlayers.length)await refreshGivePlayersFast();renderBlueprintPlayerSelect();await refreshBlueprints();}catch(error){setBlueprintStatus(betterError(error),true);}}
 async function syncBlueprintPlayer(){selectedPlayerId=document.getElementById("blueprintPlayer")?.value||"";blueprintSelectedIds=new Set();const give=document.getElementById("adminPlayer");if(give)give.value=selectedPlayerId;const permission=document.getElementById("permissionPlayer");if(permission)permission.value=selectedPlayerId;renderPlayers();await refreshBlueprints();}
-async function refreshBlueprints(){const playerId=document.getElementById("blueprintPlayer")?.value||selectedPlayerId;if(!playerId){blueprintRows=[];renderBlueprintRows();setBlueprintStatus("Choose a player to load blueprints.");return;}blueprintBusy=true;syncBlueprintButtons();setBlueprintStatus("Loading blueprints...");try{const capabilities=await getJson("/api/blueprints/capabilities");if(!capabilities.supported)throw new Error("Blueprint management is unavailable. Missing database tables: "+((capabilities.missing||[]).join(", ")||"unknown"));const data=await getJson("/api/blueprints?playerId="+encodeURIComponent(playerId));blueprintRows=data.rows||[];blueprintSelectedIds=new Set([...blueprintSelectedIds].filter(id=>blueprintRows.some(row=>Number(row.id)===id)));renderBlueprintRows();setBlueprintStatus(blueprintRows.length?"Blueprints loaded. Importing or deleting requires the player to relog before the inventory view is refreshed.":"No blueprints found for the selected player.");}catch(error){blueprintRows=[];blueprintSelectedIds=new Set();renderBlueprintRows();setBlueprintStatus(betterError(error),true);}finally{blueprintBusy=false;syncBlueprintButtons();}}
+async function refreshBlueprints(){const playerId=document.getElementById("blueprintPlayer")?.value||selectedPlayerId;if(!playerId){blueprintRows=[];renderBlueprintRows();setBlueprintStatus("Choose a player to load blueprints.");return;}blueprintBusy=true;syncBlueprintButtons();setBlueprintStatus("Loading blueprints...");try{const capabilities=await getJson("/api/blueprints/capabilities");if(!capabilities.supported)throw new Error("Blueprint management is unavailable. Missing database tables: "+((capabilities.missing||[]).join(", ")||"unknown"));const data=await getJson("/api/blueprints?playerId="+encodeURIComponent(playerId));blueprintRows=data.rows||[];blueprintSelectedIds=new Set([...blueprintSelectedIds].filter(id=>blueprintRows.some(row=>Number(row.id)===id)));renderBlueprintRows();setBlueprintStatus(blueprintRows.length?"Blueprints loaded. Importing requires the player to relog before the inventory view is refreshed.":"No blueprints found for the selected player.");}catch(error){blueprintRows=[];blueprintSelectedIds=new Set();renderBlueprintRows();setBlueprintStatus(betterError(error),true);}finally{blueprintBusy=false;syncBlueprintButtons();}}
 async function importBlueprintFiles(){const playerId=document.getElementById("blueprintPlayer")?.value||selectedPlayerId;const player=adminPlayers.find(row=>String(row.id)===String(playerId));if(!playerId||!blueprintFiles.length||blueprintFiles.length>10)return;const confirmed=await appConfirm("Import building blueprints","Import "+blueprintFiles.length+" blueprint"+(blueprintFiles.length===1?"":"s")+" for "+(player?.character_name||player?.name||"the selected player")+"? The player must relog before imported blueprints appear.","Import","Cancel");if(!confirmed)return;blueprintBusy=true;syncBlueprintButtons();let imported=0;const failures=[];try{for(let index=0;index<blueprintFiles.length;index+=1){const file=blueprintFiles[index];setBlueprintStatus("Importing "+(index+1)+" of "+blueprintFiles.length+": "+file.name);try{if(file.size>32*1024*1024)throw new Error("File exceeds 32 MB.");const blueprint=JSON.parse(await file.text());const result=await getJson("/api/blueprints/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,fileName:file.name,blueprint}),timeoutMs:120000});if(!result.ok)throw new Error(result.error||"Import failed.");imported+=1;}catch(error){failures.push(file.name+": "+betterError(error));}}}finally{blueprintBusy=false;blueprintFiles=[];const input=document.getElementById("blueprintFiles");if(input)input.value="";selectBlueprintFiles([]);}await refreshBlueprints();if(failures.length)setBlueprintStatus(imported+" imported and "+failures.length+" failed. The player must relog for successful imports.\n\n"+failures.join("\n"),true);else setBlueprintStatus(imported+" blueprint"+(imported===1?" was":"s were")+" imported successfully. The player must relog.");addActivity("blueprints","Blueprint import completed",imported+" imported / "+failures.length+" failed");playUiSound(failures.length?"warning":"success");}
 async function downloadBlueprintResponse(url,options,fallbackName){const response=await fetch(url,options||{});if(!response.ok){let message="Download failed with status "+response.status+".";try{const error=await response.json();message=error.error||message;}catch{}throw new Error(message);}const blob=await response.blob();const header=response.headers.get("content-disposition")||"";const match=header.match(/filename="([^"]+)"/i);const anchor=document.createElement("a");const objectUrl=URL.createObjectURL(blob);anchor.href=objectUrl;anchor.download=match?.[1]||fallbackName;document.body.appendChild(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(objectUrl),1000);}
 async function exportBlueprintRows(ids,forceArchive=false){const unique=[...new Set(ids.map(Number).filter(id=>Number.isInteger(id)&&id>0))];if(!unique.length)return;blueprintBusy=true;syncBlueprintButtons();try{setBlueprintStatus("Preparing "+unique.length+" blueprint"+(unique.length===1?"":"s")+" for download...");if(unique.length===1&&!forceArchive)await downloadBlueprintResponse("/api/blueprints/"+unique[0]+"/export",{},"blueprint_"+unique[0]+".json");else await downloadBlueprintResponse("/api/blueprints/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:unique})},"blueprints.zip");setBlueprintStatus(unique.length+" blueprint"+(unique.length===1?" was":"s were")+" exported successfully.");addActivity("blueprints","Blueprint export completed",unique.length+" blueprint(s)");playUiSound("success");}catch(error){setBlueprintStatus(betterError(error),true);playUiSound("warning");}finally{blueprintBusy=false;syncBlueprintButtons();}}
 function exportSelectedBlueprints(){return exportBlueprintRows([...blueprintSelectedIds],false);}
 function exportAllBlueprints(){return exportBlueprintRows(blueprintRows.map(row=>Number(row.id)),true);}
-async function deleteBlueprintRows(ids){const unique=[...new Set(ids.map(Number).filter(id=>Number.isInteger(id)&&id>0))];if(!unique.length)return;const rows=blueprintRows.filter(row=>unique.includes(Number(row.id)));const label=rows.length===1?'"'+(rows[0].name||("Blueprint "+rows[0].id))+'"':rows.length+" selected blueprints";const confirmed=await appConfirm("Delete building blueprint"+(rows.length===1?"":"s"),"Delete "+label+"? Associated Solido Replicator items will also be removed from the player inventory.","Delete","Cancel");if(!confirmed)return;blueprintBusy=true;syncBlueprintButtons();let deleted=0;const failures=[];for(const row of rows){try{const result=await getJson("/api/blueprints/"+row.id,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true})});if(!result.ok)throw new Error(result.error||"Delete failed.");deleted+=1;}catch(error){failures.push((row.name||("Blueprint "+row.id))+": "+betterError(error));}}blueprintBusy=false;blueprintSelectedIds=new Set();await refreshBlueprints();if(failures.length)setBlueprintStatus(deleted+" deleted and "+failures.length+" failed.\n\n"+failures.join("\n"),true);else setBlueprintStatus(deleted+" blueprint"+(deleted===1?" was":"s were")+" deleted successfully.");addActivity("blueprints","Blueprint delete completed",deleted+" deleted / "+failures.length+" failed");playUiSound(failures.length?"warning":"success");}
-function deleteSelectedBlueprints(){return deleteBlueprintRows([...blueprintSelectedIds]);}
-
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function selectedGiveStorage(){const id=document.getElementById("giveStorageTarget")?.value||"";return giveStorageTargets.find(row=>String(row.inventoryId)===String(id))||null;}
 function giveStorageLabel(row){return (row.name||"Storage")+" / Actor "+row.actorId+" / "+row.itemCount+" of "+row.maxItemCount+" slots";}
 function renderGiveStorageTargets(){const select=document.getElementById("giveStorageTarget");if(!select)return;const current=select.value;const q=String(document.getElementById("giveStorageSearch")?.value||"").trim().toLowerCase();const rows=q?giveStorageTargets.filter(row=>[row.name,row.kind,row.actorId,row.inventoryId,row.map,row.partitionId].join(" ").toLowerCase().includes(q)):giveStorageTargets;select.innerHTML=rows.length?rows.map(row=>'<option value="'+esc(row.inventoryId)+'">'+esc(giveStorageLabel(row))+'</option>').join(""):'<option value="">No storage found</option>';if(rows.some(row=>String(row.inventoryId)===String(current)))select.value=current;renderGiveStorageDetails();}
-function renderGiveStorageDetails(){const el=document.getElementById("giveStorageDetails");if(!el)return;const row=selectedGiveStorage();if(!row){el.textContent="Choose a detected storage container.";return;}const pos=row.position||{};const volume=row.maxItemVolume>0?(row.usedVolume+" / "+row.maxItemVolume+(row.volumeVerified?"":" estimated")):"Not limited";el.innerHTML='<div class="detail-row"><span class="subtle">Target</span><strong>'+esc(row.name)+" / "+esc(row.kind)+'</strong></div><div class="detail-row"><span class="subtle">Identity</span><strong>Actor '+esc(row.actorId)+' / Inventory '+esc(row.inventoryId)+'</strong></div><div class="detail-row"><span class="subtle">Location</span><strong>'+esc(row.map||"Unknown")+' / P'+esc(row.partitionId||"-")+' / D'+esc(row.dimensionIndex)+' / '+esc(Math.round(pos.x||0))+', '+esc(Math.round(pos.y||0))+', '+esc(Math.round(pos.z||0))+'</strong></div><div class="detail-row"><span class="subtle">Capacity</span><strong>'+esc(row.itemCount)+' / '+esc(row.maxItemCount)+' slots / Volume '+esc(volume)+'</strong></div>';}
+function renderGiveStorageDetails(){const el=document.getElementById("giveStorageDetails");if(!el)return;const row=selectedGiveStorage();if(!row){el.textContent="Choose a detected storage container.";return;}const pos=row.position||{};const volume=row.maxItemVolume>0?(row.usedVolume+" / "+row.maxItemVolume+(row.volumeVerified?"":" estimated")):"Not limited";const contents=(row.contents||[]).map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.count)+' × '+esc(item.template)+'</span><strong>'+esc(item.name||item.template)+'</strong></div>').join("")||'<div class="subtle">Storage is empty.</div>';el.innerHTML='<div class="detail-row"><span class="subtle">Target</span><strong>'+esc(row.name)+" / "+esc(row.kind)+'</strong></div><div class="detail-row"><span class="subtle">Identity</span><strong>Actor '+esc(row.actorId)+' / Inventory '+esc(row.inventoryId)+'</strong></div><div class="detail-row"><span class="subtle">Location</span><strong>'+esc(row.map||"Unknown")+' / P'+esc(row.partitionId||"-")+' / D'+esc(row.dimensionIndex)+' / '+esc(Math.round(pos.x||0))+', '+esc(Math.round(pos.y||0))+', '+esc(Math.round(pos.z||0))+'</strong></div><div class="detail-row"><span class="subtle">Capacity</span><strong>'+esc(row.itemCount)+' / '+esc(row.maxItemCount)+' slots / Volume '+esc(volume)+'</strong></div><div class="label mt">Contents</div>'+contents;}
 async function refreshGiveStorageTargets(){const el=document.getElementById("giveStorageDetails");try{if(el)el.textContent="Loading storage containers...";const data=await getJson("/api/admin/storage-targets",{timeoutMs:20000});giveStorageTargets=data.storages||[];renderGiveStorageTargets();updateGiveTargetSummary();return data;}catch(e){giveStorageTargets=[];renderGiveStorageTargets();if(el){el.className="warning mt";el.textContent=betterError(e);}return null;}}
 function syncGiveDestination(){const storage=document.getElementById("giveDestination")?.value==="storage";document.getElementById("giveStorageFields")?.classList.toggle("hidden",!storage);if(storage&&!giveStorageTargets.length)refreshGiveStorageTargets();syncQualityWarning();syncGiveItemControls();updateGiveTargetSummary();}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
@@ -19992,7 +18602,7 @@ function invalidateRepairPreview(){repairPreviewState=null;setValue("repairConfi
 function syncRepairSelectionSummary(){const selected=selectedRepairTargetIds().length;const total=repairTargets().filter(target=>target.repairable).length;setText("repairSelectionSummary",selected+" selected / "+total+" repairable.");}
 function syncRepairApplyButton(){const button=document.getElementById("repairApplyButton");if(button)button.disabled=!repairPreviewState||getValue("repairConfirmText")!=="REPAIR DURABILITY";}
 function syncRepairMode(){const offline=Boolean(repairInspectorState?.playerOffline);const button=document.getElementById("repairPrepareButton");const panel=document.getElementById("repairImmediatePanel");if(button)button.textContent=repairInspectorState&&!offline?"Queue Repair for Logout":"Generate Preview + Backup";if(panel)panel.classList.toggle("hidden",Boolean(repairInspectorState&&!offline));}
-function repairTargetRows(targets,empty){if(!targets.length)return '<tr><td colspan="6">'+esc(empty)+'</td></tr>';return targets.map(target=>'<tr><td><input type="checkbox" data-repair-target value="'+esc(target.targetId)+'" '+(target.repairable?'onchange="invalidateRepairPreview()"':'disabled')+'></td><td>'+esc(target.vehicleName||target.kind)+'</td><td>'+esc(target.templateId||target.id)+'</td><td>'+esc(target.currentDurability==null?'--':target.currentDurability)+'</td><td>'+esc(target.allowedMaximum==null?'Unknown':target.allowedMaximum)+'</td><td>'+esc(target.repairable?'Ready':target.reason)+'</td></tr>').join("");}
+function repairTargetRows(targets,empty){if(!targets.length)return '<tr><td colspan="6">'+esc(empty)+'</td></tr>';return targets.map(target=>'<tr><td><input type="checkbox" data-repair-target value="'+esc(target.targetId)+'" '+(target.repairable?'onchange="invalidateRepairPreview()"':'disabled')+'></td><td>'+esc(target.vehicleName||target.kind)+'</td><td><strong>'+esc(target.displayName||target.templateId||target.id)+'</strong><div class="subtle env-path-value">'+esc(target.templateId||target.id)+'</div></td><td>'+esc(target.currentDurability==null?'--':target.currentDurability)+'</td><td>'+esc(target.allowedMaximum==null?'Unknown':target.allowedMaximum)+'</td><td>'+esc(target.repairable?'Ready':target.reason)+'</td></tr>').join("");}
 function renderRepairTargets(){const wrap=document.getElementById("repairTargets");if(!wrap)return;if(!repairInspectorState){wrap.innerHTML='<div class="empty">Inspect a player to load repair targets.</div>';syncRepairMode();return;}wrap.innerHTML='<div class="label">Inventory Items</div><table class="mt"><thead><tr><th></th><th>Type</th><th>Template</th><th>Current</th><th>Allowed Max</th><th>Status</th></tr></thead><tbody>'+repairTargetRows(repairInspectorState.items||[],"No durable inventory items found.")+'</tbody></table><div class="label mt">Owned Vehicle Modules</div><table class="mt"><thead><tr><th></th><th>Vehicle</th><th>Module</th><th>Current</th><th>Allowed Max</th><th>Status</th></tr></thead><tbody>'+repairTargetRows(repairInspectorState.vehicleModules||[],"No durable owned vehicle modules found.")+'</tbody></table>';syncRepairSelectionSummary();syncRepairMode();}
 async function inspectRepairTargets(){const query=getValue("repairPlayerSelect");try{if(!query)throw new Error("Choose a player first.");repairPreviewState=null;setText("repairStatus","Inspecting inventory items and owned vehicle modules...");const data=await getJson("/api/admin/repair/inspect?query="+encodeURIComponent(query),{timeoutMs:60000});repairInspectorState=data;renderRepairTargets();const mode=data.playerOffline?"Immediate repair is available.":"Player is online; selected repairs will be queued until disconnect.";setText("repairStatus",(data.player?.character_name||"Player")+" / "+(data.player?.online_status||"unknown")+": "+data.summary.repairableItems+" repairable item(s), "+data.summary.repairableVehicleModules+" repairable vehicle module(s). "+mode);setText("repairPreviewLog",data.playerOffline?"Inspection loaded. Select targets and generate a preview.":"Inspection loaded for an online player. Select targets and queue them for automatic repair after logout.");addActivity("players","Repair inspection loaded",data.player?.character_name||query);}catch(e){repairInspectorState=null;renderRepairTargets();setText("repairStatus",betterError(e));showToast(betterError(e),"error");}syncRepairApplyButton();}
 function selectAllRepairableTargets(){document.querySelectorAll('[data-repair-target]:not(:disabled)').forEach(input=>{input.checked=true;});invalidateRepairPreview();}
@@ -20173,8 +18783,8 @@ function isUniqueSchematicCatalogItem(item){return String(item?.subtype||"").tri
 function schematicCatalogKind(item){if(isTechKnowledgeItem(item))return /^RCP_/i.test(techKnowledgeKeyFromTemplate(item?.id))?"Research + Recipe Unlock":"Research Unlock";if(isRecipeSchematicItem(item))return"Recipe-only Unlock";if(isSchematicItem(item))return"Schematic Item";return"";}
 function matchesSchematicCatalogFilter(item,filter){if(filter==="__schematic_items")return isSchematicItem(item)&&!isTechKnowledgeItem(item)&&!isRecipeSchematicItem(item);if(filter==="__research_unlocks")return isTechKnowledgeItem(item);if(filter==="__recipe_unlocks")return isRecipeSchematicItem(item);return null;}
 function renderAdminItemFilters(){const select=document.getElementById("adminItemCategory");if(select){const current=normalizeUiItemCategory(select.value);const categories=[...new Set(adminItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));const special=["__schematic_items","__research_unlocks","__recipe_unlocks"];select.innerHTML='<option value="">All discovered items</option><option value="__schematic_items">Schematic Items</option><option value="__research_unlocks">Research Unlocks</option><option value="__recipe_unlocks">Recipe-only Unlocks</option><option value="__building_styles">Building Styles / Blueprints (non-DLC)</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");select.value=[...categories,"","__unknown","__building_styles",...special].includes(current)?current:"";}const tierSelect=document.getElementById("adminItemTier");if(tierSelect){const current=tierSelect.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tierSelect.innerHTML='<option value="all">All tiers</option>'+tiers.map(tier=>'<option value="'+esc(tier)+'">'+esc(tier)+'</option>').join("");tierSelect.value=tiers.includes(current)?current:"all";}}
-function renderGearDiscoveryStatus(){const el=document.getElementById("gearDiscoveryStatus");if(!el)return;const report=adminItemReport||{};const total=Number(report.totalItemsFound||adminItems.length||0);const named=Number(report.itemsWithDisplayNames||adminItems.filter(item=>item.hasDisplayName).length||0);const unknown=Number(report.unknownOrUnclassifiedItems||adminItems.filter(item=>!item.hasDisplayName||!item.category).length||0);const pages=Number(report.totalFilesScanned||(report.filesScanned||[]).length||0);const downloaded=Number(report.totalImagesDownloaded||0);const reused=Number(report.totalImagesReused||0);const failed=Number(report.failedImageDownloads||0);const missing=Number(report.missingImages||0);const cache=report.cachePath?'<div class="subtle env-path-value">'+esc(report.cachePath)+'</div>':"";el.className=total?"empty mt":"warning mt";el.innerHTML='<strong>Items imported: '+total+'</strong><div class="subtle">Pages scanned: '+pages+' / Display names: '+named+' / Unknown or unclassified: '+unknown+'</div><div class="subtle">Images downloaded: '+downloaded+' / Reused: '+reused+' / Failed: '+failed+' / Missing: '+missing+'</div>'+cache+(report.message?'<div class="subtle">'+esc(report.message)+'</div>':'');}
-async function discoverGearItems(){const status=document.getElementById("gearDiscoveryStatus");try{if(status){status.className="warning mt";status.textContent="Importing Gear items and caching local icons...";}const data=await getJson("/api/gear/discover",{method:"POST",timeoutMs:300000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Gear item import completed",(adminItemReport?.totalItemsFound||adminItems.length)+" items imported");playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Gear item import failed",e.message);playUiSound("warning");}}
+function renderGearDiscoveryStatus(){const el=document.getElementById("gearDiscoveryStatus");if(!el)return;const report=adminItemReport||{};const total=Number(report.totalItemsFound||adminItems.length||0);const bundled=Number(report.bundledCatalogItems||0);const learned=Number(report.learnedItems||0);const legacy=Number(report.legacyCacheItems||0);const missing=Number(report.bundledMissingImages||0);const catalog=report.catalogPath||report.bundledCatalogPath||"";el.className=total?"empty mt":"warning mt";el.innerHTML='<strong>Offline items available: '+total+'</strong><div class="subtle">Bundled: '+bundled+' / Server discovered: '+learned+' / Preserved legacy: '+legacy+'</div><div class="subtle">Bundled image references missing: '+missing+' / Internet catalog requests: disabled</div>'+(catalog?'<div class="subtle env-path-value">'+esc(catalog)+'</div>':"")+(report.message?'<div class="subtle">'+esc(report.message)+'</div>':'');}
+async function discoverGearItems(){const status=document.getElementById("gearDiscoveryStatus");try{if(status){status.className="warning mt";status.textContent="Running bounded read-only discovery on the selected server...";}const data=await getJson("/api/gear/discover",{method:"POST",timeoutMs:300000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Server item discovery completed",(data.discovery?.records?.length||0)+" identifiers observed; "+(data.learned?.added||0)+" newly learned");playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Server item discovery failed",e.message);playUiSound("warning");}}
 function normalizeUiGrade(value){const text=String(value||"").trim();return ["Common","Uncommon","Rare","Epic","Legendary","Unique","Research","Recipe","Unknown"].includes(text)?text:"Unknown";}
 function normalizeUiItemCategory(value){const raw=String(value||"").trim();if(!raw)return"";const compact=raw.replace(/[\s_\-]+/g,"").toLowerCase();if(["customization","customizations"].includes(compact))return"Customization";if(["meleeweapon","meleeweapons","rangedweapon","rangedweapons","rangeweapon","rangeweapons"].includes(compact))return"Weapons";if(["vehicle","vehicles","vehiclebase","vehicleextra"].includes(compact))return"Vehicles";return raw;}
 function itemCatalogNameKey(item){return String(item?.name||"").trim().toLowerCase();}
@@ -20187,7 +18797,7 @@ function catalogGroupLabel(item,filter=""){const kind=schematicCatalogKind(item)
 function sortCatalogRows(items,filter="",mode="smart"){const rows=[...(items||[])];const byName=(a,b)=>String(a?.name||a?.id||"").localeCompare(String(b?.name||b?.id||""),undefined,{numeric:true,sensitivity:"base"});return rows.sort((a,b)=>{if(mode==="name")return byName(a,b);const tierDelta=catalogTierNumber(b)-catalogTierNumber(a);if(mode==="tier_desc")return tierDelta||byName(a,b);if(mode==="tier_asc")return -tierDelta||byName(a,b);const groupDelta=catalogGroupLabel(a,filter).localeCompare(catalogGroupLabel(b,filter),undefined,{numeric:true,sensitivity:"base"});return groupDelta||tierDelta||byName(a,b);});}
 function itemListTitle(item,duplicateNames){const name=String(item?.name||item?.id||"");const schematicKind=schematicCatalogKind(item);if(isTechKnowledgeItem(item)||isRecipeSchematicItem(item))return name+" — "+schematicKind;if(!duplicateNames?.has(itemCatalogNameKey(item)))return name;const detail=itemDisplayDisambiguator(item);return name+" — "+(detail||String(item?.id||""));}
 function loadMoreAdminItems(){adminItemDisplayLimit+=120;renderAdminItems();}
-function renderAdminItems(resetLimit=false){if(resetLimit)adminItemDisplayLimit=120;const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=normalizeUiItemCategory(document.getElementById("adminItemCategory")?.value||"");const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const sort=document.getElementById("adminItemSort")?.value||"smart";const styleNote=document.getElementById("buildingStyleFilterNote");if(styleNote)styleNote.classList.toggle("hidden",category!=="__building_styles");const filtered=sortCatalogRows(adminItems.filter(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const specialMatch=matchesSchematicCatalogFilter(item,category);const matchesSearch=[item.name,item.id,itemCategory,item.type,item.subtype,item.detail,itemDisplayDisambiguator(item),itemGrade,itemTier,schematicCatalogKind(item)].filter(Boolean).join(" ").toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!itemCategory||!item.hasDisplayName):(category==="__building_styles"?isNonDlcBuildingStyleItem(item):(specialMatch!==null?specialMatch:(String(category).toLowerCase()==="items"?!isSchematicItem(item)&&itemCategory===category:itemCategory===category))));const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;}),category,sort);const duplicateNames=duplicatedItemNameSet(filtered);const list=filtered.slice(0,adminItemDisplayLimit);const wrap=document.getElementById("adminItems");const count=document.getElementById("adminItemCount");if(count)count.textContent=Math.min(list.length,filtered.length)+" shown / "+filtered.length+" matching / "+adminItems.length+" loaded";const emptyMessage=category==="__building_styles"?"No matching non-DLC building style item templates were found in the bundled catalog.":(["__schematic_items","__research_unlocks","__recipe_unlocks"].includes(category)?"No matching schematic entries were found.":"No matching bundled item templates. Build the bundled catalog with npm run build:item-catalog.");let previousGroup="";const cards=list.map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemKind=schematicCatalogKind(item)||itemCategory||"Unknown";const group=catalogGroupLabel(item,category);const heading=sort==="smart"&&group!==previousGroup?'<div class="catalog-group-heading">'+esc(group)+'</div>':"";previousGroup=group;const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return heading+'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(itemKind)+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join("");wrap.innerHTML=list.length?cards+(filtered.length>list.length?'<button type="button" onclick="loadMoreAdminItems()">Load 120 more ('+esc(String(filtered.length-list.length))+' remaining)</button>':''):'<div class="empty">'+esc(emptyMessage)+'</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function renderAdminItems(resetLimit=false){if(resetLimit)adminItemDisplayLimit=120;const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=normalizeUiItemCategory(document.getElementById("adminItemCategory")?.value||"");const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const sort=document.getElementById("adminItemSort")?.value||"smart";const styleNote=document.getElementById("buildingStyleFilterNote");if(styleNote)styleNote.classList.toggle("hidden",category!=="__building_styles");const filtered=sortCatalogRows(adminItems.filter(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const specialMatch=matchesSchematicCatalogFilter(item,category);const matchesSearch=[item.name,item.id,itemCategory,item.type,item.subtype,item.detail,itemDisplayDisambiguator(item),itemGrade,itemTier,schematicCatalogKind(item)].filter(Boolean).join(" ").toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!itemCategory||!item.hasDisplayName):(category==="__building_styles"?isNonDlcBuildingStyleItem(item):(specialMatch!==null?specialMatch:(String(category).toLowerCase()==="items"?!isSchematicItem(item)&&itemCategory===category:itemCategory===category))));const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;}),category,sort);const duplicateNames=duplicatedItemNameSet(filtered);const list=filtered.slice(0,adminItemDisplayLimit);const wrap=document.getElementById("adminItems");const count=document.getElementById("adminItemCount");if(count)count.textContent=Math.min(list.length,filtered.length)+" shown / "+filtered.length+" matching / "+adminItems.length+" loaded";const emptyMessage=category==="__building_styles"?"No matching non-DLC building style item templates were found in the bundled catalog.":(["__schematic_items","__research_unlocks","__recipe_unlocks"].includes(category)?"No matching schematic entries were found.":"No matching offline item templates. You can enter an exact template ID below.");let previousGroup="";const cards=list.map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemKind=schematicCatalogKind(item)||itemCategory||"Unknown";const group=catalogGroupLabel(item,category);const heading=sort==="smart"&&group!==previousGroup?'<div class="catalog-group-heading">'+esc(group)+'</div>':"";previousGroup=group;const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return heading+'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(itemKind)+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join("");wrap.innerHTML=list.length?cards+(filtered.length>list.length?'<button type="button" onclick="loadMoreAdminItems()">Load 120 more ('+esc(String(filtered.length-list.length))+' remaining)</button>':''):'<div class="empty">'+esc(emptyMessage)+'</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
 function itemDbIcon(item){return item.icon?'<span class="item-db-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.remove();this.parentElement.textContent=&quot;IT&quot;"></span>':'<span class="item-db-icon">IT</span>';}
 function itemDbText(item){return [item.name,itemDisplayDisambiguator(item),item.id,item.category,item.subtype,item.type,item.grade,item.rarity,item.tier,item.detail,item.description,item.spawnCode,item.itemCode].filter(Boolean).join(" ").toLowerCase();}
 function fillItemDbFilters(){const cat=document.getElementById("itemDbCategory");const tier=document.getElementById("itemDbTier");if(cat){const current=normalizeUiItemCategory(cat.value);const categories=[...new Set(itemDatabaseItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));const special=["__schematic_items","__research_unlocks","__recipe_unlocks"];cat.innerHTML='<option value="">All categories</option><option value="__schematic_items">Schematic Items</option><option value="__research_unlocks">Research Unlocks</option><option value="__recipe_unlocks">Recipe-only Unlocks</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");cat.value=[...categories,...special].includes(current)?current:"";}if(tier){const current=tier.value;const tiers=[...new Set(itemDatabaseItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"";}}
@@ -20224,8 +18834,11 @@ function databaseExplorerCsvCell(value){let text=databaseExplorerCellText(value)
 function exportDatabaseExplorer(format){const result=databaseExplorerState.result||{};const columns=(result.columns||[]).map(column=>column.name);const rows=databaseExplorerState.rows||[];if(!rows.length||!columns.length){showToast("No database rows are loaded to export.","error");return;}const base=(String(result.schema||"database")+"-"+String(result.table||"rows")+"-offset-"+databaseExplorerState.offset).replace(/[^a-z0-9_.-]+/gi,"_");if(format==="json")databaseExplorerDownload(base+".json","application/json",JSON.stringify({readOnly:true,schema:result.schema,table:result.table,offset:databaseExplorerState.offset,rows},null,2));else{const csv=[columns.map(databaseExplorerCsvCell).join(","),...rows.map(row=>columns.map(column=>databaseExplorerCsvCell(row[column])).join(","))].join("\r\n");databaseExplorerDownload(base+".csv","text/csv;charset=utf-8","\ufeff"+csv);}showToast("Exported the current read-only result page.","success");}
 function catalogItemByTemplate(template){const id=String(template||"");return adminItems.find(item=>item.id===id)||itemDatabaseItems.find(item=>item.id===id)||null;}
 function templateIsSchematic(template){const item=catalogItemByTemplate(template);return item?(isTechKnowledgeItem(item)||isRecipeSchematicItem(item)):/^tech:/i.test(String(template||""))||/_schematic$/i.test(String(template||""))||/schematic$/i.test(String(template||""));}
-function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select an item from the catalog below.";return;}const kind=giveItemGrantKind(selectedAdminItem);const notice=giveItemSchematicNotice(selectedAdminItem);selected.className=notice?"warning":"detail-row";selected.innerHTML='<span class="subtle">'+esc(kind)+'</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>'+(notice?'<div class="subtle mt">'+esc(notice)+'</div>':'');}
-function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;renderAdminItems();renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();}
+function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select a catalog item or enter an exact template ID.";return;}const kind=giveItemGrantKind(selectedAdminItem);const notice=giveItemSchematicNotice(selectedAdminItem);selected.className=notice?"warning":"detail-row";selected.innerHTML='<span class="subtle">'+esc(kind)+(selectedAdminItem.source?" / "+esc(selectedAdminItem.source):"")+'</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>'+(notice?'<div class="subtle mt">'+esc(notice)+'</div>':'');}
+function readableRawTemplateName(value){return String(value||"").replace(/^.*[\/:]/,"").replace(/[_.+\-]+/g," ").replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/([A-Za-z])([0-9])/g,"$1 $2").replace(/\s+/g," ").trim().replace(/\b\w/g,letter=>letter.toUpperCase())||String(value||"");}
+function rawGiveItem(value){const id=String(value||"").trim();if(!/^[A-Za-z0-9_:.()+\/-]{2,240}$/.test(id))return null;return adminItems.find(item=>item.id===id)||{id,name:readableRawTemplateName(id),category:"Raw identifier",type:"Raw identifier",subtype:"Manual exact ID",grade:"Unknown",tier:"",source:"raw-id",icon:"/gear-codex/assets/item-icons/generic-other.svg",spawnable:true,hasDisplayName:true};}
+function selectRawGiveItem(showError=true){const input=document.getElementById("adminRawTemplate");const raw=String(input?.value||"").trim();if(!raw){if(selectedAdminItem?.source==="raw-id")selectedAdminItem=null;renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();return null;}const item=rawGiveItem(raw);if(!item){if(showError)showToast("Enter a valid exact template identifier.","error");return null;}selectedAdminItem=item;renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();return item;}
+function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;const raw=document.getElementById("adminRawTemplate");if(raw)raw.value="";renderAdminItems();renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();}
 function marketPostableItem(item){return item&&!isTechKnowledgeItem(item)&&!isRecipeSchematicItem(item);}
 function renderMarketItemFilters(){const cat=document.getElementById("marketCategory");if(cat){const current=normalizeUiItemCategory(cat.value);const categories=[...new Set(adminItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));cat.innerHTML='<option value="">All marketable items</option><option value="__schematics">Schematics and fragments</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");cat.value=[...categories,"","__unknown","__schematics"].includes(current)?current:"";}const tier=document.getElementById("marketTier");if(tier){const current=tier.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="all">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"all";}}
 function renderMarketItems(){const wrap=document.getElementById("marketItems");if(!wrap)return;const q=(document.getElementById("marketSearch")?.value||"").trim().toLowerCase();const category=normalizeUiItemCategory(document.getElementById("marketCategory")?.value||"");const grade=document.getElementById("marketGradeFilter")?.value||"all";const tier=document.getElementById("marketTier")?.value||"all";const rows=adminItems.filter(item=>{if(!marketPostableItem(item))return false;const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";if(category==="__unknown"){if(itemCategory&&item.hasDisplayName)return false;}else if(category==="__schematics"){if(!isSchematicItem(item))return false;}else if(String(category).toLowerCase()==="items"){if(isSchematicItem(item)||itemCategory!==category)return false;}else if(category&&itemCategory!==category)return false;if(grade&&grade!=="all"&&itemGrade!==grade)return false;if(tier&&tier!=="all"&&itemTier!==tier)return false;if(q){const text=[item.name,item.id,itemCategory,item.type,item.subtype,item.detail,itemGrade,itemTier,itemDisplayDisambiguator(item)].join(" ").toLowerCase();if(!text.includes(q))return false;}return true;});const duplicateNames=duplicatedItemNameSet(rows);wrap.innerHTML=rows.slice(0,140).map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">MK</span></span>':'<div class="avatar">MK</div>';return '<button type="button" class="admin-item '+(selectedMarketItem&&selectedMarketItem.id===item.id?'active':'')+'" data-market-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(itemCategory||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join("")||'<div class="empty">No marketable items match the current filters.</div>';wrap.querySelectorAll("[data-market-item-id]").forEach(el=>el.addEventListener("click",()=>selectMarketItem(el.dataset.marketItemId)));}
@@ -20241,11 +18854,11 @@ function formatMarketListingExpiry(expirationTime,gameNow){const expiry=Number(e
 function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[];const gameNow=Number(data?.gameNow||0);marketListingRows=listings;const visibleIds=new Set(listings.map(row=>Number(row.orderId)||0));selectedMarketListingIds=new Set([...selectedMarketListingIds].filter(id=>visibleIds.has(id)));const header='<div class="market-listing-header"><span></span><span>Item</span><span>Grade</span><span>Tier</span><span>Stack</span><span>Seller / Type</span><span>Price</span><span>Expiration</span><span>Actions</span></div>';const rows=listings.map(row=>{const orderId=Number(row.orderId)||0;const checkbox='<input class="market-listing-check" type="checkbox" aria-label="Select listing '+orderId+'" '+(selectedMarketListingIds.has(orderId)?"checked":"")+' onchange="toggleMarketListingSelection('+orderId+',this.checked)">';const buyAction=row.isNpcOrder?'':'<button type="button" onclick="buyMarketListing('+orderId+')">Buy & Pay</button>';const action=buyAction+'<button type="button" onclick="removeMarketListing('+orderId+')">Remove</button>';const grade=row.gradeLabel||("Grade "+(row.quality||0));const tier=row.tier||"--";const owner=row.ownerClass||("Owner "+(row.ownerId||"-"));const type=row.isNpcOrder?"NPC / manual":"Player listing";const expiry=formatMarketListingExpiry(row.expirationTime,gameNow);return '<div class="market-listing-row"><div class="market-listing-cell market-listing-select">'+checkbox+'</div><div class="market-listing-cell market-listing-item"><strong>'+esc(row.name||row.template)+'</strong><span class="subtle env-path-value">'+esc(row.template)+'</span><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+(row.category?' / '+esc(row.category):'')+'</span></div><div class="market-listing-cell"><span class="item-grade-badge">'+esc(grade)+'</span></div><div class="market-listing-cell"><strong>'+esc(tier)+'</strong></div><div class="market-listing-cell"><strong>'+esc(row.stackSize||row.initialStackSize||0)+'</strong></div><div class="market-listing-cell"><strong>'+esc(owner)+'</strong><span class="subtle">'+esc(type)+'</span></div><div class="market-listing-cell"><strong class="market-listing-price">'+esc(row.price)+' Solari</strong></div><div class="market-listing-cell market-listing-expiry '+(expiry.expired?'expired':'')+'"><strong>'+esc(expiry.label)+'</strong><span class="subtle">'+esc(expiry.detail)+'</span></div><div class="market-listing-cell market-listing-actions"><span class="action-row">'+action+'</span></div></div>';}).join('');wrap.innerHTML=listings.length?'<div class="market-listing-grid">'+header+rows+'</div>':'<div class="empty">No live market listings found.</div>';syncMarketListingSelection();}
 async function refreshMarketListings(){const wrap=document.getElementById("marketListings");try{if(wrap)wrap.innerHTML='<div class="warning">Loading live market listings...</div>';const q=document.getElementById("marketListingsSearch")?.value||"";const limit=document.getElementById("marketListingsLimit")?.value||100;const data=await getJson("/api/market/listings?limit="+encodeURIComponent(limit)+"&q="+encodeURIComponent(q),{timeoutMs:25000});renderMarketListings(data);return data;}catch(e){if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(e))+'</div>';return null;}}
 function refreshMarketListingsSoon(){clearTimeout(marketListingsTimer);marketListingsTimer=setTimeout(refreshMarketListings,350);}
-async function buyMarketListing(orderId){try{const ok=await appConfirm("Buy player listing","Buy player listing order "+orderId+", remove it from the market, and create the seller Solari payout?","Buy & Pay","Cancel");if(!ok)return;const data=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",timeoutMs:60000});showToast(data?.message||"Player listing bought and seller payout created.","success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
-async function removeMarketListing(orderId){try{const ok=await appConfirm("Remove market listing","Remove selected listing order "+orderId+" from the market? This does not create a seller payout.","Remove","Cancel");if(!ok)return;await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/remove",{method:"POST",timeoutMs:60000});showToast("Listing removed.","success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
+async function buyMarketListing(orderId){try{const ok=await appConfirm("Buy player listing","Buy player listing order "+orderId+", remove it from the market, and create the seller Solari payout?","Buy & Pay","Cancel");if(!ok)return;const data=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",timeoutMs:60000});showToast(data?.message||"Player listing bought and seller payout created.","success");await refreshMarketListings();await refreshMarketAutomator();}catch(e){showToast(betterError(e),"error");}}
+async function removeMarketListing(orderId){try{const ok=await appConfirm("Remove market listing","Remove selected listing order "+orderId+" from the market? This does not create a seller payout.","Remove","Cancel");if(!ok)return;await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/remove",{method:"POST",timeoutMs:60000});showToast("Listing removed.","success");await refreshMarketListings();await refreshMarketAutomator();}catch(e){showToast(betterError(e),"error");}}
 function selectVisibleNpcMarketListings(){for(const row of marketListingRows){const id=Number(row.orderId)||0;if(id)selectedMarketListingIds.add(id);}renderMarketListings({listings:marketListingRows});}
 function clearSelectedMarketListings(){selectedMarketListingIds.clear();renderMarketListings({listings:marketListingRows});}
-async function removeSelectedMarketListings(){const ids=[...selectedMarketListingIds];if(!ids.length){showToast("No listings selected.","warning");return;}try{const ok=await appConfirm("Remove selected listings","Remove "+ids.length+" selected market listing(s)? This does not create seller payouts.","Remove Selected","Cancel");if(!ok)return;let removed=0,failed=0;for(const id of ids){try{await getJson("/api/market/listing/"+encodeURIComponent(id)+"/remove",{method:"POST",timeoutMs:60000});removed++;}catch{failed++;}}selectedMarketListingIds.clear();showToast("Removed "+removed+" listing(s)"+(failed?"; "+failed+" failed.":"."),failed?"warning":"success");await refreshMarketListings();await refreshMarketBotPage();}catch(e){showToast(betterError(e),"error");}}
+async function removeSelectedMarketListings(){const ids=[...selectedMarketListingIds];if(!ids.length){showToast("No listings selected.","warning");return;}try{const ok=await appConfirm("Remove selected listings","Remove "+ids.length+" selected market listing(s)? This does not create seller payouts.","Remove Selected","Cancel");if(!ok)return;let removed=0,failed=0;for(const id of ids){try{await getJson("/api/market/listing/"+encodeURIComponent(id)+"/remove",{method:"POST",timeoutMs:60000});removed++;}catch{failed++;}}selectedMarketListingIds.clear();showToast("Removed "+removed+" listing(s)"+(failed?"; "+failed+" failed.":"."),failed?"warning":"success");await refreshMarketListings();await refreshMarketAutomator();}catch(e){showToast(betterError(e),"error");}}
 async function refreshMarketPanel(){await Promise.all([refreshMarketStatus(),refreshMarketListings()]);}
 async function startMarketPosting(){marketPostingBusy=false;syncMarketPostingControls();if(!adminItems.length)await refreshGiveItemsFast();renderMarketItemFilters();renderMarketItems();renderMarketSelectedItem();updateMarketSummary();syncMarketPostingControls();await refreshMarketPanel();}
 async function postMarketListing(){const log=document.getElementById("marketLog");const fold=document.getElementById("marketResultFold");try{if(marketPostingBusy)return;if(!selectedMarketItem){if(fold)fold.open=true;if(log)log.textContent="Choose a market item first, then click Post Live Listing.";const picker=document.getElementById("marketSearch");if(picker)picker.focus();playUiSound("warning");return;}const payload=marketListingPayload();const confirmed=await appConfirm("Post live market listing","Post "+payload.listingCount+" live exchange listing(s) for "+(selectedMarketItem.name||payload.template)+" at "+payload.price+" Solari each for "+payload.expiryDays+" day(s)?","Post Live","Cancel");if(!confirmed)return;marketPostingBusy=true;syncMarketPostingControls();if(fold)fold.open=true;if(log)log.textContent="Posting live market listing...";const data=await getJson("/api/market/listing",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,confirmed:true}),timeoutMs:60000});if(log)log.textContent=(data.message||"Market listing posted.")+"\\n\\n"+JSON.stringify(data,null,2);addActivity("market","Market listing posted",(selectedMarketItem.name||payload.template)+" x"+payload.listingCount);playUiSound("success");await refreshMarketPanel();}catch(e){if(fold)fold.open=true;if(log)log.textContent=betterError(e);addActivity("error","Market posting failed",e.message);playUiSound("warning");}finally{marketPostingBusy=false;syncMarketPostingControls();}}
@@ -20253,7 +18866,7 @@ let gradeRelogChoiceNoticeShown=false;
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;input.min=0;input.max=5;if(!supported)input.value=0;else{const grade=Number(input.value||0);if(Number.isFinite(grade)&&grade<0)input.value=0;if(Number.isFinite(grade)&&grade>5)input.value=5;if(usesRelogGrade(input.value)&&!gradeRelogChoiceNoticeShown){gradeRelogChoiceNoticeShown=true;setTimeout(()=>showGradeRelogPopup("items"),0);}}}if(warning){warning.classList.toggle("hidden",false);warning.textContent=supported?"Grade 1-5 uses a database-backed grant and may require relog or inventory refresh. Grade 0 uses the live receiver.":"Grade giving is not supported by the current receiver method.";}syncGiveItemControls();}
 function usesRelogGrade(value){const grade=Number(value||0);return Number.isFinite(grade)&&grade>=1&&grade<=5;}
 async function showGradeRelogPopup(context="item"){await appAlert("Player relog required","Grade 1-5 "+context+" are written directly to the database. The player must relog before the item appears in their inventory.","I Understand");}
-function adminGivePayload(){if(!selectedAdminItem)throw new Error("Choose an item first.");const destination=document.getElementById("giveDestination")?.value||"player";const payload={playerId:document.getElementById("adminPlayer").value,template:selectedAdminItem.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(selectedAdminItem),destination};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");if(destination==="storage"){const storage=selectedGiveStorage();if(!storage)throw new Error("Choose a storage container first.");payload.actorId=storage.actorId;payload.inventoryId=storage.inventoryId;}return payload;}
+function adminGivePayload(){const raw=String(document.getElementById("adminRawTemplate")?.value||"").trim();const item=raw?selectRawGiveItem(false):selectedAdminItem;if(!item)throw new Error(raw?"Enter a valid exact template identifier.":"Choose an item first.");const destination=document.getElementById("giveDestination")?.value||"player";const payload={playerId:document.getElementById("adminPlayer").value,template:item.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(item),destination};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");if(destination==="storage"){const storage=selectedGiveStorage();if(!storage)throw new Error("Choose a storage container first.");payload.actorId=storage.actorId;payload.inventoryId=storage.inventoryId;}return payload;}
 function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Grade "+row.quality:"")+(row.grantKind?" / "+row.grantKind:"");}
 function updateGiveQueueSummary(processed=0,total=giveQueue.length,succeeded=0,failed=0){const el=document.getElementById("giveQueueSummary");if(el)el.textContent="Progress: "+processed+" / "+total+" · Succeeded: "+succeeded+" · Failed: "+failed;const retry=document.getElementById("retryGiveQueueButton");if(retry)retry.disabled=!lastGiveQueueFailedItems.length||liveGiveBusy;syncGiveItemControls();}
 function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span>'+(row.grantKind?'<br><span class="subtle">'+esc(row.grantKind)+'</span>':'')+'</span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
@@ -20331,7 +18944,7 @@ function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>res
 async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
 async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();wireBlueprintViewer();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
+renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 setInterval(()=>{if(document.getElementById("repair")?.classList.contains("active"))refreshRepairQueue();},10000);
@@ -20365,7 +18978,7 @@ const REMOTE_LOCAL_ONLY_PREFIXES = [
   "/api/config", "/api/setup/", "/api/test/", "/api/settings/", "/api/ssh-key/", "/api/server-install-path/",
   "/api/live-give/env", "/api/blueprints", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/",
   "/api/admin/probe", "/api/admin/tuned-channels", "/api/admin/permissions", "/api/gear/discovery", "/api/discovery",
-  "/api/market-bot/config", "/api/market-bot/logs", "/api/director", "/api/database-browser/", "/manager-api/"
+  "/api/market-automator/logs", "/api/director", "/api/database-browser/", "/manager-api/"
 ];
 const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/status", "/api/vm-monitor", "/api/server-update/check", "/api/scheduler", "/api/receiver/status",
@@ -20375,7 +18988,7 @@ const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/admin/players", "/api/admin/repair/inspect", "/api/admin/repair/queue", "/api/players/feed", "/api/admin/items",
   "/api/give-items", "/api/gear-codex/items", "/api/item-database/items", "/api/items/catalog/status", "/api/give-items/capabilities",
   "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/progression/house-scrip", "/api/landsraad/tiers",
-  "/api/landsraad/weekly-rewards/inspect", "/api/admin/skill-reputation", "/api/market-bot/overview",
+  "/api/landsraad/weekly-rewards/inspect", "/api/admin/skill-reputation", "/api/market-automator/overview",
   "/api/market/status", "/api/market/listings", "/api/live-give/queue-presets", "/api/live-give/queue-presets/get",
   "/api/sietches", "/api/vm/status", "/api/updates/check"
 ]);
@@ -21068,38 +19681,6 @@ async function route(req, res) {
     catch (error) { await json(res, adminProbeUnavailable(error)); }
     return;
   }
-  if (url.pathname === "/api/blueprint-models/status" && req.method === "GET") {
-    const status = blueprintModelPack.status();
-    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) delete status.packDir;
-    await json(res, status, status.ok ? 200 : 500);
-    return;
-  }
-  if (url.pathname === "/api/blueprint-models/import" && req.method === "POST") {
-    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) { await json(res, { ok: false, error: "Offline model-pack import is available only on the local desktop Suite." }, 403); return; }
-    try {
-      const body = await readJsonRequest(req);
-      const result = blueprintModelPack.importFromDirectory(body.folderPath);
-      appendAdminAudit("blueprint_model_pack_imported", { modelCount: result.modelCount, mappingCount: result.mappingCount, totalBytes: result.totalBytes });
-      await json(res, result);
-    } catch (error) {
-      appendAdminAudit("blueprint_model_pack_import_failed", { error: error.message });
-      await json(res, { ok: false, error: error.message }, 400);
-    }
-    return;
-  }
-  if (url.pathname === "/api/blueprint-models/resolve" && req.method === "POST") {
-    try { const body = await readJsonRequest(req); await json(res, blueprintModelPack.resolveTypes(body.types)); }
-    catch (error) { await json(res, { ok: false, models: {}, error: error.message }, 500); }
-    return;
-  }
-  if (url.pathname.startsWith("/api/blueprint-models/files/") && req.method === "GET") {
-    const filePath = blueprintModelPack.resolveFile(url.pathname.slice("/api/blueprint-models/files/".length));
-    if (!filePath) { send(res, 404, "text/plain", "Model not found"); return; }
-    const stat = fs.statSync(filePath);
-    res.writeHead(200, { "Content-Type": "model/gltf-binary", "Content-Length": String(stat.size), "Cache-Control": "public, max-age=31536000, immutable" });
-    fs.createReadStream(filePath).pipe(res);
-    return;
-  }
   if (url.pathname === "/api/blueprints/capabilities" && req.method === "GET") {
     try { await json(res, await blueprintService.capabilities()); }
     catch (error) { await json(res, { supported: false, missing: [], error: error.message }, 500); }
@@ -21167,19 +19748,6 @@ async function route(req, res) {
     }
     return;
   }
-  const blueprintDeleteMatch = url.pathname.match(/^\/api\/blueprints\/(\d+)$/);
-  if (blueprintDeleteMatch && req.method === "DELETE") {
-    try {
-      const body = await readJsonRequest(req);
-      if (body.confirmed !== true) throw new Error("Blueprint deletion must be confirmed.");
-      const result = await blueprintService.deleteBlueprint(blueprintDeleteMatch[1]);
-      await json(res, result.ok ? result : { ...result, error: "Blueprint not found." }, result.ok ? 200 : 404);
-    } catch (error) {
-      await json(res, { ok: false, error: error.message }, /confirmed|valid|whole number/i.test(error.message) ? 400 : 500);
-    }
-    return;
-  }
-
   if (url.pathname === "/api/live-give/env" && req.method === "GET") {
     try { await json(res, await liveGiveEnvStatus()); }
     catch (error) { await json(res, { ok: false, liveGiveAvailable: false, missingEnv: [], message: error.message, error: error.message }, 500); }
@@ -21263,28 +19831,19 @@ async function route(req, res) {
     return;
   }
   if (["/api/admin/items", "/api/give-items", "/api/gear-codex/items", "/api/item-database/items"].includes(url.pathname) && req.method === "GET") {
+    scheduleServerDiscoveredItemCatalog();
     const cache = loadDuneItemsCache();
-    const dynamicRecipes = ["/api/admin/items", "/api/give-items", "/api/item-database/items"].includes(url.pathname)
-      ? await knownCraftingRecipeCatalogItems().catch((error) => {
-        appendAdminAudit("known_recipe_catalog_unavailable", { error: error.message });
-        return [];
-      })
-      : [];
-    const dynamicTechKnowledge = ["/api/admin/items", "/api/give-items", "/api/item-database/items"].includes(url.pathname)
-      ? await knownTechKnowledgeCatalogItems().catch((error) => {
-        appendAdminAudit("known_tech_knowledge_catalog_unavailable", { error: error.message });
-        return [];
-      })
-      : [];
+    const dynamicItems = ["/api/admin/items", "/api/give-items", "/api/item-database/items"].includes(url.pathname) ? liveDynamicItemCatalog : [];
     const isGiveItemCatalog = ["/api/admin/items", "/api/give-items"].includes(url.pathname);
     const allItems = isGiveItemCatalog
-      ? visibleGiveItems([...(cache.items || []), ...dynamicTechKnowledge, ...dynamicRecipes])
-      : [...(cache.items || []), ...dynamicTechKnowledge, ...dynamicRecipes];
+      ? visibleGiveItems([...(cache.items || []), ...dynamicItems])
+      : [...(cache.items || []), ...dynamicItems];
     const items = filterItemsByQuery(allItems, url.searchParams);
-    await json(res, { ok: cache.ok !== false, items, totalItems: allItems.length, dynamicRecipeCount: dynamicRecipes.length, dynamicTechKnowledgeCount: dynamicTechKnowledge.length, gradeCounts: itemGradeCounts(allItems), tierCounts: itemTierCounts(allItems), report: { ...(cache.report || {}), dynamicRecipeCount: dynamicRecipes.length, dynamicTechKnowledgeCount: dynamicTechKnowledge.length }, generatedAt: cache.generatedAt || "" });
+    await json(res, { ok: cache.ok !== false, offlineReady: true, items, totalItems: allItems.length, dynamicItemCount: dynamicItems.length, gradeCounts: itemGradeCounts(allItems), tierCounts: itemTierCounts(allItems), report: { ...(cache.report || {}), dynamicItemCount: dynamicItems.length, startupValidation: ITEM_CATALOG_STARTUP_REPORT }, generatedAt: cache.generatedAt || "" });
     return;
   }
   if (url.pathname === "/api/gear/discovery" && req.method === "GET") {
+    scheduleServerDiscoveredItemCatalog();
     const cache = loadDuneItemsCache();
     const items = filterItemsByQuery(cache.items || [], url.searchParams);
     await json(res, { ok: cache.ok !== false, items, totalItems: (cache.items || []).length, gradeCounts: itemGradeCounts(cache.items || []), tierCounts: itemTierCounts(cache.items || []), report: cache.report || {}, generatedAt: cache.generatedAt || "" });
@@ -21293,7 +19852,7 @@ async function route(req, res) {
   if (url.pathname === "/api/items/catalog/status" && req.method === "GET") {
     const cache = loadDuneItemsCache();
     const items = cache.items || [];
-    await json(res, { ok: cache.ok !== false, generatedAt: cache.generatedAt || "", totalItems: items.length, cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, gradeCounts: itemGradeCounts(items), tierCounts: itemTierCounts(items), report: cache.report || {} });
+    await json(res, { ok: cache.ok !== false, offlineReady: true, generatedAt: cache.generatedAt || "", totalItems: items.length, cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, learnedCatalogPath: SERVER_DISCOVERED_ITEMS_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, gradeCounts: itemGradeCounts(items), tierCounts: itemTierCounts(items), report: { ...(cache.report || {}), startupValidation: ITEM_CATALOG_STARTUP_REPORT } });
     return;
   }
   if (url.pathname === "/api/give-items/capabilities" && req.method === "GET") {
@@ -21302,19 +19861,20 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/gear/discover" && req.method === "POST") {
     try {
-      const result = await discoverDuneItems();
-      const items = visibleGiveItems(result.items || []);
+      const result = await refreshServerDiscoveredItemCatalog({ force: true });
+      const items = visibleGiveItems(result.catalog?.items || []);
       await json(res, {
         ...result,
         items,
         report: {
-          ...(result.report || {}),
+          ...(result.catalog?.report || {}),
           totalItemsFound: items.length,
-          giveItemCategoriesHidden: true
+          giveItemCategoriesHidden: true,
+          readOnlyServerDiscovery: true
         }
       });
     }
-    catch (error) { await json(res, { ok: false, items: [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, error: error.message, filesScanned: [], totalItemsFound: 0 } }, 500); }
+    catch (error) { await json(res, { ok: false, items: loadDuneItemsCache().items || [], report: { cachePath: DUNE_ITEMS_CACHE_PATH, error: error.message, totalItemsFound: (loadDuneItemsCache().items || []).length, offlineReady: true } }, 500); }
     return;
   }
   if (url.pathname === "/api/admin/tuned-channels" && req.method === "GET") {
@@ -21538,74 +20098,34 @@ async function route(req, res) {
     }
     return;
   }
-  if (url.pathname === "/api/market-bot/overview" && req.method === "GET") {
-    try { await json(res, await marketBotOverview()); }
+  if (url.pathname === "/api/market-automator/overview" && req.method === "GET") {
+    try { await json(res, await marketAutomator.overview()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }
-  if (url.pathname === "/api/market-bot/settings" && req.method === "POST") {
-    try {
-      const saved = await saveMarketBotSettings(JSON.parse(await readBody(req) || "{}"));
-      await json(res, { ok: true, baseUrl: marketBotBaseUrl(saved), tokenConfigured: Boolean(marketBotToken(saved)), config: publicConfig(saved) });
-    } catch (error) {
-      await json(res, { ok: false, error: error.message }, 400);
-    }
+  if (url.pathname === "/api/market-automator/config" && req.method === "PUT") {
+    try { const config = marketAutomator.save(await readJsonRequest(req)); await json(res, { ...(await marketAutomator.overview()), config }); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
     return;
   }
-  if (url.pathname === "/api/market-bot/install" && req.method === "POST") {
-    try {
-      await json(res, await runTrackedOperation("market-bot:deployment", "Install / Update Market Bot", async ({ update }) => {
-        update("Deploying Market Bot", "Uploading configuration and waiting for the VM service.");
-        return installMarketBot();
-      }, { category: "economy" }));
-    } catch (error) {
-      const failure = operationErrorResponse(error);
-      await json(res, failure.payload, failure.statusCode);
-    }
+  if (url.pathname === "/api/market-automator/pricing-preview" && req.method === "POST") {
+    try { await json(res, await marketAutomator.pricingPreview(await readJsonRequest(req))); }
+    catch (error) { await json(res, { ok: false, error: error.message, items: [] }, 400); }
     return;
   }
-  if (url.pathname === "/api/market-bot/uninstall" && req.method === "POST") {
-    try {
-      await json(res, await runTrackedOperation("market-bot:deployment", "Uninstall Market Bot", async ({ update }) => {
-        update("Removing Market Bot", "Removing the VM service and managed files.");
-        return uninstallMarketBot();
-      }, { category: "economy" }));
-    } catch (error) {
-      const failure = operationErrorResponse(error);
-      await json(res, failure.payload, failure.statusCode);
-    }
+  if (url.pathname === "/api/market-automator/catalog-search" && req.method === "POST") {
+    try { await json(res, await marketAutomator.catalogSearch(await readJsonRequest(req))); }
+    catch (error) { await json(res, { ok: false, error: error.message, items: [] }, 400); }
     return;
   }
-  if (url.pathname === "/api/market-bot/config" && req.method === "GET") {
-    try { await json(res, await marketBotRequest("/config")); }
-    catch (error) { await json(res, { ok: false, error: error.message }, 502); }
+  if (url.pathname.startsWith("/api/market-automator/run/") && req.method === "POST") {
+    try { const kind = url.pathname.slice("/api/market-automator/run/".length); await json(res, await marketAutomator.run(kind, "manual")); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }
-  if (url.pathname === "/api/market-bot/config" && req.method === "PUT") {
-    try { await json(res, await marketBotRequest("/config", { method: "PUT", body: JSON.parse(await readBody(req) || "{}"), timeoutMs: 20000 })); }
-    catch (error) { await json(res, { ok: false, error: error.message }, 502); }
-    return;
-  }
-  if (url.pathname.startsWith("/api/market-bot/tick/") && req.method === "POST") {
-    try {
-      const tick = url.pathname.replace(/^\/api\/market-bot\/tick\//, "");
-      if (!["buy", "list", "sim", "all"].includes(tick)) throw new Error("Unsupported market bot tick.");
-      const cleanupBefore = await cleanupExpiredMarketListings({ source: `tick-${tick}-before` }).catch((error) => ({ ok: false, error: error.message }));
-      const result = await marketBotRequest(`/tick/${tick}`, { method: "POST", timeoutMs: 60000 });
-      const cleanupAfter = await cleanupExpiredMarketListings({ source: `tick-${tick}-after` }).catch((error) => ({ ok: false, error: error.message }));
-      await json(res, { ...result, expiredCleanup: { before: cleanupBefore, after: cleanupAfter } });
-    } catch (error) {
-      await json(res, { ok: false, error: error.message }, 502);
-    }
-    return;
-  }
-  if (url.pathname === "/api/market-bot/logs" && req.method === "GET") {
-    try {
-      const result = await sshCommand("sudo kubectl logs -n dune-market-bot -l app=market-bot --tail=160 2>&1", 45000, { maxBuffer: 1024 * 1024 });
-      await json(res, { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr, code: result.code });
-    } catch (error) {
-      await json(res, { ok: false, error: error.message }, 500);
-    }
+  if (url.pathname === "/api/market-automator/logs" && req.method === "GET") {
+    try { await json(res, marketAutomator.logs()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }
   if (url.pathname === "/api/market/status" && req.method === "GET") {

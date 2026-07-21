@@ -13,7 +13,7 @@ const httpsPort = port + 500;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-rendered-ui-"));
 const child = spawn(process.execPath, [path.join(__dirname, "..", "server.js")], {
   cwd: path.join(__dirname, ".."),
-  env: { ...process.env, PORT: String(port), ALPHANINE_HTTPS_PORT: String(httpsPort), ALPHANINE_DATA_DIR: dataDir, ALPHANINE_SKIP_MANAGER: "1" },
+  env: { ...process.env, PORT: String(port), ALPHANINE_HTTPS_PORT: String(httpsPort), ALPHANINE_DATA_DIR: dataDir, ALPHANINE_SKIP_MANAGER: "1", ALPHANINE_DISABLE_SERVER_ITEM_DISCOVERY: "1" },
   stdio: ["ignore", "pipe", "pipe"]
 });
 
@@ -59,15 +59,26 @@ async function waitForUi() {
     assert(serverSource.includes("parsePlayerSelector(query)"), "Typed player selectors are missing from backend lookup.");
     assert(html.includes('return"controller:"+p.player_controller_id'), "Progression detected players still submit ambiguous numeric identifiers.");
     assert(html.includes('getJson("/api/progression/player?query="+encodeURIComponent(query),{timeoutMs:60000})'), "Detailed progression lookup deadline is shorter than its enrichment phases.");
-    assert(!html.includes(">Rotate Left</button>") && !html.includes(">Tilt Up</button>") && !html.includes(">Zoom In</button>"), "Blueprint viewer still exposes camera-control buttons.");
-    assert(html.includes("Drag to rotate and tilt"), "Blueprint viewer is missing its mouse-control guidance.");
-    assert(html.includes("camera.attachControl(canvas,true)"), "Blueprint viewer is not using the renderer's native mouse camera input.");
-    assert(html.includes("camera.inputs.attached.pointers.buttons=[0,1,2]"), "Blueprint viewer does not accept all mouse buttons.");
-    assert(html.includes('addEventListener("dblclick",reset)'), "Blueprint viewer is missing mouse-based reset.");
-    assert(html.includes('addEventListener("wheel",containWheel,{passive:false})'), "Blueprint viewer wheel input can still scroll the Suite page.");
-    assert(html.includes('containedEvents=["pointerdown","pointermove","pointerup","pointercancel","click","auxclick"]'), "Blueprint viewer mouse events are not contained inside the canvas.");
-    assert(html.includes("node.scaling.set(x,y,z)"), "Blueprint viewer does not replace the imported root scale.");
-    assert(!html.includes("baseScale=root.scaling.clone()"), "Blueprint viewer still preserves the loader mirror that flips asymmetric pieces.");
+    assert(html.includes("Player Building Blueprints"), "Blueprint management is missing.");
+    assert(html.includes("Export Selected") && html.includes("Export All"), "Blueprint batch export controls are missing.");
+    assert(!/blueprintViewer|BABYLON|blueprintProcedural|blueprint-piece-catalog|blueprint-viewer-transform/.test(html), "Blueprint visualization code remains in the rendered UI.");
+    assert(!html.includes('data-blueprint-action="view"') && !html.includes(">View</button>"), "Blueprint View controls remain in the rendered UI.");
+    assert(html.includes('id="adminRawTemplate"'), "Give Item raw template-ID input is missing.");
+    assert(html.includes("Discover Server IDs"), "Read-only server item discovery control is missing.");
+    assert(!/gaming\.tools|awakening\.wiki/i.test(html), "Rendered Suite UI references a removed item-catalog website.");
+    const itemResponse = await fetch(`http://127.0.0.1:${port}/api/item-database/items?q=Maula`);
+    const itemData = await itemResponse.json();
+    assert.equal(itemData.ok, true, "Offline Item Database endpoint failed.");
+    assert.equal(itemData.offlineReady, true, "Item Database is not marked offline-ready.");
+    assert(itemData.items.length > 0, "Offline Item Database search returned no items.");
+    assert(itemData.items.every((item) => String(item.icon || "").startsWith("/")), "Item Database returned a non-local icon.");
+    const codexHtml = await (await fetch(`http://127.0.0.1:${port}/gear-codex/`)).text();
+    assert(codexHtml.includes('fetch("/api/gear-codex/items"'), "Gear Codex is not migrated to the local catalog provider.");
+    const codexScripts = [...codexHtml.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi)]
+      .filter((match) => !/type=["']application\/json["']/i.test(match[1]))
+      .map((match) => match[2])
+      .filter((script) => script.trim());
+    for (const script of codexScripts) new Function(script);
     const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((match) => match[1]).filter((script) => script.trim());
     assert(scripts.length, "No inline UI script was rendered.");
     for (const script of scripts) new Function(script);

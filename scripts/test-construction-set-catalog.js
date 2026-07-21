@@ -16,7 +16,8 @@ const child = spawn(process.execPath, [path.join(root, "server.js")], {
     PORT: String(port),
     ALPHANINE_HTTPS_PORT: String(port + 500),
     ALPHANINE_DATA_DIR: dataDir,
-    ALPHANINE_SKIP_MANAGER: "1"
+    ALPHANINE_SKIP_MANAGER: "1",
+    ALPHANINE_DISABLE_SERVER_ITEM_DISCOVERY: "1"
   },
   stdio: ["ignore", "pipe", "pipe"]
 });

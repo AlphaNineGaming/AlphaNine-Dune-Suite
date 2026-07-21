@@ -1,24 +1,13 @@
 # AlphaNine Dune Suite 1.0.55
 
-Version 1.0.55 adds a complete player-building blueprint workflow, an exact offline 3D viewer, granular progression grants, House Scrip management, and restored construction-set discovery.
+Version 1.0.55 adds a complete player-building blueprint workflow, granular progression grants, House Scrip management, and restored construction-set discovery.
 
 ## Player Building Blueprints
 
 - Browse each player's saved building blueprints directly from the live server database.
 - Import validated blueprint JSON files into the selected player's inventory as replicator items.
-- Preview every selected JSON layout in 3D before importing it; no player data is changed during preview.
 - Export one blueprint as JSON, export selected blueprints, or download every saved blueprint as a ZIP archive.
-- Delete blueprints with explicit confirmation and associated inventory-item cleanup.
 - Clear relog guidance explains when the player must reconnect before inventory changes appear.
-
-## Exact Offline 3D Viewer
-
-- Bundles 538 exact building-piece meshes and 551 blueprint mappings in the installer; no internet connection, external model folder, or extra download is required.
-- Uses exported position, rotation, and scale transforms to reconstruct saved bases locally.
-- Mouse controls provide orbit, tilt, pan, and wheel zoom; input remains captured by the viewer so zooming does not scroll the Suite page.
-- Corrected transform and stair-orientation handling across mapped variants.
-- Includes layer visibility for building pieces, placeables, and pentashields, plus reset, bounds, component counts, and unknown-piece reporting.
-- Unknown identifiers are reported instead of being replaced with guessed geometry.
 
 ## Granular Skill Ranks
 
@@ -41,7 +30,7 @@ Version 1.0.55 adds a complete player-building blueprint workflow, an exact offl
 
 ## Reliability and Packaging
 
-- Added regression coverage for blueprints, the exact model pack, construction sets, granular skill ranks, House Scrip, packaged UI content, and rendered JavaScript syntax.
+- Added regression coverage for blueprints, construction sets, granular skill ranks, House Scrip, packaged UI content, and rendered JavaScript syntax.
 - The packaged Windows application continues to request administrator access where required by local server-management operations.
 - Version remains 1.0.55 for this release.
 

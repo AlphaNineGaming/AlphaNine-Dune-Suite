@@ -21147,7 +21147,8 @@
 </script>
   <script>
     const catalog = JSON.parse(document.getElementById("catalogData").textContent);
-    const baseItems = catalog.items.map((item, index) => ({ ...item, uid: item.id || `item-${index}` }));
+    const embeddedFallbackItems = catalog.items.map((item, index) => ({ ...item, uid: item.id || `item-${index}` }));
+    let baseItems = embeddedFallbackItems;
     const storeKey = "duneGearCodexUserData";
     let userData = loadUserData();
     let items = mergeItems();
@@ -21205,7 +21206,7 @@
       fillSelect(els.category, "All categories", unique("category"));
       fillSelect(els.rarity, "All rarity", unique("rarity"));
       fillSelect(els.tier, "All tiers", unique("tier"));
-      els.baseCount.textContent = `${catalog.totalUsable || items.length} base`;
+      els.baseCount.textContent = `${baseItems.length} base`;
     }
     function fillSelect(el, all, values) {
       el.innerHTML = [`<option value="">${all}</option>`, ...values.map(value => `<option>${escapeHtml(value)}</option>`)].join("");
@@ -21428,8 +21429,24 @@
       }
     });
 
-    initFilters();
-    renderList();
+    async function initializeLocalCatalog() {
+      try {
+        const response = await fetch("/api/gear-codex/items", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok || !data.ok || !Array.isArray(data.items) || !data.items.length) throw new Error(data.error || "Local catalog is unavailable.");
+        baseItems = data.items.map((item, index) => ({ ...item, uid: item.id || `item-${index}` }));
+        items = mergeItems();
+        if (!items.some((item) => item.uid === selected)) selected = items[0]?.uid;
+      } catch (error) {
+        baseItems = embeddedFallbackItems;
+        items = mergeItems();
+        console.warn("Using the embedded offline catalog fallback:", error.message);
+      }
+      initFilters();
+      renderList();
+    }
+
+    initializeLocalCatalog();
   </script>
 </body>
 </html>

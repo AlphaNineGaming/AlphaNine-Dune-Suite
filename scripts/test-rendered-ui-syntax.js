@@ -36,6 +36,12 @@ async function waitForUi() {
     const html = await waitForUi();
     assert(html.includes('id="repair"'), "Rendered Repair Inspector is missing.");
     assert(html.includes('id="landsraad"'), "Rendered Landsraad tier editor is missing.");
+    assert(html.includes('id="database-explorer"'), "Rendered Database Explorer is missing.");
+    assert(html.includes('id="databaseExplorerGrid"'), "Database Explorer result grid is missing.");
+    assert(html.includes('getJson("/api/database-browser/rows"'), "Database Explorer is not wired to its bounded row API.");
+    assert(serverSource.includes('"/api/database-browser/"'), "Database Explorer routes are not classified as local-only.");
+    assert(serverSource.includes('Database Explorer is available only from the local Suite.'), "Database Explorer routes are missing their loopback guard.");
+    assert(serverSource.includes('BEGIN TRANSACTION READ ONLY') || fs.readFileSync(path.join(__dirname, "..", "lib", "database-browser.js"), "utf8").includes('BEGIN TRANSACTION READ ONLY'), "Database Explorer is missing a database-level read-only transaction.");
     assert(html.includes("statusRefreshInFlight"), "Server indicator polling is missing its single-flight guard.");
     assert(html.includes("vmMonitorRefreshInFlight"), "VM indicator polling is missing its single-flight guard.");
     assert(serverSource.includes("suiteStatusSnapshotInFlight"), "Backend server status requests are not coalesced.");

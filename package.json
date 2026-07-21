@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.0.64",
+  "version": "1.0.65",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -31,6 +31,7 @@
     "test:specialization-progression": "node scripts/test-specialization-progression.js",
     "test:progression-grants": "node scripts/test-progression-skill-ranks-house-scrip.js",
     "test:landsraad-tiers": "node scripts/test-landsraad-tiers.js",
+    "test:database-browser": "node scripts/test-database-browser.js",
     "test:remote-access": "node scripts/test-remote-access.js",
     "test:internet-tunnel": "node scripts/test-internet-tunnel.js",
     "build:win": "npm run test:app-icon && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=false && node scripts/ensure-admin-manifest.js"
@@ -39,6 +40,7 @@
     "express": "^5.2.1",
     "leaflet": "^1.9.4",
     "node-forge": "^1.4.0",
+    "pg": "^8.22.0",
     "selfsigned": "^3.0.1"
   },
   "devDependencies": {
@@ -58,6 +60,7 @@
       "package.json",
       "package-lock.json",
       "README.md",
+      "RELEASE_NOTES_1.0.65.md",
       "MARKET_BOT_USER_GUIDE.md",
       "LICENSE",
       "manifest.webmanifest",

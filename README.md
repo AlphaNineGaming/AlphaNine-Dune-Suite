@@ -11,6 +11,7 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 ## Features
 
 - Dashboard with server, database, receiver, and VM health
+- Local-only, read-only PostgreSQL Database Explorer with schema navigation, filtering, sorting, pagination, row details, and page export
 - First-launch setup wizard
 - Integrated receiver start, stop, restart, and status
 - Player feed and player management
@@ -25,6 +26,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - GitHub update check
 
 ## Release Notes
+
+### 1.0.65
+
+- Added a local-only Database Explorer for safely browsing the selected battlegroup PostgreSQL database.
+- Added schema, table, view, column-type, primary-key, and estimated-row discovery.
+- Added bounded row browsing with parameterized filters, sorting, pagination, selected-row details, and current-page CSV/JSON export.
+- Enforced read-only PostgreSQL transactions, query and lock timeouts, metadata allowlists, cell truncation, and a 5 MB response limit.
+- Blocked Database Explorer UI and API access from LAN, HTTPS, and internet portal sessions, including authenticated Owner sessions.
 
 ### 1.0.64
 

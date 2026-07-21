@@ -1,4 +1,4 @@
-const CACHE_NAME = "alphanine-dune-suite-v2-local-http-only";
+const CACHE_NAME = "alphanine-dune-suite-v3-database-explorer";
 const STATIC_ASSETS = [
   "/",
   "/manifest.webmanifest",

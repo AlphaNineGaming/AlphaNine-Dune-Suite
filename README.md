@@ -27,6 +27,12 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.69
+
+- Redesigned the Market Automator pricing preview as a clean five-column table with sticky headings, readable badges, and highlighted Solari prices.
+- Rebalanced the Automator workspace so the preview uses the available page width without spilling into the Automation Log.
+- Preserved all pricing calculations, presets, overrides, deterministic behavior, Advanced settings, and existing listings.
+
 ### 1.0.68
 
 - Fixed Server Cleaner base deletion failures caused by PostgreSQL bigint actor IDs being rounded through JavaScript numeric conversion.

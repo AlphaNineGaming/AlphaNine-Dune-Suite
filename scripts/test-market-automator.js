@@ -19,6 +19,12 @@ assert.match(serverSource, /Generate Preview/);
 assert.match(serverSource, /Advanced pricing settings/);
 assert.match(serverSource, /Optional item price override/);
 assert.match(serverSource, /\/api\/market-automator\/catalog-search/);
+assert.strictEqual((serverSource.match(/function renderMarketAutomatorPricingPreview/g) || []).length, 1);
+assert.match(serverSource, /<table class="market-preview-table">/);
+assert.match(serverSource, /<th scope="col">Item<\/th><th scope="col">Grade<\/th><th scope="col">Tier<\/th><th scope="col">Category<\/th><th scope="col">Price<\/th>/);
+assert.match(serverSource, /role="region" aria-label="Automated price preview"/);
+assert.match(serverSource, /Sample prices from the local item catalog\. No listings are changed\./);
+assert.doesNotMatch(serverSource, /\.market-pricing-grid\s*\{/);
 
 const normalized = normalizeConfig({
   enabled: true,

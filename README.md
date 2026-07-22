@@ -27,6 +27,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.68
+
+- Fixed Server Cleaner base deletion failures caused by PostgreSQL bigint actor IDs being rounded through JavaScript numeric conversion.
+- Preserved base actor IDs as exact strings from scan results through the UI, API request, backend validation, operation logging, and SQL parameters.
+- Added Cleaner request/failure audit records and packaged regression validation.
+- Single-base deletion is supported. Bulk base deletion is not implemented.
+- Live destructive validation remains pending against a confirmed orphan or disposable test base; owned actor `953` was left untouched.
+
 ### 1.0.67
 
 - Added deterministic per-item Market Automator pricing with fixed, dynamic, category-base, metadata-multiplier, and exact manual-override controls.

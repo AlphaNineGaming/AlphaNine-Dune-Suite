@@ -5,7 +5,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const asar = require("@electron/asar");
 
 const root = path.join(__dirname, "..");
@@ -21,6 +21,30 @@ if (!fs.existsSync(archive)) throw new Error(`Packaged archive was not found: ${
 asar.extractAll(archive, extracted);
 const packagedServerSource = fs.readFileSync(path.join(extracted, "server.js"), "utf8");
 const packagedDesktopSource = fs.readFileSync(path.join(extracted, "electron", "main.js"), "utf8");
+const packagedCleanerTestPath = path.join(extracted, "scripts", "test-base-cleanup-override.js");
+assert(fs.existsSync(packagedCleanerTestPath), "Packaged app is missing the Server Cleaner regression test.");
+assert(
+  packagedServerSource.includes('const actorId = requireSqlBigint(payload.actorId, "actor_id", 0n)'),
+  "Packaged Server Cleaner is missing bigint-safe backend validation."
+);
+assert(
+  packagedServerSource.includes('const actorId=String(row.actorId||"").trim()'),
+  "Packaged Server Cleaner UI does not preserve scanned actor IDs as strings."
+);
+assert(
+  !packagedServerSource.includes("const actorId=Number(row.actorId)||0"),
+  "Packaged Server Cleaner still coerces actor IDs through Number."
+);
+const packagedCleanerTest = spawnSync(process.execPath, [packagedCleanerTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedCleanerTest.status,
+  0,
+  `Packaged Server Cleaner regression failed.\n${packagedCleanerTest.stdout || ""}\n${packagedCleanerTest.stderr || ""}`
+);
 assert(
   packagedServerSource.includes("query: (sql, timeout) => dbQueryStreamed(sql, timeout)"),
   "Packaged blueprint imports are not using streamed SQL."

@@ -14,5 +14,13 @@ assert.match(source, /orphan_base_deleted/);
 assert.match(source, /row\.status==="owned"\|\|row\.status==="partial-missing"/);
 assert.doesNotMatch(source, /row\.status==="unknown-owner"[^\n]+Delete Owned Base/);
 assert.match(source, /forceOwned\?"Owned base override deleted":"Orphaned base deleted"/);
+assert.match(source, /function requireSqlBigint\(value, name, min = 0n, max = 9223372036854775807n\)/);
+assert.match(source, /const actorId = requireSqlBigint\(payload\.actorId, "actor_id", 0n\)/);
+assert.match(source, /const actorId=String\(row\.actorId\|\|""\)\.trim\(\);const validActorId=\/\^\\d\+\$\/\.test\(actorId\);/);
+assert.match(source, /const exactActorId=String\(actorId\|\|""\)\.trim\(\);/);
+assert.match(source, /body:JSON\.stringify\(\{actorId:exactActorId,confirmed:true,forceOwned/);
+assert.doesNotMatch(source, /const actorId=Number\(row\.actorId\)\|\|0/);
+assert.match(source, /appendAdminAudit\("base_cleanup_delete_requested"/);
+assert.match(source, /appendAdminAudit\("base_cleanup_delete_failed", \{ actorId, error: error\.message/);
 
 console.log("Base cleanup override safety test passed.");

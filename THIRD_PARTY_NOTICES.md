@@ -2,18 +2,16 @@
 
 AlphaNine Dune Suite includes third-party libraries under their respective licenses.
 
-The Suite-native market automator contains no IceHunter market source code, market-bot binaries, or item-data bundles.
+## Historical Market Bot attribution
 
-## Dune-Admin
+Historical Suite releases contained Market Bot deployment YAML, item-data, and binary assets with lineage to the public IceHunter `dune-awakening-truenas` Market Bot and Dune-Admin projects by Ryan Wilson:
 
-Portions of the Suite's administration workflow were adapted from Dune-Admin and remain available under its MIT license. This notice is retained as required by that license.
+https://github.com/Icehunter/dune-awakening-truenas
 
-MIT License
+Those historical Market Bot assets were removed before the current persistent Market Bot implementation and are not included in AlphaNine Dune Suite 1.0.71.
 
-Copyright (c) 2026 Ryan Wilson
+## Dune-Admin attribution
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Portions of the Suite's administration workflow were adapted with reference to Dune-Admin by Ryan Wilson. The accessible upstream repository does not currently provide a root license file or other license grant that was independently documented during the 1.0.71 provenance audit.
 
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+This notice preserves factual attribution only; it does not assert an undocumented license.

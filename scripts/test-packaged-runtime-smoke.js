@@ -59,6 +59,31 @@ const packagedSchedulerPayload = packagedSchedulerInstall.match(/printf %s '([^'
 assert(packagedSchedulerPayload, "Packaged scheduler installer payload was not found.");
 const packagedSchedulerRuntime = zlib.gunzipSync(Buffer.from(packagedSchedulerPayload, "base64")).toString("utf8");
 assert.equal(packagedSchedulerRuntime.includes("\r"), false, "Packaged scheduler payload still contains Windows CRLF line endings.");
+const packagedMarketBot = require(path.join(extracted, "lib", "market-bot.js"));
+const packagedMarketBotBinaryPath = path.join(extracted, "assets", "market-bot", "linux-amd64", "alphanine-market-bot");
+assert(fs.existsSync(packagedMarketBotBinaryPath), "Packaged Linux/amd64 Market Bot binary is missing.");
+const packagedMarketBotBinary = fs.readFileSync(packagedMarketBotBinaryPath);
+assert.equal(packagedMarketBotBinary.subarray(0, 4).toString("hex"), "7f454c46", "Packaged Market Bot is not an ELF binary.");
+assert.equal(packagedMarketBotBinary[4], 2, "Packaged Market Bot is not ELF64.");
+assert.equal(packagedMarketBotBinary.readUInt16LE(18), 62, "Packaged Market Bot is not amd64.");
+const packagedMarketBotInstall = packagedMarketBot.buildInstallCommand({
+  config: {
+    schemaVersion: 1,
+    battlegroup: "abc",
+    namespace: "funcom-seabass-abc",
+    dbPod: "database-0",
+    dbService: "database",
+    items: []
+  },
+  binary: packagedMarketBotBinary,
+  appVersion: "packaged-smoke"
+});
+assert(packagedMarketBotInstall.includes("rc-update add alphanine-market-bot default"), "Packaged Market Bot does not register its OpenRC service.");
+assert(packagedMarketBotInstall.includes("' migrate"), "Packaged Market Bot installer does not initialize strict ownership metadata.");
+assert(packagedMarketBotInstall.includes("timeout -k 2 12 rc-service alphanine-market-bot stop"), "Packaged Market Bot installer cannot recover a hung prior daemon.");
+assert(packagedMarketBotInstall.includes('readlink -f "/proc/$market_bot_pid/exe"'), "Packaged Market Bot installer does not verify the recorded service PID.");
+assert(packagedServerSource.includes('"/api/market-bot/prepare"'), "Packaged UI/API is missing staged Market Bot activation.");
+assert(packagedServerSource.includes("Player listings are never changed."), "Packaged Market Bot safety warning is missing.");
 assert(
   /loadEnvironment\(\);\s*await startReceiverIfNeeded\(\);\s*await startServer\(\);/.test(packagedDesktopSource),
   "Packaged desktop boot does not start the receiver before the Suite backend."

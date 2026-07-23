@@ -1,6 +1,7 @@
 node_modules/
 .npm-cache/
 installer-output/
+installer-output-*/
 installer-output-stability/
 dist/
 build/

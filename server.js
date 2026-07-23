@@ -18,6 +18,17 @@ const { cleanUpdateLine, parseServerUpdateMetadata, classifyServerUpdate, server
 const { createBlueprintService } = require("./lib/blueprints");
 const { createDatabaseBrowser } = require("./lib/database-browser");
 const { createMarketAutomator } = require("./lib/market-automator");
+const {
+  createMarketBotStore,
+  normalizeConfig: normalizeMarketBotConfig,
+  buildItemPolicies: buildMarketBotItemPolicies,
+  runtimeConfig: buildMarketBotRuntimeConfig,
+  activationFingerprint: marketBotActivationFingerprint,
+  buildInstallCommand: buildMarketBotInstallCommand,
+  buildStatusCommand: buildMarketBotStatusCommand,
+  buildActionCommand: buildMarketBotActionCommand,
+  parseJsonOutput: parseMarketBotJson
+} = require("./lib/market-bot");
 const { createItemCatalogProvider, isValidTemplateId, rawFallback } = require("./lib/item-catalog-provider");
 const { createItemServerDiscovery } = require("./lib/item-server-discovery");
 const { createZipArchive } = require("./lib/zip-archive");
@@ -109,6 +120,9 @@ const DATA_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "data") : path.join(__dirn
 const OPERATION_HISTORY_PATH = path.join(DATA_DIR, "operations.json");
 const SCHEDULER_CONFIG_PATH = path.join(DATA_DIR, "vm-scheduler.json");
 const SCHEDULER_SCRIPT_PATH = packagedAssetPath("assets", "scheduler", "alphanine-scheduler.sh");
+const MARKET_BOT_CONFIG_PATH = path.join(DATA_DIR, "market-bot.json");
+const MARKET_BOT_BINARY_PATH = packagedAssetPath("assets", "market-bot", "linux-amd64", "alphanine-market-bot");
+const marketBotStore = createMarketBotStore({ configPath: MARKET_BOT_CONFIG_PATH, dataDir: DATA_DIR });
 const operationRegistry = new OperationRegistry(OPERATION_HISTORY_PATH, { maxHistory: 100 });
 const DUNE_SERVER_STEAM_APP_ID = 4754530;
 const SERVER_UPDATE_CHECK_TTL_MS = 10 * 60 * 1000;
@@ -2673,7 +2687,7 @@ async function vmAction(action) {
     appendVmAudit(action, result);
     return result;
   }
-  const command = action === "start" ? "Start-VM" : action === "stop" ? "Stop-VM" : "Restart-VM";
+  const command = action === "start" ? "Start-VM" : action === "stop" ? "Stop-VM" : "Restart-VM -Force";
   const script = `
     try {
       ${command} -Name '${psSingleQuote(vmName)}' -ErrorAction Stop
@@ -3444,6 +3458,297 @@ function startVmSchedulerAction(action) {
     }
   });
   return operationRegistry.public(operation);
+}
+
+function marketBotCatalog() {
+  return gearCatalog()
+    .filter((item) => item?.id && item.spawnable !== false && !isTechKnowledgeItem(item) && !isRecipeSchematicItem(item));
+}
+
+function localMarketBotConfig() {
+  try { return marketBotStore.load(); }
+  catch (error) {
+    return { ...normalizeMarketBotConfig({}), loadError: error.message };
+  }
+}
+
+function publicMarketBotLocal(config = localMarketBotConfig()) {
+  return {
+    schemaVersion: config.schemaVersion,
+    enabled: config.enabled,
+    paused: config.paused,
+    activated: config.activated,
+    economyStyle: config.economyStyle,
+    intervalMinutes: config.intervalMinutes,
+    expiryDays: config.expiryDays,
+    safety: config.safety,
+    overrideCount: Object.keys(config.overrides || {}).length,
+    legacyMigration: {
+      detected: config.legacyMigration?.detected === true,
+      convertedAt: config.legacyMigration?.convertedAt || "",
+      activatedAt: config.legacyMigration?.activatedAt || "",
+      legacyDisabledAt: config.legacyMigration?.legacyDisabledAt || "",
+      activationFingerprint: config.legacyMigration?.activationFingerprint || ""
+    },
+    updatedAt: config.updatedAt || "",
+    loadError: config.loadError || ""
+  };
+}
+
+async function marketBotTarget() {
+  const target = await databaseRuntimeTarget();
+  if (!target?.namespace || !target?.name || !target?.dbPod || !target?.dbSvc) {
+    throw new Error("Waiting for Exchange: the selected Battlegroup database target is incomplete.");
+  }
+  return target;
+}
+
+async function marketBotStatus() {
+  const localConfig = localMarketBotConfig();
+  const result = await sshCommand(buildMarketBotStatusCommand(), 45000, { maxBuffer: 1024 * 1024 * 8 });
+  if (!result.ok) {
+    return {
+      ok: false,
+      installed: false,
+      reachable: false,
+      status: "Waiting for Exchange",
+      message: result.error || result.stderr || "The Market Bot VM is unavailable.",
+      localConfig: publicMarketBotLocal(localConfig),
+      expectedVersion: APP_VERSION
+    };
+  }
+  try {
+    const remote = parseMarketBotJson(result.stdout);
+    const state = remote.state || {};
+    return {
+      ...remote,
+      reachable: true,
+      status: state.status || remote.status || (localConfig.paused ? "Paused" : "Running"),
+      message: state.message || remote.message || "",
+      lastCycle: state.lastCycle || null,
+      lastRunAt: state.lastRunAt || "",
+      nextRunAt: state.nextRunAt || "",
+      installedVersion: remote.config?.runtimeVersion || remote.version || "",
+      expectedVersion: APP_VERSION,
+      updateRequired: Boolean(remote.installed && String(remote.config?.runtimeVersion || "") !== String(APP_VERSION)),
+      localConfig: publicMarketBotLocal(localConfig)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      installed: false,
+      reachable: true,
+      status: "Error",
+      message: error.message,
+      localConfig: publicMarketBotLocal(localConfig),
+      expectedVersion: APP_VERSION
+    };
+  }
+}
+
+async function installMarketBot(configInput, options = {}) {
+  const config = normalizeMarketBotConfig(configInput);
+  const target = await marketBotTarget();
+  if (!fs.existsSync(MARKET_BOT_BINARY_PATH)) {
+    throw new Error("Bundled Linux/amd64 Market Bot is missing from this Suite build.");
+  }
+  const binary = fs.readFileSync(MARKET_BOT_BINARY_PATH);
+  const runtime = buildMarketBotRuntimeConfig(config, target, marketBotCatalog(), APP_VERSION);
+  const installerSource = `#!/bin/sh\n${buildMarketBotInstallCommand({ config: runtime, binary, appVersion: APP_VERSION })}\n`;
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const installerPath = path.join(DATA_DIR, `market-bot-install-${process.pid}-${Date.now()}.sh`);
+  fs.writeFileSync(installerPath, installerSource, { encoding: "utf8", mode: 0o600 });
+  let result;
+  try {
+    result = await sshCommand("bash -s", 10 * 60 * 1000, { maxBuffer: 1024 * 1024 * 12, inputPath: installerPath });
+  } finally {
+    try { fs.rmSync(installerPath, { force: true }); } catch {}
+  }
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot VM installation failed.");
+  const remote = parseMarketBotJson(result.stdout);
+  if (remote.ok === false) throw new Error(remote.error || remote.message || "Market Bot VM self-test failed.");
+  const saved = options.save === false ? config : marketBotStore.save(config);
+  appendAdminAudit("market_bot_installed", {
+    version: APP_VERSION,
+    battlegroup: target.name,
+    namespace: target.namespace,
+    activated: saved.activated,
+    paused: saved.paused,
+    itemCount: runtime.items.length,
+    binaryBytes: binary.length
+  });
+  return { ok: true, installed: true, verified: true, config: publicMarketBotLocal(saved), runtime, remote };
+}
+
+async function prepareMarketBot(input = {}) {
+  const current = localMarketBotConfig();
+  if (current.activated) throw new Error("Market Bot is already activated. Use Preview Market to inspect the current plan.");
+  const staged = normalizeMarketBotConfig({
+    ...current,
+    economyStyle: input.economyStyle || current.economyStyle,
+    enabled: false,
+    paused: true,
+    activated: false
+  });
+  const installed = await installMarketBot(staged);
+  const fingerprint = marketBotActivationFingerprint(installed.runtime);
+  staged.legacyMigration.activationFingerprint = fingerprint;
+  marketBotStore.save(staged);
+  const previewRaw = await sshCommand(buildMarketBotActionCommand("preview", { cycleId: `activation-preview-${fingerprint.slice(0, 24)}` }), 120000, { maxBuffer: 1024 * 1024 * 32 });
+  if (!previewRaw.ok) throw new Error(previewRaw.stderr || previewRaw.stdout || previewRaw.error || "Market preview failed.");
+  const preview = parseMarketBotJson(previewRaw.stdout);
+  appendAdminAudit("market_bot_activation_preview", {
+    fingerprint,
+    economyStyle: staged.economyStyle,
+    totals: preview.result?.totals || null,
+    itemCount: installed.runtime.items.length
+  });
+  return {
+    ok: true,
+    activationRequired: true,
+    fingerprint,
+    warning: "Active listings will remain unchanged. Player listings will never be modified.",
+    preview: preview.result || preview,
+    status: await marketBotStatus()
+  };
+}
+
+async function activateMarketBot(input = {}) {
+  const current = localMarketBotConfig();
+  const fingerprint = String(input.fingerprint || "").trim();
+  if (!fingerprint || fingerprint !== current.legacyMigration?.activationFingerprint) {
+    throw new Error("Activation preview is missing or stale. Preview Market again before enabling the bot.");
+  }
+  if (input.confirmed !== true) throw new Error("Explicit confirmation is required before activating Market Bot.");
+  const target = await marketBotTarget();
+  const runtime = buildMarketBotRuntimeConfig(current, target, marketBotCatalog(), APP_VERSION);
+  if (marketBotActivationFingerprint(runtime) !== fingerprint) {
+    throw new Error("Market configuration changed after preview. Generate a fresh preview before activation.");
+  }
+  const legacyRuntime = await marketAutomator.overview();
+  if (legacyRuntime.status?.running) {
+    throw new Error("Legacy Market Automator is finishing a cycle. Wait for it to stop, then activate Market Bot.");
+  }
+  marketBotStore.disableLegacy(current);
+  marketAutomator.save({ ...marketAutomator.getConfig(), enabled: false });
+  const active = normalizeMarketBotConfig({ ...current, enabled: true, paused: false, activated: true });
+  active.legacyMigration.activatedAt = new Date().toISOString();
+  const installed = await installMarketBot(active);
+  appendAdminAudit("market_bot_activated", {
+    fingerprint,
+    economyStyle: active.economyStyle,
+    legacyDisabledAt: active.legacyMigration.legacyDisabledAt || "",
+    itemCount: installed.runtime.items.length
+  });
+  return { ...installed, status: await marketBotStatus() };
+}
+
+async function previewMarketBot(input = {}) {
+  let status = await marketBotStatus();
+  const current = localMarketBotConfig();
+  const requestedStyle = input.economyStyle || current.economyStyle;
+  if (!status.installed || status.updateRequired || requestedStyle !== current.economyStyle) {
+    const staged = normalizeMarketBotConfig({ ...current, economyStyle: requestedStyle });
+    await installMarketBot(staged);
+    status = await marketBotStatus();
+  }
+  const cycleId = String(input.cycleId || `preview-${crypto.randomUUID()}`).slice(0, 160);
+  const result = await sshCommand(buildMarketBotActionCommand("preview", { cycleId }), 120000, { maxBuffer: 1024 * 1024 * 32 });
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market preview failed.");
+  const parsed = parseMarketBotJson(result.stdout);
+  appendAdminAudit("market_bot_previewed", { cycleId, totals: parsed.result?.totals || null });
+  return { ...parsed, preview: parsed.result || parsed, status };
+}
+
+async function setMarketBotPaused(paused) {
+  const current = localMarketBotConfig();
+  if (!current.activated) throw new Error("Market Bot has not been activated.");
+  const next = normalizeMarketBotConfig({ ...current, enabled: true, paused: paused === true });
+  await installMarketBot(next);
+  appendAdminAudit(paused ? "market_bot_paused" : "market_bot_resumed", {
+    message: paused ? "Active listings left unchanged." : "Target-stock reconciliation resumed."
+  });
+  return marketBotStatus();
+}
+
+function saveMarketBotOverrides(input = {}) {
+  const current = localMarketBotConfig();
+  const changes = Array.isArray(input.items) ? input.items : [];
+  const allowed = new Set(marketBotCatalog().map((item) => item.id));
+  const overrides = { ...(current.overrides || {}) };
+  for (const change of changes) {
+    const id = String(change?.id || "").trim();
+    if (!allowed.has(id)) throw new Error(`Unknown market catalog item: ${id}`);
+    if (change.reset === true) {
+      delete overrides[id];
+      continue;
+    }
+    const catalogItem = marketBotCatalog().find((item) => item.id === id);
+    const knownStackLimit = Number(catalogItem?.maxStack || 0);
+    const requestedStack = requireInteger(change.stackSize, "stack size", 1, 50000);
+    if (Number.isInteger(knownStackLimit) && knownStackLimit > 0 && requestedStack > knownStackLimit) {
+      throw new Error(`Stack size for ${id} cannot exceed its catalog maximum of ${knownStackLimit}.`);
+    }
+    overrides[id] = {
+      enabled: change.enabled !== false,
+      unitPrice: requireInteger(change.unitPrice, "unit price", 1, 999999999),
+      stackSize: requestedStack,
+      targetListings: requireInteger(change.targetListings, "target listing count", 0, 100)
+    };
+  }
+  const next = marketBotStore.save({ ...current, overrides });
+  appendAdminAudit("market_bot_item_overrides_saved", { changedItems: changes.map((item) => String(item.id || "")).filter(Boolean) });
+  return next;
+}
+
+async function updateMarketBotOverrides(input = {}) {
+  const next = saveMarketBotOverrides(input);
+  const status = await marketBotStatus();
+  if (status.installed) await installMarketBot(next);
+  return { ok: true, config: publicMarketBotLocal(next), items: buildMarketBotItemPolicies(marketBotCatalog(), next), status: await marketBotStatus() };
+}
+
+async function restockMarketBot(input = {}) {
+  const cycleId = String(input.cycleId || `manual-${crypto.randomUUID()}`).slice(0, 160);
+  const result = await sshCommand(buildMarketBotActionCommand("restock", { cycleId }), 180000, { maxBuffer: 1024 * 1024 * 32 });
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market restock failed.");
+  const parsed = parseMarketBotJson(result.stdout);
+  appendAdminAudit("market_bot_restock_completed", { cycleId, result: parsed.result || null });
+  return { ...parsed, status: await marketBotStatus() };
+}
+
+async function rollbackMarketBot() {
+  const current = localMarketBotConfig();
+  if (current.activated) {
+    await setMarketBotPaused(true);
+  }
+  const restored = marketBotStore.restoreLegacy(current);
+  const next = marketBotStore.save({
+    ...current,
+    enabled: false,
+    paused: true,
+    activated: false,
+    legacyMigration: { ...current.legacyMigration, activationFingerprint: "" }
+  });
+  await installMarketBot(next);
+  appendAdminAudit("market_bot_rolled_back", {
+    legacyRestored: true,
+    legacyEnabled: restored.enabled === true,
+    note: "Legacy configuration restored disabled to prevent concurrent engines."
+  });
+  return { ok: true, config: publicMarketBotLocal(next), legacy: { restored: true, enabled: restored.enabled === true }, status: await marketBotStatus() };
+}
+
+async function ensureMarketBotInstalled() {
+  const config = localMarketBotConfig();
+  if (!config.activated) return { ok: true, skipped: "not activated" };
+  if (!config.legacyMigration?.legacyDisabledAt) {
+    marketBotStore.disableLegacy(config);
+    marketBotStore.save(config);
+  }
+  const status = await marketBotStatus();
+  if (!status.installed || status.updateRequired) return installMarketBot(config);
+  return status;
 }
 
 function parseMetricPair(line) {
@@ -4441,9 +4746,22 @@ function recipeDisplayName(recipeId) {
 }
 
 function isRecipeSchematicItem(item = {}) {
-  if (String(item.subtype || "").trim().toLowerCase() === "unique schematic") return false;
-  if (String(item.source || "").trim().toLowerCase() === "manager-catalog") return false;
-  return isSchematicItem(item) && schematicRecipeIdCandidates(item.id).length > 0;
+  const id = String(item.id || "").trim();
+  const source = String(item.source || "").trim().toLowerCase();
+  return /^recipe:/i.test(id) || source === "live db known recipes";
+}
+
+function dynamicGiveItemsWithoutSpawnableSchematicDuplicates(dynamicItems = [], catalogItems = []) {
+  const spawnableRecipeIds = new Set();
+  for (const item of catalogItems) {
+    if (!isSchematicItem(item) || isTechKnowledgeItem(item) || isRecipeSchematicItem(item) || item.spawnable === false) continue;
+    for (const candidate of schematicRecipeIdCandidates(item.id)) spawnableRecipeIds.add(candidate.toLowerCase());
+  }
+  return dynamicItems.filter((item) => {
+    if (!isRecipeSchematicItem(item)) return true;
+    const recipeId = String(item.recipeId || item.id || "").replace(/^recipe:/i, "").trim().toLowerCase();
+    return !recipeId || !spawnableRecipeIds.has(recipeId);
+  });
 }
 
 function techKnowledgeKeyFromTemplate(template) {
@@ -4781,6 +5099,11 @@ async function refreshServerDiscoveredItemCatalog({ force = false } = {}) {
 function scheduleServerDiscoveredItemCatalog() {
   if (ITEM_SERVER_DISCOVERY_DISABLED) return;
   refreshServerDiscoveredItemCatalog().catch(() => {});
+}
+const startupMarketBotConfig = localMarketBotConfig();
+if (startupMarketBotConfig.activated) {
+  marketBotStore.disableLegacy(startupMarketBotConfig);
+  marketBotStore.save(startupMarketBotConfig);
 }
 const marketAutomator = createMarketAutomator({
   dataDir: DATA_DIR,
@@ -11864,17 +12187,28 @@ function normalizeMarketPricingAudit(value, template, finalPrice) {
 async function marketListingGameNow() {
   try {
     const sql = `
-      select coalesce(max(expiration_time)::text, '')
-      from dune.dune_exchange_orders
-      where is_npc_order = false
-        and item_id is not null
-        and expiration_time is not null
-        and expiration_time > 0
-        and expiration_time < 1000000000
+      with database_clock as (
+        select floor(extract(epoch from clock_timestamp()))::bigint as database_now
+      ),
+      player_clock as (
+        select max(expiration_time) - ${14 * 24 * 3600} as inferred_now
+        from dune.dune_exchange_orders
+        where is_npc_order = false
+          and item_id is not null
+          and expiration_time between ${14 * 24 * 3600 + 1} and 999999999
+      )
+      select (
+        case
+          when p.inferred_now between d.database_now - ${30 * 24 * 3600} and d.database_now + ${30 * 24 * 3600}
+            then p.inferred_now
+          else d.database_now
+        end
+      )::text
+      from player_clock p
+      cross join database_clock d
     `;
     const row = parseDbRows(await dbQuery(sql, 12000), ["expirationTime"])[0] || {};
-    const ref = Number(row.expirationTime || 0) || 0;
-    return ref > 14 * 24 * 3600 ? ref - 14 * 24 * 3600 : 0;
+    return Number(row.expirationTime || 0) || 0;
   } catch {
     return 0;
   }
@@ -11886,59 +12220,18 @@ async function marketListingExpiryTime(expiryDays) {
 }
 
 async function cleanupExpiredMarketListings(options = {}) {
-  const started = Date.now();
-  const gameNow = Number.isFinite(Number(options.gameNow)) ? Number(options.gameNow) : await marketListingGameNow();
-  const expiryClause = gameNow > 0
-    ? `(o.expiration_time is null or o.expiration_time <= 0 or o.expiration_time <= ${Math.floor(gameNow)})`
-    : `(o.expiration_time is null or o.expiration_time <= 0)`;
-  const sql = `
-    with target as materialized (
-      select
-        o.id as order_id,
-        o.item_id,
-        o.template_id,
-        o.expiration_time
-      from dune.dune_exchange_orders o
-      left join dune.actors a on a.id = o.owner_id
-      where (o.is_npc_order = true or a.class = 'AlphaNineMarket')
-        and ${expiryClause}
-      limit 1000
-    ),
-    deleted_sell as (
-      delete from dune.dune_exchange_sell_orders
-      where order_id in (select order_id from target)
-      returning order_id
-    ),
-    deleted_orders as (
-      delete from dune.dune_exchange_orders
-      where id in (select order_id from target)
-      returning id
-    ),
-    deleted_items as (
-      delete from dune.items
-      where id in (select item_id from target where item_id is not null)
-      returning id
-    )
-    select
-      coalesce((select count(*)::text from target), '0'),
-      coalesce((select count(*)::text from deleted_orders), '0'),
-      coalesce((select count(*)::text from deleted_items), '0'),
-      coalesce((select string_agg(order_id::text, ',' order by order_id) from target), '')
-  `;
-  const row = parseDbRows(await dbQuery(sql, 30000), ["matched", "removedOrders", "removedItems", "orderIds"])[0] || {};
-  const result = {
+  return {
     ok: true,
-    status: "cleanup-complete",
+    status: "delegated-to-market-bot",
+    skipped: true,
     source: String(options.source || "manual"),
-    gameNow: Math.floor(Math.max(0, gameNow || 0)),
-    matched: Number(row.matched || 0) || 0,
-    removedOrders: Number(row.removedOrders || 0) || 0,
-    removedItems: Number(row.removedItems || 0) || 0,
-    orderIds: row.orderIds ? String(row.orderIds).split(",").filter(Boolean).slice(0, 40) : [],
-    durationMs: Date.now() - started
+    matched: 0,
+    removedOrders: 0,
+    removedItems: 0,
+    orderIds: [],
+    durationMs: 0,
+    message: "Suite-side broad cleanup is disabled. The persistent Market Bot cleans only rows in its strict ownership table."
   };
-  if (result.removedOrders > 0) appendAdminAudit("market_expired_listings_cleaned", result);
-  return result;
 }
 
 let marketExpiredCleanupRunning = false;
@@ -12088,6 +12381,8 @@ async function marketListings(payload = {}) {
 }
 
 async function buyMarketListingAsAdmin(orderIdValue) {
+  throw new Error("Legacy automated buying is disabled because Market Bot never modifies player listings.");
+  /*
   const started = Date.now();
   const orderId = requireInteger(orderIdValue, "order id", 1, 999999999999);
   const expiryTime = await marketListingExpiryTime(14);
@@ -12236,9 +12531,12 @@ async function buyMarketListingAsAdmin(orderIdValue) {
   };
   appendAdminAudit("market_listing_bought_by_admin", result);
   return result;
+  */
 }
 
 async function removeMarketListingAsAdmin(orderIdValue) {
+  throw new Error("Legacy arbitrary listing removal is disabled. Market Bot removes only expired or invalid listings in its ownership table.");
+  /*
   const started = Date.now();
   const orderId = requireInteger(orderIdValue, "order id", 1, 999999999999);
   const sql = `
@@ -12290,6 +12588,7 @@ async function removeMarketListingAsAdmin(orderIdValue) {
   };
   appendAdminAudit("market_listing_removed_by_admin", result);
   return result;
+  */
 }
 
 async function postMarketListing(payload) {
@@ -16764,6 +17063,62 @@ function appPage() {
 
     <section id="market" class="view">
       <div class="grid four">
+        <div class="panel pad metric-tile"><div class="label">Market Bot</div><div id="marketBotState" class="value">Loading...</div><div id="marketBotMessage" class="subtle">Checking the persistent VM runtime.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Last Run</div><div id="marketBotLastRun" class="value">--</div><div id="marketBotLastResult" class="subtle">No completed cycle loaded.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Cycle Result</div><div id="marketBotCycleResult" class="value">--</div><div id="marketBotCycleDetail" class="subtle">Created / removed / errors.</div></div>
+        <div class="panel pad metric-tile"><div class="label">Next Run / Version</div><div id="marketBotNextRun" class="value">--</div><div id="marketBotVersion" class="subtle">Version not checked.</div></div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div><div class="label">Persistent Market Bot</div><div class="subtle">Runs inside the Dune VM and reconciles target stock even when Suite is closed.</div></div>
+          <button type="button" onclick="refreshMarketBot()">Refresh</button>
+        </div>
+        <div class="field-grid mt">
+          <label>Economy Style<select id="marketBotEconomyStyle"><option>Affordable</option><option>Balanced</option><option selected>Expensive</option></select></label>
+        </div>
+        <div class="action-row mt">
+          <button id="marketBotEnableButton" type="button" class="primary" onclick="enableMarketBot()">Enable Market Bot</button>
+          <button id="marketBotPreviewButton" type="button" onclick="previewMarketBot()">Preview Market</button>
+          <button id="marketBotRestockButton" type="button" onclick="restockMarketBot()">Restock Now</button>
+          <button id="marketBotPauseButton" type="button" onclick="toggleMarketBotPause()">Pause Bot</button>
+          <button type="button" onclick="toggleMarketBotCustomize()">Customize Items</button>
+        </div>
+        <div id="marketBotActionResult" class="empty mt">Market Bot is disabled until previewed and explicitly enabled.</div>
+        <div class="warning mt">Active listings remain unchanged: Market Bot does not reprice, remove, or repost them. Player listings are never changed.</div>
+      </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div><div class="label">Exact Market Preview</div><div class="subtle">The VM bot’s production planner returns every enabled catalog item; display filters do not truncate the plan.</div></div>
+          <button type="button" onclick="downloadMarketBotPreviewCsv()">Export CSV</button>
+        </div>
+        <div class="give-catalog-filters mt">
+          <label>Search<input id="marketBotPreviewSearch" placeholder="Search item name or template" oninput="renderMarketBotPreview()"></label>
+          <div class="give-filter-row">
+            <label>Category<select id="marketBotPreviewCategory" onchange="renderMarketBotPreview()"><option value="">All categories</option></select></label>
+            <label>Tier<select id="marketBotPreviewTier" onchange="renderMarketBotPreview()"><option value="">All tiers</option></select></label>
+          </div>
+        </div>
+        <div id="marketBotPreviewTotals" class="detail-list mt"><div class="empty">Run Preview Market to load the exact plan.</div></div>
+        <div id="marketBotPreviewRows" class="market-preview-scroll mt"><div class="empty">No preview loaded.</div></div>
+      </div>
+      <div id="marketBotCustomizePanel" class="panel pad mt hidden">
+        <div class="panel-head">
+          <div><div class="label">Customize Items</div><div class="subtle">Only enable/disable, unit price, stack size, and target listing count can be changed.</div></div>
+          <div class="action-row"><button type="button" onclick="resetVisibleMarketBotItems()">Reset Visible</button><button type="button" class="primary" onclick="saveMarketBotItems()">Save Items</button></div>
+        </div>
+        <label class="mt">Search Items<input id="marketBotCustomizeSearch" placeholder="Search catalog items" oninput="renderMarketBotCustomize()"></label>
+        <div id="marketBotCustomizeRows" class="market-preview-scroll mt"><div class="empty">Open Customize Items to load catalog policies.</div></div>
+      </div>
+      <details class="panel pad mt">
+        <summary>Legacy Market Automator migration</summary>
+        <div id="marketBotMigration" class="subtle mt">Checking for a preserved legacy configuration.</div>
+        <div class="warning mt">The Legacy Market Automator and Market Bot cannot run concurrently. Rollback restores the preserved legacy configuration disabled for manual review.</div>
+        <div class="action-row mt"><button type="button" onclick="rollbackMarketBot()">Rollback to Legacy Configuration</button></div>
+      </details>
+    </section>
+
+    <section id="legacy-market" class="view hidden" aria-label="Legacy Market Automator">
+      <div class="grid four">
         <div class="panel pad metric-tile"><div class="label">Automation</div><div id="marketAutomatorState" class="value">Loading...</div><div class="subtle">Runs inside Suite; no external bot.</div></div>
         <div class="panel pad metric-tile"><div class="label">NPC Listings</div><div id="marketAutomatorListings" class="value">--</div><div id="marketAutomatorLastList" class="subtle">No listing cycle yet.</div></div>
         <div class="panel pad metric-tile"><div class="label">Purchases</div><div id="marketAutomatorPurchases" class="value">--</div><div id="marketAutomatorLastBuy" class="subtle">No buyer cycle yet.</div></div>
@@ -16771,7 +17126,7 @@ function appPage() {
       </div>
       <div class="layout-2 mt market-automator-layout">
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">AlphaNine Market Automator</div><div class="subtle">Original Suite-native scheduler using your selected template IDs and the existing live-market controls.</div></div><button onclick="refreshMarketAutomator()">Refresh</button></div>
+          <div class="panel-head"><div><div class="label">Legacy Market Automator</div><div class="subtle">Preserved only for migration and rollback validation. It cannot run concurrently with Market Bot.</div></div><button onclick="refreshMarketAutomator()">Refresh</button></div>
           <div class="field-grid mt">
             <label class="check-row"><input id="marketAutomatorEnabled" type="checkbox">Automation enabled</label>
             <label>Target NPC listings<input id="marketAutomatorTarget" type="number" min="0" max="500" value="40"></label>
@@ -18032,7 +18387,7 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){startMarketPosting();refreshMarketAutomator();refreshMarketAutomatorLogs();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market")refreshMarketBot();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
@@ -18380,6 +18735,28 @@ function renderActivity(){const html=activity.length?activity.map(a=>'<div class
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 function csrfCookie(){const match=document.cookie.match(/(?:^|;\s*)alphanine_csrf=([^;]+)/);return match?decodeURIComponent(match[1]):"";}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||30000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;delete request._reauthTried;const method=String(request.method||"GET").toUpperCase();if(!["GET","HEAD","OPTIONS"].includes(method)){request.headers={...(request.headers||{}),"X-CSRF-Token":csrfCookie()};}r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(r.status===428&&location.protocol==="https:"&&!options._reauthTried){const password=window.prompt("Confirm the Remote Owner password to continue:");if(password===null)throw new Error("Owner confirmation cancelled.");const totp=window.prompt("Authenticator code, or leave blank if 2FA is disabled:")||"";const confirmResponse=await fetch("/api/auth/reauth",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfCookie()},body:JSON.stringify({password,totp})});const confirmData=await confirmResponse.json().catch(()=>({}));if(!confirmResponse.ok)throw new Error(confirmData.error||"Owner confirmation failed.");return await getJson(url,{...options,_reauthTried:true});}if(r.status===401&&location.protocol==="https:"){location.href="/login";throw new Error("Remote session expired. Sign in again.");}if(!r.ok)throw new Error(d.error||d.message||t||("Request failed for "+url+" with HTTP "+r.status));return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
+let marketBotStateData=null,marketBotPreviewData=null,marketBotItems=[],marketBotItemChanges=new Map();
+function marketBotDate(value){if(!value)return"--";const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString();}
+function marketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"0";}
+function marketBotStatusClass(value){const status=String(value||"").toLowerCase();return status==="running"?"ok":status==="error"?"bad":"warn";}
+function renderMarketBotStatus(data={}){marketBotStateData=data;const local=data.localConfig||data.config||{},cycle=data.lastCycle||{},totals=cycle.totals||{};const status=data.status||(!data.installed?"Not Installed":local.paused?"Paused":"Running");tone("marketBotState",status);setText("marketBotMessage",data.message||(!data.installed?"Enable Market Bot to install it in the VM.":"Persistent VM runtime reachable."));setText("marketBotLastRun",marketBotDate(data.lastRunAt));setText("marketBotLastResult",cycle.message||"No completed cycle loaded.");setText("marketBotCycleResult",marketBotNumber(cycle.created??totals.created??totals.createNow)+" / "+marketBotNumber(cycle.removedExpired)+" / "+(status==="Error"?"1":"0"));setText("marketBotCycleDetail","Created / expired bot-owned removed / errors");setText("marketBotNextRun",marketBotDate(data.nextRunAt));setText("marketBotVersion",(data.installedVersion||"Not installed")+" / expected "+(data.expectedVersion||"--")+(data.updateRequired?" / update required":""));setValue("marketBotEconomyStyle",local.economyStyle||"Expensive");setText("marketBotPauseButton",local.paused?"Resume Bot":"Pause Bot");const active=local.activated===true;const pauseButton=document.getElementById("marketBotPauseButton"),restockButton=document.getElementById("marketBotRestockButton");if(pauseButton)pauseButton.disabled=!active;if(restockButton)restockButton.disabled=!active||local.paused===true;setText("marketBotEnableButton",active?"Market Bot Enabled":"Enable Market Bot");const enableButton=document.getElementById("marketBotEnableButton");if(enableButton)enableButton.disabled=active;const migration=local.legacyMigration||{};setText("marketBotMigration",migration.detected?("Legacy configuration preserved. Converted "+(migration.convertedAt||"--")+". "+(migration.legacyDisabledAt?"Legacy engine disabled "+migration.legacyDisabledAt+".":"Activation has not disabled the legacy engine yet.")):"No Legacy Market Automator configuration was detected.");}
+async function refreshMarketBot(){try{const data=await getJson("/api/market-bot",{timeoutMs:50000});renderMarketBotStatus(data);return data;}catch(error){renderMarketBotStatus({status:"Error",message:betterError(error),localConfig:marketBotStateData?.localConfig||{}});return null;}}
+function marketBotPreviewRows(){const rows=marketBotPreviewData?.items||[],query=(getValue("marketBotPreviewSearch")||"").trim().toLowerCase(),category=getValue("marketBotPreviewCategory"),tier=getValue("marketBotPreviewTier");return rows.filter(row=>(!query||[row.id,row.name,row.category].some(value=>String(value||"").toLowerCase().includes(query)))&&(!category||row.category===category)&&(!tier||String(row.tier||"")===tier));}
+function fillMarketBotPreviewFilters(){const rows=marketBotPreviewData?.items||[];for(const [id,key,label] of [["marketBotPreviewCategory","category","All categories"],["marketBotPreviewTier","tier","All tiers"]]){const select=document.getElementById(id);if(!select)continue;const current=select.value;const values=[...new Set(rows.map(row=>String(row[key]||"").trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">'+label+'</option>'+values.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");select.value=values.includes(current)?current:"";}}
+function renderMarketBotPreview(){const wrap=document.getElementById("marketBotPreviewRows"),totals=document.getElementById("marketBotPreviewTotals");if(!wrap||!totals)return;const all=marketBotPreviewData?.items||[],rows=marketBotPreviewRows(),summary=marketBotPreviewData?.totals||{},categories=marketBotPreviewData?.categories||[];const categoryText=categories.map(row=>row.category+": "+marketBotNumber(row.createNow)+" create / "+marketBotNumber(row.plannedValue)+" Solari").join(" · ");totals.innerHTML=marketBotPreviewData?'<div class="detail-row"><span class="subtle">All planned catalog items</span><strong>'+marketBotNumber(summary.catalogItems??all.length)+'</strong></div><div class="detail-row"><span class="subtle">Active / deficit / create this cycle</span><strong>'+marketBotNumber(summary.activeListings)+' / '+marketBotNumber(summary.totalDeficit)+' / '+marketBotNumber(summary.createNow??summary.created)+'</strong></div><div class="detail-row"><span class="subtle">Planned market value</span><strong>'+marketBotNumber(summary.marketValue)+' Solari</strong></div><div class="detail-row"><span class="subtle">Displayed after filters</span><strong>'+marketBotNumber(rows.length)+' of '+marketBotNumber(all.length)+'</strong></div>'+(categoryText?'<div class="detail-row"><span class="subtle">Category totals</span><strong>'+esc(categoryText)+'</strong></div>':''):'<div class="empty">Run Preview Market to load the exact plan.</div>';if(!rows.length){wrap.innerHTML='<div class="empty">No preview items match these display filters.</div>';return;}wrap.innerHTML='<table class="market-preview-table"><thead><tr><th>Item</th><th>Category / Tier</th><th>Unit Price</th><th>Stack</th><th>Target</th><th>Active</th><th>Deficit</th><th>Create Now</th><th>Value</th></tr></thead><tbody>'+rows.map(row=>'<tr><td><strong>'+esc(row.name||row.id)+'</strong><div class="subtle">'+esc(row.id)+'</div></td><td>'+esc(row.category||"Other")+'<div class="subtle">'+esc(row.tier||"--")+'</div></td><td>'+marketBotNumber(row.unitPrice)+'</td><td>'+marketBotNumber(row.stackSize)+'</td><td>'+marketBotNumber(row.targetListings)+'</td><td>'+marketBotNumber(row.activeListings)+'</td><td>'+marketBotNumber(row.deficit)+'</td><td><strong>'+marketBotNumber(row.createNow)+'</strong></td><td>'+marketBotNumber(row.plannedValue)+'</td></tr>').join("")+'</tbody></table>';}
+function useMarketBotPreview(data){marketBotPreviewData=data?.preview||data?.result||data||null;fillMarketBotPreviewFilters();renderMarketBotPreview();}
+async function previewMarketBot(){const button=document.getElementById("marketBotPreviewButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Running the production planner in the VM. No listings will be changed...");const data=await getJson("/api/market-bot/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive"}),timeoutMs:600000});useMarketBotPreview(data);setText("marketBotActionResult",(data.message||marketBotPreviewData?.message||"Preview ready.")+" "+(marketBotPreviewData?.warning||""));await refreshMarketBot();showToast("Exact market preview loaded","success");return data;}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
+async function enableMarketBot(){const button=document.getElementById("marketBotEnableButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Installing Market Bot paused and generating the activation preview...");const prepared=await getJson("/api/market-bot/prepare",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive"}),timeoutMs:600000});useMarketBotPreview(prepared.preview);const totals=marketBotPreviewData?.totals||{};const confirmed=await appConfirm("Enable Persistent Market Bot","Preview fingerprint: "+prepared.fingerprint+"\\n\\nItems: "+marketBotNumber(totals.catalogItems)+"\\nCreate this first cycle: "+marketBotNumber(totals.createNow)+"\\nPlanned value: "+marketBotNumber(totals.marketValue)+" Solari\\n\\nActive listings remain unchanged. Player listings are never modified.","Enable Market Bot","Cancel");if(!confirmed){setText("marketBotActionResult","Market Bot remains installed and paused. Activation was not confirmed.");await refreshMarketBot();return;}const activated=await getJson("/api/market-bot/activate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({fingerprint:prepared.fingerprint,confirmed:true}),timeoutMs:600000});renderMarketBotStatus(activated.status||activated);setText("marketBotActionResult","Market Bot is active in the VM. Legacy Market Automator is disabled and preserved for rollback.");showToast("Persistent Market Bot enabled","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=marketBotStateData?.localConfig?.activated===true;}}
+async function toggleMarketBotPause(){const paused=marketBotStateData?.localConfig?.paused===true,action=paused?"resume":"pause";try{const data=await getJson("/api/market-bot/"+action,{method:"POST",timeoutMs:600000});renderMarketBotStatus(data);setText("marketBotActionResult",paused?"Market Bot resumed.":"Market Bot paused; active listings were left unchanged.");showToast(paused?"Market Bot resumed":"Market Bot paused","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
+async function restockMarketBot(){if(!(await appConfirm("Restock Market Now","Run one capped target-stock reconciliation cycle in the VM? Existing active and player listings remain unchanged.","Restock Now","Cancel")))return;try{setText("marketBotActionResult","Restock cycle is acquiring the database lock...");const data=await getJson("/api/market-bot/restock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cycleId:"manual-"+Date.now()+"-"+Math.random().toString(16).slice(2)}),timeoutMs:600000});setText("marketBotActionResult",data.message||data.result?.message||"Restock complete.");renderMarketBotStatus(data.status||data);await previewMarketBot();showToast("Market restock completed","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
+function downloadMarketBotPreviewCsv(){const rows=marketBotPreviewData?.items||[],categories=marketBotPreviewData?.categories||[];if(!rows.length){showToast("Run Preview Market before exporting CSV.","warning");return;}const header=["Item ID","Name","Category","Tier","Unit Price","Stack Size","Target Listings","Active Listings","Deficit","Create Now","Planned Value"],categoryHeader=["Category","Items","Active Listings","Target Listings","Deficit","Create Now","Planned Value"],quote=value=>'"'+String(value??"").replaceAll('"','""')+'"';const itemLines=[header,...rows.map(row=>[row.id,row.name,row.category,row.tier,row.unitPrice,row.stackSize,row.targetListings,row.activeListings,row.deficit,row.createNow,row.plannedValue])],categoryLines=[categoryHeader,...categories.map(row=>[row.category,row.items,row.activeListings,row.targetListings,row.deficit,row.createNow,row.plannedValue])],lines=[...itemLines.map(row=>row.map(quote).join(",")),"",...categoryLines.map(row=>row.map(quote).join(","))];const blob=new Blob([lines.join("\\r\\n")+"\\r\\n"],{type:"text/csv;charset=utf-8"}),link=document.createElement("a");link.href=URL.createObjectURL(blob);link.download="alphanine-market-preview.csv";link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);}
+async function toggleMarketBotCustomize(){const panel=document.getElementById("marketBotCustomizePanel");if(!panel)return;panel.classList.toggle("hidden");if(!panel.classList.contains("hidden")&&!marketBotItems.length){try{const data=await getJson("/api/market-bot/items",{timeoutMs:60000});marketBotItems=data.items||[];marketBotItemChanges.clear();renderMarketBotCustomize();}catch(error){setText("marketBotCustomizeRows",betterError(error));}}}
+function marketBotCustomizeVisible(){const query=(getValue("marketBotCustomizeSearch")||"").trim().toLowerCase();return marketBotItems.filter(row=>!query||[row.id,row.name,row.category].some(value=>String(value||"").toLowerCase().includes(query)));}
+function renderMarketBotCustomize(){const wrap=document.getElementById("marketBotCustomizeRows");if(!wrap)return;const rows=marketBotCustomizeVisible();wrap.innerHTML=rows.length?'<table class="market-preview-table"><thead><tr><th>Enabled</th><th>Item</th><th>Unit Price</th><th>Stack</th><th>Target Count</th><th>Source</th></tr></thead><tbody>'+rows.map(row=>'<tr><td><input type="checkbox" '+(row.enabled?"checked":"")+' onchange="changeMarketBotItem('+esc(JSON.stringify(row.id))+',&quot;enabled&quot;,this.checked)"></td><td><strong>'+esc(row.name||row.id)+'</strong><div class="subtle">'+esc(row.id)+'</div></td><td><input type="number" min="1" max="999999999" value="'+esc(row.unitPrice)+'" onchange="changeMarketBotItem('+esc(JSON.stringify(row.id))+',&quot;unitPrice&quot;,this.value)"></td><td><input type="number" min="1" max="50000" value="'+esc(row.stackSize)+'" onchange="changeMarketBotItem('+esc(JSON.stringify(row.id))+',&quot;stackSize&quot;,this.value)"></td><td><input type="number" min="0" max="100" value="'+esc(row.targetListings)+'" onchange="changeMarketBotItem('+esc(JSON.stringify(row.id))+',&quot;targetListings&quot;,this.value)"></td><td><span class="subtle">'+esc((row.sources?.unitPrice||"")+" / "+(row.sources?.stackSize||""))+'</span></td></tr>').join("")+'</tbody></table>':'<div class="empty">No catalog items match this search.</div>';}
+function changeMarketBotItem(id,key,value){const row=marketBotItems.find(item=>item.id===id);if(!row)return;row[key]=key==="enabled"?Boolean(value):Number(value);marketBotItemChanges.set(id,{id,enabled:row.enabled,unitPrice:row.unitPrice,stackSize:row.stackSize,targetListings:row.targetListings});}
+async function resetVisibleMarketBotItems(){const rows=marketBotCustomizeVisible();if(!rows.length)return;if(!(await appConfirm("Reset Visible Items","Reset "+rows.length+" visible item override(s) to the built-in pricebook and stack policy?","Reset Visible","Cancel")))return;try{const data=await getJson("/api/market-bot/items",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:rows.map(row=>({id:row.id,reset:true}))}),timeoutMs:600000});marketBotItems=data.items||[];marketBotItemChanges.clear();renderMarketBotCustomize();showToast("Visible item overrides reset","success");}catch(error){showToast(betterError(error),"error");}}
+async function saveMarketBotItems(){if(!marketBotItemChanges.size){showToast("No item changes to save.","warning");return;}try{const data=await getJson("/api/market-bot/items",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:[...marketBotItemChanges.values()]}),timeoutMs:600000});marketBotItems=data.items||[];marketBotItemChanges.clear();renderMarketBotCustomize();await previewMarketBot();showToast("Market item settings saved","success");}catch(error){showToast(betterError(error),"error");}}
+async function rollbackMarketBot(){if(!(await appConfirm("Rollback Market Bot","Pause Market Bot and restore the preserved Legacy Market Automator configuration disabled for review? Existing listings remain unchanged.","Rollback","Cancel")))return;try{const data=await getJson("/api/market-bot/rollback",{method:"POST",timeoutMs:600000});renderMarketBotStatus(data.status||data);setText("marketBotActionResult","Rollback complete. Legacy configuration was restored disabled; no automation engine is active.");showToast("Market Bot rolled back safely","success");}catch(error){showToast(betterError(error),"error");}}
 function formatMarketAutomatorNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"--";}
 let marketAutomatorDynamicPricingNeedsReview=false,marketAutomatorDynamicPreviewToken="";
 function invalidateMarketAutomatorPricingPreview(){marketAutomatorDynamicPreviewToken="";}
@@ -18841,7 +19218,7 @@ function renderItemDatabase(resetLimit=false){if(resetLimit)itemDatabaseDisplayL
 async function refreshItemDatabase(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Loading the Give Item catalog...";}const data=await getJson("/api/give-items?grade=all");itemDatabaseItems=data.items||[];if(!selectedItemDatabaseId&&itemDatabaseItems[0])selectedItemDatabaseId=itemDatabaseItems[0].id;fillItemDbFilters();renderItemDatabase();if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML='<strong>'+esc(itemDatabaseItems.length)+' items loaded.</strong><div class="subtle">Source: the same giveable-item catalog used by Give Item.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
 function schematicRecipeCandidates(template){const raw=String(template||"").trim();const out=[];const add=value=>{const recipeId=String(value||"").trim();if(recipeId&&/^[A-Za-z0-9_().+\\-]+$/.test(recipeId)&&!out.includes(recipeId))out.push(recipeId);};if(/^recipe:/i.test(raw))add(raw.replace(/^recipe:/i,""));if(raw==="NPE_ScrapMetalKnife_Schematic")add("ScrapMetalKnifeRecipe");if(/_Schematic$/i.test(raw)){const base=raw.replace(/_Schematic$/i,"");add(base+"_Recipe");add(base+"_recipe");}if(/Schematic$/i.test(raw)){const base=raw.replace(/Schematic$/i,"");add(base+"Recipe");add(base+"recipe");}if(/^Schematic_/i.test(raw)){const base=raw.replace(/^Schematic_/i,"");add(base+"Recipe");add(base+"recipe");}return out;}
 function techKnowledgeKeyFromTemplate(template){const raw=String(template||"").trim();return /^tech:/i.test(raw)?raw.replace(/^tech:/i,""):"";}
-function isRecipeSchematicItem(item){if(String(item?.subtype||"").trim().toLowerCase()==="unique schematic")return false;if(String(item?.source||"").trim().toLowerCase()==="manager-catalog")return false;return isSchematicItem(item)&&schematicRecipeCandidates(item?.id).length>0;}
+function isRecipeSchematicItem(item){const id=String(item?.id||"").trim();const source=String(item?.source||"").trim().toLowerCase();return /^recipe:/i.test(id)||source==="live db known recipes";}
 function isTechKnowledgeItem(item){return /^tech:/i.test(String(item?.id||""));}
 function giveItemGrantKind(item){return isTechKnowledgeItem(item)?"Research Blueprint Unlock":(isRecipeSchematicItem(item)?"Crafting Recipe Unlock":"Inventory Item");}
 function giveItemSchematicNotice(item){return isTechKnowledgeItem(item)?"Research blueprints unlock the player's Research tree. RCP entries also add the matching crafting recipe.":(isRecipeSchematicItem(item)?"Recipe schematics unlock the player's crafting recipe library. Schematic pattern grades and fragments are normal inventory items.":"");}
@@ -18928,11 +19305,76 @@ function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.
 function syncGiveItemResultFromLog(){if(!document.getElementById("give")?.classList.contains("active"))return;const source=document.getElementById("adminLog");const result=document.getElementById("giveItemResult");const detail=document.getElementById("giveItemResultDetail");const message=String(source?.textContent||"").trim();if(detail)detail.textContent=message||"No Give Item request has run.";if(result){const summary=message.split(/\r?\n/).find(Boolean)||"Ready to give an item.";result.className=(/failed|error|unavailable|offline|blocked/i.test(summary)?"warning":"empty")+" give-result";result.textContent=summary;}}
 function wireGiveItemResult(){const source=document.getElementById("adminLog");if(!source||source.dataset.giveResultWired)return;source.dataset.giveResultWired="true";new MutationObserver(syncGiveItemResultFromLog).observe(source,{childList:true,characterData:true,subtree:true});syncGiveItemResultFromLog();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
-function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(!storageMode&&mode==="execute"&&!usesDbGrade&&!adminLiveGiveAvailable);if(give)give.disabled=blocked||(storageMode&&!selectedGiveStorage());if(add){add.disabled=storageMode||liveGiveBusy||!selectedAdminItem;add.title=storageMode?"Give Queue currently targets player inventory only.":"Add selected item to Give Queue";}if(queue)queue.disabled=storageMode||blocked||!giveQueue.length;if(retry)retry.disabled=storageMode||blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
+function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const usesDirectDbUnlock=isTechKnowledgeItem(selectedAdminItem)||isRecipeSchematicItem(selectedAdminItem);const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(!storageMode&&mode==="execute"&&!usesDbGrade&&!usesDirectDbUnlock&&!adminLiveGiveAvailable);if(give)give.disabled=blocked||(storageMode&&!selectedGiveStorage());if(add){add.disabled=storageMode||liveGiveBusy||!selectedAdminItem;add.title=storageMode?"Give Queue currently targets player inventory only.":"Add selected item to Give Queue";}if(queue)queue.disabled=storageMode||blocked||!giveQueue.length;if(retry)retry.disabled=storageMode||blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const receiver=await getJson("/api/receiver/status",{timeoutMs:5000});liveGiveServerOnline=Boolean(receiver.ok);adminLiveGiveAvailable=Boolean(receiver.ok);liveGiveTransport={mode:"http-json",configured:Boolean(receiver.ok),reachable:Boolean(receiver.ok),target:receiver.giveUrl||"",reason:receiver.ok?"":(receiver.reason||receiver.error||"Receiver is offline.")};liveGiveUnavailableMessage=receiver.ok?"":liveGiveTransportMessage(liveGiveTransport);setGiveServerStatus(receiver.ok?"Server Status: Online. Give Item receiver is available.":"Server Status: Offline. "+(receiver.reason||receiver.error||"Receiver is offline."),receiver.ok?"ok":"warn");syncLiveGiveTransportStatus();return receiver;}catch(receiverError){try{const env=await getJson("/api/live-give/env",{timeoutMs:8000});adminLiveGiveAvailable=Boolean(env.liveGiveAvailable);liveGiveTransport=env.giveTransport||liveGiveTransport;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(env.message||liveGiveTransportMessage(liveGiveTransport||env));liveGiveServerOnline=adminLiveGiveAvailable||Boolean(env.giveTransport?.reachable);setGiveServerStatus(liveGiveServerOnline?(adminLiveGiveAvailable?"Server Status: Online. Give Item is available.":"Server Status: Receiver online. Live Give transport is limited."):"Server Status: Offline. "+(liveGiveUnavailableMessage||env.error||"Start the server before using Give Item."),liveGiveServerOnline?"ok":"warn");syncLiveGiveTransportStatus();return env;}catch(envError){liveGiveServerOnline=false;adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(receiverError)+" / "+betterError(envError);setGiveServerStatus("Server Status: Offline. "+liveGiveUnavailableMessage,"warn");syncLiveGiveTransportStatus();return null;}}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
 async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="execute";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncGiveDestination();updateGiveTargetSummary();syncGiveItemControls();await Promise.all([refreshGivePlayersFast(),refreshGiveItemsFast(),checkGiveItemServerStatus()]);syncLiveGiveMode();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
-async function giveAdminItem(){const log=document.getElementById("adminLog");const button=document.getElementById("adminGiveButton");if(liveGiveBusy)return;try{liveGiveBusy=true;if(button)button.disabled=true;const payload=adminGivePayload();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const usesDbGrade=usesRelogGrade(payload.quality);if(!usesDbGrade){log.textContent="Checking receiver transport...";await refreshLiveGiveEnv();}else log.textContent=mode==="execute"?"Preparing database grade grant...":"Running database grade dry-run...";if(mode==="execute"){if(!usesDbGrade&&!adminLiveGiveAvailable){log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);playUiSound("warning");return;}if(usesDbGrade)await showGradeRelogPopup("items");log.textContent=usesDbGrade?"Writing grade item to player inventory...":"Publishing Live Give...";addActivity("grant",usesDbGrade?"Database grade grant":"Publishing Live Give",payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});let status=usesDbGrade?"Database grade grant failed.":"Live Give failed.";if(data.status==="db-inserted")status="Database grade grant inserted.";else if(data.status==="live-verified")status="Live Give verified.";else if(data.status==="live-published")status="Live Give published / queued.";else if(data.status==="live-unavailable")status="Live Give unavailable.";log.textContent=status+"\\n"+(data.stdout||data.stderr||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,verified:Boolean(data.verified),player:data.player||null,inventory:data.inventory||null,item:data.item||null,timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);addActivity("grant",status,payload.template+" -> "+payload.playerId);playUiSound(data.status==="live-unavailable"?"warning":"success");return;}log.textContent=usesDbGrade?"Running database grade Dry-Run...":"Running Dry-Run...";addActivity("grant","Dry-run running",payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});log.textContent="Dry-run completed. No live grant executed.\\n"+(data.stdout||data.error||"")+"\\n\\n"+JSON.stringify({status:data.status,transport:data.transport,player:data.player||null,inventory:data.inventory||null,item:data.item||null,command:data.command||payload,timings:data.timings||{}},null,2);addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);playUiSound("success");}catch(e){log.textContent=betterError(e);addActivity("error","Give item failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
+function giveItemExecutionStatus(data,usesDbGrade=false){
+  if(data?.status==="db-inserted")return"Database grade grant inserted.";
+  if(data?.status==="live-verified")return"Live Give verified.";
+  if(data?.status==="live-published")return"Live Give published / queued.";
+  if(data?.status==="recipe-unlocked")return"Crafting recipe unlocked.";
+  if(data?.status==="research-unlocked")return"Research blueprint unlocked.";
+  if(data?.status==="already_unlocked")return(data?.grantKind||"Unlock")+" already unlocked.";
+  if(data?.status==="live-unavailable")return"Live Give unavailable.";
+  if(data?.ok)return(data?.grantKind||"Give Item")+" completed.";
+  return usesDbGrade?"Database grade grant failed.":"Live Give failed.";
+}
+async function giveAdminItem(){
+  const log=document.getElementById("adminLog");
+  const button=document.getElementById("adminGiveButton");
+  if(liveGiveBusy)return;
+  try{
+    liveGiveBusy=true;
+    if(button)button.disabled=true;
+    const payload=adminGivePayload();
+    const mode=document.getElementById("liveGiveMode")?.value||"dry-run";
+    const usesDbGrade=usesRelogGrade(payload.quality);
+    const directGrantKind=giveItemGrantKind(selectedAdminItem);
+    const usesDirectDbUnlock=directGrantKind==="Research Blueprint Unlock"||directGrantKind==="Crafting Recipe Unlock";
+    const usesDatabase=usesDbGrade||usesDirectDbUnlock;
+    if(!usesDatabase){
+      log.textContent="Checking receiver transport...";
+      await refreshLiveGiveEnv();
+    }else if(usesDbGrade){
+      log.textContent=mode==="execute"?"Preparing database grade grant...":"Running database grade dry-run...";
+    }else{
+      log.textContent=mode==="execute"?"Preparing "+directGrantKind.toLowerCase()+"...":"Testing "+directGrantKind.toLowerCase()+"...";
+    }
+    if(mode==="execute"){
+      if(!usesDatabase&&!adminLiveGiveAvailable){
+        log.textContent=liveGiveUnavailableMessage||"Live Give unavailable.";
+        addActivity("grant","Live Give unavailable",liveGiveUnavailableMessage);
+        playUiSound("warning");
+        return;
+      }
+      if(usesDbGrade)await showGradeRelogPopup("items");
+      const action=usesDbGrade?"Database grade grant":(usesDirectDbUnlock?directGrantKind:"Publishing Live Give");
+      log.textContent=usesDbGrade?"Writing grade item to player inventory...":(usesDirectDbUnlock?"Applying "+directGrantKind.toLowerCase()+"...":"Publishing Live Give...");
+      addActivity("grant",action,payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));
+      const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});
+      const status=giveItemExecutionStatus(data,usesDbGrade);
+      const output=[data.stdout,data.stderr,data.error].filter(Boolean).join("\\n");
+      log.textContent=status+"\\n"+output+"\\n\\n"+JSON.stringify({status:data.status,grantKind:data.grantKind||null,transport:data.transport,verified:Boolean(data.verified),player:data.player||null,inventory:data.inventory||null,item:data.item||null,timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);
+      addActivity("grant",status,payload.template+" -> "+payload.playerId);
+      playUiSound(data.ok===false||data.status==="live-unavailable"?"warning":"success");
+      return;
+    }
+    log.textContent=usesDbGrade?"Running database grade Dry-Run...":"Running Dry-Run...";
+    addActivity("grant","Dry-run running",payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));
+    const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});
+    log.textContent="Dry-run completed. No live grant executed.\\n"+[data.stdout,data.stderr,data.error].filter(Boolean).join("\\n")+"\\n\\n"+JSON.stringify({status:data.status,grantKind:data.grantKind||null,transport:data.transport,player:data.player||null,inventory:data.inventory||null,item:data.item||null,command:data.command||payload,timings:data.timings||{}},null,2);
+    addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);
+    playUiSound("success");
+  }catch(e){
+    log.textContent=betterError(e);
+    addActivity("error","Give item failed",e.message);
+    playUiSound("warning");
+  }finally{
+    liveGiveBusy=false;
+    syncGiveItemControls();
+  }
+}
 const giveAdminItemPlayerInventory=giveAdminItem;
 giveAdminItem=async function(){
   const destination=document.getElementById("giveDestination")?.value||"player";
@@ -18959,7 +19401,7 @@ giveAdminItem=async function(){
   finally{liveGiveBusy=false;syncGiveItemControls();}
 };
 const giveAdminItemWithoutSentToast=giveAdminItem;
-giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");const notice=selectedAdminItem?giveItemSchematicNotice(selectedAdminItem):"";if(log&&notice&&text&&!text.includes(notice))log.textContent=text+"\\n\\nNote: "+notice;if(/Live Give (verified|published)/i.test(text))showToast(notice?"Research unlock sent":"Item sent","success");};
+giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");const notice=selectedAdminItem?giveItemSchematicNotice(selectedAdminItem):"";if(log&&notice&&text&&!text.includes(notice))log.textContent=text+"\\n\\nNote: "+notice;const summary=text.split(/\r?\n/).find(Boolean)||"";if(/^(Live Give (verified|published)|Database grade grant inserted|Crafting recipe unlocked|Research blueprint unlocked|.+ already unlocked)/i.test(summary))showToast(summary,"success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 let startupProgressState=null;
 const STARTUP_TASKS=[
@@ -19021,7 +19463,7 @@ const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/admin/players", "/api/admin/repair/inspect", "/api/admin/repair/queue", "/api/players/feed", "/api/admin/items",
   "/api/give-items", "/api/gear-codex/items", "/api/item-database/items", "/api/items/catalog/status", "/api/give-items/capabilities",
   "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/progression/house-scrip", "/api/landsraad/tiers",
-  "/api/landsraad/weekly-rewards/inspect", "/api/admin/skill-reputation", "/api/market-automator/overview",
+  "/api/landsraad/weekly-rewards/inspect", "/api/admin/skill-reputation", "/api/market-bot", "/api/market-bot/items", "/api/market-automator/overview",
   "/api/market/status", "/api/market/listings", "/api/live-give/queue-presets", "/api/live-give/queue-presets/get",
   "/api/sietches", "/api/vm/status", "/api/updates/check"
 ]);
@@ -19868,11 +20310,14 @@ async function route(req, res) {
     const cache = loadDuneItemsCache();
     const dynamicItems = ["/api/admin/items", "/api/give-items", "/api/item-database/items"].includes(url.pathname) ? liveDynamicItemCatalog : [];
     const isGiveItemCatalog = ["/api/admin/items", "/api/give-items"].includes(url.pathname);
+    const giveDynamicItems = isGiveItemCatalog
+      ? dynamicGiveItemsWithoutSpawnableSchematicDuplicates(dynamicItems, cache.items || [])
+      : dynamicItems;
     const allItems = isGiveItemCatalog
-      ? visibleGiveItems([...(cache.items || []), ...dynamicItems])
+      ? visibleGiveItems([...(cache.items || []), ...giveDynamicItems])
       : [...(cache.items || []), ...dynamicItems];
     const items = filterItemsByQuery(allItems, url.searchParams);
-    await json(res, { ok: cache.ok !== false, offlineReady: true, items, totalItems: allItems.length, dynamicItemCount: dynamicItems.length, gradeCounts: itemGradeCounts(allItems), tierCounts: itemTierCounts(allItems), report: { ...(cache.report || {}), dynamicItemCount: dynamicItems.length, startupValidation: ITEM_CATALOG_STARTUP_REPORT }, generatedAt: cache.generatedAt || "" });
+    await json(res, { ok: cache.ok !== false, offlineReady: true, items, totalItems: allItems.length, dynamicItemCount: giveDynamicItems.length, gradeCounts: itemGradeCounts(allItems), tierCounts: itemTierCounts(allItems), report: { ...(cache.report || {}), dynamicItemCount: giveDynamicItems.length, startupValidation: ITEM_CATALOG_STARTUP_REPORT }, generatedAt: cache.generatedAt || "" });
     return;
   }
   if (url.pathname === "/api/gear/discovery" && req.method === "GET") {
@@ -20135,13 +20580,104 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === "/api/market-bot" && req.method === "GET") {
+    try { await json(res, await marketBotStatus()); }
+    catch (error) { await json(res, { ok: false, installed: false, status: "Error", error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/items" && req.method === "GET") {
+    try {
+      const config = localMarketBotConfig();
+      await json(res, { ok: true, config: publicMarketBotLocal(config), items: buildMarketBotItemPolicies(marketBotCatalog(), config) });
+    } catch (error) {
+      await json(res, { ok: false, error: error.message, items: [] }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/items" && req.method === "PUT") {
+    try { await json(res, await updateMarketBotOverrides(await readJsonRequest(req))); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/prepare" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req);
+      const result = await runTrackedOperation("market-bot:install", "Prepare Market Bot", async ({ update }) => {
+        update("Installing Market Bot paused", "Staging the Linux/amd64 runtime and ownership schema without creating listings.");
+        const prepared = await prepareMarketBot(body);
+        update("Activation preview ready", "Review the exact target-stock plan before activation.");
+        return prepared;
+      }, { category: "market", detail: String(body.economyStyle || "Expensive") });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/activate" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req);
+      const result = await runTrackedOperation("market-bot:install", "Activate Market Bot", async ({ update }) => {
+        update("Disabling Legacy Market Automator", "Preventing concurrent automation while preserving its rollback snapshot.");
+        const activated = await activateMarketBot(body);
+        update("Market Bot running in VM", "Persistent target-stock reconciliation is active.");
+        return activated;
+      }, { category: "market", detail: "Explicit activation after preview" });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/preview" && req.method === "POST") {
+    try { await json(res, await previewMarketBot(await readJsonRequest(req))); }
+    catch (error) { await json(res, { ok: false, status: "Error", error: error.message, preview: { items: [] } }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/pause" && req.method === "POST") {
+    try { await json(res, await setMarketBotPaused(true)); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/resume" && req.method === "POST") {
+    try { await json(res, await setMarketBotPaused(false)); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/restock" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req);
+      const result = await runTrackedOperation("market-bot:restock", "Market Bot Restock", async ({ update }) => {
+        update("Reconciling target stock", "The VM bot is acquiring the database lock and applying one capped cycle.");
+        const restocked = await restockMarketBot(body);
+        update("Restock complete", restocked.message || restocked.status || "Cycle completed.");
+        return restocked;
+      }, { category: "market", detail: String(body.cycleId || "manual") });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/rollback" && req.method === "POST") {
+    try { await json(res, await rollbackMarketBot()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
   if (url.pathname === "/api/market-automator/overview" && req.method === "GET") {
     try { await json(res, await marketAutomator.overview()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }
   if (url.pathname === "/api/market-automator/config" && req.method === "PUT") {
-    try { const config = marketAutomator.save(await readJsonRequest(req)); await json(res, { ...(await marketAutomator.overview()), config }); }
+    try {
+      if (localMarketBotConfig().activated) throw new Error("Legacy Market Automator is locked while persistent Market Bot is activated.");
+      const config = marketAutomator.save(await readJsonRequest(req));
+      await json(res, { ...(await marketAutomator.overview()), config });
+    }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
     return;
   }
@@ -20156,7 +20692,11 @@ async function route(req, res) {
     return;
   }
   if (url.pathname.startsWith("/api/market-automator/run/") && req.method === "POST") {
-    try { const kind = url.pathname.slice("/api/market-automator/run/".length); await json(res, await marketAutomator.run(kind, "manual")); }
+    try {
+      if (localMarketBotConfig().activated) throw new Error("Legacy Market Automator cannot run while persistent Market Bot is activated.");
+      const kind = url.pathname.slice("/api/market-automator/run/".length);
+      await json(res, await marketAutomator.run(kind, "manual"));
+    }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }
@@ -20449,6 +20989,7 @@ server.listen(PORT, LOCAL_HOST, async () => {
   logLiveGiveStartupValidation();
   setTimeout(() => runMarketExpiredCleanupBackground("startup"), 30000);
   setInterval(() => runMarketExpiredCleanupBackground("timer"), 10 * 60 * 1000);
+  setTimeout(() => ensureMarketBotInstalled().catch((error) => appendAdminAudit("market_bot_auto_update_failed", { error: error.message })), 45000);
   setTimeout(() => processRepairQueue().catch((error) => appendAdminAudit("durability_repair_queue_processor_error", { error: error.message })), 3000);
   const repairQueueInterval = setInterval(() => processRepairQueue().catch((error) => appendAdminAudit("durability_repair_queue_processor_error", { error: error.message })), 20000);
   repairQueueInterval.unref?.();

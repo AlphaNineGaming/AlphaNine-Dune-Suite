@@ -1,12 +1,14 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.0.69",
+  "version": "1.0.71",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
   "scripts": {
     "build:item-catalog": "node scripts/build-item-catalog.js",
+    "build:market-bot": "node scripts/build-market-bot.js",
     "test:item-catalog-offline": "node scripts/test-item-catalog-offline.js && node scripts/test-item-server-discovery.js",
+    "test:schematic-give": "node scripts/test-schematic-give-routing.js",
     "build:skill-catalog": "node scripts/build-skill-catalog.js",
     "test:secret-persistence": "node scripts/test-secret-config-persistence.js",
     "test:setup-paths": "node scripts/test-setup-path-persistence.js",
@@ -18,6 +20,7 @@
     "test:durability-repair": "node scripts/test-durability-repair.js",
     "test:repair-queue": "node scripts/test-repair-queue.js",
     "test:market-listings": "node scripts/test-market-listings.js",
+    "test:market-bot": "node scripts/test-market-bot.js",
     "test:market-automator": "node scripts/test-market-automator.js",
     "test:construction-sets": "node scripts/test-construction-set-catalog.js",
     "test:ui-syntax": "node scripts/test-rendered-ui-syntax.js",
@@ -60,6 +63,8 @@
       "package.json",
       "package-lock.json",
       "README.md",
+      "RELEASE_NOTES_1.0.71.md",
+      "RELEASE_NOTES_1.0.70.md",
       "RELEASE_NOTES_1.0.69.md",
       "RELEASE_NOTES_1.0.68.md",
       "RELEASE_NOTES_1.0.67.md",
@@ -81,6 +86,7 @@
       "electron/**",
       "assets/**",
       "lib/**",
+      "market-bot/**",
       "data/.gitkeep",
       "data/ui-overrides.css",
       "data/dune-items-catalog.json",
@@ -105,7 +111,8 @@
       "!**/*.log"
     ],
     "asarUnpack": [
-      "manager/**"
+      "manager/**",
+      "assets/market-bot/**"
     ],
     "afterPack": "scripts/ensure-admin-manifest.js",
     "win": {

@@ -12,6 +12,9 @@ const packaged = new Set(asar.listPackage(archive).map((entry) => entry.replaceA
 const requiredRuntimeFiles = [
   "server.js",
   "assets/coordinate-system.js",
+  "assets/market-bot/linux-amd64/alphanine-market-bot",
+  "lib/market-bot.js",
+  "market-bot/main.go",
   "lib/player-directory.js",
   "lib/teleport-request-mode.js",
   "electron/main.js"
@@ -23,9 +26,16 @@ if (missing.length) {
 }
 
 const packagedServer = asar.extractFile(archive, "server.js").toString("utf8");
+const packagedMarketBotModule = asar.extractFile(archive, "lib/market-bot.js").toString("utf8");
 const packagedPlayerDirectory = asar.extractFile(archive, "lib/player-directory.js").toString("utf8");
 if (!packagedServer.includes("loadSharedPlayerDirectory") || !packagedServer.includes("adminPlayerDirectory")) {
   throw new Error("Packaged server is missing the stabilized shared player-directory integration.");
+}
+if (!packagedServer.includes("prepareMarketBot") || !packagedServer.includes("ensureMarketBotInstalled")) {
+  throw new Error("Packaged server is missing the persistent Market Bot integration.");
+}
+if (!packagedMarketBotModule.includes("alphanine_market_bot_listings") && !packagedMarketBotModule.includes("VM_MARKET_BOT_BINARY")) {
+  throw new Error("Packaged Market Bot installer module is incomplete.");
 }
 if (!packagedPlayerDirectory.includes("createPlayerDirectory") || !packagedPlayerDirectory.includes("parsePlayerSelector")) {
   throw new Error("Packaged player-directory module is incomplete.");

@@ -27,6 +27,19 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.71
+
+- Replaced the Suite-process market scheduler with a persistent Linux/amd64 Market Bot installed and supervised inside the Dune VM.
+- Added exact all-item preview, Affordable/Balanced/Expensive pricebooks, per-item target-stock reconciliation, constrained item customization, CSV export, and live status.
+- Added a database advisory lock, strict ownership metadata, idempotent transactional cycles, creation/value caps, and a hard rule that player and untracked listings are never changed.
+- Added preview-confirmed migration that preserves the Legacy Market Automator configuration and existing listings without activating automatically.
+
+### 1.0.70
+
+- Restored grade-0 physical schematic templates to the Live Give inventory path instead of inferring database recipe unlocks from `_Schematic` names.
+- Hid recipe-only duplicates when the same recipe has a spawnable schematic item, while preserving genuine recipe-only and Research unlock entries.
+- Fixed successful recipe and Research database unlocks being labeled “Live Give failed,” and removed their unnecessary receiver dependency.
+
 ### 1.0.69
 
 - Redesigned the Market Automator pricing preview as a clean five-column table with sticky headings, readable badges, and highlighted Solari prices.

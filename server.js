@@ -14268,6 +14268,17 @@ function storageDisplayName(actorClass) {
     .trim();
 }
 
+const STORAGE_CUSTOM_NAME_SQL = `
+  coalesce((
+    select max(nullif(btrim(pa.actor_name), ''))
+    from dune.permission_actor pa
+    where pa.actor_id = a.id
+      and btrim(coalesce(pa.actor_name, '')) <> ''
+      and pa.actor_name not like '##%'
+      and lower(btrim(pa.actor_name)) <> 'none'
+  ), '')
+`;
+
 async function adminStorageTargets() {
   const sql = `
     select
@@ -14276,12 +14287,13 @@ async function adminStorageTargets() {
       coalesce(i.inventory_type::text, ''),
       coalesce(i.max_item_count::text, '0'),
       coalesce(i.max_item_volume::text, '0'),
-      (select count(*)::text from dune.items it where it.inventory_id=i.id),
-      (select coalesce(max(it.position_index), -1)::text from dune.items it where it.inventory_id=i.id),
-      a.class,
-      coalesce(a.map, ''),
-      coalesce(a.partition_id::text, ''),
-      coalesce(a.dimension_index::text, ''),
+       (select count(*)::text from dune.items it where it.inventory_id=i.id),
+       (select coalesce(max(it.position_index), -1)::text from dune.items it where it.inventory_id=i.id),
+       a.class,
+       replace(${STORAGE_CUSTOM_NAME_SQL}, E'\\t', ' '),
+       coalesce(a.map, ''),
+       coalesce(a.partition_id::text, ''),
+       coalesce(a.dimension_index::text, ''),
       coalesce(((a.transform).location).x::text, ''),
       coalesce(((a.transform).location).y::text, ''),
       coalesce(((a.transform).location).z::text, ''),
@@ -14298,7 +14310,7 @@ async function adminStorageTargets() {
     order by a.map, a.partition_id, a.dimension_index, a.class, a.id
   `;
   const output = await dbQuery(sql, 20000);
-  const rows = parseDbRows(output, ["actorId", "inventoryId", "inventoryType", "maxItemCount", "maxItemVolume", "itemCount", "maxPosition", "actorClass", "map", "partitionId", "dimensionIndex", "x", "y", "z", "items"]);
+  const rows = parseDbRows(output, ["actorId", "inventoryId", "inventoryType", "maxItemCount", "maxItemVolume", "itemCount", "maxPosition", "actorClass", "customName", "map", "partitionId", "dimensionIndex", "x", "y", "z", "items"]);
   return {
     ok: true,
     storages: rows.map((row) => {
@@ -14309,11 +14321,15 @@ async function adminStorageTargets() {
         const item = itemCatalogProvider.resolve(template);
         return { template, name: item?.name || template, count: Number(count) || 0, source: item?.source || "raw-id", icon: item?.icon || "" };
       }).sort((a, b) => a.name.localeCompare(b.name));
+      const typeName = storageDisplayName(row.actorClass);
+      const customName = String(row.customName || "").trim();
       return {
         actorId: row.actorId,
         inventoryId: row.inventoryId,
         inventoryType: Number(row.inventoryType),
-        name: storageDisplayName(row.actorClass),
+        name: customName || typeName,
+        customName,
+        typeName,
         kind: Number(row.inventoryType) === 4 ? "Placeable Storage" : "Vehicle Cargo",
         actorClass: row.actorClass,
         map: row.map,
@@ -14358,7 +14374,8 @@ async function adminGiveItemToStorage(payload = {}) {
       order by ps.last_avatar_activity desc nulls last limit 1
     ), target_storage as (
       select i.id inventory_id, i.actor_id, i.inventory_type, coalesce(i.max_item_count, 0) max_item_count,
-             coalesce(i.max_item_volume, 0) max_item_volume, a.class, a.map, a.partition_id, a.dimension_index,
+             coalesce(i.max_item_volume, 0) max_item_volume, a.class, ${STORAGE_CUSTOM_NAME_SQL} custom_name,
+             a.map, a.partition_id, a.dimension_index,
              (select count(*)::int from dune.items it where it.inventory_id=i.id) item_count,
              (select coalesce(max(it.position_index), -1)::bigint from dune.items it where it.inventory_id=i.id) max_position,
              coalesce((select jsonb_object_agg(stacks.template_id, stacks.total) from (
@@ -14375,12 +14392,13 @@ async function adminGiveItemToStorage(payload = {}) {
                 else 'ready' end,
            coalesce((select account_id from target_player),''), coalesce((select character_name from target_player),''),
            coalesce((select online_status from target_player),''), coalesce((select class from target_storage),''),
+           coalesce((select custom_name from target_storage),''),
            coalesce((select map from target_storage),''), coalesce((select partition_id::text from target_storage),''),
            coalesce((select dimension_index::text from target_storage),''), coalesce((select max_item_count::text from target_storage),'0'),
            coalesce((select max_item_volume::text from target_storage),'0'), coalesce((select item_count::text from target_storage),'0'),
            coalesce((select max_position::text from target_storage),'-1'), coalesce((select item_stacks from target_storage),'{}')
   `;
-  const precheck = parseDbRows(await dbQuery(precheckSql, 15000), ["status", "accountId", "characterName", "onlineStatus", "actorClass", "map", "partitionId", "dimensionIndex", "maxItemCount", "maxItemVolume", "itemCount", "maxPosition", "itemStacks"])[0] || {};
+  const precheck = parseDbRows(await dbQuery(precheckSql, 15000), ["status", "accountId", "characterName", "onlineStatus", "actorClass", "customName", "map", "partitionId", "dimensionIndex", "maxItemCount", "maxItemVolume", "itemCount", "maxPosition", "itemStacks"])[0] || {};
   if (precheck.status === "player_not_found") throw new Error("The selected player was not found.");
   if (precheck.status === "player_not_offline") throw new Error(`${precheck.characterName || "Selected player"} must be offline before depositing items into storage. Current status: ${precheck.onlineStatus || "unknown"}.`);
   if (precheck.status === "storage_not_found") throw new Error("The selected storage actor or inventory no longer exists. Refresh storage containers.");
@@ -14396,7 +14414,9 @@ async function adminGiveItemToStorage(payload = {}) {
   const usedVolume = Object.entries(itemStacks).reduce((sum, [storedTemplate, count]) => sum + storageItemMetadata(storedTemplate).volume * Math.max(0, Number(count) || 0), 0);
   const maxItemVolume = Number(precheck.maxItemVolume || 0);
   if (volumeVerified && maxItemVolume > 0 && usedVolume + itemVolume > maxItemVolume) throw new Error(`Storage volume would exceed capacity: ${Math.round((usedVolume + itemVolume) * 100) / 100} required / ${maxItemVolume} maximum.`);
-  const storage = { actorId: String(actorId), inventoryId: String(inventoryId), name: storageDisplayName(precheck.actorClass), actorClass: precheck.actorClass, map: precheck.map, partitionId: precheck.partitionId, dimensionIndex: Number(precheck.dimensionIndex || 0), itemCount: Number(precheck.itemCount || 0), maxItemCount: Number(precheck.maxItemCount || 0), usedVolume: Math.round(usedVolume * 100) / 100, maxItemVolume, volumeVerified };
+  const typeName = storageDisplayName(precheck.actorClass);
+  const customName = String(precheck.customName || "").trim();
+  const storage = { actorId: String(actorId), inventoryId: String(inventoryId), name: customName || typeName, customName, typeName, actorClass: precheck.actorClass, map: precheck.map, partitionId: precheck.partitionId, dimensionIndex: Number(precheck.dimensionIndex || 0), itemCount: Number(precheck.itemCount || 0), maxItemCount: Number(precheck.maxItemCount || 0), usedVolume: Math.round(usedVolume * 100) / 100, maxItemVolume, volumeVerified };
   if (dryRun) return { ok: true, dryRun: true, status: "dry-run-passed", transport: "database", player: { accountId: precheck.accountId, characterName: precheck.characterName, onlineStatus: precheck.onlineStatus }, storage, item: { id: template, name: giveItemDisplayName(template), qty, grade, stackCount, stackMax: metadata.stackMax, volume: itemVolume }, note: "Player is offline. Storage target, identity, and free slots were validated. No database write was performed." };
   const statsJson = JSON.stringify({ FCustomizationStats: [[], {}], FItemStackAndDurabilityStats: [[], {}] });
   const insertSql = `
@@ -18990,9 +19010,9 @@ function exportAllBlueprints(){return exportBlueprintRows(blueprintRows.map(row=
 function playerLabel(p){return (p.character_name||p.name||p.id||"Unknown")+" / account "+(p.account_id||p.id||"-");}
 function selectedPlayer(){return adminPlayers.find(row=>row.id===selectedPlayerId)||null;}
 function selectedGiveStorage(){const id=document.getElementById("giveStorageTarget")?.value||"";return giveStorageTargets.find(row=>String(row.inventoryId)===String(id))||null;}
-function giveStorageLabel(row){return (row.name||"Storage")+" / Actor "+row.actorId+" / "+row.itemCount+" of "+row.maxItemCount+" slots";}
-function renderGiveStorageTargets(){const select=document.getElementById("giveStorageTarget");if(!select)return;const current=select.value;const q=String(document.getElementById("giveStorageSearch")?.value||"").trim().toLowerCase();const rows=q?giveStorageTargets.filter(row=>[row.name,row.kind,row.actorId,row.inventoryId,row.map,row.partitionId].join(" ").toLowerCase().includes(q)):giveStorageTargets;select.innerHTML=rows.length?rows.map(row=>'<option value="'+esc(row.inventoryId)+'">'+esc(giveStorageLabel(row))+'</option>').join(""):'<option value="">No storage found</option>';if(rows.some(row=>String(row.inventoryId)===String(current)))select.value=current;renderGiveStorageDetails();}
-function renderGiveStorageDetails(){const el=document.getElementById("giveStorageDetails");if(!el)return;const row=selectedGiveStorage();if(!row){el.textContent="Choose a detected storage container.";return;}const pos=row.position||{};const volume=row.maxItemVolume>0?(row.usedVolume+" / "+row.maxItemVolume+(row.volumeVerified?"":" estimated")):"Not limited";const contents=(row.contents||[]).map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.count)+' × '+esc(item.template)+'</span><strong>'+esc(item.name||item.template)+'</strong></div>').join("")||'<div class="subtle">Storage is empty.</div>';el.innerHTML='<div class="detail-row"><span class="subtle">Target</span><strong>'+esc(row.name)+" / "+esc(row.kind)+'</strong></div><div class="detail-row"><span class="subtle">Identity</span><strong>Actor '+esc(row.actorId)+' / Inventory '+esc(row.inventoryId)+'</strong></div><div class="detail-row"><span class="subtle">Location</span><strong>'+esc(row.map||"Unknown")+' / P'+esc(row.partitionId||"-")+' / D'+esc(row.dimensionIndex)+' / '+esc(Math.round(pos.x||0))+', '+esc(Math.round(pos.y||0))+', '+esc(Math.round(pos.z||0))+'</strong></div><div class="detail-row"><span class="subtle">Capacity</span><strong>'+esc(row.itemCount)+' / '+esc(row.maxItemCount)+' slots / Volume '+esc(volume)+'</strong></div><div class="label mt">Contents</div>'+contents;}
+function giveStorageLabel(row){const type=row.typeName||row.name||"Storage";const label=row.customName?(row.customName+" / "+type):type;return label+" / Actor "+row.actorId+" / "+row.itemCount+" of "+row.maxItemCount+" slots";}
+function renderGiveStorageTargets(){const select=document.getElementById("giveStorageTarget");if(!select)return;const current=select.value;const q=String(document.getElementById("giveStorageSearch")?.value||"").trim().toLowerCase();const rows=q?giveStorageTargets.filter(row=>[row.name,row.customName,row.typeName,row.kind,row.actorId,row.inventoryId,row.map,row.partitionId].join(" ").toLowerCase().includes(q)):giveStorageTargets;select.innerHTML=rows.length?rows.map(row=>'<option value="'+esc(row.inventoryId)+'">'+esc(giveStorageLabel(row))+'</option>').join(""):'<option value="">No storage found</option>';if(rows.some(row=>String(row.inventoryId)===String(current)))select.value=current;renderGiveStorageDetails();}
+function renderGiveStorageDetails(){const el=document.getElementById("giveStorageDetails");if(!el)return;const row=selectedGiveStorage();if(!row){el.textContent="Choose a detected storage container.";return;}const pos=row.position||{};const volume=row.maxItemVolume>0?(row.usedVolume+" / "+row.maxItemVolume+(row.volumeVerified?"":" estimated")):"Not limited";const target=row.customName?(row.customName+" / "+(row.typeName||row.kind)):(row.name||row.kind);const contents=(row.contents||[]).map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.count)+' × '+esc(item.template)+'</span><strong>'+esc(item.name||item.template)+'</strong></div>').join("")||'<div class="subtle">Storage is empty.</div>';el.innerHTML='<div class="detail-row"><span class="subtle">Target</span><strong>'+esc(target)+" / "+esc(row.kind)+'</strong></div><div class="detail-row"><span class="subtle">Identity</span><strong>Actor '+esc(row.actorId)+' / Inventory '+esc(row.inventoryId)+'</strong></div><div class="detail-row"><span class="subtle">Location</span><strong>'+esc(row.map||"Unknown")+' / P'+esc(row.partitionId||"-")+' / D'+esc(row.dimensionIndex)+' / '+esc(Math.round(pos.x||0))+', '+esc(Math.round(pos.y||0))+', '+esc(Math.round(pos.z||0))+'</strong></div><div class="detail-row"><span class="subtle">Capacity</span><strong>'+esc(row.itemCount)+' / '+esc(row.maxItemCount)+' slots / Volume '+esc(volume)+'</strong></div><div class="label mt">Contents</div>'+contents;}
 async function refreshGiveStorageTargets(){const el=document.getElementById("giveStorageDetails");try{if(el)el.textContent="Loading storage containers...";const data=await getJson("/api/admin/storage-targets",{timeoutMs:20000});giveStorageTargets=data.storages||[];renderGiveStorageTargets();updateGiveTargetSummary();return data;}catch(e){giveStorageTargets=[];renderGiveStorageTargets();if(el){el.className="warning mt";el.textContent=betterError(e);}return null;}}
 function syncGiveDestination(){const storage=document.getElementById("giveDestination")?.value==="storage";document.getElementById("giveStorageFields")?.classList.toggle("hidden",!storage);if(storage&&!giveStorageTargets.length)refreshGiveStorageTargets();syncQualityWarning();syncGiveItemControls();updateGiveTargetSummary();}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}

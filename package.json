@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.0.71",
+  "version": "1.0.72",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -9,6 +9,7 @@
     "build:market-bot": "node scripts/build-market-bot.js",
     "test:item-catalog-offline": "node scripts/test-item-catalog-offline.js && node scripts/test-item-server-discovery.js",
     "test:schematic-give": "node scripts/test-schematic-give-routing.js",
+    "test:storage-names": "node scripts/test-storage-container-names.js",
     "build:skill-catalog": "node scripts/build-skill-catalog.js",
     "test:secret-persistence": "node scripts/test-secret-config-persistence.js",
     "test:setup-paths": "node scripts/test-setup-path-persistence.js",
@@ -63,6 +64,7 @@
       "package.json",
       "package-lock.json",
       "README.md",
+      "RELEASE_NOTES_1.0.72.md",
       "RELEASE_NOTES_1.0.71.md",
       "RELEASE_NOTES_1.0.70.md",
       "RELEASE_NOTES_1.0.69.md",

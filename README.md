@@ -27,6 +27,12 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.72
+
+- Give Item storage destinations now show valid in-game container names, such as `Fuel Cells`, ahead of the derived container type.
+- Storage destination search now matches custom container names and container types.
+- Storage details and deposit results preserve both the custom name and technical container type, while unnamed containers retain the existing fallback label.
+
 ### 1.0.71
 
 - Replaced the Suite-process market scheduler with a persistent Linux/amd64 Market Bot installed and supervised inside the Dune VM.

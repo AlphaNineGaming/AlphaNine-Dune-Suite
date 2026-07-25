@@ -107,6 +107,18 @@ func TestMigrationCreatesStrictOwnershipMarker(t *testing.T) {
 	if !strings.Contains(sql, "create table if not exists public.alphanine_market_bot_listings") {
 		t.Fatal("migration does not create listing ownership metadata")
 	}
+	for _, expected := range []string{
+		"grant usage on schema public to dune",
+		"grant select on table",
+		"public.alphanine_market_bot_cycles",
+		"public.alphanine_market_bot_listings",
+		"public.alphanine_market_bot_audit",
+		"grant select on sequence public.alphanine_market_bot_audit_id_seq to dune",
+	} {
+		if !strings.Contains(sql, expected) {
+			t.Fatalf("migration does not preserve database backup access: missing %q", expected)
+		}
+	}
 }
 
 func TestKubectlCallsHaveBoundedTimeouts(t *testing.T) {

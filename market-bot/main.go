@@ -395,6 +395,13 @@ create table if not exists public.alphanine_market_bot_audit (
   event text not null,
   details jsonb not null default '{}'::jsonb
 );
+grant usage on schema public to dune;
+grant select on table
+  public.alphanine_market_bot_cycles,
+  public.alphanine_market_bot_listings,
+  public.alphanine_market_bot_audit
+to dune;
+grant select on sequence public.alphanine_market_bot_audit_id_seq to dune;
 with selected_partition as (
   select partition_id from dune.world_partition order by partition_id limit 1
 )

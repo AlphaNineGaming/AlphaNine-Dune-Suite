@@ -36,6 +36,9 @@ async function waitForUi() {
     const html = await waitForUi();
     assert(html.includes('id="repair"'), "Rendered Repair Inspector is missing.");
     assert(html.includes('id="landsraad"'), "Rendered Landsraad tier editor is missing.");
+    assert(html.includes("Exactly five distinct thresholds"), "Rendered Landsraad policy is missing the exact-five requirement.");
+    assert(/id="landsraadTierPreviewButton"[^>]*disabled/.test(html), "Rendered Landsraad preview button is not fail-closed by default.");
+    assert(html.includes("landsraadTierState?.ok===true&&landsraadTierState.tiers?.length===5"), "Rendered Landsraad controls are not gated on a valid five-tier inspection.");
     assert(html.includes('id="database-explorer"'), "Rendered Database Explorer is missing.");
     assert(html.includes('id="databaseExplorerGrid"'), "Database Explorer result grid is missing.");
     assert(html.includes('getJson("/api/database-browser/rows"'), "Database Explorer is not wired to its bounded row API.");

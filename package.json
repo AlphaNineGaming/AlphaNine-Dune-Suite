@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.0.72",
+  "version": "1.0.73",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -64,6 +64,7 @@
       "package.json",
       "package-lock.json",
       "README.md",
+      "RELEASE_NOTES_1.0.73.md",
       "RELEASE_NOTES_1.0.72.md",
       "RELEASE_NOTES_1.0.71.md",
       "RELEASE_NOTES_1.0.70.md",

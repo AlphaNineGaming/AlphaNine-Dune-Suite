@@ -9,6 +9,7 @@ const { spawn, spawnSync } = require("child_process");
 const asar = require("@electron/asar");
 
 const root = path.join(__dirname, "..");
+const rootPackage = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const outputDir = process.env.ALPHANINE_BUILD_OUTPUT_DIR || path.join(root, "installer-output");
 const archive = path.join(outputDir, "win-unpacked", "resources", "app.asar");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-packaged-smoke-"));
@@ -22,7 +23,11 @@ asar.extractAll(archive, extracted);
 const packagedServerSource = fs.readFileSync(path.join(extracted, "server.js"), "utf8");
 const packagedDesktopSource = fs.readFileSync(path.join(extracted, "electron", "main.js"), "utf8");
 const packagedCleanerTestPath = path.join(extracted, "scripts", "test-base-cleanup-override.js");
+const packagedLandsraadTestPath = path.join(extracted, "scripts", "test-landsraad-tiers.js");
+const packagedReleaseNotesPath = path.join(extracted, `RELEASE_NOTES_${rootPackage.version}.md`);
 assert(fs.existsSync(packagedCleanerTestPath), "Packaged app is missing the Server Cleaner regression test.");
+assert(fs.existsSync(packagedLandsraadTestPath), "Packaged app is missing the Landsraad exact-five regression test.");
+assert(fs.existsSync(packagedReleaseNotesPath), `Packaged app is missing release notes for ${rootPackage.version}.`);
 assert(
   packagedServerSource.includes('const actorId = requireSqlBigint(payload.actorId, "actor_id", 0n)'),
   "Packaged Server Cleaner is missing bigint-safe backend validation."
@@ -44,6 +49,20 @@ assert.equal(
   packagedCleanerTest.status,
   0,
   `Packaged Server Cleaner regression failed.\n${packagedCleanerTest.stdout || ""}\n${packagedCleanerTest.stderr || ""}`
+);
+const packagedLandsraadTest = spawnSync(process.execPath, [packagedLandsraadTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedLandsraadTest.status,
+  0,
+  `Packaged Landsraad regression failed.\n${packagedLandsraadTest.stdout || ""}\n${packagedLandsraadTest.stderr || ""}`
+);
+assert(
+  packagedServerSource.includes("detectedTiers.length === LANDSRAAD_TIER_COUNT"),
+  "Packaged Landsraad inspection is missing the exact-five fail-closed invariant."
 );
 assert(
   packagedServerSource.includes("query: (sql, timeout) => dbQueryStreamed(sql, timeout)"),
@@ -154,6 +173,9 @@ async function waitForUi() {
     assert(html.includes("Grant Selected Ranks"), "Packaged UI is missing granular skill rank grants.");
     assert(html.includes("House Scrip is virtual currency"), "Packaged UI is missing the House Scrip grant panel.");
     const packagedVersion = JSON.parse(fs.readFileSync(path.join(extracted, "package.json"), "utf8")).version;
+    assert.equal(packagedVersion, rootPackage.version, "Packaged version does not match the release source.");
+    assert(html.includes("Exactly five distinct thresholds"), "Packaged Landsraad UI is missing the exact-five policy.");
+    assert(/id="landsraadTierPreviewButton"[^>]*disabled/.test(html), "Packaged Landsraad preview is not fail-closed by default.");
     console.log(`Packaged Suite smoke test passed on isolated port ${port}; version ${packagedVersion}.`);
   } finally {
     if (child.exitCode === null) child.kill();

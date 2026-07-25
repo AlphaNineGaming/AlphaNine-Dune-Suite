@@ -3,6 +3,7 @@ const path = require("path");
 const asar = require("@electron/asar");
 
 const root = path.join(__dirname, "..");
+const rootPackage = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const outputDir = process.env.ALPHANINE_BUILD_OUTPUT_DIR || path.join(root, "installer-output");
 const archive = path.join(outputDir, "win-unpacked", "resources", "app.asar");
 
@@ -17,7 +18,9 @@ const requiredRuntimeFiles = [
   "market-bot/main.go",
   "lib/player-directory.js",
   "lib/teleport-request-mode.js",
-  "electron/main.js"
+  "electron/main.js",
+  "scripts/test-landsraad-tiers.js",
+  `RELEASE_NOTES_${rootPackage.version}.md`
 ];
 const missing = requiredRuntimeFiles.filter((entry) => !packaged.has(entry));
 
@@ -39,6 +42,9 @@ if (!packagedMarketBotModule.includes("alphanine_market_bot_listings") && !packa
 }
 if (!packagedPlayerDirectory.includes("createPlayerDirectory") || !packagedPlayerDirectory.includes("parsePlayerSelector")) {
   throw new Error("Packaged player-directory module is incomplete.");
+}
+if (!packagedServer.includes("detectedTiers.length === LANDSRAAD_TIER_COUNT") || !packagedServer.includes("Exactly five distinct thresholds")) {
+  throw new Error("Packaged Landsraad exact-five protection is incomplete.");
 }
 
 console.log(`Packaged runtime files verified in ${archive}`);

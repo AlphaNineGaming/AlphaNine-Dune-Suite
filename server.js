@@ -8060,6 +8060,7 @@ const landsraadWeeklyPatchPreviews = new Map();
 const LANDSRAAD_WEEKLY_CONFIRM_TEXT = "APPLY LANDSRAAD";
 const landsraadTierPreviews = new Map();
 const LANDSRAAD_TIER_CONFIRM_TEXT = "APPLY LANDSRAAD TIERS";
+const LANDSRAAD_TIER_COUNT = 5;
 const CHARACTER_PROGRESSION_LIMITS = {
   TotalXPEarned: 999999999,
   TotalSkillPoints: 999,
@@ -9740,21 +9741,31 @@ async function landsraadTierInspect() {
     group by rewards.threshold
     order by rewards.threshold;
   `, 15000);
-  const tiers = parseDbRows(output, ["threshold", "rowCount"]).map((row, index) => ({
-    tier: index + 1,
-    label: `Tier ${index + 1}`,
+  const detectedTiers = parseDbRows(output, ["threshold", "rowCount"]).map((row) => ({
     threshold: requireInteger(row.threshold, "Stored Landsraad threshold", 1, 2147483647),
     rowCount: requireInteger(row.rowCount, "Stored Landsraad reward row count", 1, 10000000)
   }));
+  const detectedThresholds = detectedTiers.map((row) => row.threshold);
+  const exactTierCount = detectedTiers.length === LANDSRAAD_TIER_COUNT;
+  const tiers = exactTierCount ? detectedTiers.map((row, index) => ({
+    ...row,
+    tier: index + 1,
+    label: `Tier ${index + 1}`
+  })) : [];
+  const reason = exactTierCount
+    ? ""
+    : `Exactly ${LANDSRAAD_TIER_COUNT} distinct Landsraad reward thresholds are required; detected ${detectedTiers.length}: ${detectedThresholds.length ? detectedThresholds.join(", ") : "(none)"}. No tiers are editable because active and legacy reward groups cannot yet be distinguished safely.`;
   return {
-    ok: tiers.length > 0,
-    status: tiers.length ? "detected" : "empty",
+    ok: exactTierCount,
+    status: exactTierCount ? "detected" : "invalid_tier_count",
     schema: "dune",
     table: "landsraad_task_rewards",
     columns,
     tiers,
-    totalRewardRows: tiers.reduce((sum, row) => sum + row.rowCount, 0),
-    reason: tiers.length ? "" : "No Landsraad reward tiers were found."
+    detectedTierCount: detectedTiers.length,
+    detectedThresholds,
+    totalRewardRows: detectedTiers.reduce((sum, row) => sum + row.rowCount, 0),
+    reason
   };
 }
 
@@ -9783,7 +9794,15 @@ async function landsraadTierPreview(payload) {
     if (!inspect.ok) return { ok: false, status: inspect.status, inspect, error: inspect.reason };
     const thresholds = validateLandsraadThresholds(payload?.thresholds, inspect.tiers.length);
     const rows = await landsraadTierBackupRows();
-    if (rows.length !== inspect.totalRewardRows) throw new Error("Landsraad reward rows changed during preview. Refresh and try again.");
+    const backupDistribution = new Map();
+    for (const row of rows) {
+      const threshold = requireInteger(row.threshold, "Backed-up Landsraad threshold", 1, 2147483647);
+      backupDistribution.set(threshold, (backupDistribution.get(threshold) || 0) + 1);
+    }
+    const distributionChanged = rows.length !== inspect.totalRewardRows
+      || backupDistribution.size !== inspect.tiers.length
+      || inspect.tiers.some((row) => backupDistribution.get(row.threshold) !== row.rowCount);
+    if (distributionChanged) throw new Error("Landsraad reward tiers changed during preview. No backup or preview was created; refresh and try again.");
     const previewId = crypto.randomBytes(16).toString("hex");
     const newTiers = inspect.tiers.map((row, index) => ({ ...row, threshold: thresholds[index] }));
     const backupPath = progressionBackupPath("landsraad", "tiers", previewId);
@@ -9826,6 +9845,8 @@ async function landsraadTierApply(payload) {
     if (payload?.confirmText !== LANDSRAAD_TIER_CONFIRM_TEXT) throw new Error(`Type ${LANDSRAAD_TIER_CONFIRM_TEXT} before applying.`);
     if (Date.now() - preview.createdAt > 1000 * 60 * 30) throw new Error("Preview expired. Generate a new preview.");
     if (!fs.existsSync(preview.backupPath)) throw new Error("Matching backup file is missing.");
+    const currentInspect = await landsraadTierInspect();
+    if (!currentInspect.ok) throw new Error(currentInspect.reason || `Exactly ${LANDSRAAD_TIER_COUNT} Landsraad tiers are required.`);
     const oldTiers = preview.oldValues.tiers;
     const newTiers = preview.newValues.tiers;
     validateLandsraadThresholds(newTiers.map((row) => row.threshold), oldTiers.length);
@@ -17447,19 +17468,20 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel pad">
           <div class="label">Tier Editing Policy</div>
           <div class="detail-list mt">
+            <div class="detail-row"><span class="subtle">Required tier count</span><strong>Exactly five distinct thresholds</strong></div>
             <div class="detail-row"><span class="subtle">Tier names</span><strong>Tier 1–5 by ascending threshold</strong></div>
             <div class="detail-row"><span class="subtle">Changed field</span><strong>threshold only</strong></div>
             <div class="detail-row"><span class="subtle">Rewards</span><strong>Task, template, and amount preserved</strong></div>
             <div class="detail-row"><span class="subtle">Validation</span><strong>Positive, unique, strictly increasing</strong></div>
             <div class="detail-row"><span class="subtle">Protection</span><strong>Backup + lock + transaction + read-back</strong></div>
           </div>
-          <div class="warning mt">Editing a tier changes every reward row currently assigned to that threshold. Progression Editing must be enabled in Settings before Apply.</div>
+          <div class="warning mt">Editing is disabled unless exactly five distinct thresholds are detected. Editing a tier changes every reward row currently assigned to that threshold. Progression Editing must be enabled in Settings before Apply.</div>
         </div>
       </div>
       <div class="panel pad mt">
         <div class="label">Protected Apply</div>
         <div class="action-row mt">
-          <button type="button" onclick="previewLandsraadTiers()">Generate Preview + Backup</button>
+          <button id="landsraadTierPreviewButton" type="button" onclick="previewLandsraadTiers()" disabled>Generate Preview + Backup</button>
         </div>
         <label class="mt">Type APPLY LANDSRAAD TIERS<input id="landsraadTierConfirmText" placeholder="APPLY LANDSRAAD TIERS" oninput="syncLandsraadTierApplyButton()"></label>
         <div class="action-row mt"><button id="landsraadTierApplyButton" type="button" class="danger" onclick="applyLandsraadTiers()" disabled>Apply Tier Changes</button></div>
@@ -19040,8 +19062,8 @@ function clearRepairTargets(){document.querySelectorAll('[data-repair-target]').
 async function previewRepair(){try{const query=getValue("repairPlayerSelect");const targetIds=selectedRepairTargetIds();if(!repairInspectorState||!query)throw new Error("Inspect a player first.");if(!targetIds.length)throw new Error("Select at least one repairable target.");if(!repairInspectorState.playerOffline){const confirmed=await appConfirm("Queue Repair Until Logout","Queue "+targetIds.length+" repair(s) for "+(repairInspectorState.player?.character_name||"this online player")+"? The Suite will re-inspect the selected records, create the backup, and repair them automatically after the player disconnects.","Queue Repair","Cancel");if(!confirmed)return;const queued=await getJson("/api/admin/repair/queue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,targetIds,confirmText:"QUEUE REPAIR"}),timeoutMs:60000});setText("repairStatus",queued.message||"Repair queued until player logout.");showToast(queued.message||"Repair queued.","success");clearRepairTargets();await refreshRepairQueue();return;}setText("repairPreviewLog","Creating an exact pre-change backup and protected preview...");const data=await getJson("/api/admin/repair/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,targetIds}),timeoutMs:60000});repairPreviewState=data;setText("repairPreviewLog","Preview ready for "+data.targets.length+" target(s).\nBackup: "+data.backupPath+"\nExpires: "+new Date(data.expiresAt).toLocaleString()+"\n\nThe battlegroup may remain running. Type REPAIR DURABILITY, then apply while the player remains offline.");syncRepairApplyButton();showToast("Repair preview and backup ready.","success");}catch(e){repairPreviewState=null;setText("repairPreviewLog",betterError(e));syncRepairApplyButton();showToast(betterError(e),"error");}}
 async function applyRepair(){try{if(!repairPreviewState)throw new Error("Generate a repair preview first.");if(getValue("repairConfirmText")!=="REPAIR DURABILITY")throw new Error("Type REPAIR DURABILITY exactly.");const confirmed=await appConfirm("Apply Live Durability Repair","Apply "+repairPreviewState.targets.length+" live repair(s)? The battlegroup may remain running, but the player must remain offline. Permanent maximum-durability decay will remain unchanged.","Apply Repair","Cancel");if(!confirmed)return;setText("repairPreviewLog","Revalidating the offline player and applying the protected live transaction...");const data=await getJson("/api/admin/repair/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:repairPreviewState.previewId,confirmText:getValue("repairConfirmText")}),timeoutMs:90000});repairPreviewState=null;setValue("repairConfirmText","");syncRepairApplyButton();showToast(data.message||"Repair applied.","success");await inspectRepairTargets();setText("repairPreviewLog",(data.message||"Repair applied.")+"\nBackup: "+(data.backupPath||"created")+"\nAudit: "+(data.auditLogPath||"admin-audit.log"));}catch(e){setText("repairPreviewLog",betterError(e));showToast(betterError(e),"error");syncRepairApplyButton();}}
 function invalidateLandsraadTierPreview(){landsraadTierPreviewState=null;setValue("landsraadTierConfirmText","");setText("landsraadTierPreviewLog","Tier values changed. Generate a new preview and backup.");syncLandsraadTierApplyButton();}
-function syncLandsraadTierApplyButton(){const button=document.getElementById("landsraadTierApplyButton");if(button)button.disabled=!landsraadTierPreviewState||getValue("landsraadTierConfirmText")!=="APPLY LANDSRAAD TIERS";}
-function renderLandsraadTiers(data){landsraadTierState=data;landsraadTierPreviewState=null;setValue("landsraadTierConfirmText","");syncLandsraadTierApplyButton();const rows=document.getElementById("landsraadTierRows");if(!rows)return;if(!data?.ok){rows.innerHTML='<div class="empty">'+esc(data?.reason||data?.error||"Landsraad tiers unavailable.")+'</div>';setText("landsraadTierStatus",data?.reason||data?.error||"Landsraad tiers unavailable.");return;}rows.innerHTML=data.tiers.map(row=>'<div class="detail-row"><label>'+esc(row.label)+' threshold<input class="landsraad-tier-threshold" data-tier="'+esc(row.tier)+'" type="number" min="1" max="2147483647" step="1" value="'+esc(row.threshold)+'" oninput="invalidateLandsraadTierPreview()"></label><strong>'+esc(Number(row.rowCount).toLocaleString())+' reward rows</strong></div>').join("");setText("landsraadTierStatus",data.tiers.length+" tiers loaded from the live database / "+Number(data.totalRewardRows||0).toLocaleString()+" reward rows.");setText("landsraadTierPreviewLog","Current thresholds loaded. Adjust values, then generate a protected preview.");}
+function syncLandsraadTierApplyButton(){const editingReady=landsraadTierState?.ok===true&&landsraadTierState.tiers?.length===5;const previewButton=document.getElementById("landsraadTierPreviewButton");if(previewButton)previewButton.disabled=!editingReady;const button=document.getElementById("landsraadTierApplyButton");if(button)button.disabled=!editingReady||!landsraadTierPreviewState||getValue("landsraadTierConfirmText")!=="APPLY LANDSRAAD TIERS";}
+function renderLandsraadTiers(data){landsraadTierState=data;landsraadTierPreviewState=null;setValue("landsraadTierConfirmText","");syncLandsraadTierApplyButton();const rows=document.getElementById("landsraadTierRows");if(!rows)return;if(!data?.ok){const diagnostic=data?.reason||data?.error||"Landsraad tiers unavailable.";rows.innerHTML='<div class="empty">'+esc(diagnostic)+'</div>';setText("landsraadTierStatus",diagnostic);setText("landsraadTierPreviewLog",diagnostic);return;}rows.innerHTML=data.tiers.map(row=>'<div class="detail-row"><label>'+esc(row.label)+' threshold<input class="landsraad-tier-threshold" data-tier="'+esc(row.tier)+'" type="number" min="1" max="2147483647" step="1" value="'+esc(row.threshold)+'" oninput="invalidateLandsraadTierPreview()"></label><strong>'+esc(Number(row.rowCount).toLocaleString())+' reward rows</strong></div>').join("");setText("landsraadTierStatus",data.tiers.length+" tiers loaded from the live database / "+Number(data.totalRewardRows||0).toLocaleString()+" reward rows.");setText("landsraadTierPreviewLog","Current thresholds loaded. Adjust values, then generate a protected preview.");}
 async function refreshLandsraadTiers(){try{setText("landsraadTierStatus","Loading authoritative Landsraad thresholds...");const data=await getJson("/api/landsraad/tiers",{timeoutMs:30000});renderLandsraadTiers(data);if(!data.ok)throw new Error(data.reason||data.error||"Landsraad tiers unavailable.");addActivity("world","Landsraad tiers loaded",data.tiers.map(row=>row.threshold).join(", "));}catch(e){renderLandsraadTiers({ok:false,error:betterError(e),tiers:[]});addActivity("error","Landsraad tiers unavailable",e.message);}}
 function landsraadTierThresholdPayload(){return [...document.querySelectorAll(".landsraad-tier-threshold")].sort((a,b)=>Number(a.dataset.tier)-Number(b.dataset.tier)).map(input=>input.value);}
 async function previewLandsraadTiers(){try{if(!landsraadTierState?.ok)throw new Error("Refresh Landsraad tiers first.");const data=await getJson("/api/landsraad/tiers/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({thresholds:landsraadTierThresholdPayload()}),timeoutMs:45000});if(!data.ok)throw new Error(data.error||"Landsraad tier preview failed.");landsraadTierPreviewState=data;setText("landsraadTierPreviewLog","Preview ready.\nBackup: "+data.backupPath+"\nAffected reward rows: "+data.changedRewardRows+"\n\nCurrent tiers:\n"+JSON.stringify(data.oldValues.tiers,null,2)+"\n\nNew tiers:\n"+JSON.stringify(data.newValues.tiers,null,2)+"\n\nType APPLY LANDSRAAD TIERS before applying.");syncLandsraadTierApplyButton();showToast("Landsraad tier preview and backup ready.","success");}catch(e){landsraadTierPreviewState=null;setText("landsraadTierPreviewLog",betterError(e));syncLandsraadTierApplyButton();showToast(betterError(e),"error");}}

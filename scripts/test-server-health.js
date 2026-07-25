@@ -157,6 +157,8 @@ assert.equal(recoveredPod.lastTerminationReason, undefined);
 assert.equal(recoveredPod.containers[0].lastTerminationReason, "Error", "Last termination evidence must remain visible.");
 assert.equal(recovered.namespaces.find((entry) => entry.name === "dune-market-bot").state, "Healthy");
 assert.equal(recovered.warnings.length, 1, "Recovered warnings must remain visible in the warning event list.");
+assert.equal(recovered.warnings[0].active, false, "A retained warning for a currently healthy pod must be marked recovered.");
+assert.equal(recovered.warnings[0].currentState, "Healthy");
 assert.equal(recovered.state, "Healthy", "Retained warning history must not independently lower current server health.");
 
 const completedFailureInput = healthyInput();
@@ -167,8 +169,8 @@ completedFailurePods.push(pod("alphanine-dump-failed-pod", [
 completedFailureInput.commandResults.pods = jsonResult(completedFailurePods);
 const completedFailure = buildServerHealthReport(completedFailureInput);
 assert.equal(completedFailure.pods.find((entry) => entry.name === "alphanine-dump-failed-pod").state, "Unhealthy");
-assert.equal(completedFailure.namespaces.find((entry) => entry.name === namespace).state, "Degraded", "A completed failed job must not imply the namespace's running workload is unhealthy.");
-assert.equal(completedFailure.state, "Degraded", "A recent completed job failure should be visible without claiming the live server is unhealthy.");
+assert.equal(completedFailure.namespaces.find((entry) => entry.name === namespace).state, "Healthy", "A completed failed job must not lower the namespace's current workload health.");
+assert.equal(completedFailure.state, "Healthy", "A completed job failure should remain visible without lowering current server health.");
 
 const brokenInput = healthyInput();
 brokenInput.commandResults.pods = jsonResult([

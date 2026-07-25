@@ -16510,6 +16510,7 @@ function appPage() {
     .health-reason { max-width:380px; color:#ffbd9f; overflow-wrap:anywhere; }
     .health-warning-list { display:grid; gap:8px; max-height:420px; overflow:auto; }
     .health-warning { padding:10px; border-left:3px solid #dfa937; background:rgba(138,91,20,.12); }
+    .health-warning.recovered { border-left-color:#5dcf82; background:rgba(35,119,66,.12); }
     .health-warning strong { margin-right:7px; }
     .health-unavailable { color:var(--muted); font-style:italic; }
     @media (max-width:1250px) { .health-summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.health-connectivity,.health-services,.health-resources{grid-template-columns:1fr 1fr} }
@@ -18807,7 +18808,7 @@ function renderServerHealth(data){
   const pvcRows=((data.storage&&data.storage.pvcs)||[]).map(function(pvc){return '<tr data-state="'+esc(pvc.state)+'"><td>'+serverHealthBadge(pvc.state)+'</td><td>'+esc(pvc.namespace)+'</td><td><strong>'+esc(pvc.name)+'</strong></td><td>'+esc(pvc.phase)+'</td><td>'+esc(pvc.capacity||pvc.requested||"Unknown")+'</td><td>'+esc(pvc.storageClass||"Default")+'</td><td>'+esc(pvc.volume||"Pending")+'</td></tr>';});
   document.getElementById("serverHealthStorage").innerHTML=serverHealthTable(["State","Namespace","Claim","Phase","Capacity","Class","Volume"],pvcRows);
   const warnings=data.warnings||[];
-  document.getElementById("serverHealthWarnings").innerHTML=warnings.length?warnings.map(function(event){return '<div class="health-warning"><strong>'+esc(event.reason)+'</strong><span class="micro">'+esc(event.age)+" • "+esc(event.namespace)+"/"+esc(event.objectName)+'</span><div>'+esc(event.message)+'</div></div>';}).join(""):'<div class="empty">No relevant warning events.</div>';
+  document.getElementById("serverHealthWarnings").innerHTML=warnings.length?warnings.map(function(event){const recovered=event.active===false;return '<div class="health-warning'+(recovered?' recovered':'')+'"><strong>'+esc(recovered?"Recovered":event.reason)+'</strong><span class="micro">'+esc(event.age)+" • "+esc(event.namespace)+"/"+esc(event.objectName)+(recovered?" • "+esc(event.reason):"")+'</span><div>'+esc(event.message)+'</div></div>';}).join(""):'<div class="empty">No relevant warning events.</div>';
   const checkRows=(data.checks||[]).map(function(check){const state=check.ok?"Healthy":(check.optional?"Unknown":"Unhealthy");return '<tr data-state="'+state+'"><td>'+serverHealthBadge(state)+'</td><td><strong>'+esc(check.label)+'</strong>'+(check.optional?' <span class="micro">optional</span>':'')+'</td><td>'+esc(check.durationMs===null?"--":check.durationMs+" ms")+'</td><td class="'+(check.optional&&!check.ok?"health-unavailable":"health-reason")+'">'+esc(check.ok?"Completed":(check.optional?"Unavailable":check.error||"Failed"))+'</td></tr>';});
   document.getElementById("serverHealthChecks").innerHTML=serverHealthTable(["State","Check","Duration","Result"],checkRows);
 }

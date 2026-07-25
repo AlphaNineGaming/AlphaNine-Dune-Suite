@@ -126,6 +126,50 @@ const permissionLimited = buildServerHealthReport(permissionLimitedInput);
 assert.equal(permissionLimited.connectivity.hyperv.state, "Unknown", "A permission-limited Hyper-V check must not falsely report Offline.");
 assert.equal(permissionLimited.state, "Healthy", "Reachable SSH and Kubernetes remain authoritative when Hyper-V inspection is permission-limited.");
 
+const recoveredInput = healthyInput();
+const recoveredPods = JSON.parse(recoveredInput.commandResults.pods.stdout).items;
+recoveredPods.push({
+  ...pod("market-bot-abc", [container("market-bot", {
+    restartCount: 98,
+    lastState: { terminated: { reason: "Error", exitCode: 1, finishedAt: "2026-07-25T17:10:00.000Z" } }
+  })]),
+  metadata: meta("market-bot-abc", "dune-market-bot")
+});
+recoveredInput.commandResults.pods = jsonResult(recoveredPods);
+const recoveredNamespaces = JSON.parse(recoveredInput.commandResults.namespaces.stdout).items;
+recoveredNamespaces.push({ kind: "Namespace", metadata: meta("dune-market-bot", ""), status: { phase: "Active" } });
+recoveredInput.commandResults.namespaces = jsonResult(recoveredNamespaces);
+recoveredInput.commandResults.events = jsonResult([{
+  kind: "Event",
+  metadata: meta("market-bot-warning", "dune-market-bot"),
+  reason: "BackOff",
+  message: "Back-off restarting failed container market-bot",
+  involvedObject: { kind: "Pod", name: "market-bot-abc" },
+  lastTimestamp: "2026-07-25T17:10:30.000Z",
+  count: 5
+}]);
+recoveredInput.marketBot = { installed: true, status: "Running", reachable: true, message: "Restock completed." };
+const recovered = buildServerHealthReport(recoveredInput);
+const recoveredPod = recovered.pods.find((entry) => entry.name === "market-bot-abc");
+assert.equal(recoveredPod.state, "Healthy", "A currently ready pod must not remain unhealthy because Kubernetes retained a BackOff event.");
+assert.equal(recoveredPod.reason, "", "Recovered warnings must not be presented as an active pod failure.");
+assert.equal(recoveredPod.lastTerminationReason, undefined);
+assert.equal(recoveredPod.containers[0].lastTerminationReason, "Error", "Last termination evidence must remain visible.");
+assert.equal(recovered.namespaces.find((entry) => entry.name === "dune-market-bot").state, "Healthy");
+assert.equal(recovered.warnings.length, 1, "Recovered warnings must remain visible in the warning event list.");
+assert.equal(recovered.state, "Healthy", "Retained warning history must not independently lower current server health.");
+
+const completedFailureInput = healthyInput();
+const completedFailurePods = JSON.parse(completedFailureInput.commandResults.pods.stdout).items;
+completedFailurePods.push(pod("alphanine-dump-failed-pod", [
+  container("database", { ready: false, state: { terminated: { reason: "Error", exitCode: 1, finishedAt: "2026-07-25T17:30:00.000Z" } } })
+], { phase: "Failed" }));
+completedFailureInput.commandResults.pods = jsonResult(completedFailurePods);
+const completedFailure = buildServerHealthReport(completedFailureInput);
+assert.equal(completedFailure.pods.find((entry) => entry.name === "alphanine-dump-failed-pod").state, "Unhealthy");
+assert.equal(completedFailure.namespaces.find((entry) => entry.name === namespace).state, "Degraded", "A completed failed job must not imply the namespace's running workload is unhealthy.");
+assert.equal(completedFailure.state, "Degraded", "A recent completed job failure should be visible without claiming the live server is unhealthy.");
+
 const brokenInput = healthyInput();
 brokenInput.commandResults.pods = jsonResult([
   pod("postgres-0", [container("postgres")]),

@@ -31,6 +31,7 @@
     "test:python-discovery": "node scripts/test-python-discovery.js",
     "test:manager-netstat": "node scripts/test-manager-netstat-decoding.js",
     "test:server-update": "node scripts/test-server-update-monitor.js",
+    "test:server-health": "node scripts/test-server-health.js",
     "test:vm-scheduler": "node scripts/test-vm-scheduler.js",
     "test:specialization-progression": "node scripts/test-specialization-progression.js",
     "test:progression-grants": "node scripts/test-progression-skill-ranks-house-scrip.js",

@@ -42,6 +42,7 @@ const {
 const { createItemCatalogProvider, isValidTemplateId, rawFallback } = require("./lib/item-catalog-provider");
 const { createItemServerDiscovery } = require("./lib/item-server-discovery");
 const { createZipArchive } = require("./lib/zip-archive");
+const { buildServerHealthReport } = require("./lib/server-health");
 const {
   defaultSchedulerConfig,
   normalizeSchedulerConfig,
@@ -3021,6 +3022,7 @@ function vmMonitorKind(score, online) {
 
 let suiteStatusSnapshotInFlight = null;
 let vmConnectionMonitorInFlight = null;
+let serverHealthScanInFlight = null;
 
 async function suiteStatusSnapshot() {
   const vm = await vmInfoFast(5000);
@@ -3131,6 +3133,88 @@ async function sshCommand(command, timeout = 180000, options = {}) {
   ];
   if (options.inputPath) return runWithStdin("ssh", args, options.inputPath, { timeout, maxBuffer: options.maxBuffer });
   return run("ssh", args, { timeout, maxBuffer: options.maxBuffer });
+}
+
+async function serverHealthRemoteCheck(command, timeout = 15000, maxBuffer = 1024 * 1024) {
+  const started = Date.now();
+  const result = await sshCommand(command, timeout, { maxBuffer }).catch((error) => ({
+    ok: false,
+    stdout: "",
+    stderr: "",
+    error: error.message || String(error)
+  }));
+  return { ...result, durationMs: Date.now() - started };
+}
+
+async function runServerHealthScan() {
+  const started = Date.now();
+  const checkedAt = new Date().toISOString();
+  const selectedBattlegroup = normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup);
+  const kubectlJson = (resource, timeout = 15000) => serverHealthRemoteCheck(
+    `sudo kubectl get ${resource} -A -o json --request-timeout=10s`,
+    timeout
+  );
+  const hostMetricsCommand = [
+    "LC_ALL=C",
+    "top -bn1 2>/dev/null | awk '/Cpu/ { for (i=1;i<=NF;i++) if ($i ~ /id/) { value=$(i-1); gsub(/[^0-9.]/,\"\",value); print \"CPU \" value; exit } }'",
+    "awk '/MemTotal:/ { total=$2 } /MemAvailable:/ { available=$2 } END { print \"MEM \" total \" \" available }' /proc/meminfo 2>/dev/null",
+    "df -Pk / 2>/dev/null | awk 'NR==2 { print \"DISK \"$2\" \"$3\" \"$4\" \"$5\" \"$6 }'",
+    "awk '{ print \"LOAD \"$1\" \"$2\" \"$3 }' /proc/loadavg 2>/dev/null",
+    "awk '{ split($1,value,\".\"); print \"UPTIME \"value[1] }' /proc/uptime 2>/dev/null"
+  ].join("; ");
+  const safe = (promise, fallback) => promise.catch((error) => ({ ...fallback, error: error.message || String(error) }));
+  const [
+    vm,
+    ssh,
+    version,
+    nodes,
+    namespaces,
+    pods,
+    workloads,
+    networking,
+    pvcs,
+    events,
+    nodeMetrics,
+    podMetrics,
+    hostMetrics,
+    database,
+    receiver,
+    marketBot
+  ] = await Promise.all([
+    safe(vmInfoFast(6000), { exists: false, state: "Unknown" }),
+    serverHealthRemoteCheck("printf 'ALPHANINE_HEALTH_SSH_OK\\n'", 10000, 4096),
+    serverHealthRemoteCheck("sudo kubectl version -o json --request-timeout=7s", 12000),
+    kubectlJson("nodes", 15000),
+    kubectlJson("namespaces", 15000),
+    kubectlJson("pods", 20000),
+    kubectlJson("deployments,statefulsets,daemonsets", 20000),
+    kubectlJson("services,endpoints", 20000),
+    kubectlJson("persistentvolumeclaims", 15000),
+    serverHealthRemoteCheck("sudo kubectl get events -A --field-selector type=Warning -o json --request-timeout=10s", 20000),
+    serverHealthRemoteCheck("sudo kubectl top nodes --no-headers --request-timeout=7s", 12000, 1024 * 256),
+    serverHealthRemoteCheck("sudo kubectl top pods -A --containers --no-headers --request-timeout=10s", 15000, 1024 * 512),
+    serverHealthRemoteCheck(hostMetricsCommand, 12000, 1024 * 64),
+    safe(databaseHealthSnapshot(8000), { ok: false, status: "unavailable", message: "Database health check failed." }),
+    safe(receiverStatus(), { ok: false, status: "Offline", lastError: "Receiver status is unavailable." }),
+    safe(marketBotStatus(), { installed: false, status: "Unknown", message: "Market Bot status is unavailable." })
+  ]);
+  return buildServerHealthReport({
+    checkedAt,
+    durationMs: Date.now() - started,
+    selectedBattlegroup,
+    vm,
+    ssh,
+    database,
+    receiver,
+    marketBot,
+    commandResults: { version, nodes, namespaces, pods, workloads, networking, pvcs, events, nodeMetrics, podMetrics, hostMetrics }
+  });
+}
+
+function serverHealthSnapshot() {
+  if (serverHealthScanInFlight) return serverHealthScanInFlight;
+  serverHealthScanInFlight = runServerHealthScan().finally(() => { serverHealthScanInFlight = null; });
+  return serverHealthScanInFlight;
 }
 
 async function steamServerUpToDateCheck(buildId) {
@@ -16397,6 +16481,39 @@ function appPage() {
       background:linear-gradient(180deg, #b77a22, #6d4518) !important;
       border-color:rgba(96,61,20,.82) !important;
     }
+    .health-toolbar { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }
+    .health-overall { display:flex; align-items:center; gap:14px; }
+    .health-state { display:inline-flex; align-items:center; min-height:44px; padding:0 18px; border:1px solid var(--line); border-radius:10px; font-size:18px; font-weight:850; letter-spacing:.04em; }
+    .health-state.healthy,.health-dot.healthy { color:#8ce6aa; border-color:rgba(93,207,130,.5); background:rgba(35,119,66,.18); }
+    .health-state.degraded,.health-dot.degraded { color:#ffd879; border-color:rgba(223,169,55,.5); background:rgba(138,91,20,.18); }
+    .health-state.unhealthy,.health-dot.unhealthy { color:#ff9f8b; border-color:rgba(225,83,58,.55); background:rgba(130,38,27,.2); }
+    .health-state.offline,.health-dot.offline { color:#b9bec8; border-color:rgba(142,150,165,.48); background:rgba(75,80,91,.2); }
+    .health-state.unknown,.health-dot.unknown { color:#a8c9e8; border-color:rgba(92,147,196,.45); background:rgba(35,78,116,.18); }
+    .health-summary-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px; }
+    .health-summary-card { padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--bg-2); }
+    .health-summary-card strong { display:block; margin-top:5px; font-size:23px; color:var(--gold-bright); }
+    .health-connectivity,.health-services,.health-resources { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+    .health-card { min-width:0; padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--bg-2); }
+    .health-card-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .health-dot { display:inline-flex; padding:4px 8px; border:1px solid var(--line); border-radius:999px; font-size:10px; font-weight:800; text-transform:uppercase; white-space:nowrap; }
+    .health-card p { margin:8px 0 0; color:var(--muted); line-height:1.4; overflow-wrap:anywhere; }
+    .health-table-wrap { overflow:auto; max-height:520px; border:1px solid var(--line); border-radius:8px; }
+    .health-table { width:100%; border-collapse:collapse; min-width:760px; }
+    .health-table th { position:sticky; top:0; z-index:1; background:var(--bg-2); text-align:left; white-space:nowrap; }
+    .health-table td,.health-table th { padding:10px; vertical-align:top; }
+    .health-table tr[data-state="Unhealthy"] td:first-child { border-left:3px solid #df533a; }
+    .health-table tr[data-state="Degraded"] td:first-child { border-left:3px solid #dfa937; }
+    .health-pod-filters { display:grid; grid-template-columns:minmax(220px,1fr) 180px; gap:10px; }
+    .health-pod-row { cursor:pointer; }
+    .health-container-list { display:grid; gap:5px; margin-top:7px; }
+    .health-container { display:grid; grid-template-columns:minmax(130px,1fr) repeat(4,minmax(72px,auto)); gap:8px; padding:7px; border:1px solid var(--line); border-radius:7px; font-size:11px; }
+    .health-reason { max-width:380px; color:#ffbd9f; overflow-wrap:anywhere; }
+    .health-warning-list { display:grid; gap:8px; max-height:420px; overflow:auto; }
+    .health-warning { padding:10px; border-left:3px solid #dfa937; background:rgba(138,91,20,.12); }
+    .health-warning strong { margin-right:7px; }
+    .health-unavailable { color:var(--muted); font-style:italic; }
+    @media (max-width:1250px) { .health-summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.health-connectivity,.health-services,.health-resources{grid-template-columns:1fr 1fr} }
+    @media (max-width:720px) { .health-summary-grid,.health-connectivity,.health-services,.health-resources,.health-pod-filters{grid-template-columns:1fr}.health-container{grid-template-columns:1fr 1fr} }
     @media (max-width:1300px) { .dashboard-grid{grid-template-columns:1fr 1fr}.dashboard-grid > .panel:last-child{grid-column:1/-1}.map-explorer{grid-template-columns:1fr}.operations-intel{position:relative;top:auto}.map-intel-grid,.map-region-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
     @media (max-width:1500px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 340px}.live-map-panel{width:340px}.live-map-stage{width:100%;} }
     @media (max-width:1180px) { .live-map-layout{grid-template-columns:minmax(0,1fr) 320px}.live-map-panel{width:320px}.hero-body{padding:24px; padding-bottom:82px; max-width:none}.hero-actions{left:24px; right:24px; bottom:22px; justify-content:flex-start; max-width:none} }
@@ -16659,6 +16776,7 @@ function appPage() {
       <div class="nav-group">
         <div class="nav-group-title">Overview</div>
         <button class="tab active" data-view="dashboard">Dashboard</button>
+        <button class="tab" data-view="server-health">Server Health</button>
         <button class="tab" data-view="operations">Operations <span id="operationsNavCount"></span></button>
       </div>
       <div class="nav-group">
@@ -16849,6 +16967,95 @@ function appPage() {
           <div class="dashboard-footer">
             <span>Need help? Join our Discord: <a href="https://discord.gg/RQsVw2vyg" target="_blank" rel="noopener">https://discord.gg/RQsVw2vyg</a></span>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="server-health" class="view">
+      <div class="panel pad">
+        <div class="health-toolbar">
+          <div class="health-overall">
+            <span id="serverHealthState" class="health-state unknown">Unknown</span>
+            <div>
+              <div class="label">Dune VM &amp; Kubernetes</div>
+              <div id="serverHealthStamp" class="subtle">Run a read-only health scan.</div>
+            </div>
+          </div>
+          <div class="action-row">
+            <label class="check-row"><input id="serverHealthAutoRefresh" type="checkbox" onchange="syncServerHealthAutoRefresh()"> Auto-refresh every 60s</label>
+            <button id="serverHealthRefreshButton" type="button" class="primary" onclick="refreshServerHealth()">Refresh Health</button>
+          </div>
+        </div>
+        <div id="serverHealthReasons" class="empty mt">Health reasons will appear here.</div>
+      </div>
+
+      <div id="serverHealthSummary" class="health-summary-grid mt">
+        <div class="health-summary-card"><span class="micro">Nodes</span><strong>--</strong></div>
+        <div class="health-summary-card"><span class="micro">Namespaces</span><strong>--</strong></div>
+        <div class="health-summary-card"><span class="micro">Pods</span><strong>--</strong></div>
+        <div class="health-summary-card"><span class="micro">Containers</span><strong>--</strong></div>
+        <div class="health-summary-card"><span class="micro">Restarts</span><strong>--</strong></div>
+        <div class="health-summary-card"><span class="micro">Warnings</span><strong>--</strong></div>
+      </div>
+
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Connectivity</div><div class="subtle">Hyper-V, existing SSH configuration, and Kubernetes API.</div></div></div>
+        <div id="serverHealthConnectivity" class="health-connectivity"><div class="empty">Not scanned.</div></div>
+      </div>
+
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Critical Services</div><div class="subtle">PostgreSQL, RabbitMQ, Dune, Receiver, and Market Bot.</div></div></div>
+        <div id="serverHealthServices" class="health-services"><div class="empty">Not scanned.</div></div>
+      </div>
+
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Resources &amp; Pressure</div><div class="subtle">Metrics are optional. Unavailable metrics do not lower server health.</div></div></div>
+        <div id="serverHealthResources" class="health-resources"><div class="empty">Not scanned.</div></div>
+      </div>
+
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Kubernetes Nodes</div><div class="subtle">Readiness, resource pressure, capacity, and usage when available.</div></div></div>
+        <div id="serverHealthNodes" class="health-table-wrap"><div class="empty">Not scanned.</div></div>
+      </div>
+
+      <div class="panel pad mt">
+        <div class="panel-head"><div><div class="label">Workloads</div><div class="subtle">Deployments, StatefulSets, and DaemonSets: expected versus ready replicas.</div></div></div>
+        <div id="serverHealthWorkloads" class="health-table-wrap"><div class="empty">Not scanned.</div></div>
+      </div>
+
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div><div class="label">Pods &amp; Containers</div><div class="subtle">Every namespace, pod, init container, application container, and ephemeral container.</div></div>
+          <div class="health-pod-filters">
+            <input id="serverHealthPodSearch" type="search" placeholder="Filter namespace, pod, node, or reason" oninput="renderServerHealthPods()">
+            <select id="serverHealthPodState" onchange="renderServerHealthPods()">
+              <option value="">All states</option><option>Healthy</option><option>Degraded</option><option>Unhealthy</option><option>Offline</option><option>Unknown</option>
+              <option value="Running">Phase: Running</option><option value="Pending">Phase: Pending</option><option value="Failed">Phase: Failed</option><option value="Succeeded">Phase: Succeeded</option><option value="UnknownPhase">Phase: Unknown</option>
+            </select>
+          </div>
+        </div>
+        <div id="serverHealthPods" class="health-table-wrap"><div class="empty">Not scanned.</div></div>
+      </div>
+
+      <div class="layout-2 mt">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Namespaces</div><div class="subtle">Pod phases and unhealthy counts.</div></div></div>
+          <div id="serverHealthNamespaces" class="health-table-wrap"><div class="empty">Not scanned.</div></div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Persistent Storage</div><div class="subtle">PVC state, requested capacity, class, and volume.</div></div></div>
+          <div id="serverHealthStorage" class="health-table-wrap"><div class="empty">Not scanned.</div></div>
+        </div>
+      </div>
+
+      <div class="layout-2 mt">
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Recent Warning Events</div><div class="subtle">Relevant warnings only; messages are concise and redacted.</div></div></div>
+          <div id="serverHealthWarnings" class="health-warning-list"><div class="empty">Not scanned.</div></div>
+        </div>
+        <div class="panel pad">
+          <div class="panel-head"><div><div class="label">Check Execution</div><div class="subtle">Bounded read-only checks; optional metrics are marked separately.</div></div></div>
+          <div id="serverHealthChecks" class="health-table-wrap"><div class="empty">Not scanned.</div></div>
         </div>
       </div>
     </section>
@@ -18499,6 +18706,7 @@ let INTERNET_PORTAL_URL="";
 const tabs=[...document.querySelectorAll(".tab")], views=[...document.querySelectorAll(".view")];
 const viewCopy={
   dashboard:["Dashboard","Command overview for your self-hosted Arrakis battlegroup."],
+  "server-health":["Server Health","Read-only health for the Dune VM, Kubernetes workload, storage, and Suite services."],
   operations:["Operations","Persistent progress, duplicate-action protection, and recent Suite work."],
   players:["Players","Search, inspect, and select characters for admin actions."],
   blueprints:["Blueprints","Import and export player building blueprints."],
@@ -18524,7 +18732,7 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market")refreshMarketBot();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market")refreshMarketBot();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
 let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
@@ -18533,6 +18741,90 @@ let databaseExplorerState={schemas:[],tables:[],metadata:null,rows:[],selectedTa
 let serverUpdateOperationId="",serverUpdateCheckState=null,serverUpdatePollTimer=null;
 const HYDRATION_TOOLTIP_TEXT=${JSON.stringify(HYDRATION_TOOLTIP)};
 let liveMapTunnelPromise=null;
+let serverHealthData=null,serverHealthRefreshInFlight=null,serverHealthAutoTimer=null;
+function serverHealthClass(value){return String(value||"Unknown").toLowerCase();}
+function serverHealthBadge(value){const state=String(value||"Unknown");return '<span class="health-dot '+serverHealthClass(state)+'">'+esc(state)+'</span>';}
+function serverHealthBytes(value){const bytes=Number(value||0);if(!bytes)return "Unavailable";if(bytes>=1073741824)return (bytes/1073741824).toFixed(1)+" GiB";if(bytes>=1048576)return (bytes/1048576).toFixed(1)+" MiB";return Math.round(bytes/1024)+" KiB";}
+function serverHealthTable(headers,rows){if(!rows.length)return '<div class="empty">No matching results.</div>';return '<table class="health-table"><thead><tr>'+headers.map(function(header){return "<th>"+esc(header)+"</th>";}).join("")+'</tr></thead><tbody>'+rows.join("")+'</tbody></table>';}
+function serverHealthCard(label,item){item=item||{};return '<div class="health-card"><div class="health-card-head"><strong>'+esc(label)+'</strong>'+serverHealthBadge(item.state)+'</div><p>'+esc(item.message||item.status||"No details.")+'</p></div>';}
+function renderServerHealthPods(){
+  const target=document.getElementById("serverHealthPods");if(!target)return;
+  const data=serverHealthData;if(!data){target.innerHTML='<div class="empty">Not scanned.</div>';return;}
+  const query=String(document.getElementById("serverHealthPodSearch").value||"").trim().toLowerCase();
+  const filter=document.getElementById("serverHealthPodState").value;
+  const pods=(data.pods||[]).filter(function(pod){
+    const text=[pod.namespace,pod.name,pod.node,pod.reason,pod.phase].join(" ").toLowerCase();
+    const stateMatch=!filter||(filter==="UnknownPhase"?pod.phase==="Unknown":(filter==="Running"||filter==="Pending"||filter==="Failed"||filter==="Succeeded"?pod.phase===filter:pod.state===filter));
+    return stateMatch&&(!query||text.includes(query));
+  });
+  const rows=pods.map(function(pod){
+    const containers=(pod.containers||[]).map(function(container){
+      const reason=container.reason||container.lastTerminationReason||"None";
+      return '<div class="health-container"><strong>'+esc(container.name)+' <span class="micro">'+esc(container.type)+'</span></strong><span>'+esc(container.ready?"Ready":"Not ready")+'</span><span>'+esc(container.state)+'</span><span>Restarts '+esc(container.restartCount)+'</span><span>'+esc(reason)+'</span></div>';
+    }).join("");
+    return '<tr class="health-pod-row" data-state="'+esc(pod.state)+'"><td>'+serverHealthBadge(pod.state)+'<div class="micro">'+esc(pod.phase)+'</div></td><td><strong>'+esc(pod.namespace)+'</strong><div>'+esc(pod.name)+'</div><div class="health-container-list">'+containers+'</div></td><td>'+esc(pod.readiness)+'</td><td>'+esc(pod.restarts)+'</td><td>'+esc(pod.age)+'</td><td>'+esc(pod.node)+'</td><td class="health-reason">'+esc(pod.reason||"None")+'</td></tr>';
+  });
+  target.innerHTML=serverHealthTable(["State / Phase","Namespace / Pod / Containers","Ready","Restarts","Age","Node","Failure reason"],rows);
+}
+function renderServerHealth(data){
+  serverHealthData=data;
+  const state=String(data.state||"Unknown"),stateNode=document.getElementById("serverHealthState");
+  stateNode.textContent=state;stateNode.className="health-state "+serverHealthClass(state);
+  const checked=data.checkedAt?new Date(data.checkedAt).toLocaleString():"Unknown";
+  document.getElementById("serverHealthStamp").textContent="Checked "+checked+" in "+Math.round(Number(data.durationMs||0)/1000)+"s"+(data.selectedServer&&data.selectedServer.namespace?" • "+data.selectedServer.namespace:"");
+  document.getElementById("serverHealthReasons").innerHTML=(data.reasons||[]).length?data.reasons.map(function(reason){return '<div>• '+esc(reason)+'</div>';}).join(""):'<span class="subtle">No health problems detected.</span>';
+  const summary=data.summary||{},summaryRows=[["Nodes",summary.nodes],["Namespaces",summary.namespaces],["Pods",summary.pods],["Containers",(summary.readyContainers||0)+"/"+(summary.containers||0)],["Restarts",summary.restarts],["Warnings",summary.recentWarnings]];
+  document.getElementById("serverHealthSummary").innerHTML=summaryRows.map(function(row){return '<div class="health-summary-card"><span class="micro">'+esc(row[0])+'</span><strong>'+esc(row[1]??0)+'</strong></div>';}).join("");
+  const connectivity=data.connectivity||{};
+  document.getElementById("serverHealthConnectivity").innerHTML=[
+    serverHealthCard("Hyper-V VM",connectivity.hyperv),
+    serverHealthCard("SSH",connectivity.ssh),
+    serverHealthCard("Kubernetes API",connectivity.kubernetes)
+  ].join("");
+  const services=data.services||{};
+  document.getElementById("serverHealthServices").innerHTML=[
+    serverHealthCard("PostgreSQL",services.postgres),
+    serverHealthCard("RabbitMQ",services.rabbitmq),
+    serverHealthCard("Dune Server",services.dune),
+    serverHealthCard("Receiver",services.receiver),
+    serverHealthCard("Market Bot",services.marketBot)
+  ].join("");
+  const resources=data.resources||{},host=resources.host||{},memory=host.memory,disk=host.disk,pressures=resources.pressures||[];
+  document.getElementById("serverHealthResources").innerHTML=[
+    serverHealthCard("Kubernetes Metrics",{state:resources.metricsServer&&resources.metricsServer.status==="Available"?"Healthy":"Unknown",message:resources.metricsServer&&resources.metricsServer.message}),
+    serverHealthCard("Host CPU",{state:host.cpuPercent===null||host.cpuPercent===undefined?"Unknown":"Healthy",message:host.cpuPercent===null||host.cpuPercent===undefined?"Unavailable":host.cpuPercent+"% • load "+(host.loadAverage||"Unavailable")}),
+    serverHealthCard("Host Memory",{state:memory?"Healthy":"Unknown",message:memory?memory.percent+"% • "+serverHealthBytes(memory.usedBytes)+" / "+serverHealthBytes(memory.totalBytes):"Unavailable"}),
+    serverHealthCard("Root Disk",{state:disk?"Healthy":"Unknown",message:disk?disk.percent+"% • "+serverHealthBytes(disk.usedBytes)+" / "+serverHealthBytes(disk.totalBytes):"Unavailable"}),
+    serverHealthCard("Resource Pressure",{state:pressures.length?"Degraded":"Healthy",message:pressures.length?pressures.map(function(row){return row.node+": "+row.pressure;}).join(", "):"No node pressure reported."})
+  ].join("");
+  const nodeRows=(data.nodes||[]).map(function(node){return '<tr data-state="'+esc(node.state)+'"><td>'+serverHealthBadge(node.state)+'</td><td><strong>'+esc(node.name)+'</strong></td><td>'+esc(node.status)+'</td><td>'+esc((node.roles||[]).join(", ")||"worker")+'</td><td>'+esc(node.age)+'</td><td>'+esc((node.pressures||[]).join(", ")||"None")+'</td><td>'+esc(node.metrics?node.metrics.cpuPercent+" CPU / "+node.metrics.memoryPercent+" memory":"Unavailable")+'</td><td class="health-reason">'+esc(node.reason||"None")+'</td></tr>';});
+  document.getElementById("serverHealthNodes").innerHTML=serverHealthTable(["State","Node","Ready","Roles","Age","Pressure","Metrics","Reason"],nodeRows);
+  const workloadRows=(data.workloads||[]).map(function(workload){return '<tr data-state="'+esc(workload.state)+'"><td>'+serverHealthBadge(workload.state)+'</td><td>'+esc(workload.namespace)+'</td><td>'+esc(workload.kind)+'</td><td><strong>'+esc(workload.name)+'</strong></td><td>'+esc(workload.ready)+" / "+esc(workload.expected)+'</td><td>'+esc(workload.available)+'</td><td>'+esc(workload.age)+'</td><td class="health-reason">'+esc(workload.reason||"None")+'</td></tr>';});
+  document.getElementById("serverHealthWorkloads").innerHTML=serverHealthTable(["State","Namespace","Kind","Name","Ready / Expected","Available","Age","Reason"],workloadRows);
+  renderServerHealthPods();
+  const namespaceRows=(data.namespaces||[]).map(function(namespace){const phases=Object.entries(namespace.phaseCounts||{}).map(function(entry){return entry[0]+" "+entry[1];}).join(", ");return '<tr data-state="'+esc(namespace.state)+'"><td>'+serverHealthBadge(namespace.state)+'</td><td><strong>'+esc(namespace.name)+'</strong></td><td>'+esc(namespace.phase)+'</td><td>'+esc(namespace.podCount)+'</td><td>'+esc(phases||"None")+'</td><td>'+esc(namespace.age)+'</td></tr>';});
+  document.getElementById("serverHealthNamespaces").innerHTML=serverHealthTable(["State","Namespace","Phase","Pods","Pod phases","Age"],namespaceRows);
+  const pvcRows=((data.storage&&data.storage.pvcs)||[]).map(function(pvc){return '<tr data-state="'+esc(pvc.state)+'"><td>'+serverHealthBadge(pvc.state)+'</td><td>'+esc(pvc.namespace)+'</td><td><strong>'+esc(pvc.name)+'</strong></td><td>'+esc(pvc.phase)+'</td><td>'+esc(pvc.capacity||pvc.requested||"Unknown")+'</td><td>'+esc(pvc.storageClass||"Default")+'</td><td>'+esc(pvc.volume||"Pending")+'</td></tr>';});
+  document.getElementById("serverHealthStorage").innerHTML=serverHealthTable(["State","Namespace","Claim","Phase","Capacity","Class","Volume"],pvcRows);
+  const warnings=data.warnings||[];
+  document.getElementById("serverHealthWarnings").innerHTML=warnings.length?warnings.map(function(event){return '<div class="health-warning"><strong>'+esc(event.reason)+'</strong><span class="micro">'+esc(event.age)+" • "+esc(event.namespace)+"/"+esc(event.objectName)+'</span><div>'+esc(event.message)+'</div></div>';}).join(""):'<div class="empty">No relevant warning events.</div>';
+  const checkRows=(data.checks||[]).map(function(check){const state=check.ok?"Healthy":(check.optional?"Unknown":"Unhealthy");return '<tr data-state="'+state+'"><td>'+serverHealthBadge(state)+'</td><td><strong>'+esc(check.label)+'</strong>'+(check.optional?' <span class="micro">optional</span>':'')+'</td><td>'+esc(check.durationMs===null?"--":check.durationMs+" ms")+'</td><td class="'+(check.optional&&!check.ok?"health-unavailable":"health-reason")+'">'+esc(check.ok?"Completed":(check.optional?"Unavailable":check.error||"Failed"))+'</td></tr>';});
+  document.getElementById("serverHealthChecks").innerHTML=serverHealthTable(["State","Check","Duration","Result"],checkRows);
+}
+async function refreshServerHealth(){
+  if(serverHealthRefreshInFlight)return serverHealthRefreshInFlight;
+  const button=document.getElementById("serverHealthRefreshButton");
+  if(button){button.disabled=true;button.textContent="Scanning…";}
+  document.getElementById("serverHealthStamp").textContent="Running bounded read-only checks…";
+  serverHealthRefreshInFlight=(async function(){try{const data=await getJson("/api/server-health",{timeoutMs:65000});renderServerHealth(data);return data;}catch(error){const state=document.getElementById("serverHealthState");state.textContent="Unknown";state.className="health-state unknown";document.getElementById("serverHealthStamp").textContent="Health scan failed.";document.getElementById("serverHealthReasons").textContent=betterError(error);}finally{serverHealthRefreshInFlight=null;if(button){button.disabled=false;button.textContent="Refresh Health";}}})();
+  return serverHealthRefreshInFlight;
+}
+function syncServerHealthAutoRefresh(){
+  if(serverHealthAutoTimer){clearInterval(serverHealthAutoTimer);serverHealthAutoTimer=null;}
+  const enabled=document.getElementById("serverHealthAutoRefresh")&&document.getElementById("serverHealthAutoRefresh").checked;
+  const open=document.getElementById("server-health")&&document.getElementById("server-health").classList.contains("active");
+  if(enabled&&open)serverHealthAutoTimer=setInterval(function(){if(!serverHealthRefreshInFlight)refreshServerHealth();},60000);
+}
 async function toggleDragTeleport(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,dragTeleportEnabled:enabled===true})});appConfig=data.config||{...current,dragTeleportEnabled:enabled===true};setChecked("settingsDragTeleportEnabled",enabled===true);setChecked("liveMapDragTeleportToggle",enabled===true);setText("settingsSaveStatus","Click-to-teleport "+(enabled?"enabled.":"disabled."));showLiveMapResultBadge(enabled?"Click-to-teleport enabled":"Click-to-teleport disabled",enabled?"success":"working");}catch(error){setChecked("settingsDragTeleportEnabled",!enabled);setChecked("liveMapDragTeleportToggle",!enabled);setText("settingsSaveStatus",betterError(error));showLiveMapResultBadge("Click setting failed: "+betterError(error),"fail");}}
 async function toggleProgressionEditing(enabled){try{const current=appConfig||await getJson("/api/config");const data=await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...current,progressionEditingEnabled:enabled===true})});appConfig=data.config||{...current,progressionEditingEnabled:enabled===true};setChecked("settingsProgressionEditingEnabled",appConfig.progressionEditingEnabled===true);setText("settingsSaveStatus","Progression Editing "+(appConfig.progressionEditingEnabled?"enabled.":"disabled."));playUiSound("click");}catch(error){setChecked("settingsProgressionEditingEnabled",!enabled);setText("settingsSaveStatus",betterError(error));playUiSound("warning");}}
 async function deleteTeleportPreset(){const select=document.getElementById("teleportPreset");const preset=select&&select.value!==""?liveTeleportPresets[Number(select.value)]:null;try{if(!preset)throw new Error("Choose a saved location first.");if(!(await appConfirm("Delete saved location","Delete '"+preset.name+"'?","Delete","Cancel")))return;const data=await getJson("/api/live-map/teleport/presets?name="+encodeURIComponent(preset.name),{method:"DELETE"});await loadTeleportPresets();setText("savedLocationStatus",data.message||"Saved location deleted.");showToast(data.message||"Saved location deleted.","success");playUiSound("success");}catch(error){setText("savedLocationStatus",betterError(error));showToast(betterError(error),"error");playUiSound("warning");}}
@@ -18546,7 +18838,7 @@ function clearActionCenterSoon(delay=4000){const card=document.getElementById("s
 function showToast(message,kind="success"){const toast=document.getElementById("suiteToast");if(!toast)return;const normalized=normalizeActionKind(kind);window.clearTimeout(suiteToastTimer);toast.textContent=String(message||"");toast.className="suite-toast "+normalized;setActionCenter(normalized==="error"?"Action needs attention":normalized==="working"?"Working":"Action complete",String(message||""),normalized);suiteToastTimer=window.setTimeout(()=>toast.classList.add("hidden"),4000);}
 function buttonActionLabel(button){if(!button)return"";const explicit=button.getAttribute("aria-label")||button.getAttribute("title")||button.dataset.actionLabel;if(explicit)return explicit.trim();const open=button.dataset.open;if(open)return"Open "+open.replace(/-/g," ");const text=(button.textContent||"").replace(/\s+/g," ").trim();return text.slice(0,90);}
 let suiteTooltipEl=null,suiteTooltipTarget=null;
-const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.","database-explorer":"Browse the selected battlegroup database locally with enforced read-only queries.",management:"Open the embedded server manager console.","web-portal":"Open or copy the local and LAN Suite portal URLs.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run Setup Doctor for guided checks, safe defaults, paths, and service fixes."};
+const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","server-health":"Run bounded read-only checks for the VM, Kubernetes workloads, storage, and Suite services.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.","database-explorer":"Browse the selected battlegroup database locally with enforced read-only queries.",management:"Open the embedded server manager console.","web-portal":"Open or copy the local and LAN Suite portal URLs.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run Setup Doctor for guided checks, safe defaults, paths, and service fixes."};
 const SUITE_ONCLICK_TOOLTIPS=[[/refreshAll\(/,"Refresh the dashboard, VM monitor, maps, players, receiver status, and admin data."],[/refreshLiveMap\(/,"Reload live map actors and location overlays from the server database."],[/executeLiveTeleport\(/,"Teleport the selected player to the prepared live map coordinates."],[/refreshAdmin\(/,"Refresh players, item catalog state, receiver readiness, and live give capability."],[/giveAdminItem\(/,"Send the selected item to the selected player using the active give transport."],[/giveQueuedItems\(/,"Send every item currently staged in the give queue."],[/refreshProgressionInspector\(/,"Scan progression tables, functions, and support metadata again."],[/lookupProgressionPlayer\(/,"Find a player in progression data using the current search value."],[/previewProgressionApply\(/,"Create a backup and preview the progression change before any live write."],[/applyProgressionLive\(/,"Apply the prepared progression change to the live database."],[/refresh\(/,"Refresh server status, players, resources, and recent activity."],[/act\('start'\)/,"Start the battlegroup server after checking VM and map readiness."],[/act\('restart'\)/,"Restart the battlegroup server."],[/act\('stop'\)/,"Stop the battlegroup server."],[/act\('backup'\)/,"Run the configured server backup action."],[/act\('update'\)/,"Run the configured server update action."],[/openDirector\(/,"Open the battlegroup director interface or management endpoint."],[/refreshVmStatus\(/,"Refresh VM power state, IP, uptime, ping, ports, and services."],[/runVmAction\('start'\)/,"Start the configured Hyper-V virtual machine."],[/runVmAction\('stop'\)/,"Stop the configured Hyper-V virtual machine."],[/deployMap\(/,"Read the selected map partitions, set replicas, and apply the requested memory limit."],[/stopSelectedMap\(/,"Scale the selected map down so it stops running."],[/refreshMaps\(/,"Reload map deployment status, available maps, memory limits, and partition readiness."],[/startDatabaseTunnel\(/,"Start or retry the SSH tunnel that exposes Postgres locally."],[/createDatabaseBackup\(/,"Create a database backup using the configured backup location."],[/restoreDatabaseBackup\(/,"Import the selected battlegroup backup into the database."],[/reloadManagerFrame\(/,"Reload the embedded server manager console."],[/refreshItemDatabase\(/,"Reload the bundled item database and filters."],[/refreshDiagnostics\(/,"Run Setup Doctor and refresh setup checks, fixes, logs, and runtime details."],[/openSetupWizard\(/,"Open the setup wizard to review or change core Suite configuration."],[/refreshBattlegroups\(/,"Reload battlegroups and selected battlegroup metadata."],[/useSelectedBattlegroup\(/,"Make the selected battlegroup the active target for Suite actions."],[/saveBattlegroupTitle\(/,"Save a friendly title for the selected battlegroup."],[/refreshReceiverStatus\(/,"Refresh receiver service status and reachability."],[/receiverAction\('start'\)/,"Start the live give receiver service."],[/receiverAction\('stop'\)/,"Stop the live give receiver service."],[/receiverAction\('restart'\)/,"Restart the live give receiver service."],[/saveSettings\(/,"Save the current Suite settings to config.json."],[/checkUpdates\(/,"Check the configured update source for a newer Suite release."],[/exportSettings\(/,"Export Suite settings to a file."],[/importSettings\(/,"Import Suite settings from a file."],[/openAboutDialog\(/,"Show Suite version, build, links, and project information."]];
 function suitePanelContext(button){const panel=button.closest(".panel,.map-deployment-panel,.setup-card,.suite-modal-card,.about-card");const label=panel?.querySelector(".label,h2,h3,strong")?.textContent;return label?String(label).replace(/\s+/g," ").trim():"";}
 function suiteDescriptiveTooltip(button){if(!button||button.dataset.tooltip==="false")return"";if(button.dataset.tooltip)return button.dataset.tooltip;if(button.classList.contains("tab"))return SUITE_VIEW_TOOLTIPS[button.dataset.view]||("Open the "+buttonActionLabel(button)+" workspace.");if(button.dataset.open)return SUITE_VIEW_TOOLTIPS[button.dataset.open]||("Open the "+button.dataset.open.replace(/-/g," ")+" panel.");const onclick=String(button.getAttribute("onclick")||"");for(const [pattern,text] of SUITE_ONCLICK_TOOLTIPS){if(pattern.test(onclick))return text;}if(button.classList.contains("player-card"))return"Select this player for details, item grants, permission tools, and related actions.";if(button.classList.contains("admin-item"))return"Select this item template for live giving or queue staging.";if(button.classList.contains("item-db-card"))return"Open this item record in the item database details panel.";const text=buttonActionLabel(button);const context=suitePanelContext(button);if(context&&text)return context+": "+text+". Click to run this action.";return text?("Click to run: "+text+"."):"";}
@@ -20028,6 +20320,11 @@ async function route(req, res) {
   if (url.pathname === "/api/diagnostics" && req.method === "GET") {
     try { await json(res, await diagnosticsSnapshot()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/server-health" && req.method === "GET") {
+    try { await json(res, await serverHealthSnapshot()); }
+    catch (error) { await json(res, { ok: false, readOnly: true, state: "Unknown", error: redactSensitiveText(error.message) }, 500); }
     return;
   }
   if (url.pathname === "/api/battlegroups" && req.method === "GET") {

@@ -25,10 +25,12 @@ const packagedDesktopSource = fs.readFileSync(path.join(extracted, "electron", "
 const packagedCleanerTestPath = path.join(extracted, "scripts", "test-base-cleanup-override.js");
 const packagedLandsraadTestPath = path.join(extracted, "scripts", "test-landsraad-tiers.js");
 const packagedServerUpdateTestPath = path.join(extracted, "scripts", "test-server-update-monitor.js");
+const packagedServerHealthTestPath = path.join(extracted, "scripts", "test-server-health.js");
 const packagedReleaseNotesPath = path.join(extracted, `RELEASE_NOTES_${rootPackage.version}.md`);
 assert(fs.existsSync(packagedCleanerTestPath), "Packaged app is missing the Server Cleaner regression test.");
 assert(fs.existsSync(packagedLandsraadTestPath), "Packaged app is missing the Landsraad exact-five regression test.");
 assert(fs.existsSync(packagedServerUpdateTestPath), "Packaged app is missing the Server Updater regression test.");
+assert(fs.existsSync(packagedServerHealthTestPath), "Packaged app is missing the Server Health regression test.");
 assert(fs.existsSync(packagedReleaseNotesPath), `Packaged app is missing release notes for ${rootPackage.version}.`);
 assert(
   packagedServerSource.includes('const actorId = requireSqlBigint(payload.actorId, "actor_id", 0n)'),
@@ -71,6 +73,16 @@ assert.equal(
   packagedServerUpdateTest.status,
   0,
   `Packaged Server Updater regression failed.\n${packagedServerUpdateTest.stdout || ""}\n${packagedServerUpdateTest.stderr || ""}`
+);
+const packagedServerHealthTest = spawnSync(process.execPath, [packagedServerHealthTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedServerHealthTest.status,
+  0,
+  `Packaged Server Health regression failed.\n${packagedServerHealthTest.stdout || ""}\n${packagedServerHealthTest.stderr || ""}`
 );
 assert(
   packagedServerSource.includes("detectedTiers.length === LANDSRAAD_TIER_COUNT"),
@@ -194,6 +206,9 @@ async function waitForUi() {
     assert(/id="landsraadTierPreviewButton"[^>]*disabled/.test(html), "Packaged Landsraad preview is not fail-closed by default.");
     assert(html.includes("Nested server-management timeout:"), "Packaged Server Updater UI is missing nested timeout diagnostics.");
     assert(html.includes('getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:120000})'), "Packaged Server Updater UI deadline is not longer than bounded backend work.");
+    assert(html.includes('id="server-health"'), "Packaged UI is missing the Server Health page.");
+    assert(html.includes("Refresh Health"), "Packaged UI is missing manual Server Health refresh.");
+    assert(html.includes('getJson("/api/server-health",{timeoutMs:65000})'), "Packaged Server Health scan is missing its bounded UI deadline.");
     console.log(`Packaged Suite smoke test passed on isolated port ${port}; version ${packagedVersion}.`);
   } finally {
     if (child.exitCode === null) child.kill();

@@ -18,10 +18,12 @@ const requiredRuntimeFiles = [
   "market-bot/main.go",
   "lib/player-directory.js",
   "lib/server-update.js",
+  "lib/server-health.js",
   "lib/teleport-request-mode.js",
   "electron/main.js",
   "scripts/test-landsraad-tiers.js",
   "scripts/test-server-update-monitor.js",
+  "scripts/test-server-health.js",
   `RELEASE_NOTES_${rootPackage.version}.md`
 ];
 const missing = requiredRuntimeFiles.filter((entry) => !packaged.has(entry));
@@ -34,6 +36,7 @@ const packagedServer = asar.extractFile(archive, "server.js").toString("utf8");
 const packagedMarketBotModule = asar.extractFile(archive, "lib/market-bot.js").toString("utf8");
 const packagedPlayerDirectory = asar.extractFile(archive, "lib/player-directory.js").toString("utf8");
 const packagedServerUpdate = asar.extractFile(archive, "lib/server-update.js").toString("utf8");
+const packagedServerHealth = asar.extractFile(archive, "lib/server-health.js").toString("utf8");
 if (!packagedServer.includes("loadSharedPlayerDirectory") || !packagedServer.includes("adminPlayerDirectory")) {
   throw new Error("Packaged server is missing the stabilized shared player-directory integration.");
 }
@@ -54,6 +57,12 @@ if (!packagedServerUpdate.includes("SERVER_UPDATE_TIMEOUTS") || !packagedServerU
 }
 if (!packagedServer.includes("runServerUpdateLifecycle") || !packagedServer.includes("serverUpdateDiagnosticText")) {
   throw new Error("Packaged Server Updater cleanup or structured failure diagnostics are incomplete.");
+}
+if (!packagedServer.includes('"/api/server-health"') || !packagedServer.includes('id="server-health"') || !packagedServer.includes("serverHealthScanInFlight")) {
+  throw new Error("Packaged application is missing the Server Health API, page, or overlap guard.");
+}
+if (!packagedServerHealth.includes("buildServerHealthReport") || !packagedServerHealth.includes("CrashLoopBackOff") || !packagedServerHealth.includes("FailedScheduling")) {
+  throw new Error("Packaged Server Health parser is incomplete.");
 }
 
 console.log(`Packaged runtime files verified in ${archive}`);

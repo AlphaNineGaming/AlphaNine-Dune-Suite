@@ -31,6 +31,39 @@ async function waitForUi() {
   throw new Error(`Rendered UI did not start. ${stderr}`);
 }
 
+function extractFunction(source, name) {
+  const asyncStart = source.indexOf(`async function ${name}(`);
+  const start = asyncStart >= 0 ? asyncStart : source.indexOf(`function ${name}(`);
+  assert(start >= 0, `Rendered function ${name} is missing.`);
+  const bodyStart = source.indexOf("){", start) + 1;
+  assert(bodyStart > start, `Rendered function ${name} body is missing.`);
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote) {
+      if (char === "\\") escaped = true;
+      else if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index + 1);
+    }
+  }
+  throw new Error(`Rendered function ${name} is incomplete.`);
+}
+
 (async () => {
   try {
     const html = await waitForUi();
@@ -38,7 +71,11 @@ async function waitForUi() {
     assert(html.includes('id="landsraad"'), "Rendered Landsraad tier editor is missing.");
     assert(html.includes("Exactly five distinct thresholds"), "Rendered Landsraad policy is missing the exact-five requirement.");
     assert(/id="landsraadTierPreviewButton"[^>]*disabled/.test(html), "Rendered Landsraad preview button is not fail-closed by default.");
+    assert(/id="landsraadTierConfirmText"[^>]*disabled/.test(html), "Rendered Landsraad confirmation input is not fail-closed by default.");
+    assert(html.includes("button:disabled") && html.includes("input:disabled") && html.includes("cursor:not-allowed"), "Disabled Landsraad controls are not visibly distinguished.");
     assert(html.includes("landsraadTierState?.ok===true&&landsraadTierState.tiers?.length===5"), "Rendered Landsraad controls are not gated on a valid five-tier inspection.");
+    assert(html.includes('id="landsraadTierAdvancedDetails"'), "Rendered Landsraad advanced diagnostics are missing.");
+    assert(html.includes("[d?.reason,d?.error,d?.message]"), "API error formatting does not prefer a structured reason.");
     assert(html.includes('id="database-explorer"'), "Rendered Database Explorer is missing.");
     assert(html.includes('id="databaseExplorerGrid"'), "Database Explorer result grid is missing.");
     assert(html.includes('getJson("/api/database-browser/rows"'), "Database Explorer is not wired to its bounded row API.");
@@ -93,6 +130,86 @@ async function waitForUi() {
     const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((match) => match[1]).filter((script) => script.trim());
     assert(scripts.length, "No inline UI script was rendered.");
     for (const script of scripts) new Function(script);
+    const suiteScript = scripts.join("\n");
+    const getJsonForTest = new Function("fetch", "AbortController", "setTimeout", "clearTimeout", "location", "window", `
+      function csrfCookie(){return "";}
+      ${extractFunction(suiteScript, "getJson")}
+      return getJson;
+    `)(
+      async () => ({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({
+          ok: false,
+          status: "invalid_tier_count",
+          reason: "structured Landsraad reason",
+          detectedThresholds: [35, 350, 700, 1050, 1400, 3500, 7000, 10500, 14000]
+        })
+      }),
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      { protocol: "http:", href: "" },
+      { prompt: () => null }
+    );
+    let structuredError = null;
+    try {
+      await getJsonForTest("/api/landsraad/tiers", { timeoutMs: 1000 });
+    } catch (error) {
+      structuredError = error;
+    }
+    assert(structuredError, "Rendered request helper accepted an invalid Landsraad response.");
+    assert.equal(structuredError.message, "structured Landsraad reason", "Rendered request helper did not extract the API reason.");
+    assert.equal(structuredError.apiResponse?.status, "invalid_tier_count", "Rendered request helper did not retain structured diagnostics.");
+    assert.doesNotMatch(structuredError.message, /\[object Object\]|\{"?ok"?\s*:/, "Rendered request helper leaked raw JSON into the error message.");
+    const elements = Object.fromEntries([
+      "landsraadTierStatus",
+      "landsraadTierRows",
+      "landsraadTierPreviewLog",
+      "landsraadTierConfirmText",
+      "landsraadTierPreviewButton",
+      "landsraadTierApplyButton",
+      "landsraadTierAdvancedDetails",
+      "landsraadTierDetectedThresholds"
+    ].map((id) => [id, { id, textContent: "", innerHTML: "", value: "", disabled: false, hidden: false, open: false, className: "" }]));
+    const documentStub = { getElementById: (id) => elements[id] || null };
+    const landsraadHarness = new Function("document", `
+      let landsraadTierState=null,landsraadTierPreviewState={previewId:"stale-preview"};
+      function getValue(id){return document.getElementById(id)?.value||"";}
+      function setValue(id,value){const element=document.getElementById(id);if(element)element.value=String(value);}
+      function setText(id,value){const element=document.getElementById(id);if(element)element.textContent=String(value);}
+      function esc(value){return String(value).replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));}
+      ${extractFunction(suiteScript, "betterError")}
+      ${extractFunction(suiteScript, "syncLandsraadTierApplyButton")}
+      ${extractFunction(suiteScript, "renderLandsraadTiers")}
+      return {render:renderLandsraadTiers,preview:()=>landsraadTierPreviewState};
+    `)(documentStub);
+    landsraadHarness.render({
+      ok: false,
+      status: "invalid_tier_count",
+      detectedTierCount: 9,
+      detectedThresholds: [35, 350, 700, 1050, 1400, 3500, 7000, 10500, 14000],
+      tiers: [],
+      reason: "raw API reason that must not be repeated",
+      raw: { shouldNeverRender: true }
+    });
+    const expectedWarning = "Landsraad editing is unavailable because this server contains multiple reward groups. Detected 9 distinct thresholds. No data was changed.";
+    assert.equal(elements.landsraadTierStatus.textContent, expectedWarning, "Ambiguous Landsraad response did not render the single clean warning.");
+    assert.equal(landsraadHarness.preview(), null, "Ambiguous tier detection did not clear stale preview state.");
+    assert.equal(elements.landsraadTierAdvancedDetails.hidden, false, "Ambiguous thresholds are not available under Advanced Details.");
+    assert.match(elements.landsraadTierDetectedThresholds.innerHTML, /<code>35<\/code>[\s\S]*<code>14,000<\/code>/, "Advanced Details does not show a readable threshold list.");
+    assert.equal(elements.landsraadTierPreviewButton.disabled, true, "Generate Preview + Backup remains enabled for an ambiguous configuration.");
+    assert.equal(elements.landsraadTierConfirmText.disabled, true, "Landsraad confirmation remains enabled for an ambiguous configuration.");
+    assert.equal(elements.landsraadTierApplyButton.disabled, true, "Apply Tier Changes remains enabled for an ambiguous configuration.");
+    const renderedFailureText = [
+      elements.landsraadTierStatus.textContent,
+      elements.landsraadTierRows.innerHTML,
+      elements.landsraadTierPreviewLog.textContent,
+      elements.landsraadTierDetectedThresholds.innerHTML
+    ].join("\n");
+    assert.equal(renderedFailureText.split(expectedWarning).length - 1, 1, "The Landsraad warning is rendered more than once.");
+    assert.doesNotMatch(renderedFailureText, /\[object Object\]|\{"?ok"?\s*:|"?status"?\s*:\s*"?invalid_tier_count"?|shouldNeverRender/, "Rendered Landsraad failure leaks an object or raw JSON response.");
+    assert(!extractFunction(suiteScript, "renderLandsraadTiers").includes("JSON.stringify"), "Landsraad failure rendering stringifies API data.");
     console.log("Rendered Suite UI, Server Updater diagnostics, Repair Inspector, and Landsraad editor JavaScript syntax passed.");
   } finally {
     child.kill();

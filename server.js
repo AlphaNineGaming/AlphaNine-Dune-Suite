@@ -14,7 +14,17 @@ const { createRemoteAccess } = require("./lib/remote-access");
 const { createInternetTunnel } = require("./lib/internet-tunnel");
 const { createPlayerDirectory, parsePlayerSelector } = require("./lib/player-directory");
 const { durabilityRepairCandidate } = require("./lib/durability-repair");
-const { cleanUpdateLine, parseServerUpdateMetadata, classifyServerUpdate, serverUpdateProgress } = require("./lib/server-update");
+const {
+  SERVER_UPDATE_TIMEOUTS,
+  SERVER_MANAGEMENT_UI_TIMEOUTS,
+  cleanUpdateLine,
+  parseServerUpdateMetadata,
+  classifyServerUpdate,
+  serverUpdateProgress,
+  serverManagementTimeoutMs,
+  runServerUpdateLifecycle,
+  createServerUpdateCheckCoordinator
+} = require("./lib/server-update");
 const { createBlueprintService } = require("./lib/blueprints");
 const { createDatabaseBrowser } = require("./lib/database-browser");
 const { createMarketAutomator } = require("./lib/market-automator");
@@ -126,7 +136,7 @@ const marketBotStore = createMarketBotStore({ configPath: MARKET_BOT_CONFIG_PATH
 const operationRegistry = new OperationRegistry(OPERATION_HISTORY_PATH, { maxHistory: 100 });
 const DUNE_SERVER_STEAM_APP_ID = 4754530;
 const SERVER_UPDATE_CHECK_TTL_MS = 10 * 60 * 1000;
-let serverUpdateCheckCache = { checkedAt: 0, data: null, promise: null };
+let serverUpdateCheckCoordinator = null;
 const UI_OVERRIDE_CSS_PATH = path.join(DATA_DIR, "ui-overrides.css");
 const BUNDLED_DATA_DIR = packagedAssetPath("data");
 const BUNDLED_UI_OVERRIDE_CSS_PATH = path.join(BUNDLED_DATA_DIR, "ui-overrides.css");
@@ -3132,7 +3142,7 @@ async function steamServerUpToDateCheck(buildId) {
       hostname: "api.steampowered.com",
       path: pathname,
       headers: { "User-Agent": `AlphaNine-Dune-Suite/${APP_VERSION}`, "Accept": "application/json" },
-      timeout: 12000
+      timeout: SERVER_UPDATE_TIMEOUTS.steamWebMs
     }, (response) => {
       let body = "";
       response.on("data", (chunk) => { body += chunk; });
@@ -3155,7 +3165,7 @@ async function steamServerUpToDateCheck(buildId) {
 async function steamPublicBuildCheckViaVm(buildId) {
   const current = String(buildId || "").trim();
   const command = `steamcmd +login anonymous +app_info_update 1 +app_info_print ${DUNE_SERVER_STEAM_APP_ID} +logoff +quit 2>/dev/null | awk -F'"' '/"branches"/{in_branches=1} in_branches && /"public"/{in_public=1; next} in_public && /"buildid"/{print $4; exit}'`;
-  const result = await sshCommand(command, 60000, { maxBuffer: 1024 * 1024 * 2 });
+  const result = await sshCommand(command, SERVER_UPDATE_TIMEOUTS.steamFallbackMs, { maxBuffer: 1024 * 1024 * 2 });
   const latest = String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).find((line) => /^\d+$/.test(line)) || "";
   if (!result.ok || !latest) throw new Error(result.stderr || result.error || "SteamCMD did not return the public branch build ID.");
   return { response: { success: true, up_to_date: latest === current, required_version: Number(latest) }, source: "SteamCMD public branch metadata" };
@@ -3200,7 +3210,7 @@ printf '__ALPHANINE_NAMESPACE__=%s\\n' "$namespace"
 
 async function uncachedServerUpdateCheck() {
   const checkedAt = new Date().toISOString();
-  const metadataResult = await sshCommand(serverUpdateMetadataCommand(), 30000, { maxBuffer: 1024 * 256 });
+  const metadataResult = await sshCommand(serverUpdateMetadataCommand(), SERVER_UPDATE_TIMEOUTS.metadataCommandMs, { maxBuffer: 1024 * 256 });
   if (!metadataResult.ok) {
     return { ok: false, updateAvailable: false, checkedAt, error: metadataResult.stderr || metadataResult.error || "Could not read Funcom server version metadata." };
   }
@@ -3237,61 +3247,101 @@ async function uncachedServerUpdateCheck() {
 }
 
 async function checkServerUpdate({ force = false } = {}) {
-  const fresh = serverUpdateCheckCache.data && Date.now() - serverUpdateCheckCache.checkedAt < SERVER_UPDATE_CHECK_TTL_MS;
-  if (!force && fresh) return { ...serverUpdateCheckCache.data, cached: true };
-  if (serverUpdateCheckCache.promise) return serverUpdateCheckCache.promise;
-  serverUpdateCheckCache.promise = uncachedServerUpdateCheck().then((data) => {
-    serverUpdateCheckCache = { checkedAt: Date.now(), data, promise: null };
-    return data;
-  }).catch((error) => {
-    const data = { ok: false, updateAvailable: false, checkedAt: new Date().toISOString(), error: error.message };
-    serverUpdateCheckCache = { checkedAt: Date.now(), data, promise: null };
-    return data;
-  });
-  return serverUpdateCheckCache.promise;
+  if (!serverUpdateCheckCoordinator) {
+    serverUpdateCheckCoordinator = createServerUpdateCheckCoordinator(uncachedServerUpdateCheck, { ttlMs: SERVER_UPDATE_CHECK_TTL_MS });
+  }
+  return serverUpdateCheckCoordinator.check({ force });
 }
 
 async function sshStreamingCommand(command, options = {}) {
-  const sync = await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
-  const cfg = sync.config || loadConfig();
-  const info = sync.vm || await vmInfo(cfg.vmName || configuredVmName());
-  const ip = normalizeIpv4(info.ip) || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
-  if (!info.exists && !ip) return { ok: false, code: 1, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
-  if (info.exists && info.state !== "Running") return { ok: false, code: 1, stdout: "", stderr: "VM is not running.", error: "VM is not running." };
-  const key = sshKeyStatus(cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
-  if (!key.exists) return { ok: false, code: 1, stdout: "", stderr: key.message, error: key.message };
-  const user = String(cfg.sshUser || cfg.receiverSshUser || "dune").trim();
-  const args = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "LogLevel=QUIET", "-i", key.path, `${user}@${ip}`, command];
-  return new Promise((resolve) => {
-    const child = spawn("ssh", args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    const maxOutput = Number(options.maxBuffer || 1024 * 1024);
-    let stdout = "";
-    let stderr = "";
-    let lineBuffer = "";
-    let settled = false;
-    let timer = null;
-    const emitLines = (chunk) => {
-      lineBuffer += String(chunk || "");
-      const lines = lineBuffer.split(/\r?\n|\r/);
-      lineBuffer = lines.pop() || "";
-      for (const line of lines) if (cleanUpdateLine(line)) options.onLine?.(cleanUpdateLine(line));
-    };
-    child.stdout.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-maxOutput); emitLines(chunk); });
-    child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-maxOutput); emitLines(chunk); });
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (cleanUpdateLine(lineBuffer)) options.onLine?.(cleanUpdateLine(lineBuffer));
-      resolve(result);
-    };
-    child.on("error", (error) => finish({ ok: false, code: 1, stdout, stderr, error: error.message }));
-    child.on("exit", (code, signal) => finish({ ok: code === 0, code: Number(code ?? 1), signal: signal || "", stdout, stderr, error: code === 0 ? "" : (cleanUpdateLine(stderr) || `SSH update exited with code ${code}.`) }));
-    timer = setTimeout(() => {
-      child.kill();
-      finish({ ok: false, code: 1, stdout, stderr, error: `Dune server update timed out after ${Number(options.timeout || 900000)}ms.` });
-    }, Number(options.timeout || 900000));
+  const startedAtMs = Date.now();
+  const timeoutMs = Number(options.timeout || SERVER_UPDATE_TIMEOUTS.updateCommandMs);
+  let stage = "Resolving VM connection";
+  const markStage = (next) => {
+    stage = cleanUpdateLine(next || stage);
+    options.onStage?.(stage, Date.now() - startedAtMs);
+  };
+  const failure = (underlyingError, extra = {}) => ({
+    ok: false,
+    code: Number(extra.code ?? 1),
+    signal: extra.signal || "",
+    stdout: extra.stdout || "",
+    stderr: extra.stderr || "",
+    error: cleanUpdateLine(underlyingError),
+    underlyingError: cleanUpdateLine(underlyingError),
+    stage,
+    command,
+    elapsedMs: Date.now() - startedAtMs,
+    timeoutMs,
+    timedOut: Boolean(extra.timedOut)
   });
+  try {
+    markStage("Resolving VM connection");
+    const sync = await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
+    const cfg = sync.config || loadConfig();
+    const info = sync.vm || await vmInfo(cfg.vmName || configuredVmName());
+    const ip = normalizeIpv4(info.ip) || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
+    if (!info.exists && !ip) return failure(info.error || "VM not found.");
+    if (info.exists && info.state !== "Running") return failure("VM is not running.");
+    markStage("Validating SSH connection");
+    const key = sshKeyStatus(cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
+    if (!key.exists) return failure(key.message);
+    const user = String(cfg.sshUser || cfg.receiverSshUser || "dune").trim();
+    const args = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "LogLevel=QUIET", "-i", key.path, `${user}@${ip}`, command];
+    const remainingMs = timeoutMs - (Date.now() - startedAtMs);
+    if (remainingMs <= 0) return failure(`Suite backend timed out before the server-management command started after ${timeoutMs} ms.`, { timedOut: true });
+    markStage("Running server management update command");
+    return await new Promise((resolve) => {
+      const child = spawn("ssh", args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      const maxOutput = Number(options.maxBuffer || 1024 * 1024);
+      let stdout = "";
+      let stderr = "";
+      let lineBuffer = "";
+      let settled = false;
+      let timer = null;
+      const publishLine = (value) => {
+        const line = cleanUpdateLine(value);
+        if (!line) return;
+        const parsedStage = options.onLine?.(line);
+        if (parsedStage) stage = cleanUpdateLine(parsedStage);
+      };
+      const emitLines = (chunk) => {
+        lineBuffer += String(chunk || "");
+        const lines = lineBuffer.split(/\r?\n|\r/);
+        lineBuffer = lines.pop() || "";
+        for (const line of lines) publishLine(line);
+      };
+      child.stdout.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-maxOutput); emitLines(chunk); });
+      child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-maxOutput); emitLines(chunk); });
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        publishLine(lineBuffer);
+        resolve({
+          ...result,
+          stage,
+          command,
+          elapsedMs: Date.now() - startedAtMs,
+          timeoutMs,
+          underlyingError: result.underlyingError || result.error || ""
+        });
+      };
+      child.on("error", (error) => finish(failure(error.message, { stdout, stderr })));
+      child.on("exit", (code, signal) => {
+        const underlyingError = code === 0 ? "" : (cleanUpdateLine(stderr) || `SSH update exited with code ${code}.`);
+        finish(code === 0
+          ? { ok: true, code: 0, signal: signal || "", stdout, stderr, error: "", timedOut: false }
+          : failure(underlyingError, { code, signal, stdout, stderr }));
+      });
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(failure(`Suite backend timed out while running the server-management update command after ${timeoutMs} ms.`, { stdout, stderr, timedOut: true }));
+      }, remainingMs);
+    });
+  } catch (error) {
+    return failure(error.message || error);
+  }
 }
 
 function serverUpdateApplyCommand(configValue = loadConfig()) {
@@ -3321,13 +3371,21 @@ function startServerUpdateJob() {
   setImmediate(async () => {
     let progress = 1;
     let lastPublishedAt = 0;
-    let lastPublishedStage = "";
+    let lastPublishedStage = "Starting update";
     let lastPublishedProgress = -1;
-    try {
-      appendAdminAudit("server_update_started", { operationId: operation.id, selection: serverUpdateSelection() });
-      const result = await sshStreamingCommand(serverUpdateApplyCommand(), {
-        timeout: 15 * 60 * 1000,
+    const command = serverUpdateApplyCommand();
+    try { appendAdminAudit("server_update_started", { operationId: operation.id, selection: serverUpdateSelection(), timeoutMs: SERVER_UPDATE_TIMEOUTS.updateCommandMs }); } catch {}
+    await runServerUpdateLifecycle({
+      command,
+      stage: lastPublishedStage,
+      timeoutMs: SERVER_UPDATE_TIMEOUTS.updateCommandMs,
+      execute: () => sshStreamingCommand(command, {
+        timeout: SERVER_UPDATE_TIMEOUTS.updateCommandMs,
         maxBuffer: 1024 * 1024 * 4,
+        onStage: (stage, elapsedMs) => {
+          lastPublishedStage = stage;
+          operationRegistry.update(operation, stage, `Elapsed ${elapsedMs} ms.`, { progress });
+        },
         onLine: (line) => {
           const parsed = serverUpdateProgress(line, progress);
           progress = parsed.progress;
@@ -3339,17 +3397,36 @@ function startServerUpdateJob() {
             lastPublishedStage = parsed.stage;
             lastPublishedProgress = parsed.progress;
           }
+          return parsed.stage;
         }
-      });
-      if (!result.ok) throw new Error(result.error || result.stderr || "Funcom server update failed.");
-      operationRegistry.finish(operation, "success");
-      serverUpdateCheckCache = { checkedAt: 0, data: null, promise: null };
-      appendAdminAudit("server_update_completed", { operationId: operation.id, progress: 100 });
-    } catch (error) {
-      operationRegistry.update(operation, "Update failed", error.message, { progress, logLine: `ERROR: ${error.message}` });
-      operationRegistry.finish(operation, "failed", error.message);
-      appendAdminAudit("server_update_failed", { operationId: operation.id, error: error.message });
-    }
+      }),
+      onSuccess: (result) => {
+        operationRegistry.finish(operation, "success");
+        serverUpdateCheckCoordinator?.reset();
+        try { appendAdminAudit("server_update_completed", { operationId: operation.id, progress: 100, elapsedMs: result.elapsedMs, command: result.command }); } catch {}
+      },
+      onFailure: (failureDetails) => {
+        operationRegistry.update(operation, failureDetails.stage, failureDetails.message, { progress, logLine: `ERROR: ${failureDetails.message}`, diagnostics: failureDetails });
+        operationRegistry.finish(operation, "failed", failureDetails.message, { stage: failureDetails.stage, diagnostics: failureDetails });
+        try { appendAdminAudit("server_update_failed", { operationId: operation.id, ...failureDetails }); } catch {}
+      },
+      onFinally: ({ failure: failureDetails }) => {
+        if (operation.status === "running" || operation.status === "pending") {
+          const fallback = failureDetails || {
+            stage: lastPublishedStage || "Update failed",
+            command,
+            elapsedMs: Math.max(0, Date.now() - new Date(operation.startedAt).getTime()),
+            timeoutMs: SERVER_UPDATE_TIMEOUTS.updateCommandMs,
+            timedOut: false,
+            timeoutSource: "",
+            nestedTimeoutMs: 0,
+            underlyingError: "Updater stopped without a terminal result.",
+            message: "Updater stopped without a terminal result."
+          };
+          operationRegistry.finish(operation, "failed", fallback.message, { stage: fallback.stage, diagnostics: fallback });
+        }
+      }
+    });
   });
   return operationRegistry.public(operation);
 }
@@ -3906,7 +3983,7 @@ async function battlegroup(action) {
       config: readiness.summary
     });
   }
-  return sshCommand(`/home/dune/.dune/bin/battlegroup ${action}`, action === "update" ? 600000 : 240000);
+  return sshCommand(`/home/dune/.dune/bin/battlegroup ${action}`, serverManagementTimeoutMs(action));
 }
 
 function serverControlConfigured() {
@@ -18751,11 +18828,12 @@ function setServerUpdateDetectionStatus(message,kind="empty"){const el=document.
 function fillServerUpdateVersions(data={}){const metadata=data.metadata||data;setText("serverUpdateCurrentBuild",serverUpdateValue(data.requiredBuildId&&data.requiredBuildId!==data.currentBuildId?data.currentBuildId+" -> "+data.requiredBuildId:data.currentBuildId||metadata.steamBuildId));setText("serverUpdateDownloadedRevision",serverUpdateValue(data.downloadedRevision||metadata.downloadedRevision));setText("serverUpdateDeployedRevision",serverUpdateValue(data.deployedRevision||metadata.deployedRevision));}
 function showServerUpdatePanel(data=serverUpdateCheckState||{}){fillServerUpdateVersions(data);document.getElementById("serverUpdatePanel")?.classList.remove("hidden");}
 function hideServerUpdatePanel(){document.getElementById("serverUpdatePanel")?.classList.add("hidden");}
-function renderServerUpdateOperation(operation){if(!operation)return;const running=operation.status==="running"||operation.status==="pending";const success=operation.status==="success";const progress=Number.isFinite(Number(operation.progress))?Math.max(0,Math.min(100,Number(operation.progress))):(success?100:0);setText("serverUpdatePanelTitle",success?"Dune server update completed":operation.status==="failed"?"Dune server update failed":"Updating Dune server");setText("serverUpdatePanelDetail",operation.detail||operation.error||(running?"Funcom update is running.":"Update finished."));setText("serverUpdateStage",operation.stage||"Updating");setText("serverUpdateProgressText",Math.round(progress)+"% · "+serverUpdateElapsed(operation));const fill=document.getElementById("serverUpdateProgressFill");if(fill)fill.style.width=progress+"%";const badgeEl=document.getElementById("serverUpdatePanelState");if(badgeEl){badgeEl.textContent=success?"Completed":operation.status==="failed"?"Failed":"Updating";badgeEl.className="badge "+(success?"ok":operation.status==="failed"?"bad":"warn");}const lines=Array.isArray(operation.logTail)?operation.logTail:[];setText("serverUpdateLiveLog",lines.length?lines.join("\n"):(operation.error||"Waiting for Funcom update output..."));setServerUpdateDetectionStatus(success?"Dune server update completed.":operation.status==="failed"?("Update failed: "+(operation.error||operation.detail||"Unknown error")):("Update running: "+(operation.stage||"Starting")),success?"empty":"warning");if(!running){serverUpdateOperationId="";window.clearTimeout(serverUpdatePollTimer);playUiSound(success?"success":"warning");showToast(success?"Dune server update completed.":"Dune server update failed.",success?"success":"error");setTimeout(()=>checkServerUpdateAvailability({force:true,prompt:false}),1800);}}
-async function pollServerUpdateOperation(operationId){window.clearTimeout(serverUpdatePollTimer);if(!operationId)return;try{const data=await getJson("/api/operations",{timeoutMs:8000});renderOperations(data);const operation=(data.operations||[]).find(row=>row.id===operationId)||(data.active||[]).find(row=>row.key==="battlegroup:update");if(!operation)throw new Error("The server update operation was not found.");serverUpdateOperationId=operation.id;renderServerUpdateOperation(operation);if(operation.status==="running"||operation.status==="pending")serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operation.id),1000);}catch(error){setText("serverUpdatePanelDetail",betterError(error));setServerUpdateDetectionStatus("Update status unavailable: "+betterError(error),"warning");serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operationId),2500);}}
-async function startDetectedServerUpdate(updateData=serverUpdateCheckState||{}){showServerUpdatePanel(updateData);setText("serverUpdatePanelTitle","Starting Dune server update");setText("serverUpdatePanelDetail","Creating a protected background update operation.");setText("serverUpdateLiveLog","Waiting for Funcom update output...");try{const data=await getJson("/api/server-update/start",{method:"POST",timeoutMs:15000});serverUpdateOperationId=data.operation?.id||"";if(!serverUpdateOperationId)throw new Error("Update operation ID was not returned.");renderServerUpdateOperation(data.operation);setActionCenter("Dune server update started","Live status is available in the update panel.","working");addActivity("server","Dune server update started",serverUpdateOperationId);await pollServerUpdateOperation(serverUpdateOperationId);}catch(error){const operations=await refreshOperations().catch(()=>null);const active=(operations?.active||[]).find(row=>row.key==="battlegroup:update");if(active){serverUpdateOperationId=active.id;showServerUpdatePanel(updateData);await pollServerUpdateOperation(active.id);return;}setText("serverUpdatePanelTitle","Dune server update could not start");setText("serverUpdatePanelDetail",betterError(error));setText("serverUpdateLiveLog",betterError(error));setServerUpdateDetectionStatus("Update could not start: "+betterError(error),"warning");playUiSound("warning");}}
+function serverUpdateDiagnosticText(operation){const d=operation?.diagnostics;if(!d)return"";return["Stage: "+(d.stage||operation.stage||"Unknown"),"Command: "+(d.command||"Unknown"),"Elapsed: "+Number(d.elapsedMs||0)+" ms","Backend timeout: "+Number(d.timeoutMs||0)+" ms","Underlying error: "+(d.underlyingError||operation.error||"Unknown")].concat(d.nestedTimeoutMs?["Nested server-management timeout: "+Number(d.nestedTimeoutMs)+" ms"]:[]).join("\n");}
+function renderServerUpdateOperation(operation){if(!operation)return;const running=operation.status==="running"||operation.status==="pending";const success=operation.status==="success";const progress=Number.isFinite(Number(operation.progress))?Math.max(0,Math.min(100,Number(operation.progress))):(success?100:0);setText("serverUpdatePanelTitle",success?"Dune server update completed":operation.status==="failed"?"Dune server update failed":"Updating Dune server");setText("serverUpdatePanelDetail",operation.detail||operation.error||(running?"Funcom update is running.":"Update finished."));setText("serverUpdateStage",operation.diagnostics?.stage||operation.stage||"Updating");setText("serverUpdateProgressText",Math.round(progress)+"% · "+serverUpdateElapsed(operation));const fill=document.getElementById("serverUpdateProgressFill");if(fill)fill.style.width=progress+"%";const badgeEl=document.getElementById("serverUpdatePanelState");if(badgeEl){badgeEl.textContent=success?"Completed":operation.status==="failed"?"Failed":"Updating";badgeEl.className="badge "+(success?"ok":operation.status==="failed"?"bad":"warn");}const lines=Array.isArray(operation.logTail)?operation.logTail:[],diagnostics=serverUpdateDiagnosticText(operation);setText("serverUpdateLiveLog",[lines.length?lines.join("\n"):(operation.error||"Waiting for Funcom update output..."),diagnostics].filter(Boolean).join("\n\nFailure diagnostics:\n"));setServerUpdateDetectionStatus(success?"Dune server update completed.":operation.status==="failed"?("Update failed: "+(operation.error||operation.detail||"Unknown error")):("Update running: "+(operation.stage||"Starting")),success?"empty":"warning");if(!running){serverUpdateOperationId="";window.clearTimeout(serverUpdatePollTimer);playUiSound(success?"success":"warning");showToast(success?"Dune server update completed.":"Dune server update failed.",success?"success":"error");setTimeout(()=>checkServerUpdateAvailability({force:true,prompt:false}),1800);}}
+async function pollServerUpdateOperation(operationId){window.clearTimeout(serverUpdatePollTimer);if(!operationId)return;try{const data=await getJson("/api/operations",{timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiPollMs}});renderOperations(data);const operation=(data.operations||[]).find(row=>row.id===operationId)||(data.active||[]).find(row=>row.key==="battlegroup:update");if(!operation)throw new Error("The server update operation was not found.");serverUpdateOperationId=operation.id;renderServerUpdateOperation(operation);if(operation.status==="running"||operation.status==="pending")serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operation.id),1000);}catch(error){setText("serverUpdatePanelDetail",betterError(error));setServerUpdateDetectionStatus("Update status unavailable: "+betterError(error),"warning");serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operationId),2500);}}
+async function startDetectedServerUpdate(updateData=serverUpdateCheckState||{}){showServerUpdatePanel(updateData);setText("serverUpdatePanelTitle","Starting Dune server update");setText("serverUpdatePanelDetail","Creating a protected background update operation.");setText("serverUpdateLiveLog","Waiting for Funcom update output...");try{const data=await getJson("/api/server-update/start",{method:"POST",timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiStartMs}});serverUpdateOperationId=data.operation?.id||"";if(!serverUpdateOperationId)throw new Error("Update operation ID was not returned.");renderServerUpdateOperation(data.operation);setActionCenter("Dune server update started","Live status is available in the update panel.","working");addActivity("server","Dune server update started",serverUpdateOperationId);await pollServerUpdateOperation(serverUpdateOperationId);}catch(error){const operations=await refreshOperations().catch(()=>null);const active=(operations?.active||[]).find(row=>row.key==="battlegroup:update");if(active){serverUpdateOperationId=active.id;showServerUpdatePanel(updateData);await pollServerUpdateOperation(active.id);return;}serverUpdateOperationId="";setText("serverUpdatePanelTitle","Dune server update could not start");setText("serverUpdatePanelDetail",betterError(error));setText("serverUpdateLiveLog",betterError(error));setServerUpdateDetectionStatus("Update could not start: "+betterError(error),"warning");playUiSound("warning");}}
 function serverUpdatePromptKey(data){return [data.requiredBuildId||"",data.downloadedRevision||"",data.deployedRevision||""].join("|");}
-async function checkServerUpdateAvailability(options={}){const force=options.force===true,prompt=options.prompt!==false;if(serverUpdateOperationId)return serverUpdateCheckState;setServerUpdateDetectionStatus("Checking Funcom and Steam server versions...","warning");const button=document.getElementById("serverUpdateButton");if(button)button.disabled=true;try{const data=await getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:45000});serverUpdateCheckState=data;fillServerUpdateVersions(data);if(!data.updateAvailable){setServerUpdateDetectionStatus("Server is current. Steam build "+serverUpdateValue(data.currentBuildId)+" · deployed "+serverUpdateValue(data.deployedRevision)+".","empty");if(force)showToast("Dune server is up to date.","success");return data;}setServerUpdateDetectionStatus("Dune server update available. "+(data.reason||"A newer Funcom build was detected."),"warning");if(prompt){const key=serverUpdatePromptKey(data);let alreadyPrompted=false;try{alreadyPrompted=sessionStorage.getItem("alphaNineServerUpdatePrompted")===key;}catch{}if(force||!alreadyPrompted){const activeDialog=document.querySelector(".suite-modal-overlay:not(.hidden),.setup-overlay:not(.hidden),.startup-progress-overlay:not(.hidden)");if(activeDialog){window.setTimeout(()=>checkServerUpdateAvailability({force:false,prompt:true}),30000);return data;}try{sessionStorage.setItem("alphaNineServerUpdatePrompted",key);}catch{}const message=(data.reason||"A newer Dune server build is available.")+"\n\nSteam build: "+serverUpdateValue(data.currentBuildId)+(data.requiredBuildId&&data.requiredBuildId!==data.currentBuildId?" -> "+data.requiredBuildId:"")+"\nDownloaded revision: "+serverUpdateValue(data.downloadedRevision)+"\nDeployed revision: "+serverUpdateValue(data.deployedRevision)+"\n\nUpdating may reconcile or restart server pods and disconnect online players. A recent backup is recommended.";if(await appConfirm("Dune Server Update Available",message,"Update Now","Later"))await startDetectedServerUpdate(data);}}return data;}catch(error){setServerUpdateDetectionStatus("Automatic server update check unavailable: "+betterError(error),"warning");if(force)showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
+async function checkServerUpdateAvailability(options={}){const force=options.force===true,prompt=options.prompt!==false;if(serverUpdateOperationId)return serverUpdateCheckState;setServerUpdateDetectionStatus("Checking Funcom and Steam server versions...","warning");const button=document.getElementById("serverUpdateButton");if(button)button.disabled=true;try{const data=await getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiCheckMs}});serverUpdateCheckState=data;fillServerUpdateVersions(data);if(!data.updateAvailable){setServerUpdateDetectionStatus("Server is current. Steam build "+serverUpdateValue(data.currentBuildId)+" · deployed "+serverUpdateValue(data.deployedRevision)+".","empty");if(force)showToast("Dune server is up to date.","success");return data;}setServerUpdateDetectionStatus("Dune server update available. "+(data.reason||"A newer Funcom build was detected."),"warning");if(prompt){const key=serverUpdatePromptKey(data);let alreadyPrompted=false;try{alreadyPrompted=sessionStorage.getItem("alphaNineServerUpdatePrompted")===key;}catch{}if(force||!alreadyPrompted){const activeDialog=document.querySelector(".suite-modal-overlay:not(.hidden),.setup-overlay:not(.hidden),.startup-progress-overlay:not(.hidden)");if(activeDialog){window.setTimeout(()=>checkServerUpdateAvailability({force:false,prompt:true}),30000);return data;}try{sessionStorage.setItem("alphaNineServerUpdatePrompted",key);}catch{}const message=(data.reason||"A newer Dune server build is available.")+"\n\nSteam build: "+serverUpdateValue(data.currentBuildId)+(data.requiredBuildId&&data.requiredBuildId!==data.currentBuildId?" -> "+data.requiredBuildId:"")+"\nDownloaded revision: "+serverUpdateValue(data.downloadedRevision)+"\nDeployed revision: "+serverUpdateValue(data.deployedRevision)+"\n\nUpdating may reconcile or restart server pods and disconnect online players. A recent backup is recommended.";if(await appConfirm("Dune Server Update Available",message,"Update Now","Later"))await startDetectedServerUpdate(data);}}return data;}catch(error){setServerUpdateDetectionStatus("Automatic server update check unavailable: "+betterError(error),"warning");if(force)showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
 async function checkServerUpdateNow(){return checkServerUpdateAvailability({force:true,prompt:true});}
 
 function schedulerConfigFromUi(){return{version:1,enabled:document.getElementById("schedulerEnabled")?.checked===true,battlegroup:String(schedulerState?.config?.battlegroup||schedulerState?.localConfig?.battlegroup||appConfig?.selectedBattlegroup?.name||"").trim(),timezone:getValue("schedulerTimezone"),catchUpWindowMinutes:Number(getValue("schedulerCatchup")||120),backup:{enabled:document.getElementById("schedulerBackupEnabled")?.checked===true,time:getValue("schedulerBackupTime"),retention:Number(getValue("schedulerBackupRetention")||7),timeoutMinutes:Number(getValue("schedulerBackupTimeout")||15)},restart:{enabled:document.getElementById("schedulerRestartEnabled")?.checked===true,time:getValue("schedulerRestartTime"),backupFirst:true,backupFreshMinutes:Number(getValue("schedulerBackupFresh")||90),playersOnlinePolicy:getValue("schedulerPlayerPolicy")||"skip",maxDeferralMinutes:Number(getValue("schedulerMaxDeferral")||180),healthTimeoutMinutes:Number(getValue("schedulerHealthTimeout")||15)}};}
@@ -18951,7 +19029,7 @@ function betterError(e){return e&&e.message?e.message:"Command failed. Check tha
 async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status",{timeoutMs:30000});renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
 async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!(await appConfirm("Confirm VM action","Are you sure you want to "+action+" the VM?","Run "+action,"Cancel")))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
-async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const data=await getJson("/api/action/"+action,{method:"POST"});let output=data.stdout||data.stderr||data.error||"Done.";if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
+async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const actionTimeouts=${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)},data=await getJson("/api/action/"+action,{method:"POST",timeoutMs:actionTimeouts[action]||180000});let output=data.stdout||data.stderr||data.error||"Done.";if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
 function updateMapMemoryInput(){const select=document.getElementById("mapSelect");const rows=window.mapDeploymentRows||[];const row=rows.find(m=>m.map===select?.value);tone("mapMemory",row?.memory||"Unset");}
 const MAP_MEMORY_LIMIT_PATTERN=/^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)(?:Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|k)?$/;
@@ -19350,7 +19428,7 @@ function setGiveServerStatus(message,kind){const el=document.getElementById("liv
 function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const usesDirectDbUnlock=isTechKnowledgeItem(selectedAdminItem)||isRecipeSchematicItem(selectedAdminItem);const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(!storageMode&&mode==="execute"&&!usesDbGrade&&!usesDirectDbUnlock&&!adminLiveGiveAvailable);if(give)give.disabled=blocked||(storageMode&&!selectedGiveStorage());if(add){add.disabled=storageMode||liveGiveBusy||!selectedAdminItem;add.title=storageMode?"Give Queue currently targets player inventory only.":"Add selected item to Give Queue";}if(queue)queue.disabled=storageMode||blocked||!giveQueue.length;if(retry)retry.disabled=storageMode||blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const receiver=await getJson("/api/receiver/status",{timeoutMs:5000});liveGiveServerOnline=Boolean(receiver.ok);adminLiveGiveAvailable=Boolean(receiver.ok);liveGiveTransport={mode:"http-json",configured:Boolean(receiver.ok),reachable:Boolean(receiver.ok),target:receiver.giveUrl||"",reason:receiver.ok?"":(receiver.reason||receiver.error||"Receiver is offline.")};liveGiveUnavailableMessage=receiver.ok?"":liveGiveTransportMessage(liveGiveTransport);setGiveServerStatus(receiver.ok?"Server Status: Online. Give Item receiver is available.":"Server Status: Offline. "+(receiver.reason||receiver.error||"Receiver is offline."),receiver.ok?"ok":"warn");syncLiveGiveTransportStatus();return receiver;}catch(receiverError){try{const env=await getJson("/api/live-give/env",{timeoutMs:8000});adminLiveGiveAvailable=Boolean(env.liveGiveAvailable);liveGiveTransport=env.giveTransport||liveGiveTransport;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(env.message||liveGiveTransportMessage(liveGiveTransport||env));liveGiveServerOnline=adminLiveGiveAvailable||Boolean(env.giveTransport?.reachable);setGiveServerStatus(liveGiveServerOnline?(adminLiveGiveAvailable?"Server Status: Online. Give Item is available.":"Server Status: Receiver online. Live Give transport is limited."):"Server Status: Offline. "+(liveGiveUnavailableMessage||env.error||"Start the server before using Give Item."),liveGiveServerOnline?"ok":"warn");syncLiveGiveTransportStatus();return env;}catch(envError){liveGiveServerOnline=false;adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(receiverError)+" / "+betterError(envError);setGiveServerStatus("Server Status: Offline. "+liveGiveUnavailableMessage,"warn");syncLiveGiveTransportStatus();return null;}}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
 async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="execute";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncGiveDestination();updateGiveTargetSummary();syncGiveItemControls();await Promise.all([refreshGivePlayersFast(),refreshGiveItemsFast(),checkGiveItemServerStatus()]);syncLiveGiveMode();}
-async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST"});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
+async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST",timeoutMs:${SERVER_MANAGEMENT_UI_TIMEOUTS.start}});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 function giveItemExecutionStatus(data,usesDbGrade=false){
   if(data?.status==="db-inserted")return"Database grade grant inserted.";
   if(data?.status==="live-verified")return"Live Give verified.";

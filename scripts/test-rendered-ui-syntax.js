@@ -52,6 +52,14 @@ async function waitForUi() {
     assert(html.includes('getJson("/api/status",{timeoutMs:45000})'), "Server indicator polling deadline is too short.");
     assert(html.includes('getJson("/api/vm-monitor",{timeoutMs:45000})'), "VM indicator polling deadline is too short.");
     assert(html.includes("keeping the last confirmed indicators"), "Transient indicator delays do not preserve the last confirmed state.");
+    assert(html.includes('getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:120000})'), "Server Updater check does not keep its UI deadline beyond bounded backend work.");
+    assert(html.includes('getJson("/api/server-update/start",{method:"POST",timeoutMs:30000})'), "Server Updater start request is missing its explicit UI deadline.");
+    assert(html.includes("serverUpdateDiagnosticText"), "Server Updater failure diagnostics are missing from the rendered UI.");
+    assert(html.includes("Nested server-management timeout:"), "Server Updater does not expose a nested command timeout.");
+    assert(serverSource.includes("runServerUpdateLifecycle"), "Server Updater is missing guaranteed busy-state cleanup.");
+    assert(serverSource.includes("createServerUpdateCheckCoordinator"), "Server Updater status refresh is missing failure-aware cache coordination.");
+    assert(serverSource.includes("serverManagementTimeoutMs(action)"), "Server management actions are not using operation-specific backend timeouts.");
+    assert(html.includes('getJson("/api/action/start",{method:"POST",timeoutMs:960000})'), "Give Item server start can still let the browser fail before the backend start deadline.");
     assert(html.includes("loadSharedPlayerDirectory"), "Shared browser player directory is missing.");
     assert(html.includes("PLAYER_DIRECTORY_REQUEST_TIMEOUT_MS=35000"), "Shared player request deadline is not aligned with backend work.");
     assert(html.includes("keeping the last confirmed directory"), "Player refresh failures do not preserve confirmed player data.");
@@ -85,7 +93,7 @@ async function waitForUi() {
     const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((match) => match[1]).filter((script) => script.trim());
     assert(scripts.length, "No inline UI script was rendered.");
     for (const script of scripts) new Function(script);
-    console.log("Rendered Suite UI, Repair Inspector, and Landsraad editor JavaScript syntax passed.");
+    console.log("Rendered Suite UI, Server Updater diagnostics, Repair Inspector, and Landsraad editor JavaScript syntax passed.");
   } finally {
     child.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });

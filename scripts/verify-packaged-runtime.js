@@ -17,9 +17,11 @@ const requiredRuntimeFiles = [
   "lib/market-bot.js",
   "market-bot/main.go",
   "lib/player-directory.js",
+  "lib/server-update.js",
   "lib/teleport-request-mode.js",
   "electron/main.js",
   "scripts/test-landsraad-tiers.js",
+  "scripts/test-server-update-monitor.js",
   `RELEASE_NOTES_${rootPackage.version}.md`
 ];
 const missing = requiredRuntimeFiles.filter((entry) => !packaged.has(entry));
@@ -31,6 +33,7 @@ if (missing.length) {
 const packagedServer = asar.extractFile(archive, "server.js").toString("utf8");
 const packagedMarketBotModule = asar.extractFile(archive, "lib/market-bot.js").toString("utf8");
 const packagedPlayerDirectory = asar.extractFile(archive, "lib/player-directory.js").toString("utf8");
+const packagedServerUpdate = asar.extractFile(archive, "lib/server-update.js").toString("utf8");
 if (!packagedServer.includes("loadSharedPlayerDirectory") || !packagedServer.includes("adminPlayerDirectory")) {
   throw new Error("Packaged server is missing the stabilized shared player-directory integration.");
 }
@@ -45,6 +48,12 @@ if (!packagedPlayerDirectory.includes("createPlayerDirectory") || !packagedPlaye
 }
 if (!packagedServer.includes("detectedTiers.length === LANDSRAAD_TIER_COUNT") || !packagedServer.includes("Exactly five distinct thresholds")) {
   throw new Error("Packaged Landsraad exact-five protection is incomplete.");
+}
+if (!packagedServerUpdate.includes("SERVER_UPDATE_TIMEOUTS") || !packagedServerUpdate.includes("createServerUpdateCheckCoordinator")) {
+  throw new Error("Packaged Server Updater timeout policy or failure-aware status coordinator is incomplete.");
+}
+if (!packagedServer.includes("runServerUpdateLifecycle") || !packagedServer.includes("serverUpdateDiagnosticText")) {
+  throw new Error("Packaged Server Updater cleanup or structured failure diagnostics are incomplete.");
 }
 
 console.log(`Packaged runtime files verified in ${archive}`);

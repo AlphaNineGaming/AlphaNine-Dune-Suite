@@ -3818,12 +3818,15 @@ async function rollbackMarketBot() {
 
 async function ensureMarketBotInstalled() {
   const config = localMarketBotConfig();
-  if (!config.activated) return { ok: true, skipped: "not activated" };
+  const status = await marketBotStatus();
+  if (!config.activated) {
+    if (status.installed && status.updateRequired) return installMarketBot(config);
+    return { ok: true, skipped: "not activated" };
+  }
   if (!config.legacyMigration?.legacyDisabledAt) {
     marketBotStore.disableLegacy(config);
     marketBotStore.save(config);
   }
-  const status = await marketBotStatus();
   if (!status.installed || status.updateRequired) return installMarketBot(config);
   return status;
 }

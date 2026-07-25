@@ -13,7 +13,7 @@ assert(/group by rewards\.threshold\r?\n\s*order by rewards\.threshold/.test(sou
 assert(!source.includes("select threshold::text, count(*)::text\n    from dune.landsraad_task_rewards\n    group by threshold\n    order by threshold"), "Tier inspection must not sort the threshold::text output alias lexicographically.");
 assert(source.includes("detectedTiers.length === LANDSRAAD_TIER_COUNT"), "Tier inspection must require exactly five distinct thresholds.");
 assert(source.includes("tiers = exactTierCount ? detectedTiers.map"), "Tier labels must only be created after the exact-five check.");
-assert(source.includes("tiers,\n    detectedTierCount"), "Invalid tier counts must return no editable tier rows while retaining diagnostics.");
+assert(/tiers,\r?\n\s*detectedTierCount/.test(source), "Invalid tier counts must return no editable tier rows while retaining diagnostics.");
 assert(source.includes("detectedThresholds"), "Invalid tier-count diagnostics must include every detected threshold.");
 assert(source.includes("thresholds[index] <= thresholds[index - 1]"), "Tier validation must reject duplicate or descending thresholds.");
 assert(source.includes("Keep all ${expectedCount} detected Landsraad tiers."), "Tier editing must not silently add or remove reward tiers.");

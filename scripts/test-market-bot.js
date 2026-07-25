@@ -157,6 +157,7 @@ const catalog = [
   assert(serverSource.includes("Legacy Market Automator is locked while persistent Market Bot is activated."), "legacy/new concurrency guard is missing");
   assert(serverSource.includes("delegated-to-market-bot"), "unsafe Suite-side cleanup was not disabled");
   assert(serverSource.includes("Legacy automated buying is disabled because Market Bot never modifies player listings."), "player-listing buyer path is not disabled");
+  assert(serverSource.includes("if (status.installed && status.updateRequired) return installMarketBot(config);"), "installed paused Market Bots must receive versioned migrations during Suite startup");
   assert(serverSource.includes("Legacy arbitrary listing removal is disabled."), "arbitrary listing removal path is not disabled");
   assert(serverSource.includes('id="market" class="view"') && serverSource.includes("Persistent Market Bot"), "primary Market Bot UI is missing");
   assert(serverSource.includes('id="legacy-market" class="view hidden"'), "legacy market UI is not isolated");

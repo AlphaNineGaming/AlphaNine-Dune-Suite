@@ -32,6 +32,8 @@ type ItemPolicy struct {
 	UnitPrice      int64  `json:"unitPrice"`
 	StackSize      int    `json:"stackSize"`
 	TargetListings int    `json:"targetListings"`
+	CategoryMask   int    `json:"categoryMask"`
+	CategoryDepth  int    `json:"categoryDepth"`
 }
 
 type Config struct {
@@ -46,6 +48,7 @@ type Config struct {
 	DBService       string       `json:"dbService"`
 	ExchangeName    string       `json:"exchangeName"`
 	EconomyStyle    string       `json:"economyStyle"`
+	ListingCategory string       `json:"listingCategory"`
 	IntervalMinutes int          `json:"intervalMinutes"`
 	ExpiryDays      int          `json:"expiryDays"`
 	Safety          SafetyConfig `json:"safety"`
@@ -84,7 +87,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: alphanine-market-bot <daemon|preview|restock|status|pause|resume|migrate|self-test>")
+		return errors.New("usage: alphanine-market-bot <daemon|preview|restock|clean|status|pause|resume|migrate|self-test>")
 	}
 	if args[0] == "--version" || args[0] == "version" {
 		writeJSON(map[string]interface{}{"ok": true, "name": "AlphaNine Market Bot", "version": runtimeVersion, "goos": "linux", "goarch": "amd64"})
@@ -148,6 +151,24 @@ func run(args []string) error {
 		state := stateForConfig(cfg, status, message, nil)
 		_ = writeAtomicJSON(p.state, state, 0640)
 		writeJSON(commandResult{OK: true, Status: status, Message: message})
+		return nil
+	case "clean":
+		cfg, err := readConfig(p.config)
+		if err != nil {
+			return err
+		}
+		cfg.Paused = true
+		if err := writeAtomicJSON(p.config, cfg, 0640); err != nil {
+			return err
+		}
+		raw, err := executeSQL(cfg, cleanupSQL(cfg))
+		if err != nil {
+			return err
+		}
+		message := resultMessage(raw)
+		state := stateForConfig(cfg, "Paused", message, raw)
+		_ = writeAtomicJSON(p.state, state, 0640)
+		writeJSON(commandResult{OK: true, Status: "Paused", Message: message, Result: raw})
 		return nil
 	case "preview", "restock":
 		cfg, err := readConfig(p.config)
@@ -405,19 +426,99 @@ grant select on sequence public.alphanine_market_bot_audit_id_seq to dune;
 with selected_partition as (
   select partition_id from dune.world_partition order by partition_id limit 1
 )
-insert into dune.actors (class, serial, gas_attributes, properties, dimension_index, partition_id)
-select 'AlphaNineMarket', 0, '{}', '{"AlphaNineOwner":"market-bot-v1"}', 0, partition_id
+insert into dune.actors (class, serial, gas_attributes, properties, dimension_index, partition_id, owner_account_id)
+select 'Duke', 0, '{}', '{}', 0, partition_id, null
 from selected_partition
 where not exists (
-  select 1 from dune.actors
-  where class='AlphaNineMarket' and properties->>'AlphaNineOwner'='market-bot-v1'
+  select 1 from dune.actors where class='Duke' and owner_account_id is null
 );
 insert into dune.dune_exchange_users (owner_id)
 select id from dune.actors
-where class='AlphaNineMarket' and properties->>'AlphaNineOwner'='market-bot-v1'
+where class='Duke' and owner_account_id is null
 on conflict do nothing;
+with selected_duke as (
+  select id from dune.actors where class='Duke' and owner_account_id is null order by id limit 1
+),
+legacy_bot as (
+  select id from dune.actors
+  where class='AlphaNineMarket' and properties->>'AlphaNineOwner'='market-bot-v1'
+)
+update dune.dune_exchange_orders o
+set owner_id=(select id from selected_duke)
+from public.alphanine_market_bot_listings m
+where o.id=m.order_id and m.retired_at is null and o.owner_id in(select id from legacy_bot)
+  and exists(select 1 from selected_duke);
 commit;
 select json_build_object('ok', true, 'status', 'ready', 'schemaVersion', 1)::text;`
+}
+
+func cleanupSQL(cfg Config) string {
+	return fmt.Sprintf(`
+begin;
+with
+lock_state as (
+  select pg_try_advisory_xact_lock(hashtextextended(%s, 0)) acquired
+),
+bot_actor as (
+  select id from dune.actors
+  where class='Duke' and owner_account_id is null
+  order by id limit 1
+),
+targets as materialized (
+  select m.order_id,m.item_id
+  from public.alphanine_market_bot_listings m
+  join dune.dune_exchange_orders o on o.id=m.order_id
+  join dune.dune_exchange_sell_orders s on s.order_id=o.id
+  join dune.items i on i.id=m.item_id and i.id=o.item_id
+  join bot_actor b on b.id=o.owner_id
+  where m.retired_at is null and o.is_npc_order=true
+    and (select acquired from lock_state)
+  for update of o,i
+),
+deleted_sell as (
+  delete from dune.dune_exchange_sell_orders
+  where order_id in(select order_id from targets)
+  returning order_id
+),
+deleted_orders as (
+  delete from dune.dune_exchange_orders
+  where id in(select order_id from deleted_sell)
+  returning id
+),
+deleted_items as (
+  delete from dune.items i
+  using targets t,deleted_orders d
+  where i.id=t.item_id and d.id=t.order_id
+  returning i.id
+),
+retired as (
+  update public.alphanine_market_bot_listings m
+  set retired_at=now()
+  where m.order_id in(select id from deleted_orders)
+  returning m.order_id
+),
+audited as (
+  insert into public.alphanine_market_bot_audit(cycle_id,event,details)
+  select null,'cleaned',jsonb_build_object('removed',(select count(*) from retired))
+  where (select acquired from lock_state)
+  returning id
+),
+summary as (
+  select json_build_object(
+    'ok',(select acquired from lock_state),
+    'status',case when (select acquired from lock_state) then 'cleaned' else 'lock-busy' end,
+    'message',case
+      when (select acquired from lock_state)
+        then format('Cleaned %%s Market Bot-owned listings. Market Bot is paused.',(select count(*) from retired))
+      else 'Another Market Bot operation holds the database lock.'
+    end,
+    'removed',(select count(*) from retired),
+    'playerListingsChanged',0,
+    'auditId',(select id from audited limit 1)
+  ) result
+)
+select result::text from summary;
+commit;`, sqlText("alphanine-market-bot:"+cfg.Namespace+":"+cfg.Battlegroup))
 }
 
 func reconciliationSQL(cfg Config, cycleID string, execute bool) string {
@@ -430,11 +531,12 @@ func reconciliationSQL(cfg Config, cycleID string, execute bool) string {
 		if !item.Enabled || item.TargetListings < 1 {
 			continue
 		}
-		values = append(values, fmt.Sprintf("(%s,%s,%s,%s,%d,%d,%d)",
-			sqlText(item.ID), sqlText(item.Name), sqlText(item.Category), sqlText(item.Tier), item.UnitPrice, item.StackSize, item.TargetListings))
+		values = append(values, fmt.Sprintf("(%s,%s,%s,%s,%d,%d,%d,%d,%d)",
+			sqlText(item.ID), sqlText(item.Name), sqlText(item.Category), sqlText(item.Tier), item.UnitPrice, item.StackSize,
+			item.TargetListings, item.CategoryMask, item.CategoryDepth))
 	}
 	if len(values) == 0 {
-		values = append(values, "('','','','',1,1,0)")
+		values = append(values, "('','','','',1,1,0,0,0)")
 	}
 	executeBool := "false"
 	if execute {
@@ -454,7 +556,7 @@ settings as (
 lock_state as (
   select pg_try_advisory_xact_lock(hashtextextended(%s, 0)) acquired
 ),
-policy(template_id, display_name, category, tier, unit_price, stack_size, target_count) as (
+policy(template_id, display_name, category, tier, unit_price, stack_size, target_count, category_mask, category_depth) as (
   values %s
 ),
 selected_exchange as (
@@ -462,11 +564,15 @@ selected_exchange as (
   from dune.dune_exchanges
   where %s
   order by id
-  limit 1
 ),
 exchange_state as (
   select count(*) exchange_count, min(exchange_id) exchange_id, min(inventory_id) inventory_id, min(exchange_name) exchange_name
   from selected_exchange
+),
+selected_access_point as (
+  select min(id) access_point_id,count(*) access_point_count
+  from dune.dune_exchange_accesspoints
+  where exchange_id=(select exchange_id from exchange_state)
 ),
 player_clock as (
   select max(expiration_time) - 1209600 inferred_now
@@ -489,7 +595,7 @@ game_clock as (
 ),
 bot_actor as (
   select id from dune.actors
-  where class='AlphaNineMarket' and properties->>'AlphaNineOwner'='market-bot-v1'
+  where class='Duke' and owner_account_id is null
   order by id limit 1
 ),
 prior_cycle as (
@@ -504,6 +610,7 @@ valid_managed as (
   join dune.items i on i.id=m.item_id and i.id=o.item_id
   join bot_actor b on b.id=o.owner_id
   where m.retired_at is null and o.is_npc_order=true and o.template_id=m.template_id
+    and o.category_mask>0 and o.category_depth>0
 ),
 active_counts as (
   select template_id,count(*)::integer active
@@ -514,16 +621,27 @@ active_counts as (
 planned as (
   select p.*,coalesce(a.active,0) active_count,greatest(0,p.target_count-coalesce(a.active,0)) deficit
   from policy p left join active_counts a using(template_id)
-  where p.target_count>0
+  where p.target_count>0 and p.category_mask>0 and p.category_depth>0
 ),
 expanded as (
   select p.*,n.ordinal
   from planned p cross join lateral generate_series(1,p.deficit) n(ordinal)
 ),
-ranked as (
-  select e.*,row_number() over(order by lower(e.category),lower(e.display_name),e.template_id,e.ordinal) sequence,
-         sum(e.unit_price*e.stack_size) over(order by lower(e.category),lower(e.display_name),e.template_id,e.ordinal) cumulative_value
+category_ranked as (
+  select e.*,row_number() over(
+    partition by lower(e.category)
+    order by lower(e.display_name),e.template_id,e.ordinal
+  ) category_sequence
   from expanded e
+),
+ranked as (
+  select e.*,row_number() over(
+           order by e.category_sequence,lower(e.category),lower(e.display_name),e.template_id,e.ordinal
+         ) sequence,
+         sum(e.unit_price*e.stack_size) over(
+           order by e.category_sequence,lower(e.category),lower(e.display_name),e.template_id,e.ordinal
+         ) cumulative_value
+  from category_ranked e
 ),
 approved as (
   select * from ranked r,settings s
@@ -536,6 +654,7 @@ summary as (
       when not (select acquired from lock_state) then 'lock-busy'
       when (select exchange_count from exchange_state)<>1 then 'waiting'
       when (select inventory_id from exchange_state) is null then 'waiting'
+      when (select access_point_count from selected_access_point)<1 then 'waiting'
       when (select game_now from game_clock)<=0 then 'waiting'
       when not exists(select 1 from bot_actor) then 'waiting'
       else 'planned' end,
@@ -543,6 +662,7 @@ summary as (
       when not (select acquired from lock_state) then 'Another Market Bot cycle holds the database lock.'
       when (select exchange_count from exchange_state)<>1 then 'Waiting for exactly one usable Exchange.'
       when (select inventory_id from exchange_state) is null then 'Waiting for the Exchange inventory.'
+      when (select access_point_count from selected_access_point)<1 then 'Waiting for an Exchange access point.'
       when (select game_now from game_clock)<=0 then 'Waiting for a verified Exchange clock.'
       when not exists(select 1 from bot_actor) then 'Waiting for the dedicated Market Bot actor.'
       else 'Market plan is ready.' end,
@@ -558,7 +678,9 @@ summary as (
       'plannedValue',p.unit_price*p.stack_size*(select count(*) from approved a where a.template_id=p.template_id)
     ) order by lower(p.category),lower(p.display_name),p.template_id) from planned p),'[]'::json),
     'totals',json_build_object(
+      'configuredCatalogItems',(select count(*) from policy where target_count>0),
       'catalogItems',(select count(*) from planned),
+      'skippedUnknownCategoryMasks',(select count(*) from policy where target_count>0 and (category_mask<=0 or category_depth<=0)),
       'activeListings',coalesce((select sum(active_count) from planned),0),
       'totalDeficit',coalesce((select sum(deficit) from planned),0),
       'createNow',(select count(*) from approved),
@@ -580,7 +702,7 @@ summary as (
         from planned p group by p.category
       ) c
     ),'[]'::json),
-    'warning','Active listings are never repriced, removed, or reposted. Player listings are never changed.'
+    'warning','Only category-verified listings count as active. Existing valid listings are never repriced or reposted. Player listings are never changed.'
   ) result
 )
 select result::text from summary;
@@ -604,7 +726,7 @@ prior_cycle as (
   select result from public.alphanine_market_bot_cycles
   where cycle_id=(select cycle_id from settings) and completed_at is not null
 ),
-policy(template_id, display_name, category, tier, unit_price, stack_size, target_count) as (
+policy(template_id, display_name, category, tier, unit_price, stack_size, target_count, category_mask, category_depth) as (
   values %s
 ),
 selected_exchange as (
@@ -612,18 +734,15 @@ selected_exchange as (
   from dune.dune_exchanges
   where %s
   order by id
-  limit 1
 ),
 exchange_state as (
   select count(*) exchange_count, min(exchange_id) exchange_id, min(inventory_id) inventory_id, min(exchange_name) exchange_name
   from selected_exchange
 ),
 selected_access_point as (
-  select coalesce((
-    select access_point_id from dune.dune_exchange_orders
-    where exchange_id=(select exchange_id from exchange_state) and access_point_id is not null
-    order by id limit 1
-  ),1)::bigint access_point_id
+  select min(id) access_point_id,count(*) access_point_count
+  from dune.dune_exchange_accesspoints
+  where exchange_id=(select exchange_id from exchange_state)
 ),
 player_clock as (
   select max(expiration_time)-1209600 inferred_now
@@ -646,13 +765,14 @@ game_clock as (
 ),
 bot_actor as (
   select id from dune.actors
-  where class='AlphaNineMarket' and properties->>'AlphaNineOwner'='market-bot-v1'
+  where class='Duke' and owner_account_id is null
   order by id limit 1
 ),
 cycle_gate as (
   select s.cycle_id
   from settings s,lock_state l,exchange_state e,game_clock g
   where l.acquired and e.exchange_count=1 and e.inventory_id is not null and g.game_now>0
+    and (select access_point_count from selected_access_point)>=1
     and exists(select 1 from bot_actor) and not exists(select 1 from prior_cycle)
 ),
 invalid_tracking as (
@@ -670,7 +790,7 @@ invalid_tracking as (
   returning m.order_id
 ),
 expired_target as (
-  select m.order_id,m.item_id
+  select m.order_id,m.item_id,(o.category_mask<=0 or o.category_depth<=0) invalid_category
   from public.alphanine_market_bot_listings m
   join dune.dune_exchange_orders o on o.id=m.order_id
   join dune.dune_exchange_sell_orders s on s.order_id=o.id
@@ -678,7 +798,8 @@ expired_target as (
   join bot_actor b on b.id=o.owner_id
   cross join game_clock g
   where m.retired_at is null and o.is_npc_order=true and o.template_id=m.template_id
-    and (o.expiration_time is null or o.expiration_time<=g.game_now or i.stack_size<=0)
+    and (o.expiration_time is null or o.expiration_time<=g.game_now or i.stack_size<=0
+      or o.category_mask<=0 or o.category_depth<=0)
     and exists(select 1 from cycle_gate)
   for update of o,i
 ),
@@ -713,6 +834,7 @@ valid_managed as (
   join dune.items i on i.id=m.item_id and i.id=o.item_id
   join bot_actor b on b.id=o.owner_id
   where m.retired_at is null and o.is_npc_order=true and o.template_id=m.template_id
+    and o.category_mask>0 and o.category_depth>0
     and (select count(*) from invalid_tracking)+(select count(*) from retired_expired)>=0
 ),
 active_counts as (
@@ -724,16 +846,27 @@ active_counts as (
 planned as (
   select p.*,coalesce(a.active,0) active_count,greatest(0,p.target_count-coalesce(a.active,0)) deficit
   from policy p left join active_counts a using(template_id)
-  where p.target_count>0
+  where p.target_count>0 and p.category_mask>0 and p.category_depth>0
 ),
 expanded as (
   select p.*,n.ordinal
   from planned p cross join lateral generate_series(1,p.deficit) n(ordinal)
 ),
-ranked as (
-  select e.*,row_number() over(order by lower(e.category),lower(e.display_name),e.template_id,e.ordinal) sequence,
-         sum(e.unit_price*e.stack_size) over(order by lower(e.category),lower(e.display_name),e.template_id,e.ordinal) cumulative_value
+category_ranked as (
+  select e.*,row_number() over(
+    partition by lower(e.category)
+    order by lower(e.display_name),e.template_id,e.ordinal
+  ) category_sequence
   from expanded e
+),
+ranked as (
+  select e.*,row_number() over(
+           order by e.category_sequence,lower(e.category),lower(e.display_name),e.template_id,e.ordinal
+         ) sequence,
+         sum(e.unit_price*e.stack_size) over(
+           order by e.category_sequence,lower(e.category),lower(e.display_name),e.template_id,e.ordinal
+         ) cumulative_value
+  from category_ranked e
 ),
 approved as (
   select r.*
@@ -773,7 +906,7 @@ inserted_orders as (
   )
   select (select exchange_id from exchange_state),(select access_point_id from selected_access_point),
          (select id from bot_actor),true,(select game_now+expiry_seconds from game_clock,settings),
-         p.template_id,1.0,1.0,0,0,p.unit_price,0,p.item_id
+         p.template_id,1.0,1.0,p.category_mask,p.category_depth,p.unit_price,0,p.item_id
   from item_plan p order by p.sequence
   returning id,item_id,template_id,item_price,expiration_time
 ),
@@ -799,6 +932,7 @@ generated_result as (
       when not (select acquired from lock_state) then 'lock-busy'
       when (select exchange_count from exchange_state)<>1 then 'waiting'
       when (select inventory_id from exchange_state) is null then 'waiting'
+      when (select access_point_count from selected_access_point)<1 then 'waiting'
       when (select game_now from game_clock)<=0 then 'waiting'
       when not exists(select 1 from bot_actor) then 'waiting'
       else 'completed' end,
@@ -806,9 +940,11 @@ generated_result as (
       when not (select acquired from lock_state) then 'Another Market Bot cycle holds the database lock.'
       when (select exchange_count from exchange_state)<>1 then 'Waiting for exactly one usable Exchange.'
       when (select inventory_id from exchange_state) is null then 'Waiting for the Exchange inventory.'
+      when (select access_point_count from selected_access_point)<1 then 'Waiting for an Exchange access point.'
       when (select game_now from game_clock)<=0 then 'Waiting for a verified Exchange clock.'
       when not exists(select 1 from bot_actor) then 'Waiting for the dedicated Market Bot actor.'
-      else format('Restock completed: %%s created, %%s expired bot-owned listings removed.',(select count(*) from tracked),(select count(*) from retired_expired)) end,
+      else format('Restock completed: %%s created, %%s expired or invisible bot-owned listings removed.',
+        (select count(*) from tracked),(select count(*) from retired_expired)) end,
     'cycleId',(select cycle_id from settings),
     'mode','execute',
     'exchange',(select exchange_name from exchange_state),
@@ -816,6 +952,7 @@ generated_result as (
     'clockSource',(select clock_source from game_clock),
     'created',(select count(*) from tracked),
     'removedExpired',(select count(*) from retired_expired),
+    'removedInvalidCategory',(select count(*) from expired_target where invalid_category),
     'retiredInvalid',(select count(*) from invalid_tracking),
     'items',coalesce((select json_agg(json_build_object(
       'id',p.template_id,'name',p.display_name,'category',p.category,'tier',p.tier,'unitPrice',p.unit_price,
@@ -824,7 +961,9 @@ generated_result as (
       'plannedValue',p.unit_price*p.stack_size*(select count(*) from item_plan a where a.template_id=p.template_id)
     ) order by lower(p.category),lower(p.display_name),p.template_id) from planned p),'[]'::json),
     'totals',json_build_object(
+      'configuredCatalogItems',(select count(*) from policy where target_count>0),
       'catalogItems',(select count(*) from planned),
+      'skippedUnknownCategoryMasks',(select count(*) from policy where target_count>0 and (category_mask<=0 or category_depth<=0)),
       'activeListings',coalesce((select sum(active_count) from planned),0),
       'totalDeficit',coalesce((select sum(deficit) from planned),0),
       'created',(select count(*) from tracked),
@@ -846,7 +985,7 @@ generated_result as (
         from planned p group by p.category
       ) c
     ),'[]'::json),
-    'warning','Active listings are never repriced, removed, or reposted. Player listings are never changed.'
+    'warning','Only category-verified listings count as active. Existing valid listings are never repriced or reposted. Player listings are never changed.'
   ) result
 ),
 completed_cycle as (
@@ -882,7 +1021,8 @@ func publicConfig(cfg Config) map[string]interface{} {
 		"schemaVersion": cfg.SchemaVersion, "runtimeVersion": cfg.RuntimeVersion, "enabled": cfg.Enabled,
 		"paused": cfg.Paused, "activated": cfg.Activated, "battlegroup": cfg.Battlegroup,
 		"economyStyle": cfg.EconomyStyle, "intervalMinutes": cfg.IntervalMinutes, "expiryDays": cfg.ExpiryDays,
-		"safety": cfg.Safety, "itemCount": len(cfg.Items),
+		"listingCategory": cfg.ListingCategory,
+		"safety":          cfg.Safety, "itemCount": len(cfg.Items),
 	}
 }
 

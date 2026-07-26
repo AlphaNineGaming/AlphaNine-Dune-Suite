@@ -130,7 +130,11 @@ assert(packagedMarketBotInstall.includes("' migrate"), "Packaged Market Bot inst
 assert(packagedMarketBotInstall.includes("timeout -k 2 12 rc-service alphanine-market-bot stop"), "Packaged Market Bot installer cannot recover a hung prior daemon.");
 assert(packagedMarketBotInstall.includes('readlink -f "/proc/$market_bot_pid/exe"'), "Packaged Market Bot installer does not verify the recorded service PID.");
 assert(packagedServerSource.includes('"/api/market-bot/prepare"'), "Packaged UI/API is missing staged Market Bot activation.");
-assert(packagedServerSource.includes("Player listings are never changed."), "Packaged Market Bot safety warning is missing.");
+assert(
+  packagedServerSource.includes("Player listings and untracked NPC listings will not be touched.") &&
+    packagedServerSource.includes('"/api/market-bot/clean"'),
+  "Packaged Market Bot tracked-only cleanup safety warning is missing."
+);
 assert(
   /loadEnvironment\(\);\s*await startReceiverIfNeeded\(\);\s*await startServer\(\);/.test(packagedDesktopSource),
   "Packaged desktop boot does not start the receiver before the Suite backend."

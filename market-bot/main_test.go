@@ -30,6 +30,8 @@ func testConfig() Config {
 			UnitPrice:      100,
 			StackSize:      2,
 			TargetListings: 3,
+			CategoryMask:   65536,
+			CategoryDepth:  2,
 		}},
 	}
 }
@@ -54,7 +56,10 @@ func TestPreviewUsesReadOnlyProductionPlanner(t *testing.T) {
 		"extract(epoch from clock_timestamp())",
 		"'database-clock'",
 		"'clockSource'",
-		"'warning','Active listings are never repriced",
+		"'warning','Only category-verified listings count as active",
+		"o.category_mask>0 and o.category_depth>0",
+		"partition by lower(e.category)",
+		"order by e.category_sequence,lower(e.category)",
 		"rollback;",
 	} {
 		if !strings.Contains(sql, expected) {
@@ -72,11 +77,14 @@ func TestExecuteIsOwnedLockedAndIdempotent(t *testing.T) {
 		"pg_try_advisory_xact_lock",
 		"prior_cycle",
 		"on conflict do nothing",
-		"properties->>'AlphaNineOwner'='market-bot-v1'",
+		"class='Duke' and owner_account_id is null",
 		"extract(epoch from clock_timestamp())",
 		"from public.alphanine_market_bot_listings",
 		"o.is_npc_order=true",
 		"insert into dune.items",
+		"p.category_mask,p.category_depth",
+		"o.category_mask<=0 or o.category_depth<=0",
+		"partition by lower(e.category)",
 		"insert into public.alphanine_market_bot_listings",
 		"completed_at,result",
 		"commit;",
@@ -90,6 +98,30 @@ func TestExecuteIsOwnedLockedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestCleanupDeletesOnlyStrictlyTrackedBotOwnedListings(t *testing.T) {
+	sql := cleanupSQL(testConfig())
+	for _, expected := range []string{
+		"pg_try_advisory_xact_lock",
+		"public.alphanine_market_bot_listings",
+		"m.retired_at is null",
+		"class='Duke' and owner_account_id is null",
+		"join bot_actor b on b.id=o.owner_id",
+		"o.is_npc_order=true",
+		"delete from dune.dune_exchange_sell_orders",
+		"delete from dune.dune_exchange_orders",
+		"delete from dune.items",
+		"'playerListingsChanged',0",
+		"commit;",
+	} {
+		if !strings.Contains(sql, expected) {
+			t.Fatalf("cleanup SQL missing %q", expected)
+		}
+	}
+	if strings.Contains(sql, "o.is_npc_order=false") || strings.Contains(sql, "o.is_npc_order = false") {
+		t.Fatal("cleanup SQL contains a player-listing predicate")
+	}
+}
+
 func TestSQLTextEscapesCatalogValues(t *testing.T) {
 	cfg := testConfig()
 	cfg.Items[0].Name = "Maker's Knife"
@@ -99,10 +131,13 @@ func TestSQLTextEscapesCatalogValues(t *testing.T) {
 	}
 }
 
-func TestMigrationCreatesStrictOwnershipMarker(t *testing.T) {
+func TestMigrationCreatesNativeTrackedBotIdentity(t *testing.T) {
 	sql := migrationSQL()
-	if !strings.Contains(sql, `"AlphaNineOwner":"market-bot-v1"`) {
-		t.Fatal("migration does not create the dedicated ownership marker")
+	if !strings.Contains(sql, "select 'Duke'") || !strings.Contains(sql, "owner_account_id is null") {
+		t.Fatal("migration does not create a clean native Duke actor")
+	}
+	if !strings.Contains(sql, "from public.alphanine_market_bot_listings m") || !strings.Contains(sql, "set owner_id=(select id from selected_duke)") {
+		t.Fatal("migration does not transfer only tracked legacy bot listings")
 	}
 	if !strings.Contains(sql, "create table if not exists public.alphanine_market_bot_listings") {
 		t.Fatal("migration does not create listing ownership metadata")

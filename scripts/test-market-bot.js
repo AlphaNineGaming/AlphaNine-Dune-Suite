@@ -11,6 +11,7 @@ const {
   legacyMigration,
   createMarketBotStore,
   buildItemPolicies,
+  marketCategoryMaskSeed,
   runtimeConfig,
   activationFingerprint,
   buildInstallCommand,
@@ -28,6 +29,10 @@ const catalog = [
   { id: "Item_B", name: "Rare Knife", category: "Weapons", tier: "T4", grade: "Rare" },
   { id: "Item_C", name: "Unknown Thing", category: "Unknown", tier: "" }
 ];
+const testCategorySeed = {
+  item_a: { mask: 65536, depth: 2 },
+  item_b: { mask: 131328, depth: 3 }
+};
 
 {
   const config = defaultMarketBotConfig();
@@ -35,17 +40,38 @@ const catalog = [
   assert.equal(config.paused, true);
   assert.equal(config.activated, false);
   assert.equal(config.economyStyle, "Expensive");
-  const policies = buildItemPolicies(catalog, config);
+  assert.equal(config.listingCategory, "");
+  const policies = buildItemPolicies(catalog, config, testCategorySeed);
   assert.equal(policies.length, 3);
   assert.equal(policies[0].targetListings, 1);
   assert.equal(policies.find((row) => row.id === "Item_A").stackSize, 20, "catalog stack maximum must win");
   assert.equal(policies.find((row) => row.id === "Item_C").unitPrice, 1000, "unknown category must use a conservative market baseline");
+  assert.deepEqual(
+    [policies.find((row) => row.id === "Item_A").categoryMask, policies.find((row) => row.id === "Item_A").categoryDepth],
+    [65536, 2],
+    "verified category metadata must be attached case-insensitively"
+  );
+  assert.equal(policies.find((row) => row.id === "Item_C").categoryMask, 0, "unknown category metadata must fail closed");
 }
 
 {
   const expensive = buildItemPolicies(catalog, normalizeConfig({ economyStyle: "Expensive" }));
   const affordable = buildItemPolicies(catalog, normalizeConfig({ economyStyle: "Affordable" }));
   assert(affordable.find((row) => row.id === "Item_B").unitPrice < expensive.find((row) => row.id === "Item_B").unitPrice);
+}
+
+{
+  const policies = buildItemPolicies(catalog, normalizeConfig({ listingCategory: "Weapons" }), testCategorySeed);
+  assert.equal(policies.find((row) => row.id === "Item_B").enabled, true);
+  assert.equal(policies.find((row) => row.id === "Item_A").enabled, false);
+  assert.equal(policies.find((row) => row.id === "Item_C").enabled, false);
+}
+
+{
+  const seed = marketCategoryMaskSeed();
+  assert(Object.keys(seed).length > 1000, "bundled category seed is unexpectedly incomplete");
+  assert(seed.social_atre_casual03_shoes?.mask > 0, "Arrakeen garment metadata is missing");
+  assert(seed.radiation_suit?.depth > 0, "known suit metadata is missing");
 }
 
 {
@@ -135,6 +161,7 @@ const catalog = [
   const action = buildActionCommand("preview", { cycleId: "preview-123" });
   assert(action.includes("preview"));
   assert(action.includes("preview-123"));
+  assert(buildActionCommand("clean").includes("'clean'"));
   assert.throws(() => buildActionCommand("remove-player-listing"));
   assert.deepEqual(parseJsonOutput("diagnostic\n{\"ok\":true}\n"), { ok: true });
 }
@@ -160,12 +187,26 @@ const catalog = [
   assert(serverSource.includes("if (status.installed && status.updateRequired) return installMarketBot(config);"), "installed paused Market Bots must receive versioned migrations during Suite startup");
   assert(serverSource.includes("Legacy arbitrary listing removal is disabled."), "arbitrary listing removal path is not disabled");
   assert(serverSource.includes('id="market" class="view"') && serverSource.includes("Persistent Market Bot"), "primary Market Bot UI is missing");
+  assert(serverSource.includes("Category-verified catalog items") && serverSource.includes("Skipped (category metadata unavailable)"), "Market Bot UI must distinguish visible from skipped catalog items");
+  assert(serverSource.includes('id="marketBotListingCategory"') && serverSource.includes('"/api/market-bot/category"'), "persistent listing category control is missing");
+  assert(serverSource.includes("Clean Bot Market") && serverSource.includes('"/api/market-bot/clean"'), "tracked-only Market Bot cleanup control is missing");
   assert(serverSource.includes('id="legacy-market" class="view hidden"'), "legacy market UI is not isolated");
   assert(goSource.includes("pg_try_advisory_xact_lock"), "database lock is missing");
   assert(goSource.includes("public.alphanine_market_bot_listings"), "strict ownership table is missing");
+  assert(goSource.includes("class='Duke' and owner_account_id is null"), "Market Bot must use a native clean Duke actor");
+  assert(goSource.includes("set owner_id=(select id from selected_duke)"), "tracked legacy Market Bot orders must migrate to the native actor");
   assert(goSource.includes("not exists(select 1 from prior_cycle)"), "cycle idempotency gate is missing");
   assert(goSource.includes("extract(epoch from clock_timestamp())"), "database-clock fallback is missing");
   assert(goSource.includes("Player listings are never changed."), "planner safety warning is missing");
+  assert(goSource.includes("p.category_mask,p.category_depth"), "listing inserts must use verified category metadata");
+  assert(goSource.includes("o.category_mask>0 and o.category_depth>0"), "invisible listings must not count as active");
+  assert(goSource.includes("o.category_mask<=0 or o.category_depth<=0"), "owned invisible listings must be repaired");
+  assert(goSource.includes("partition by lower(e.category)") && goSource.includes("order by e.category_sequence,lower(e.category)"), "restock allocation must interleave deficient categories");
+  assert(!goSource.includes("row_number() over(order by lower(e.category),lower(e.display_name)"), "alphabetical category starvation ordering must not return");
+  assert(goSource.includes("'playerListingsChanged',0") && goSource.includes("join bot_actor b on b.id=o.owner_id"), "cleanup must report and enforce tracked bot ownership");
+  assert(goSource.includes("dune.dune_exchange_accesspoints"), "access point must resolve from a live foreign-key row");
+  assert(!goSource.includes("),1)::bigint access_point_id"), "Market Bot must not invent access point id 1");
+  assert(!/p\.template_id,1\.0,1\.0,0,0,p\.unit_price/.test(goSource), "Market Bot must not create zero-mask listings");
   assert(serverSource.includes("Restart-VM -Force"), "VM restart must be non-interactive");
   assert(!/delete from dune\.[^\n]+\n[\s\S]{0,300}is_npc_order=false/i.test(goSource), "Market Bot contains a player-listing delete path");
 }

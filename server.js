@@ -3626,6 +3626,13 @@ function marketBotCatalog() {
     .filter((item) => item?.id && item.spawnable !== false && !isTechKnowledgeItem(item) && !isRecipeSchematicItem(item));
 }
 
+function marketBotCategories() {
+  return [...new Set(marketBotCatalog()
+    .map((item) => String(item.category || "Other").trim())
+    .filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+}
+
 function localMarketBotConfig() {
   try { return marketBotStore.load(); }
   catch (error) {
@@ -3640,6 +3647,8 @@ function publicMarketBotLocal(config = localMarketBotConfig()) {
     paused: config.paused,
     activated: config.activated,
     economyStyle: config.economyStyle,
+    listingCategory: config.listingCategory || "",
+    availableCategories: marketBotCategories(),
     intervalMinutes: config.intervalMinutes,
     expiryDays: config.expiryDays,
     safety: config.safety,
@@ -3744,9 +3753,12 @@ async function installMarketBot(configInput, options = {}) {
 async function prepareMarketBot(input = {}) {
   const current = localMarketBotConfig();
   if (current.activated) throw new Error("Market Bot is already activated. Use Preview Market to inspect the current plan.");
+  const listingCategory = String(input.listingCategory ?? current.listingCategory ?? "").trim();
+  if (listingCategory && !marketBotCategories().includes(listingCategory)) throw new Error(`Unknown market category: ${listingCategory}`);
   const staged = normalizeMarketBotConfig({
     ...current,
     economyStyle: input.economyStyle || current.economyStyle,
+    listingCategory,
     enabled: false,
     paused: true,
     activated: false
@@ -3761,6 +3773,7 @@ async function prepareMarketBot(input = {}) {
   appendAdminAudit("market_bot_activation_preview", {
     fingerprint,
     economyStyle: staged.economyStyle,
+    listingCategory: staged.listingCategory || "All categories",
     totals: preview.result?.totals || null,
     itemCount: installed.runtime.items.length
   });
@@ -3808,8 +3821,10 @@ async function previewMarketBot(input = {}) {
   let status = await marketBotStatus();
   const current = localMarketBotConfig();
   const requestedStyle = input.economyStyle || current.economyStyle;
-  if (!status.installed || status.updateRequired || requestedStyle !== current.economyStyle) {
-    const staged = normalizeMarketBotConfig({ ...current, economyStyle: requestedStyle });
+  const requestedCategory = String(input.listingCategory ?? current.listingCategory ?? "").trim();
+  if (requestedCategory && !marketBotCategories().includes(requestedCategory)) throw new Error(`Unknown market category: ${requestedCategory}`);
+  if (!status.installed || status.updateRequired || requestedStyle !== current.economyStyle || requestedCategory !== current.listingCategory) {
+    const staged = normalizeMarketBotConfig({ ...current, economyStyle: requestedStyle, listingCategory: requestedCategory });
     await installMarketBot(staged);
     status = await marketBotStatus();
   }
@@ -3869,12 +3884,40 @@ async function updateMarketBotOverrides(input = {}) {
   return { ok: true, config: publicMarketBotLocal(next), items: buildMarketBotItemPolicies(marketBotCatalog(), next), status: await marketBotStatus() };
 }
 
+async function updateMarketBotCategory(input = {}) {
+  const current = localMarketBotConfig();
+  const listingCategory = String(input.listingCategory || "").trim();
+  if (listingCategory && !marketBotCategories().includes(listingCategory)) throw new Error(`Unknown market category: ${listingCategory}`);
+  const next = marketBotStore.save({ ...current, listingCategory });
+  const status = await marketBotStatus();
+  if (status.installed) await installMarketBot(next);
+  appendAdminAudit("market_bot_listing_category_saved", { listingCategory: listingCategory || "All categories" });
+  return { ok: true, config: publicMarketBotLocal(next), status: await marketBotStatus() };
+}
+
 async function restockMarketBot(input = {}) {
   const cycleId = String(input.cycleId || `manual-${crypto.randomUUID()}`).slice(0, 160);
   const result = await sshCommand(buildMarketBotActionCommand("restock", { cycleId }), 180000, { maxBuffer: 1024 * 1024 * 32 });
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market restock failed.");
   const parsed = parseMarketBotJson(result.stdout);
   appendAdminAudit("market_bot_restock_completed", { cycleId, result: parsed.result || null });
+  return { ...parsed, status: await marketBotStatus() };
+}
+
+async function cleanMarketBot(input = {}) {
+  if (input.confirmed !== true) throw new Error("Explicit confirmation is required before cleaning Market Bot listings.");
+  const current = localMarketBotConfig();
+  if (!current.activated) throw new Error("Market Bot has not been activated.");
+  const paused = normalizeMarketBotConfig({ ...current, enabled: true, paused: true });
+  await installMarketBot(paused);
+  const result = await sshCommand(buildMarketBotActionCommand("clean"), 180000, { maxBuffer: 1024 * 1024 * 32 });
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot cleanup failed.");
+  const parsed = parseMarketBotJson(result.stdout);
+  appendAdminAudit("market_bot_cleaned", {
+    removed: parsed.result?.removed ?? parsed.removed ?? 0,
+    playerListingsChanged: 0,
+    paused: true
+  });
   return { ...parsed, status: await marketBotStatus() };
 }
 
@@ -17414,16 +17457,19 @@ function appPage() {
         </div>
         <div class="field-grid mt">
           <label>Economy Style<select id="marketBotEconomyStyle"><option>Affordable</option><option>Balanced</option><option selected>Expensive</option></select></label>
+          <label>Listing Category<select id="marketBotListingCategory"><option value="">All categories</option></select></label>
         </div>
         <div class="action-row mt">
           <button id="marketBotEnableButton" type="button" class="primary" onclick="enableMarketBot()">Enable Market Bot</button>
           <button id="marketBotPreviewButton" type="button" onclick="previewMarketBot()">Preview Market</button>
           <button id="marketBotRestockButton" type="button" onclick="restockMarketBot()">Restock Now</button>
           <button id="marketBotPauseButton" type="button" onclick="toggleMarketBotPause()">Pause Bot</button>
+          <button type="button" onclick="saveMarketBotCategory()">Save Category</button>
           <button type="button" onclick="toggleMarketBotCustomize()">Customize Items</button>
+          <button id="marketBotCleanButton" type="button" class="danger" onclick="cleanMarketBot()">Clean Bot Market</button>
         </div>
         <div id="marketBotActionResult" class="empty mt">Market Bot is disabled until previewed and explicitly enabled.</div>
-        <div class="warning mt">Active listings remain unchanged: Market Bot does not reprice, remove, or repost them. Player listings are never changed.</div>
+        <div class="warning mt">Normal restocks leave active listings unchanged. Clean Bot Market removes only listings tracked as Market Bot-owned, never player listings, and pauses the bot afterward.</div>
       </div>
       <div class="panel pad mt">
         <div class="panel-head">
@@ -19170,16 +19216,19 @@ let marketBotStateData=null,marketBotPreviewData=null,marketBotItems=[],marketBo
 function marketBotDate(value){if(!value)return"--";const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString();}
 function marketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"0";}
 function marketBotStatusClass(value){const status=String(value||"").toLowerCase();return status==="running"?"ok":status==="error"?"bad":"warn";}
-function renderMarketBotStatus(data={}){marketBotStateData=data;const local=data.localConfig||data.config||{},cycle=data.lastCycle||{},totals=cycle.totals||{};const status=data.status||(!data.installed?"Not Installed":local.paused?"Paused":"Running");tone("marketBotState",status);setText("marketBotMessage",data.message||(!data.installed?"Enable Market Bot to install it in the VM.":"Persistent VM runtime reachable."));setText("marketBotLastRun",marketBotDate(data.lastRunAt));setText("marketBotLastResult",cycle.message||"No completed cycle loaded.");setText("marketBotCycleResult",marketBotNumber(cycle.created??totals.created??totals.createNow)+" / "+marketBotNumber(cycle.removedExpired)+" / "+(status==="Error"?"1":"0"));setText("marketBotCycleDetail","Created / expired bot-owned removed / errors");setText("marketBotNextRun",marketBotDate(data.nextRunAt));setText("marketBotVersion",(data.installedVersion||"Not installed")+" / expected "+(data.expectedVersion||"--")+(data.updateRequired?" / update required":""));setValue("marketBotEconomyStyle",local.economyStyle||"Expensive");setText("marketBotPauseButton",local.paused?"Resume Bot":"Pause Bot");const active=local.activated===true;const pauseButton=document.getElementById("marketBotPauseButton"),restockButton=document.getElementById("marketBotRestockButton");if(pauseButton)pauseButton.disabled=!active;if(restockButton)restockButton.disabled=!active||local.paused===true;setText("marketBotEnableButton",active?"Market Bot Enabled":"Enable Market Bot");const enableButton=document.getElementById("marketBotEnableButton");if(enableButton)enableButton.disabled=active;const migration=local.legacyMigration||{};setText("marketBotMigration",migration.detected?("Legacy configuration preserved. Converted "+(migration.convertedAt||"--")+". "+(migration.legacyDisabledAt?"Legacy engine disabled "+migration.legacyDisabledAt+".":"Activation has not disabled the legacy engine yet.")):"No Legacy Market Automator configuration was detected.");}
+function fillMarketBotListingCategories(local={}){const select=document.getElementById("marketBotListingCategory");if(!select)return;const categories=Array.isArray(local.availableCategories)?local.availableCategories:[];select.innerHTML='<option value="">All categories</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");select.value=categories.includes(local.listingCategory)?local.listingCategory:"";}
+function renderMarketBotStatus(data={}){marketBotStateData=data;const local=data.localConfig||data.config||{},cycle=data.lastCycle||{},totals=cycle.totals||{};const status=data.status||(!data.installed?"Not Installed":local.paused?"Paused":"Running");tone("marketBotState",status);setText("marketBotMessage",data.message||(!data.installed?"Enable Market Bot to install it in the VM.":"Persistent VM runtime reachable."));setText("marketBotLastRun",marketBotDate(data.lastRunAt));setText("marketBotLastResult",cycle.message||"No completed cycle loaded.");setText("marketBotCycleResult",marketBotNumber(cycle.created??totals.created??totals.createNow)+" / "+marketBotNumber(cycle.removedExpired)+" / "+(status==="Error"?"1":"0"));setText("marketBotCycleDetail","Created / expired bot-owned removed / errors");setText("marketBotNextRun",marketBotDate(data.nextRunAt));setText("marketBotVersion",(data.installedVersion||"Not installed")+" / expected "+(data.expectedVersion||"--")+(data.updateRequired?" / update required":""));setValue("marketBotEconomyStyle",local.economyStyle||"Expensive");fillMarketBotListingCategories(local);setText("marketBotPauseButton",local.paused?"Resume Bot":"Pause Bot");const active=local.activated===true;const pauseButton=document.getElementById("marketBotPauseButton"),restockButton=document.getElementById("marketBotRestockButton"),cleanButton=document.getElementById("marketBotCleanButton");if(pauseButton)pauseButton.disabled=!active;if(restockButton)restockButton.disabled=!active||local.paused===true;if(cleanButton)cleanButton.disabled=!active;setText("marketBotEnableButton",active?"Market Bot Enabled":"Enable Market Bot");const enableButton=document.getElementById("marketBotEnableButton");if(enableButton)enableButton.disabled=active;const migration=local.legacyMigration||{};setText("marketBotMigration",migration.detected?("Legacy configuration preserved. Converted "+(migration.convertedAt||"--")+". "+(migration.legacyDisabledAt?"Legacy engine disabled "+migration.legacyDisabledAt+".":"Activation has not disabled the legacy engine yet.")):"No Legacy Market Automator configuration was detected.");}
 async function refreshMarketBot(){try{const data=await getJson("/api/market-bot",{timeoutMs:50000});renderMarketBotStatus(data);return data;}catch(error){renderMarketBotStatus({status:"Error",message:betterError(error),localConfig:marketBotStateData?.localConfig||{}});return null;}}
 function marketBotPreviewRows(){const rows=marketBotPreviewData?.items||[],query=(getValue("marketBotPreviewSearch")||"").trim().toLowerCase(),category=getValue("marketBotPreviewCategory"),tier=getValue("marketBotPreviewTier");return rows.filter(row=>(!query||[row.id,row.name,row.category].some(value=>String(value||"").toLowerCase().includes(query)))&&(!category||row.category===category)&&(!tier||String(row.tier||"")===tier));}
 function fillMarketBotPreviewFilters(){const rows=marketBotPreviewData?.items||[];for(const [id,key,label] of [["marketBotPreviewCategory","category","All categories"],["marketBotPreviewTier","tier","All tiers"]]){const select=document.getElementById(id);if(!select)continue;const current=select.value;const values=[...new Set(rows.map(row=>String(row[key]||"").trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">'+label+'</option>'+values.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");select.value=values.includes(current)?current:"";}}
-function renderMarketBotPreview(){const wrap=document.getElementById("marketBotPreviewRows"),totals=document.getElementById("marketBotPreviewTotals");if(!wrap||!totals)return;const all=marketBotPreviewData?.items||[],rows=marketBotPreviewRows(),summary=marketBotPreviewData?.totals||{},categories=marketBotPreviewData?.categories||[];const categoryText=categories.map(row=>row.category+": "+marketBotNumber(row.createNow)+" create / "+marketBotNumber(row.plannedValue)+" Solari").join(" · ");totals.innerHTML=marketBotPreviewData?'<div class="detail-row"><span class="subtle">All planned catalog items</span><strong>'+marketBotNumber(summary.catalogItems??all.length)+'</strong></div><div class="detail-row"><span class="subtle">Active / deficit / create this cycle</span><strong>'+marketBotNumber(summary.activeListings)+' / '+marketBotNumber(summary.totalDeficit)+' / '+marketBotNumber(summary.createNow??summary.created)+'</strong></div><div class="detail-row"><span class="subtle">Planned market value</span><strong>'+marketBotNumber(summary.marketValue)+' Solari</strong></div><div class="detail-row"><span class="subtle">Displayed after filters</span><strong>'+marketBotNumber(rows.length)+' of '+marketBotNumber(all.length)+'</strong></div>'+(categoryText?'<div class="detail-row"><span class="subtle">Category totals</span><strong>'+esc(categoryText)+'</strong></div>':''):'<div class="empty">Run Preview Market to load the exact plan.</div>';if(!rows.length){wrap.innerHTML='<div class="empty">No preview items match these display filters.</div>';return;}wrap.innerHTML='<table class="market-preview-table"><thead><tr><th>Item</th><th>Category / Tier</th><th>Unit Price</th><th>Stack</th><th>Target</th><th>Active</th><th>Deficit</th><th>Create Now</th><th>Value</th></tr></thead><tbody>'+rows.map(row=>'<tr><td><strong>'+esc(row.name||row.id)+'</strong><div class="subtle">'+esc(row.id)+'</div></td><td>'+esc(row.category||"Other")+'<div class="subtle">'+esc(row.tier||"--")+'</div></td><td>'+marketBotNumber(row.unitPrice)+'</td><td>'+marketBotNumber(row.stackSize)+'</td><td>'+marketBotNumber(row.targetListings)+'</td><td>'+marketBotNumber(row.activeListings)+'</td><td>'+marketBotNumber(row.deficit)+'</td><td><strong>'+marketBotNumber(row.createNow)+'</strong></td><td>'+marketBotNumber(row.plannedValue)+'</td></tr>').join("")+'</tbody></table>';}
+function renderMarketBotPreview(){const wrap=document.getElementById("marketBotPreviewRows"),totals=document.getElementById("marketBotPreviewTotals");if(!wrap||!totals)return;const all=marketBotPreviewData?.items||[],rows=marketBotPreviewRows(),summary=marketBotPreviewData?.totals||{},categories=marketBotPreviewData?.categories||[];const categoryText=categories.map(row=>row.category+": "+marketBotNumber(row.createNow)+" create / "+marketBotNumber(row.plannedValue)+" Solari").join(" · ");totals.innerHTML=marketBotPreviewData?'<div class="detail-row"><span class="subtle">Category-verified catalog items</span><strong>'+marketBotNumber(summary.catalogItems??all.length)+'</strong></div>'+(summary.skippedUnknownCategoryMasks?'<div class="detail-row"><span class="subtle">Skipped (category metadata unavailable)</span><strong>'+marketBotNumber(summary.skippedUnknownCategoryMasks)+'</strong></div>':'')+'<div class="detail-row"><span class="subtle">Visible active / deficit / create this cycle</span><strong>'+marketBotNumber(summary.activeListings)+' / '+marketBotNumber(summary.totalDeficit)+' / '+marketBotNumber(summary.createNow??summary.created)+'</strong></div><div class="detail-row"><span class="subtle">Planned market value</span><strong>'+marketBotNumber(summary.marketValue)+' Solari</strong></div><div class="detail-row"><span class="subtle">Displayed after filters</span><strong>'+marketBotNumber(rows.length)+' of '+marketBotNumber(all.length)+'</strong></div>'+(categoryText?'<div class="detail-row"><span class="subtle">Category totals</span><strong>'+esc(categoryText)+'</strong></div>':''):'<div class="empty">Run Preview Market to load the exact plan.</div>';if(!rows.length){wrap.innerHTML='<div class="empty">No preview items match these display filters.</div>';return;}wrap.innerHTML='<table class="market-preview-table"><thead><tr><th>Item</th><th>Category / Tier</th><th>Unit Price</th><th>Stack</th><th>Target</th><th>Active</th><th>Deficit</th><th>Create Now</th><th>Value</th></tr></thead><tbody>'+rows.map(row=>'<tr><td><strong>'+esc(row.name||row.id)+'</strong><div class="subtle">'+esc(row.id)+'</div></td><td>'+esc(row.category||"Other")+'<div class="subtle">'+esc(row.tier||"--")+'</div></td><td>'+marketBotNumber(row.unitPrice)+'</td><td>'+marketBotNumber(row.stackSize)+'</td><td>'+marketBotNumber(row.targetListings)+'</td><td>'+marketBotNumber(row.activeListings)+'</td><td>'+marketBotNumber(row.deficit)+'</td><td><strong>'+marketBotNumber(row.createNow)+'</strong></td><td>'+marketBotNumber(row.plannedValue)+'</td></tr>').join("")+'</tbody></table>';}
 function useMarketBotPreview(data){marketBotPreviewData=data?.preview||data?.result||data||null;fillMarketBotPreviewFilters();renderMarketBotPreview();}
-async function previewMarketBot(){const button=document.getElementById("marketBotPreviewButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Running the production planner in the VM. No listings will be changed...");const data=await getJson("/api/market-bot/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive"}),timeoutMs:600000});useMarketBotPreview(data);setText("marketBotActionResult",(data.message||marketBotPreviewData?.message||"Preview ready.")+" "+(marketBotPreviewData?.warning||""));await refreshMarketBot();showToast("Exact market preview loaded","success");return data;}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
-async function enableMarketBot(){const button=document.getElementById("marketBotEnableButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Installing Market Bot paused and generating the activation preview...");const prepared=await getJson("/api/market-bot/prepare",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive"}),timeoutMs:600000});useMarketBotPreview(prepared.preview);const totals=marketBotPreviewData?.totals||{};const confirmed=await appConfirm("Enable Persistent Market Bot","Preview fingerprint: "+prepared.fingerprint+"\\n\\nItems: "+marketBotNumber(totals.catalogItems)+"\\nCreate this first cycle: "+marketBotNumber(totals.createNow)+"\\nPlanned value: "+marketBotNumber(totals.marketValue)+" Solari\\n\\nActive listings remain unchanged. Player listings are never modified.","Enable Market Bot","Cancel");if(!confirmed){setText("marketBotActionResult","Market Bot remains installed and paused. Activation was not confirmed.");await refreshMarketBot();return;}const activated=await getJson("/api/market-bot/activate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({fingerprint:prepared.fingerprint,confirmed:true}),timeoutMs:600000});renderMarketBotStatus(activated.status||activated);setText("marketBotActionResult","Market Bot is active in the VM. Legacy Market Automator is disabled and preserved for rollback.");showToast("Persistent Market Bot enabled","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=marketBotStateData?.localConfig?.activated===true;}}
+async function previewMarketBot(){const button=document.getElementById("marketBotPreviewButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Running the production planner in the VM. No listings will be changed...");const data=await getJson("/api/market-bot/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive",listingCategory:getValue("marketBotListingCategory")||""}),timeoutMs:600000});useMarketBotPreview(data);setText("marketBotActionResult",(data.message||marketBotPreviewData?.message||"Preview ready.")+" "+(marketBotPreviewData?.warning||""));await refreshMarketBot();showToast("Exact market preview loaded","success");return data;}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
+async function enableMarketBot(){const button=document.getElementById("marketBotEnableButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Installing Market Bot paused and generating the activation preview...");const prepared=await getJson("/api/market-bot/prepare",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive",listingCategory:getValue("marketBotListingCategory")||""}),timeoutMs:600000});useMarketBotPreview(prepared.preview);const totals=marketBotPreviewData?.totals||{};const confirmed=await appConfirm("Enable Persistent Market Bot","Preview fingerprint: "+prepared.fingerprint+"\\n\\nItems: "+marketBotNumber(totals.catalogItems)+"\\nCreate this first cycle: "+marketBotNumber(totals.createNow)+"\\nPlanned value: "+marketBotNumber(totals.marketValue)+" Solari\\n\\nActive listings remain unchanged. Player listings are never modified.","Enable Market Bot","Cancel");if(!confirmed){setText("marketBotActionResult","Market Bot remains installed and paused. Activation was not confirmed.");await refreshMarketBot();return;}const activated=await getJson("/api/market-bot/activate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({fingerprint:prepared.fingerprint,confirmed:true}),timeoutMs:600000});renderMarketBotStatus(activated.status||activated);setText("marketBotActionResult","Market Bot is active in the VM. Legacy Market Automator is disabled and preserved for rollback.");showToast("Persistent Market Bot enabled","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=marketBotStateData?.localConfig?.activated===true;}}
 async function toggleMarketBotPause(){const paused=marketBotStateData?.localConfig?.paused===true,action=paused?"resume":"pause";try{const data=await getJson("/api/market-bot/"+action,{method:"POST",timeoutMs:600000});renderMarketBotStatus(data);setText("marketBotActionResult",paused?"Market Bot resumed.":"Market Bot paused; active listings were left unchanged.");showToast(paused?"Market Bot resumed":"Market Bot paused","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
 async function restockMarketBot(){if(!(await appConfirm("Restock Market Now","Run one capped target-stock reconciliation cycle in the VM? Existing active and player listings remain unchanged.","Restock Now","Cancel")))return;try{setText("marketBotActionResult","Restock cycle is acquiring the database lock...");const data=await getJson("/api/market-bot/restock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cycleId:"manual-"+Date.now()+"-"+Math.random().toString(16).slice(2)}),timeoutMs:600000});setText("marketBotActionResult",data.message||data.result?.message||"Restock complete.");renderMarketBotStatus(data.status||data);await previewMarketBot();showToast("Market restock completed","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
+async function saveMarketBotCategory(){try{const listingCategory=getValue("marketBotListingCategory")||"";const data=await getJson("/api/market-bot/category",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({listingCategory}),timeoutMs:600000});renderMarketBotStatus(data.status||data);setText("marketBotActionResult","Listing category saved: "+(listingCategory||"All categories")+". Future restocks will use this selection.");await previewMarketBot();showToast("Market category saved","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
+async function cleanMarketBot(){if(!(await appConfirm("Clean Bot Market","Remove every active listing that is strictly tracked as Market Bot-owned?\\n\\nPlayer listings and untracked NPC listings will not be touched. The Market Bot will be paused after cleanup so it cannot immediately refill.","Clean Bot Market","Cancel")))return;const button=document.getElementById("marketBotCleanButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Pausing Market Bot and removing only tracked bot-owned listings...");const data=await getJson("/api/market-bot/clean",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true}),timeoutMs:600000});renderMarketBotStatus(data.status||data);const removed=data.result?.removed??data.removed??0;setText("marketBotActionResult","Clean complete: "+marketBotNumber(removed)+" tracked bot-owned listing(s) removed. Market Bot is paused. Player listings changed: 0.");await previewMarketBot();showToast("Bot-owned market listings cleaned","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{if(button)button.disabled=marketBotStateData?.localConfig?.activated!==true;}}
 function downloadMarketBotPreviewCsv(){const rows=marketBotPreviewData?.items||[],categories=marketBotPreviewData?.categories||[];if(!rows.length){showToast("Run Preview Market before exporting CSV.","warning");return;}const header=["Item ID","Name","Category","Tier","Unit Price","Stack Size","Target Listings","Active Listings","Deficit","Create Now","Planned Value"],categoryHeader=["Category","Items","Active Listings","Target Listings","Deficit","Create Now","Planned Value"],quote=value=>'"'+String(value??"").replaceAll('"','""')+'"';const itemLines=[header,...rows.map(row=>[row.id,row.name,row.category,row.tier,row.unitPrice,row.stackSize,row.targetListings,row.activeListings,row.deficit,row.createNow,row.plannedValue])],categoryLines=[categoryHeader,...categories.map(row=>[row.category,row.items,row.activeListings,row.targetListings,row.deficit,row.createNow,row.plannedValue])],lines=[...itemLines.map(row=>row.map(quote).join(",")),"",...categoryLines.map(row=>row.map(quote).join(","))];const blob=new Blob([lines.join("\\r\\n")+"\\r\\n"],{type:"text/csv;charset=utf-8"}),link=document.createElement("a");link.href=URL.createObjectURL(blob);link.download="alphanine-market-preview.csv";link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);}
 async function toggleMarketBotCustomize(){const panel=document.getElementById("marketBotCustomizePanel");if(!panel)return;panel.classList.toggle("hidden");if(!panel.classList.contains("hidden")&&!marketBotItems.length){try{const data=await getJson("/api/market-bot/items",{timeoutMs:60000});marketBotItems=data.items||[];marketBotItemChanges.clear();renderMarketBotCustomize();}catch(error){setText("marketBotCustomizeRows",betterError(error));}}}
 function marketBotCustomizeVisible(){const query=(getValue("marketBotCustomizeSearch")||"").trim().toLowerCase();return marketBotItems.filter(row=>!query||[row.id,row.name,row.category].some(value=>String(value||"").toLowerCase().includes(query)));}
@@ -21035,6 +21084,11 @@ async function route(req, res) {
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
     return;
   }
+  if (url.pathname === "/api/market-bot/category" && req.method === "PUT") {
+    try { await json(res, await updateMarketBotCategory(await readJsonRequest(req))); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
   if (url.pathname === "/api/market-bot/prepare" && req.method === "POST") {
     try {
       const body = await readJsonRequest(req);
@@ -21091,6 +21145,22 @@ async function route(req, res) {
         update("Restock complete", restocked.message || restocked.status || "Cycle completed.");
         return restocked;
       }, { category: "market", detail: String(body.cycleId || "manual") });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/clean" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req);
+      const result = await runTrackedOperation("market-bot:clean", "Clean Bot Market", async ({ update }) => {
+        update("Pausing Market Bot", "Preventing the persistent runtime from refilling during cleanup.");
+        const cleaned = await cleanMarketBot(body);
+        update("Bot market cleaned", `${cleaned.result?.removed ?? cleaned.removed ?? 0} tracked bot-owned listing(s) removed; player listings changed: 0.`);
+        return cleaned;
+      }, { category: "market", detail: "Tracked bot-owned listings only" });
       await json(res, result);
     } catch (error) {
       const failure = operationErrorResponse(error);

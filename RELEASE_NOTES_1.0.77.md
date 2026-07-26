@@ -1,15 +1,22 @@
 # AlphaNine Dune Suite 1.0.77
 
-## Arrakeen Market Bot visibility
+## Arrakeen Market Bot compatibility
 
-- Fixed bot-created listings existing in PostgreSQL but not appearing in Arrakeen's in-game Exchange categories.
-- Market Bot now posts only items with verified category mask and depth metadata.
-- Existing invisible zero-category listings owned and tracked by Market Bot are safely replaced during restock; player listings are never changed.
-- Active and deficit totals now count only category-verified listings.
-- Unknown category metadata fails closed and is reported as skipped instead of creating invisible stock.
-- Exchange access points are resolved from live database rows rather than assuming an identifier.
+- Fixes bot-created listings existing in PostgreSQL but not appearing in Arrakeen's in-game Exchange.
+- Uses verified category mask and depth metadata and resolves Exchange access points from live database rows.
+- Uses a clean native `Duke` NPC actor that Arrakeen can render.
+- Safely migrates and repairs only active AlphaNine-tracked Market Bot listings.
+- Unknown category metadata fails closed instead of creating invisible stock.
+
+## Market Bot controls
+
+- Adds a persistent Listing Category selector. Operators can list from all categories or restrict future restocks to one selected category.
+- Adds Clean Bot Market, which pauses the bot and removes only listings strictly recorded as Market Bot-owned.
+- Player listings and untracked NPC listings are never changed by cleanup.
+- Interleaves deficient categories during capped all-category restocks so alphabetical categories cannot consume the entire cycle.
 
 ## Verification
 
-- Added category metadata, invisible-listing repair, and Exchange access-point regression coverage.
+- Added regression coverage for category metadata, native ownership, fair category allocation, and tracked-only cleanup.
 - Rebuilt the embedded Linux Market Bot runtime as version 1.0.77.
+- Verified the packaged Windows application with its isolated runtime smoke test.

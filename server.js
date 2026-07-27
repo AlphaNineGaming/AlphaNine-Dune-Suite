@@ -16494,6 +16494,63 @@ function appPage() {
       background:linear-gradient(180deg, var(--glass), var(--panel-2));
       box-shadow:0 0 18px var(--theme-glow);
     }
+    #adminItems .admin-item {
+      position:relative;
+      transition:border-color .14s ease, background .14s ease, box-shadow .14s ease, transform .14s ease;
+    }
+    #adminItems .admin-item.active {
+      padding:9px 92px 9px 12px;
+      border:2px solid var(--gold-bright);
+      background:linear-gradient(90deg, color-mix(in srgb, var(--option-selected-bg) 34%, var(--panel)), var(--panel-2));
+      box-shadow:inset 5px 0 0 var(--gold-bright), 0 0 0 2px color-mix(in srgb, var(--gold-bright) 28%, transparent), 0 0 24px var(--theme-glow);
+      transform:translateX(2px);
+    }
+    #adminItems .admin-item.active strong {
+      color:var(--text);
+    }
+    #adminItems .admin-item-selected-mark {
+      position:absolute;
+      top:9px;
+      right:10px;
+      display:inline-flex !important;
+      width:auto;
+      padding:4px 7px;
+      border:1px solid var(--gold-bright);
+      background:var(--option-selected-bg);
+      color:var(--option-selected-text) !important;
+      font-size:9.5px !important;
+      font-weight:950;
+      line-height:1;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      box-shadow:0 3px 10px var(--theme-glow);
+    }
+    #adminItems .admin-item:focus-visible {
+      outline:3px solid var(--blue);
+      outline-offset:2px;
+    }
+    body.theme-royal #adminItems .admin-item.active {
+      border-color:#5f370d;
+      background:linear-gradient(100deg, #734513 0%, #925b1b 58%, #a96f25 100%);
+      box-shadow:inset 6px 0 0 #ffe8ad, 0 0 0 2px rgba(95,55,13,.26), 0 10px 24px rgba(86,48,10,.26);
+    }
+    body.theme-royal #adminItems .admin-item.active strong {
+      color:#fffaf0;
+    }
+    body.theme-royal #adminItems .admin-item.active > div > span:not(.item-grade-badge) {
+      color:#f6ddb1;
+    }
+    body.theme-royal #adminItems .admin-item.active .item-grade-badge {
+      border-color:rgba(255,243,211,.72);
+      background:rgba(58,31,7,.34);
+      color:#fff3d3 !important;
+    }
+    body.theme-royal #adminItems .admin-item-selected-mark {
+      border-color:#4f2d0b;
+      background:#fff1c9;
+      color:#3b2108 !important;
+      box-shadow:0 4px 12px rgba(58,31,7,.28);
+    }
     .avatar,
     .admin-item img,
     .item-db-icon,
@@ -19687,7 +19744,7 @@ function catalogGroupLabel(item,filter=""){const kind=schematicCatalogKind(item)
 function sortCatalogRows(items,filter="",mode="smart"){const rows=[...(items||[])];const byName=(a,b)=>String(a?.name||a?.id||"").localeCompare(String(b?.name||b?.id||""),undefined,{numeric:true,sensitivity:"base"});return rows.sort((a,b)=>{if(mode==="name")return byName(a,b);const tierDelta=catalogTierNumber(b)-catalogTierNumber(a);if(mode==="tier_desc")return tierDelta||byName(a,b);if(mode==="tier_asc")return -tierDelta||byName(a,b);const groupDelta=catalogGroupLabel(a,filter).localeCompare(catalogGroupLabel(b,filter),undefined,{numeric:true,sensitivity:"base"});return groupDelta||tierDelta||byName(a,b);});}
 function itemListTitle(item,duplicateNames){const name=String(item?.name||item?.id||"");const schematicKind=schematicCatalogKind(item);if(isTechKnowledgeItem(item)||isRecipeSchematicItem(item))return name+" — "+schematicKind;if(!duplicateNames?.has(itemCatalogNameKey(item)))return name;const detail=itemDisplayDisambiguator(item);return name+" — "+(detail||String(item?.id||""));}
 function loadMoreAdminItems(){adminItemDisplayLimit+=120;renderAdminItems();}
-function renderAdminItems(resetLimit=false){if(resetLimit)adminItemDisplayLimit=120;const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=normalizeUiItemCategory(document.getElementById("adminItemCategory")?.value||"");const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const sort=document.getElementById("adminItemSort")?.value||"smart";const styleNote=document.getElementById("buildingStyleFilterNote");if(styleNote)styleNote.classList.toggle("hidden",category!=="__building_styles");const filtered=sortCatalogRows(adminItems.filter(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const specialMatch=matchesSchematicCatalogFilter(item,category);const matchesSearch=[item.name,item.id,itemCategory,item.type,item.subtype,item.detail,itemDisplayDisambiguator(item),itemGrade,itemTier,schematicCatalogKind(item)].filter(Boolean).join(" ").toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!itemCategory||!item.hasDisplayName):(category==="__building_styles"?isNonDlcBuildingStyleItem(item):(specialMatch!==null?specialMatch:(String(category).toLowerCase()==="items"?!isSchematicItem(item)&&itemCategory===category:itemCategory===category))));const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;}),category,sort);const duplicateNames=duplicatedItemNameSet(filtered);const list=filtered.slice(0,adminItemDisplayLimit);const wrap=document.getElementById("adminItems");const count=document.getElementById("adminItemCount");if(count)count.textContent=Math.min(list.length,filtered.length)+" shown / "+filtered.length+" matching / "+adminItems.length+" loaded";const emptyMessage=category==="__building_styles"?"No matching non-DLC building style item templates were found in the bundled catalog.":(["__schematic_items","__research_unlocks","__recipe_unlocks"].includes(category)?"No matching schematic entries were found.":"No matching offline item templates. You can enter an exact template ID below.");let previousGroup="";const cards=list.map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemKind=schematicCatalogKind(item)||itemCategory||"Unknown";const group=catalogGroupLabel(item,category);const heading=sort==="smart"&&group!==previousGroup?'<div class="catalog-group-heading">'+esc(group)+'</div>':"";previousGroup=group;const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return heading+'<button type="button" class="admin-item '+(selectedAdminItem&&selectedAdminItem.id===item.id?'active':'')+'" data-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(itemKind)+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join("");wrap.innerHTML=list.length?cards+(filtered.length>list.length?'<button type="button" onclick="loadMoreAdminItems()">Load 120 more ('+esc(String(filtered.length-list.length))+' remaining)</button>':''):'<div class="empty">'+esc(emptyMessage)+'</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
+function renderAdminItems(resetLimit=false){if(resetLimit)adminItemDisplayLimit=120;const q=(document.getElementById("adminSearch")?.value||"").toLowerCase();const category=normalizeUiItemCategory(document.getElementById("adminItemCategory")?.value||"");const grade=document.getElementById("adminItemGrade")?.value||"all";const tier=document.getElementById("adminItemTier")?.value||"all";const sort=document.getElementById("adminItemSort")?.value||"smart";const styleNote=document.getElementById("buildingStyleFilterNote");if(styleNote)styleNote.classList.toggle("hidden",category!=="__building_styles");const filtered=sortCatalogRows(adminItems.filter(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";const specialMatch=matchesSchematicCatalogFilter(item,category);const matchesSearch=[item.name,item.id,itemCategory,item.type,item.subtype,item.detail,itemDisplayDisambiguator(item),itemGrade,itemTier,schematicCatalogKind(item)].filter(Boolean).join(" ").toLowerCase().includes(q);const matchesCategory=!category||(category==="__unknown"?(!itemCategory||!item.hasDisplayName):(category==="__building_styles"?isNonDlcBuildingStyleItem(item):(specialMatch!==null?specialMatch:(String(category).toLowerCase()==="items"?!isSchematicItem(item)&&itemCategory===category:itemCategory===category))));const matchesGrade=!grade||grade==="all"||itemGrade===grade;const matchesTier=!tier||tier==="all"||itemTier===tier;return matchesSearch&&matchesCategory&&matchesGrade&&matchesTier;}),category,sort);const duplicateNames=duplicatedItemNameSet(filtered);const list=filtered.slice(0,adminItemDisplayLimit);const wrap=document.getElementById("adminItems");const count=document.getElementById("adminItemCount");if(count)count.textContent=Math.min(list.length,filtered.length)+" shown / "+filtered.length+" matching / "+adminItems.length+" loaded";const emptyMessage=category==="__building_styles"?"No matching non-DLC building style item templates were found in the bundled catalog.":(["__schematic_items","__research_unlocks","__recipe_unlocks"].includes(category)?"No matching schematic entries were found.":"No matching offline item templates. You can enter an exact template ID below.");let previousGroup="";const cards=list.map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemKind=schematicCatalogKind(item)||itemCategory||"Unknown";const group=catalogGroupLabel(item,category);const heading=sort==="smart"&&group!==previousGroup?'<div class="catalog-group-heading">'+esc(group)+'</div>':"";previousGroup=group;const active=Boolean(selectedAdminItem&&selectedAdminItem.id===item.id);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">IT</span></span>':'<div class="avatar">IT</div>';return heading+'<button type="button" class="admin-item '+(active?'active':'')+'" data-item-id="'+esc(item.id)+'" aria-pressed="'+(active?'true':'false')+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(itemKind)+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div>'+(active?'<span class="admin-item-selected-mark" aria-hidden="true">Selected</span>':'')+'</button>';}).join("");wrap.innerHTML=list.length?cards+(filtered.length>list.length?'<button type="button" onclick="loadMoreAdminItems()">Load 120 more ('+esc(String(filtered.length-list.length))+' remaining)</button>':''):'<div class="empty">'+esc(emptyMessage)+'</div>';wrap.querySelectorAll("[data-item-id]").forEach(el=>el.addEventListener("click",()=>selectAdminItem(el.dataset.itemId)));}
 function itemDbIcon(item){return item.icon?'<span class="item-db-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.remove();this.parentElement.textContent=&quot;IT&quot;"></span>':'<span class="item-db-icon">IT</span>';}
 function itemDbText(item){return [item.name,itemDisplayDisambiguator(item),item.id,item.category,item.subtype,item.type,item.grade,item.rarity,item.tier,item.detail,item.description,item.spawnCode,item.itemCode].filter(Boolean).join(" ").toLowerCase();}
 function fillItemDbFilters(){const cat=document.getElementById("itemDbCategory");const tier=document.getElementById("itemDbTier");if(cat){const current=normalizeUiItemCategory(cat.value);const categories=[...new Set(itemDatabaseItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));const special=["__schematic_items","__research_unlocks","__recipe_unlocks"];cat.innerHTML='<option value="">All categories</option><option value="__schematic_items">Schematic Items</option><option value="__research_unlocks">Research Unlocks</option><option value="__recipe_unlocks">Recipe-only Unlocks</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");cat.value=[...categories,...special].includes(current)?current:"";}if(tier){const current=tier.value;const tiers=[...new Set(itemDatabaseItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"";}}

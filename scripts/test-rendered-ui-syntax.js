@@ -112,6 +112,10 @@ function extractFunction(source, name) {
     assert(!/blueprintViewer|BABYLON|blueprintProcedural|blueprint-piece-catalog|blueprint-viewer-transform/.test(html), "Blueprint visualization code remains in the rendered UI.");
     assert(!html.includes('data-blueprint-action="view"') && !html.includes(">View</button>"), "Blueprint View controls remain in the rendered UI.");
     assert(html.includes('id="adminRawTemplate"'), "Give Item raw template-ID input is missing.");
+    assert(html.includes("admin-item-selected-mark"), "Give Item selected-item marker is missing.");
+    assert(html.includes(`aria-pressed="'+(active?'true':'false')+'"`), "Give Item selection does not expose its pressed state.");
+    assert(html.includes("#adminItems .admin-item.active"), "Give Item selected-row highlight styling is missing.");
+    assert(html.includes("body.theme-royal #adminItems .admin-item.active"), "Royal Desert is missing its high-contrast Give Item selected-row style.");
     assert(html.includes("Discover Server IDs"), "Read-only server item discovery control is missing.");
     assert(!/gaming\.tools|awakening\.wiki/i.test(html), "Rendered Suite UI references a removed item-catalog website.");
     const itemResponse = await fetch(`http://127.0.0.1:${port}/api/item-database/items?q=Maula`);

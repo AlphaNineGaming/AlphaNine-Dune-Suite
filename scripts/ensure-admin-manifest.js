@@ -25,6 +25,8 @@ function findRcedit() {
       if (fs.existsSync(candidate)) return candidate;
     }
   }
+  const managed = path.join(root, "node_modules", "rcedit", "bin", "rcedit-x64.exe");
+  if (fs.existsSync(managed)) return managed;
   const bundled = path.join(root, "node_modules", "electron-winstaller", "vendor", "rcedit.exe");
   if (fs.existsSync(bundled)) return bundled;
   throw new Error(`electron-builder rcedit-x64.exe was not found under ${cacheRoot}`);

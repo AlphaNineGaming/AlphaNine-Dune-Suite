@@ -1454,7 +1454,20 @@
           { key: "vehicleQuicksandDamage", label: "Vehicle quicksand damage", help: "Writes UserGame.ini m_VehicleQuicksandDamage.", type: "range", min: 0, max: 100, step: 1, value: 10, unit: "" },
           { key: "heatDrainMultiplier", label: "Heat drain", help: "No confirmed self-hosted config key found for heat drain; planning only.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x", supported: false },
           { key: "waterRetentionMultiplier", label: "Sandworm safe time", help: "Writes Vehicle.SandwormInvulnerabilitySecondsOnExit as multiplier x 900 seconds.", type: "range", min: 0.25, max: 3, step: 0.05, value: 1, unit: "x" },
-          { key: "wormAggression", label: "Sandworm enabled", help: "0 disables sandworm console variables; values above 0 enable sandworm danger zones and vehicle collision.", type: "range", min: 0, max: 3, step: 0.1, value: 1, unit: "x" },
+          { key: "wormAggression", label: "Sandworm enabled", help: "0 disables sandworm console variables; values above 0 enable the system. This control is an on/off gate, not sensitivity.", type: "range", min: 0, max: 1, step: 1, value: 1, unit: "" },
+          { key: "sandwormThreatScale", label: "Sandworm sensitivity", help: "Writes UserGame.ini ThreatScale. Higher values scale overall threat sensitivity.", type: "range", min: 0, max: 10, step: 0.1, value: 1, unit: "x" },
+          { key: "sandwormMaxThreatScore", label: "Maximum threat score", help: "Writes UserGame.ini DefaultMaxThreatScore.", type: "range", min: 0, max: 100000, step: 100, value: 5000, unit: "" },
+          { key: "sandwormThreatDecayDelay", label: "Threat decay delay", help: "Writes UserGame.ini ThreatDecreaseCooldownInSeconds.", type: "range", min: 0, max: 300, step: 1, value: 5, unit: "s" },
+          { key: "sandwormThreatDecayRate", label: "Threat decay rate", help: "Writes UserGame.ini ThreatDecreasingValuePerSec. Higher values clear accumulated threat faster.", type: "range", min: 0, max: 1000, step: 1, value: 0, unit: "/s" },
+          { key: "sandwormWalkingThreat", label: "Walking threat", help: "Writes UserGame.ini WalkingThreatPerSec.", type: "range", min: 0, max: 1000, step: 1, value: 15, unit: "/s" },
+          { key: "sandwormRunningThreat", label: "Running threat", help: "Writes UserGame.ini RunningThreatPerSec.", type: "range", min: 0, max: 1000, step: 1, value: 20, unit: "/s" },
+          { key: "sandwormSprintingThreat", label: "Sprinting threat", help: "Writes UserGame.ini SprintingThreatPerSec.", type: "range", min: 0, max: 1000, step: 1, value: 20, unit: "/s" },
+          { key: "sandwormVehicleShootingThreat", label: "Vehicle shooting threat", help: "Writes UserGame.ini PlayerVehicleShootingThreatFactor.", type: "range", min: 0, max: 10, step: 0.1, value: 1, unit: "x" },
+          { key: "sandwormMinimumDistance", label: "Minimum worm separation", help: "Writes UserGame.ini m_MinDistanceBetweenSandworms in Unreal world units.", type: "range", min: 0, max: 1000000, step: 1000, value: 80000, unit: " UU" },
+          { key: "sandwormDangerZones", label: "Worm danger zones", help: "Writes UserGame.ini m_bEnableDangerZones.", type: "toggle", value: true },
+          { key: "sandwormHibernation", label: "Worm hibernation", help: "Writes UserGame.ini m_bEnableHibernation to reduce activity when players are absent.", type: "toggle", value: true },
+          { key: "giantWormEnabled", label: "Giant worm system", help: "Writes UserGame.ini m_bGiantWormSystemEnabled.", type: "toggle", value: true },
+          { key: "giantWormMinimumPlayers", label: "Giant worm minimum players", help: "Writes UserGame.ini m_GiantWormMinimumPlayersOnSpiceField.", type: "range", min: 0, max: 100, step: 1, value: 4, unit: "" },
           { key: "deepDesertResetDays", label: "Deep desert reset", help: "No confirmed self-hosted config key found for Deep Desert reset cadence; planning only.", type: "range", min: 1, max: 14, step: 1, value: 7, unit: "d", supported: false }
         ]
       },
@@ -1550,14 +1563,14 @@
         lootQualityMultiplier: 0.85, structureDecayMultiplier: 1.4, pvpMode: "frontier_zones",
         inventoryWeightMultiplier: 1.25, playerInventoryStartingSize: 30, playerInventoryStartingVolumeCapacity: 175,
         stormEnabled: true, stormFrequency: 1.6, stormSeverity: 1.5, waterRetentionMultiplier: 0.75,
-        wormAggression: 1.7, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
+        wormAggression: 1, sandwormThreatScale: 1.7, baseClaimLimit: 3, buildHeightLimit: 4, publicBuildDamage: true
       },
       builder: {
         harvestMultiplier: 2.5, spiceYieldMultiplier: 1.8,
         lootQualityMultiplier: 1.4, structureDecayMultiplier: 0.25, pvpMode: "off",
         inventoryWeightMultiplier: 0.5, playerInventoryStartingSize: 80, playerInventoryStartingVolumeCapacity: 450,
         stormEnabled: true, stormFrequency: 0.55, stormSeverity: 0.6, waterRetentionMultiplier: 1.7,
-        wormAggression: 0.5, baseClaimLimit: 8, buildHeightLimit: 8, publicBuildDamage: false
+        wormAggression: 1, sandwormThreatScale: 0.5, baseClaimLimit: 8, buildHeightLimit: 8, publicBuildDamage: false
       }
     };
 
@@ -1912,7 +1925,7 @@
       score += stormsActive ? 6 : -9;
       score += stormsActive ? (state.stormFrequency - 1) * 9 : 0;
       score += stormsActive ? (state.stormSeverity - 1) * 9 : 0;
-      score += (state.wormAggression - 1) * 10;
+      score += state.wormAggression > 0 ? (state.sandwormThreatScale - 1) * 10 : -12;
       score += state.pvpMode === "always_on" ? 19 : state.pvpMode === "off" ? -12 : 5;
       score += state.publicBuildDamage ? 6 : -4;
       score += (1 - state.harvestMultiplier) * 5;

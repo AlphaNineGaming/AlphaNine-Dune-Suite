@@ -250,6 +250,19 @@ def build_ini(profile):
     storm_enabled = storm_switch and storm_frequency > 0 and storm_severity > 0
     worm_enabled = float(setting(profile, "environment", "wormAggression", 1)) > 0
     sandworm_safe_seconds = max(0, float(setting(profile, "environment", "waterRetentionMultiplier", 1)) * 900)
+    sandworm_threat_scale = max(0, min(10, float(setting(profile, "environment", "sandwormThreatScale", 1))))
+    sandworm_max_threat = max(0, min(100000, float(setting(profile, "environment", "sandwormMaxThreatScore", 5000))))
+    sandworm_threat_decay_delay = max(0, min(300, float(setting(profile, "environment", "sandwormThreatDecayDelay", 5))))
+    sandworm_threat_decay_rate = max(0, min(1000, float(setting(profile, "environment", "sandwormThreatDecayRate", 0))))
+    sandworm_walking_threat = max(0, min(1000, float(setting(profile, "environment", "sandwormWalkingThreat", 15))))
+    sandworm_running_threat = max(0, min(1000, float(setting(profile, "environment", "sandwormRunningThreat", 20))))
+    sandworm_sprinting_threat = max(0, min(1000, float(setting(profile, "environment", "sandwormSprintingThreat", 20))))
+    sandworm_vehicle_shooting_threat = max(0, min(10, float(setting(profile, "environment", "sandwormVehicleShootingThreat", 1))))
+    sandworm_min_distance = max(0, min(1000000, float(setting(profile, "environment", "sandwormMinimumDistance", 80000))))
+    sandworm_danger_zones = bool(setting(profile, "environment", "sandwormDangerZones", True))
+    sandworm_hibernation = bool(setting(profile, "environment", "sandwormHibernation", True))
+    giant_worm_enabled = bool(setting(profile, "environment", "giantWormEnabled", True))
+    giant_worm_min_players = max(0, min(100, int(setting(profile, "environment", "giantWormMinimumPlayers", 4))))
     item_decay = max(0, min(10, float(setting(profile, "resources", "structureDecayMultiplier", 1))))
     mining = max(0, float(setting(profile, "resources", "harvestMultiplier", 1)))
     vehicle_mining = max(0, float(setting(profile, "resources", "spiceYieldMultiplier", mining)))
@@ -311,6 +324,22 @@ UpdateRateInSeconds={item_decay:.2f}
 [/Script/DuneSandbox.SandStormConfig]
 ; Enable Coriolis storm
 m_bCoriolisAutoSpawnEnabled={bool_text(storm_enabled)}
+
+[/Script/DuneSandbox.SandwormSettings]
+; Sandworm sensitivity, threat generation, and spawning behavior.
+ThreatScale={sandworm_threat_scale:.2f}
+DefaultMaxThreatScore={sandworm_max_threat:.1f}
+ThreatDecreaseCooldownInSeconds={sandworm_threat_decay_delay:.1f}
+ThreatDecreasingValuePerSec={sandworm_threat_decay_rate:.1f}
+WalkingThreatPerSec={sandworm_walking_threat:.1f}
+RunningThreatPerSec={sandworm_running_threat:.1f}
+SprintingThreatPerSec={sandworm_sprinting_threat:.1f}
+PlayerVehicleShootingThreatFactor={sandworm_vehicle_shooting_threat:.2f}
+m_MinDistanceBetweenSandworms={sandworm_min_distance:.1f}
+m_bEnableDangerZones={bool_text(sandworm_danger_zones)}
+m_bEnableHibernation={bool_text(sandworm_hibernation)}
+m_bGiantWormSystemEnabled={bool_text(giant_worm_enabled)}
+m_GiantWormMinimumPlayersOnSpiceField={giant_worm_min_players}
 
 [/Script/DuneSandbox.BuildingSettings]
 ; Max number of landclaims. Needs to also be applied to each client.

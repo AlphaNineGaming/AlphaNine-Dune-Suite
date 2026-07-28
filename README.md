@@ -27,6 +27,12 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.80
+
+- Added a persistent Hide Banner control that collapses the dashboard banner into a compact Show Banner row.
+- Moved About, Discord, and Buy Me a Coffee from the sidebar to compact controls beside UI Mode in the top bar.
+- Preserved responsive wrapping on narrower windows and removed the obsolete sidebar action styles.
+
 ### 1.0.72
 
 - Give Item storage destinations now show valid in-game container names, such as `Fuel Cells`, ahead of the derived container type.

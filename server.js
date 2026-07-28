@@ -15148,9 +15148,6 @@ function appPage() {
     .nav-group-title::after { content:""; height:1px; flex:1 1 auto; background:linear-gradient(90deg, rgba(240,201,106,.34), transparent); }
     .nav-group.advanced-nav { border-top:1px solid rgba(214,166,69,.13); padding-top:5px; }
     .sidebar-foot { flex:0 0 auto; margin-top:16px; color:var(--muted); font-size:12px; line-height:1.5; }
-    .sidebar-links { display:grid; gap:8px; margin-top:10px; }
-    .sidebar-links a, .sidebar-foot button { width:100%; justify-content:flex-start; min-height:34px; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--gold-bright); text-decoration:none; border:1px solid rgba(214,166,69,.24); background:rgba(255,255,255,.018); padding:8px 10px; clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
-    .sidebar-links a:hover, .sidebar-foot button:hover { border-color:var(--line-strong); background:rgba(214,166,69,.1); box-shadow:0 0 18px rgba(214,166,69,.11); }
     .legal-notice { margin-top:12px; padding-top:10px; border-top:1px solid rgba(214,166,69,.16); color:rgba(214,196,151,.68); font-size:10px; line-height:1.35; }
     body.theme-royal .build-info { border-top-color:rgba(105,73,32,.28); color:#3f2d1d; }
     body.theme-royal .build-info span { color:#3f2d1d; }
@@ -15167,6 +15164,9 @@ function appPage() {
     .topbar-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:10px; }
     .ui-mode-control { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.09em; white-space:nowrap; }
     .ui-mode-control select { width:auto; min-width:112px; min-height:34px; padding:0 28px 0 10px; font-size:11px; }
+    .topbar-utility-links { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+    .topbar-utility-links .topbar-utility-button { display:inline-flex; align-items:center; justify-content:center; width:auto; min-height:34px; padding:7px 10px; border:1px solid rgba(214,166,69,.28); border-radius:999px; background:rgba(255,255,255,.025); color:var(--gold-bright); box-shadow:none; font-size:10px; font-weight:850; line-height:1; letter-spacing:.055em; text-transform:uppercase; white-space:nowrap; clip-path:none; }
+    .topbar-utility-links .topbar-utility-button:hover { border-color:var(--line-strong); background:rgba(214,166,69,.1); color:var(--gold-bright); box-shadow:0 0 18px rgba(214,166,69,.11); }
     body.simple-mode .advanced-only { display:none !important; }
     body.simple-mode .advanced-nav { display:none !important; }
     body.simple-mode .advanced-status.empty { display:none !important; }
@@ -15204,6 +15204,11 @@ function appPage() {
       var(--panel-2); box-shadow:var(--shadow); clip-path:none; }
     .hero::before { display:none; }
     .hero-body { display:none; }
+    .hero-toggle { position:absolute; top:12px; right:12px; z-index:2; display:inline-flex; align-items:center; justify-content:center; gap:7px; min-height:34px; padding:7px 11px; border:1px solid rgba(240,201,106,.46); border-radius:999px; background:rgba(5,7,5,.76); color:var(--gold-bright); box-shadow:0 7px 22px rgba(0,0,0,.24); font-size:11px; font-weight:900; letter-spacing:.05em; text-transform:uppercase; backdrop-filter:blur(8px); }
+    .hero-toggle:hover { border-color:var(--gold-bright); background:rgba(18,16,11,.9); box-shadow:0 7px 24px rgba(0,0,0,.32), 0 0 16px rgba(214,166,69,.12); }
+    .hero-toggle-icon { width:14px; font-size:15px; line-height:1; }
+    .hero.dashboard-hero-collapsed { display:flex; align-items:center; justify-content:flex-end; height:36px; min-height:36px; aspect-ratio:auto; border-color:transparent; border-radius:0; background:none; box-shadow:none; overflow:visible; }
+    .hero.dashboard-hero-collapsed .hero-toggle { position:static; min-height:30px; padding:5px 10px; background:rgba(5,7,5,.52); }
     .kicker, .label { color:var(--gold-bright); font-size:var(--font-panel-label); text-transform:uppercase; letter-spacing:.11em; font-weight:900; line-height:1.2; }
     .grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:var(--panel-gap); }
     .grid.four { grid-template-columns:repeat(4,minmax(0,1fr)); }
@@ -15772,9 +15777,7 @@ function appPage() {
     body.theme-royal .panel-head button,
     body.theme-royal .settings-grid button,
     body.theme-royal .vm-details button,
-    body.theme-royal .dashboard-footer button,
-    body.theme-royal .sidebar-foot button,
-    body.theme-royal .sidebar-links a {
+    body.theme-royal .dashboard-footer button {
       color:#221914;
       background:linear-gradient(180deg, rgba(255,250,238,.96), rgba(230,190,122,.58));
       border-color:rgba(128,85,32,.5);
@@ -15787,9 +15790,7 @@ function appPage() {
     body.theme-royal .panel-head button:hover,
     body.theme-royal .settings-grid button:hover,
     body.theme-royal .vm-details button:hover,
-    body.theme-royal .dashboard-footer button:hover,
-    body.theme-royal .sidebar-foot button:hover,
-    body.theme-royal .sidebar-links a:hover {
+    body.theme-royal .dashboard-footer button:hover {
       color:#221914;
       background:linear-gradient(180deg, rgba(255,253,247,.99), rgba(218,171,94,.68));
       border-color:rgba(105,73,32,.72);
@@ -16380,8 +16381,6 @@ function appPage() {
     .settings-grid button,
     .vm-details button,
     .dashboard-footer button,
-    .sidebar-foot button,
-    .sidebar-links a,
     .setup-card button {
       color:var(--sand);
       background:linear-gradient(180deg, var(--panel-2), var(--panel));
@@ -16406,30 +16405,11 @@ function appPage() {
     .settings-grid button:hover,
     .vm-details button:hover,
     .dashboard-footer button:hover,
-    .sidebar-foot button:hover,
-    .sidebar-links a:hover,
     .setup-card button:hover {
       color:var(--gold-bright);
       border-color:var(--line-strong);
       background:linear-gradient(180deg, var(--glass), var(--panel-2));
       box-shadow:0 10px 28px var(--theme-glow), inset 0 1px 0 rgba(255,255,255,.055);
-    }
-    .sidebar-links a.donate-link {
-      min-height:40px;
-      justify-content:center;
-      color:#1b1206;
-      border-color:rgba(255,225,143,.9);
-      background:linear-gradient(180deg, #f0c96a, #b87922);
-      box-shadow:0 0 24px rgba(240,201,106,.24), inset 0 1px 0 rgba(255,255,255,.4);
-      font-size:12px;
-      font-weight:950;
-      letter-spacing:.08em;
-    }
-    .sidebar-links a.donate-link:hover {
-      color:#160e04;
-      border-color:#ffe18f;
-      background:linear-gradient(180deg, #ffe18f, #d49a37);
-      box-shadow:0 0 30px rgba(240,201,106,.38), inset 0 1px 0 rgba(255,255,255,.55);
     }
     .primary,
     button.primary,
@@ -16921,11 +16901,6 @@ function appPage() {
       </div>
     </nav>
     <div class="sidebar-foot">
-      <button type="button" data-feedback-ignore="true" onclick="openAboutDialog()">About</button>
-      <div class="sidebar-links" aria-label="Community links">
-        <a href="https://discord.gg/RQsVw2vyg" target="_blank" rel="noopener">Discord Support</a>
-        <a class="donate-link" href="https://ko-fi.com/E1W220NMPA" target="_blank" rel="noopener">Buy Me a Coffee</a>
-      </div>
       <div class="legal-notice">Dune: Awakening &copy; Funcom.<br>AlphaNine Dune Suite is an independent community project and is not affiliated with or endorsed by Funcom.</div>
     </div>
   </aside>
@@ -16939,6 +16914,11 @@ function appPage() {
         <label class="ui-mode-control">UI Mode
           <select id="headerUiMode" onchange="changeUiMode(this.value)"><option value="simple">Simple</option><option value="advanced">Advanced</option></select>
         </label>
+        <div class="topbar-utility-links" aria-label="About and community links">
+          <button type="button" class="topbar-utility-button" data-feedback-ignore="true" onclick="openAboutDialog()">About</button>
+          <button type="button" class="topbar-utility-button" data-feedback-ignore="true" onclick="openSupportDiscord()">Discord</button>
+          <button type="button" class="topbar-utility-button" data-feedback-ignore="true" onclick="openSupportKofi()">Buy Me a Coffee</button>
+        </div>
         <label class="ui-mode-control">Theme
           <select id="headerTheme" onchange="changeTheme(this.value)">
             <option value="gold">AlphaNine Gold</option>
@@ -16969,7 +16949,12 @@ function appPage() {
       </div>
     </div>
     <section id="dashboard" class="view active">
-      <div class="hero" role="img" aria-label="AlphaNine Dune Suite banner"></div>
+      <div id="dashboardHero" class="hero" aria-label="AlphaNine Dune Suite banner">
+        <button type="button" id="dashboardHeroToggle" class="hero-toggle" aria-controls="dashboardHero" aria-expanded="true" aria-label="Hide dashboard banner" title="Hide dashboard banner" onclick="toggleDashboardHeroCollapsed()">
+          <span class="hero-toggle-icon" aria-hidden="true">&minus;</span>
+          <span class="hero-toggle-label">Hide banner</span>
+        </button>
+      </div>
       <div class="grid">
         <div class="panel pad metric-tile"><div class="label">Players</div><div id="players" class="value">Checking...</div><div class="subtle">Known live population.</div></div>
         <div class="panel pad metric-tile advanced-only"><div class="label">Give Transport</div><div id="adminLive" class="value">Checking...</div><div class="subtle">Runtime grant route.</div></div>
@@ -18995,6 +18980,9 @@ function loadSidebarCollapsed(){let collapsed=false;try{collapsed=localStorage.g
 function applyBrandCollapsed(collapsed){document.body.classList.toggle("brand-collapsed",Boolean(collapsed));const button=document.getElementById("brandCollapseButton");if(button){button.setAttribute("aria-label",collapsed?"Expand brand panel":"Collapse brand panel");button.title=collapsed?"Expand brand panel":"Collapse brand panel";}}
 function toggleBrandCollapsed(){const collapsed=!document.body.classList.contains("brand-collapsed");applyBrandCollapsed(collapsed);try{localStorage.setItem("alphaNineBrandCollapsed",collapsed?"1":"0");}catch{}playUiSound("click");}
 function loadBrandCollapsed(){let collapsed=false;try{collapsed=localStorage.getItem("alphaNineBrandCollapsed")==="1";}catch{}applyBrandCollapsed(collapsed);}
+function applyDashboardHeroCollapsed(collapsed){const hero=document.getElementById("dashboardHero");const button=document.getElementById("dashboardHeroToggle");if(hero)hero.classList.toggle("dashboard-hero-collapsed",Boolean(collapsed));if(button){const label=collapsed?"Show banner":"Hide banner";button.setAttribute("aria-expanded",collapsed?"false":"true");button.setAttribute("aria-label",label);button.title=label;const icon=button.querySelector(".hero-toggle-icon");const text=button.querySelector(".hero-toggle-label");if(icon)icon.textContent=collapsed?"+":"−";if(text)text.textContent=label;}}
+function toggleDashboardHeroCollapsed(){const hero=document.getElementById("dashboardHero");const collapsed=!hero?.classList.contains("dashboard-hero-collapsed");applyDashboardHeroCollapsed(collapsed);try{localStorage.setItem("alphaNineDashboardHeroCollapsed",collapsed?"1":"0");}catch{}playUiSound("click");}
+function loadDashboardHeroCollapsed(){let collapsed=false;try{collapsed=localStorage.getItem("alphaNineDashboardHeroCollapsed")==="1";}catch{}applyDashboardHeroCollapsed(collapsed);}
 function setManagerFrameStatus(title,reason,kind="warn"){const status=document.getElementById("managerFrameStatus");const frame=document.getElementById("managerFrame");if(!status)return;status.style.display="block";if(frame)frame.style.display="none";status.innerHTML='<div class="label">'+esc(title||"Server Manager unavailable.")+'</div><div class="value '+esc(kind)+' mt">'+esc(title||"Server Manager unavailable.")+'</div><div class="subtle mt">Reason:<br>'+esc(reason||"Manager service not running / failed to start.")+'</div>';}
 function normalizeManagerFrameTypography(){const frame=document.getElementById("managerFrame");try{const doc=frame&&frame.contentDocument;if(!doc||!doc.head)return;syncManagerFrameTheme();let style=doc.getElementById("alphanine-suite-typography");if(!style){style=doc.createElement("style");style.id="alphanine-suite-typography";doc.head.appendChild(style);}style.textContent=":root{--suite-panel-label:10.5px;--suite-panel-title:16px;--suite-panel-body:12.5px;--suite-panel-value:16px;--suite-panel-subtle:11.5px;--suite-button:12.5px} .panel,.summary,.rail,.group,.server-panel,.reward-panel{font-size:var(--suite-panel-body)!important;line-height:1.42!important}.panel-head h2,.summary h2,.group-title h3,.management-title strong{font-size:var(--suite-panel-title)!important;line-height:1.18!important}.brand-title,.setting-head,.label span,.reward-head span,.reward-panel label,.reward-status,.reward-log,.status-row,.endpoint-help{font-size:var(--suite-panel-subtle)!important}.label strong,.reward-head h3,.setting strong{font-size:13px!important;line-height:1.22!important}.value,.status-row strong{font-size:var(--suite-panel-value)!important;line-height:1.12!important}.setting,.setting-head{grid-template-columns:minmax(142px,1fr) minmax(150px,220px) minmax(96px,112px) minmax(96px,112px)!important;gap:12px!important}.setting .value{font-size:clamp(11px,1vw,16px)!important;padding:0 6px!important;min-width:0!important;overflow:hidden!important;white-space:nowrap!important;letter-spacing:0!important}.btn,.chip,button{font-size:var(--suite-button)!important;line-height:1.18!important;padding:7px 12px!important;min-height:36px!important}input,select,textarea{font-size:12.5px!important}table{font-size:12.5px!important}th{font-size:10.5px!important}td{font-size:12px!important}";}catch{}}
 function managerFrameHasContent(){const frame=document.getElementById("managerFrame");try{return Boolean(frame&&frame.contentDocument&&frame.contentDocument.body&&frame.contentDocument.body.innerText.trim());}catch{return false;}}
@@ -19956,7 +19944,7 @@ function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>res
 async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
 async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
-renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
+renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadDashboardHeroCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 setInterval(()=>{if(document.getElementById("repair")?.classList.contains("active"))refreshRepairQueue();},10000);

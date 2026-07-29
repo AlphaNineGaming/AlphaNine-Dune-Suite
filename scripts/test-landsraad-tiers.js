@@ -9,6 +9,12 @@ const vm = require("vm");
 const source = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
 assert(source.includes("from dune.landsraad_task_rewards"), "Tier inspection must use the authoritative Landsraad reward table.");
+assert(source.includes("from dune.landsraad_decree_term current_term"), "Tier inspection must resolve the current Landsraad term directly from its authoritative table.");
+assert(source.includes("order by current_term.start_time desc nulls last, current_term.term_id desc"), "Current-term resolution must match the game's latest-started-term ordering.");
+assert(!source.includes("from dune.landsraad_load_current_term() current_term"), "Tier inspection must not compile the game function because some servers are missing its custom array types.");
+assert(source.includes("join dune.landsraad_tasks tasks on tasks.id = rewards.task_id"), "Tier reads and writes must relate rewards to their owning term.");
+assert(source.includes("where tasks.term_id = ${termId}::bigint"), "Tier inspection must exclude historical Landsraad terms.");
+assert(source.includes('status: "test_term"'), "Tier editing must fail closed for a current test term.");
 assert(/group by rewards\.threshold\r?\n\s*order by rewards\.threshold/.test(source), "Tier thresholds must be grouped and ordered by the integer column, not the selected text alias.");
 assert(!source.includes("select threshold::text, count(*)::text\n    from dune.landsraad_task_rewards\n    group by threshold\n    order by threshold"), "Tier inspection must not sort the threshold::text output alias lexicographically.");
 assert(source.includes("detectedTiers.length === LANDSRAAD_TIER_COUNT"), "Tier inspection must require exactly five distinct thresholds.");
@@ -20,7 +26,9 @@ assert(source.includes("Keep all ${expectedCount} detected Landsraad tiers."), "
 assert(source.includes('progressionBackupPath("landsraad", "tiers", previewId)'), "A full backup must be created before tier writes.");
 assert(source.includes('const LANDSRAAD_TIER_CONFIRM_TEXT = "APPLY LANDSRAAD TIERS"'), "Tier writes must require exact typed confirmation.");
 assert(source.includes("const currentInspect = await landsraadTierInspect();"), "Apply must re-check the exact-five invariant before opening its write transaction.");
-assert(source.includes("lock table dune.landsraad_task_rewards in share row exclusive mode"), "Tier apply must lock the reward table before stale-data validation.");
+assert(source.includes("lock table dune.landsraad_decree_term, dune.landsraad_tasks, dune.landsraad_task_rewards in share row exclusive mode"), "Tier apply must lock the term, task, and reward tables before stale-data validation.");
+assert(source.includes("and tasks.term_id = ${termId}::bigint"), "Tier updates must be restricted to tasks belonging to the previewed current term.");
+assert(source.includes("The current Landsraad term changed after preview. No changes were applied."), "Apply must reject a term rollover inside the write transaction.");
 assert(source.includes("Landsraad tier data changed after preview. No changes were applied."), "Apply must reject stale tier previews.");
 assert(source.includes("Landsraad tier verification failed. Transaction rolled back."), "Apply must verify the updated distribution inside the transaction.");
 assert(source.includes('url.pathname === "/api/landsraad/tiers"'), "Tier inspection API route is missing.");
@@ -31,10 +39,13 @@ assert(source.includes('class="landsraad-tier-threshold"'), "Editable Landsraad 
 assert(source.includes('id="landsraadTierPreviewButton"'), "The preview button must have an explicit fail-closed disabled state.");
 assert(source.includes("Exactly five distinct thresholds"), "The UI policy must state the exact-five requirement.");
 
-function createHarness(initialThresholds) {
+function createHarness(initialThresholds, options = {}) {
   let thresholds = [...initialThresholds];
+  let termId = String(options.termId || "42");
+  let testTerm = options.testTerm === true;
+  const historicalThresholds = [...(options.historicalThresholds || [])];
   let beforeBackup = null;
-  const calls = { metadata: 0, distribution: 0, backup: 0, streamed: 0, writes: [], audits: [] };
+  const calls = { metadata: 0, currentTerm: 0, distribution: 0, backup: 0, streamed: 0, streamSql: "", writes: [], audits: [] };
   const context = {
     crypto,
     Date,
@@ -53,21 +64,34 @@ function createHarness(initialThresholds) {
     dbQuery: async (sql) => {
       if (sql.includes("information_schema.columns")) {
         calls.metadata += 1;
-        return ["task_id", "threshold", "template_id", "amount"].map((column) => ({ column, data_type: column === "template_id" ? "text" : "bigint" }));
+        return [
+          ...["task_id", "threshold", "template_id", "amount"].map((column) => ({ table: "landsraad_task_rewards", column, data_type: column === "template_id" ? "text" : "bigint" })),
+          ...["id", "term_id"].map((column) => ({ table: "landsraad_tasks", column, data_type: "bigint" })),
+          ...["term_id", "start_time", "test_term"].map((column) => ({ table: "landsraad_decree_term", column, data_type: column === "test_term" ? "boolean" : (column === "start_time" ? "timestamp without time zone" : "bigint") }))
+        ];
       }
-      if (sql.includes("select task_id::text")) {
+      if (sql.includes("from dune.landsraad_decree_term current_term")) {
+        calls.currentTerm += 1;
+        if (options.noCurrentTerm) return [];
+        if (options.currentTermRows) return options.currentTermRows;
+        return [{ termId, testTerm: testTerm ? "true" : "false" }];
+      }
+      if (sql.includes("select rewards.task_id::text")) {
         calls.backup += 1;
         if (beforeBackup) beforeBackup();
         return thresholds.map((threshold, index) => ({ task_id: String(index + 1), threshold: String(threshold), template_id: `reward-${index + 1}`, amount: "1" }));
       }
       if (sql.includes("group by rewards.threshold")) {
         calls.distribution += 1;
-        return thresholds.map((threshold) => ({ threshold: String(threshold), rowCount: "1" }));
+        const scoped = sql.includes("join dune.landsraad_tasks tasks on tasks.id = rewards.task_id") && sql.includes(`where tasks.term_id = ${termId}::bigint`);
+        const visibleThresholds = scoped ? thresholds : [...thresholds, ...historicalThresholds];
+        return visibleThresholds.map((threshold) => ({ threshold: String(threshold), rowCount: "1" }));
       }
       throw new Error(`Unexpected query in Landsraad test: ${sql}`);
     },
-    dbQueryStreamed: async () => {
+    dbQueryStreamed: async (sql) => {
       calls.streamed += 1;
+      calls.streamSql = sql;
       return [];
     },
     progressionBackupPath: () => "landsraad-test-backup.json",
@@ -94,6 +118,8 @@ globalThis.landsraadTestApi = {
     api: context.landsraadTestApi,
     calls,
     setThresholds(next) { thresholds = [...next]; },
+    setTermId(next) { termId = String(next); },
+    setTestTerm(next) { testTerm = next === true; },
     setBeforeBackup(callback) { beforeBackup = callback; }
   };
 }
@@ -112,6 +138,27 @@ async function run() {
   const validApply = await valid.api.apply({ previewId: validPreview.previewId, confirmText: "APPLY LANDSRAAD TIERS" });
   assert.equal(validApply.ok, true, "A valid five-tier preview must remain applicable.");
   assert.equal(valid.calls.streamed, 1, "Valid apply must reach the protected transaction.");
+  assert.match(valid.calls.streamSql, /tasks\.term_id = 42::bigint/, "The protected transaction must only inspect and update the previewed term.");
+
+  const screenshotCurrentThresholds = [700, 3500, 7000, 10500, 14000];
+  const historicalThresholds = [100, 101, 102, 103, 104, 105, 200, 300, 400, 500];
+  const retainedHistory = createHarness(screenshotCurrentThresholds, { historicalThresholds });
+  const retainedHistoryInspect = await retainedHistory.api.inspect();
+  assert.equal(retainedHistoryInspect.ok, true, "Historical terms must not inflate the current term's tier count.");
+  assert.equal(retainedHistoryInspect.termId, "42");
+  assert.deepEqual([...retainedHistoryInspect.detectedThresholds], screenshotCurrentThresholds, "The 15-threshold screenshot case must display only its five current-term thresholds.");
+  assert.equal(retainedHistoryInspect.totalRewardRows, 5);
+
+  const testTerm = createHarness(validThresholds, { testTerm: true });
+  const testTermInspect = await testTerm.api.inspect();
+  assert.equal(testTermInspect.ok, false, "A current test term must remain read-only.");
+  assert.equal(testTermInspect.status, "test_term");
+  assert.equal(testTerm.calls.distribution, 0, "Test-term rewards must not be loaded into the editor.");
+
+  const noCurrentTerm = createHarness(validThresholds, { noCurrentTerm: true });
+  const noCurrentTermInspect = await noCurrentTerm.api.inspect();
+  assert.equal(noCurrentTermInspect.ok, false, "Missing current terms must fail closed.");
+  assert.equal(noCurrentTermInspect.status, "no_current_term");
 
   const reportedThresholds = [35, 350, 700, 1050, 1400, 3500, 7000, 10500, 14000];
   const ambiguous = createHarness(reportedThresholds);
@@ -148,7 +195,15 @@ async function run() {
   assert.match(blockedApply.error, /detected 9:/);
   assert.equal(changedAfterPreview.calls.streamed, 0, "Ambiguity detected at apply time must leave every database row unchanged.");
 
-  console.log("Landsraad exact-five inspection, preview, apply, ambiguity, and no-write regression checks passed.");
+  const rolledTerm = createHarness(validThresholds);
+  const rolledPreview = await rolledTerm.api.preview({ thresholds: [40, 400, 800, 1200, 1600] });
+  rolledTerm.setTermId("43");
+  const rolloverBlocked = await rolledTerm.api.apply({ previewId: rolledPreview.previewId, confirmText: "APPLY LANDSRAAD TIERS" });
+  assert.equal(rolloverBlocked.ok, false, "Apply must stop after a Landsraad term rollover.");
+  assert.match(rolloverBlocked.error, /current Landsraad term changed from 42 to 43/);
+  assert.equal(rolledTerm.calls.streamed, 0, "A stale prior-term preview must never reach mutation SQL.");
+
+  console.log("Landsraad current-term scoping, historical retention, exact-five, test-term, rollover, and no-write regression checks passed.");
 }
 
 run().catch((error) => {

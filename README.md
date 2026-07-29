@@ -27,6 +27,13 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.81
+
+- Scoped Landsraad reward-tier inspection, backup, editing, and verification to the current non-test term.
+- Historical term rewards no longer appear as extra tiers after weekly resets.
+- Resolves the current term directly from `dune.landsraad_decree_term` without invoking the broken game `landsraad_load_current_term()` function.
+- Added fail-closed protection for test terms, missing or ambiguous current terms, and rollover during preview or apply.
+
 ### 1.0.80
 
 - Added a persistent Hide Banner control that collapses the dashboard banner into a compact Show Banner row.

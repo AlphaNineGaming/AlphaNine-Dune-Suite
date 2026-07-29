@@ -191,20 +191,21 @@ function extractFunction(source, name) {
     landsraadHarness.render({
       ok: false,
       status: "invalid_tier_count",
+      termId: "42",
       detectedTierCount: 9,
       detectedThresholds: [35, 350, 700, 1050, 1400, 3500, 7000, 10500, 14000],
       tiers: [],
       reason: "raw API reason that must not be repeated",
       raw: { shouldNeverRender: true }
     });
-    const expectedWarning = "Landsraad editing is unavailable because this server contains multiple reward groups. Detected 9 distinct thresholds. No data was changed.";
-    assert.equal(elements.landsraadTierStatus.textContent, expectedWarning, "Ambiguous Landsraad response did not render the single clean warning.");
-    assert.equal(landsraadHarness.preview(), null, "Ambiguous tier detection did not clear stale preview state.");
-    assert.equal(elements.landsraadTierAdvancedDetails.hidden, false, "Ambiguous thresholds are not available under Advanced Details.");
+    const expectedWarning = "Current Landsraad term 42 has 9 distinct reward thresholds; exactly 5 are required. Historical terms were ignored and no data was changed.";
+    assert.equal(elements.landsraadTierStatus.textContent, expectedWarning, "Invalid current-term Landsraad response did not render the single clean warning.");
+    assert.equal(landsraadHarness.preview(), null, "Invalid tier detection did not clear stale preview state.");
+    assert.equal(elements.landsraadTierAdvancedDetails.hidden, false, "Invalid current-term thresholds are not available under Advanced Details.");
     assert.match(elements.landsraadTierDetectedThresholds.innerHTML, /<code>35<\/code>[\s\S]*<code>14,000<\/code>/, "Advanced Details does not show a readable threshold list.");
-    assert.equal(elements.landsraadTierPreviewButton.disabled, true, "Generate Preview + Backup remains enabled for an ambiguous configuration.");
-    assert.equal(elements.landsraadTierConfirmText.disabled, true, "Landsraad confirmation remains enabled for an ambiguous configuration.");
-    assert.equal(elements.landsraadTierApplyButton.disabled, true, "Apply Tier Changes remains enabled for an ambiguous configuration.");
+    assert.equal(elements.landsraadTierPreviewButton.disabled, true, "Generate Preview + Backup remains enabled for an invalid current-term configuration.");
+    assert.equal(elements.landsraadTierConfirmText.disabled, true, "Landsraad confirmation remains enabled for an invalid current-term configuration.");
+    assert.equal(elements.landsraadTierApplyButton.disabled, true, "Apply Tier Changes remains enabled for an invalid current-term configuration.");
     const renderedFailureText = [
       elements.landsraadTierStatus.textContent,
       elements.landsraadTierRows.innerHTML,

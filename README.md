@@ -17,6 +17,7 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - Player feed and player management
 - Player blueprint listing, validated inventory import, individual JSON export, selected export, and all-blueprint ZIP export
 - Give Item with Dry-Run and Live Give modes
+- Storage deposits with bounded free-slot allocation, persistent receipts, integrity polling, in-game visibility confirmation, and protected battlegroup refresh
 - Live Map with player, vehicle, and base markers when position data is available
 - Server Management view
 - Gear Codex
@@ -26,6 +27,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - GitHub update check
 
 ## Release Notes
+
+### 1.0.82
+
+- Storage deposits now choose the lowest valid unused positions instead of extending beyond a finite container's slot range when holes exist.
+- Deposits are blocked when the target already contains duplicate or out-of-range positions.
+- Successful deposits create persistent receipts and automatically recheck the inserted item rows after 2, 5, 15, and 30 seconds without repeating the grant.
+- Give Item now distinguishes database verification from operator-confirmed in-game visibility.
+- Added a protected battlegroup refresh entry that uses the existing player, backup, exact-target, and post-start health gates; it never restarts the VM or deletes raw pods.
 
 ### 1.0.81
 

@@ -10,6 +10,7 @@ const Coordinates = require("./assets/coordinate-system");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError } = require("./lib/operations");
+const { StorageDepositStore, classifyStorageVerification } = require("./lib/storage-deposits");
 const { createRemoteAccess } = require("./lib/remote-access");
 const { createInternetTunnel } = require("./lib/internet-tunnel");
 const { createPlayerDirectory, parsePlayerSelector } = require("./lib/player-directory");
@@ -129,12 +130,14 @@ const MANAGER_DIR = packagedUnpackedPath("manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
 const DATA_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "data") : path.join(__dirname, "data");
 const OPERATION_HISTORY_PATH = path.join(DATA_DIR, "operations.json");
+const STORAGE_DEPOSIT_HISTORY_PATH = path.join(DATA_DIR, "storage-deposits.json");
 const SCHEDULER_CONFIG_PATH = path.join(DATA_DIR, "vm-scheduler.json");
 const SCHEDULER_SCRIPT_PATH = packagedAssetPath("assets", "scheduler", "alphanine-scheduler.sh");
 const MARKET_BOT_CONFIG_PATH = path.join(DATA_DIR, "market-bot.json");
 const MARKET_BOT_BINARY_PATH = packagedAssetPath("assets", "market-bot", "linux-amd64", "alphanine-market-bot");
 const marketBotStore = createMarketBotStore({ configPath: MARKET_BOT_CONFIG_PATH, dataDir: DATA_DIR });
 const operationRegistry = new OperationRegistry(OPERATION_HISTORY_PATH, { maxHistory: 100 });
+const storageDepositStore = new StorageDepositStore(STORAGE_DEPOSIT_HISTORY_PATH, { maxHistory: 100 });
 const DUNE_SERVER_STEAM_APP_ID = 4754530;
 const SERVER_UPDATE_CHECK_TTL_MS = 10 * 60 * 1000;
 let serverUpdateCheckCoordinator = null;
@@ -14690,6 +14693,13 @@ async function adminGiveItemToStorage(payload = {}) {
              a.map, a.partition_id, a.dimension_index,
              (select count(*)::int from dune.items it where it.inventory_id=i.id) item_count,
              (select coalesce(max(it.position_index), -1)::bigint from dune.items it where it.inventory_id=i.id) max_position,
+             (select count(*)::int from (
+               select it.position_index from dune.items it
+               where it.inventory_id=i.id and it.position_index is not null
+               group by it.position_index having count(*) > 1
+             ) conflicts) duplicate_slots,
+             (select count(*)::int from dune.items it
+               where it.inventory_id=i.id and (it.position_index < 0 or (coalesce(i.max_item_count,0) > 0 and it.position_index >= i.max_item_count))) invalid_positions,
              coalesce((select jsonb_object_agg(stacks.template_id, stacks.total) from (
                select it.template_id, sum(it.stack_size) total from dune.items it where it.inventory_id=i.id group by it.template_id
              ) stacks), '{}'::jsonb)::text item_stacks
@@ -14708,13 +14718,16 @@ async function adminGiveItemToStorage(payload = {}) {
            coalesce((select map from target_storage),''), coalesce((select partition_id::text from target_storage),''),
            coalesce((select dimension_index::text from target_storage),''), coalesce((select max_item_count::text from target_storage),'0'),
            coalesce((select max_item_volume::text from target_storage),'0'), coalesce((select item_count::text from target_storage),'0'),
-           coalesce((select max_position::text from target_storage),'-1'), coalesce((select item_stacks from target_storage),'{}')
+           coalesce((select max_position::text from target_storage),'-1'), coalesce((select duplicate_slots::text from target_storage),'0'),
+           coalesce((select invalid_positions::text from target_storage),'0'), coalesce((select item_stacks from target_storage),'{}')
   `;
-  const precheck = parseDbRows(await dbQuery(precheckSql, 15000), ["status", "accountId", "characterName", "onlineStatus", "actorClass", "customName", "map", "partitionId", "dimensionIndex", "maxItemCount", "maxItemVolume", "itemCount", "maxPosition", "itemStacks"])[0] || {};
+  const precheck = parseDbRows(await dbQuery(precheckSql, 15000), ["status", "accountId", "characterName", "onlineStatus", "actorClass", "customName", "map", "partitionId", "dimensionIndex", "maxItemCount", "maxItemVolume", "itemCount", "maxPosition", "duplicateSlots", "invalidPositions", "itemStacks"])[0] || {};
   if (precheck.status === "player_not_found") throw new Error("The selected player was not found.");
   if (precheck.status === "player_not_offline") throw new Error(`${precheck.characterName || "Selected player"} must be offline before depositing items into storage. Current status: ${precheck.onlineStatus || "unknown"}.`);
   if (precheck.status === "storage_not_found") throw new Error("The selected storage actor or inventory no longer exists. Refresh storage containers.");
   if (precheck.status !== "ready") throw new Error(`Storage deposit precheck failed: ${precheck.status || "unknown"}.`);
+  if (Number(precheck.duplicateSlots || 0) > 0) throw new Error("This storage container has duplicate occupied slot positions. Repair its inventory integrity before depositing another item.");
+  if (Number(precheck.invalidPositions || 0) > 0) throw new Error("This storage container has items outside its valid slot range. Repair its inventory integrity before depositing another item.");
   const metadata = storageItemMetadata(template);
   const stackCount = Math.ceil(qty / metadata.stackMax);
   const availableSlots = Number(precheck.maxItemCount || 0) > 0 ? Number(precheck.maxItemCount) - Number(precheck.itemCount || 0) : Number.MAX_SAFE_INTEGER;
@@ -14751,25 +14764,160 @@ async function adminGiveItemToStorage(payload = {}) {
       where i.id=${inventoryId} and i.actor_id=${actorId}
         and (((i.inventory_type=4) and a.class ilike '%Container%') or (i.inventory_type=0 and coalesce(i.max_item_count,0)>0 and a.class ilike '%Vehicles%'))
       limit 1;
+    create temp table storage_grant_slots on commit drop as
+      select candidate.position_index,
+             row_number() over (order by candidate.position_index)::int slot_number
+      from storage_grant_target t
+      cross join lateral (
+        select free_slot.position_index::bigint
+        from generate_series(0, greatest(t.max_item_count-1, 0)) free_slot(position_index)
+        where t.max_item_count>0
+          and not exists(select 1 from dune.items occupied where occupied.inventory_id=t.inventory_id and occupied.position_index=free_slot.position_index)
+        order by free_slot.position_index
+        limit ${stackCount}
+      ) candidate
+      union all
+      select (t.max_position+n)::bigint, n::int
+      from storage_grant_target t cross join generate_series(1,${stackCount}) n
+      where t.max_item_count<=0;
+    do $$ begin
+      if (select count(*) from storage_grant_slots) <> ${stackCount} then
+        raise exception 'Storage no longer has enough valid free slots';
+      end if;
+    end $$;
     create temp table storage_grant_prepared on commit drop as
       select nextval('dune.items_id_seq'::regclass) item_id, t.inventory_id,
-             least(${metadata.stackMax}, ${qty}-(n-1)*${metadata.stackMax})::bigint stack_size,
-             (t.max_position+n)::bigint position_index
-      from storage_grant_target t cross join generate_series(1,${stackCount}) n
-      where (t.max_item_count<=0 or t.item_count+${stackCount}<=t.max_item_count);
+             least(${metadata.stackMax}, ${qty}-(s.slot_number-1)*${metadata.stackMax})::bigint stack_size,
+             s.position_index
+      from storage_grant_target t cross join storage_grant_slots s;
     select dune.save_item(row(p.item_id,p.inventory_id,p.stack_size,p.position_index,${sqlString(template)},true,extract(epoch from clock_timestamp())::bigint,${sqlString(statsJson)}::jsonb,${grade},null)::dune.inventoryitem) from storage_grant_prepared p;
-    select case when count(*)=${stackCount} and coalesce(sum(i.stack_size),0)=${qty} then 'inserted' else 'verification_failed' end,
+    do $$ begin
+      if not coalesce((select count(*)=${stackCount} and coalesce(sum(i.stack_size),0)=${qty}
+                       and count(distinct i.position_index)=count(*)
+                       and bool_and(i.position_index>=0 and (t.max_item_count<=0 or i.position_index<t.max_item_count))
+                       and bool_and((select count(*) from dune.items occupied where occupied.inventory_id=i.inventory_id and occupied.position_index=i.position_index)=1)
+                from storage_grant_prepared p
+                join dune.items i on i.id=p.item_id and i.inventory_id=p.inventory_id and i.template_id=${sqlString(template)}
+                cross join storage_grant_target t
+                group by t.max_item_count),false) then
+        raise exception 'Storage deposit failed transactional slot and quantity verification';
+      end if;
+    end $$;
+    select case when count(*)=${stackCount} and coalesce(sum(i.stack_size),0)=${qty}
+                       and count(distinct i.position_index)=count(*)
+                       and bool_and(i.position_index>=0 and (t.max_item_count<=0 or i.position_index<t.max_item_count))
+                       and bool_and((select count(*) from dune.items occupied where occupied.inventory_id=i.inventory_id and occupied.position_index=i.position_index)=1)
+                     then 'inserted' else 'verification_failed' end,
            count(*)::text, coalesce(sum(i.stack_size),0)::text,
-           coalesce(string_agg(i.id::text,',' order by i.id),'')
-      from storage_grant_prepared p join dune.items i on i.id=p.item_id and i.inventory_id=p.inventory_id and i.template_id=${sqlString(template)};
+           coalesce(string_agg(i.id::text,',' order by i.id),''),
+           coalesce(string_agg(i.position_index::text,',' order by i.id),'')
+      from storage_grant_prepared p
+      join dune.items i on i.id=p.item_id and i.inventory_id=p.inventory_id and i.template_id=${sqlString(template)}
+      cross join storage_grant_target t
+      group by t.max_item_count;
     commit;
   `;
-  const resultRows = parseDbRows(await dbQuery(insertSql, 30000), ["status", "stackCount", "quantity", "itemIds"]);
+  const resultRows = parseDbRows(await dbQuery(insertSql, 30000), ["status", "stackCount", "quantity", "itemIds", "positions"]);
   const inserted = [...resultRows].reverse().find((row) => row.status === "inserted" || row.status === "verification_failed") || {};
   if (inserted.status !== "inserted") throw new Error("Storage deposit did not pass post-write verification; inspect the database before retrying.");
-  const result = { ok: true, dryRun: false, status: "storage-inserted", transport: "database", verified: true, player: { accountId: precheck.accountId, characterName: precheck.characterName, onlineStatus: precheck.onlineStatus }, storage, item: { id: template, name: giveItemDisplayName(template), qty: Number(inserted.quantity || qty), grade, stackCount: Number(inserted.stackCount || stackCount), stackMax: metadata.stackMax, volume: itemVolume, itemIds: String(inserted.itemIds || "").split(",").filter(Boolean) }, note: "Inserted without restarting the battlegroup. Keep the player offline until the deposit is visible in game." };
-  appendAdminAudit("storage_item_deposited", { playerId, actorId, inventoryId, template, qty, grade, itemIds: result.item.itemIds });
+  const itemIds = String(inserted.itemIds || "").split(",").filter(Boolean);
+  const positions = String(inserted.positions || "").split(",").filter(Boolean).map(Number);
+  const receiptId = `storage-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const receipt = {
+    receiptId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    status: "database-verified",
+    visibility: "unknown",
+    confirmedVisible: false,
+    checkCount: 0,
+    player: { accountId: precheck.accountId, characterName: precheck.characterName },
+    storage,
+    item: { id: template, name: giveItemDisplayName(template), quantity: Number(inserted.quantity || qty), grade, stackCount: Number(inserted.stackCount || stackCount), itemIds, positions },
+    preFingerprint: crypto.createHash("sha256").update(String(precheck.itemStacks || "{}")).digest("hex")
+  };
+  let receiptWarning = "";
+  try { storageDepositStore.add(receipt); }
+  catch (error) { receiptWarning = ` The database write succeeded, but the receipt could not be persisted to disk: ${error.message}`; }
+  const result = { ok: true, dryRun: false, status: "storage-inserted", transport: "database", verified: true, player: { accountId: precheck.accountId, characterName: precheck.characterName, onlineStatus: precheck.onlineStatus }, storage, item: { id: template, name: giveItemDisplayName(template), qty: Number(inserted.quantity || qty), grade, stackCount: Number(inserted.stackCount || stackCount), stackMax: metadata.stackMax, volume: itemVolume, itemIds, positions }, receipt, note: "Database write and slot integrity passed. Reopen the container to check game visibility; the Suite will continue checking that the rows remain stable." + receiptWarning };
+  appendAdminAudit("storage_item_deposited", { receiptId, playerId, actorId, inventoryId, template, qty, grade, itemIds, positions });
   return result;
+}
+
+function storageDepositReceipt(receiptId) {
+  const receipt = storageDepositStore.get(String(receiptId || "").trim());
+  if (!receipt) throw new Error("Storage deposit receipt was not found.");
+  return receipt;
+}
+
+async function verifyStorageDepositReceipt(receiptId) {
+  const receipt = storageDepositReceipt(receiptId);
+  const inventoryId = String(receipt.storage?.inventoryId || "");
+  const template = String(receipt.item?.id || "");
+  const itemIds = Array.isArray(receipt.item?.itemIds) ? receipt.item.itemIds.map(String) : [];
+  const positions = Array.isArray(receipt.item?.positions) ? receipt.item.positions.map(String) : [];
+  if (!/^\d+$/.test(inventoryId) || !itemIds.length || itemIds.some((value) => !/^\d+$/.test(value))) throw new Error("Storage deposit receipt contains invalid database identifiers.");
+  const expectedValues = itemIds.map((itemId, index) => `(${itemId}::bigint,${/^\d+$/.test(positions[index] || "") ? positions[index] : "-1"}::bigint)`).join(",");
+  const sql = `
+    with expected(item_id, expected_position) as (values ${expectedValues}),
+    observed as (
+      select e.item_id, e.expected_position, i.inventory_id, i.stack_size, i.position_index, i.template_id
+      from expected e left join dune.items i on i.id=e.item_id
+    )
+    select
+      (select count(*)::text from expected),
+      count(o.inventory_id)::text,
+      count(*) filter (where o.inventory_id=${inventoryId} and o.template_id=${sqlString(template)} and o.position_index=o.expected_position})::text,
+      coalesce(sum(o.stack_size) filter (where o.inventory_id=${inventoryId} and o.template_id=${sqlString(template)}),0)::text,
+      (select count(*)::text from (
+        select i.position_index from dune.items i
+        where i.inventory_id=${inventoryId} and i.position_index is not null
+        group by i.position_index having count(*)>1
+      ) conflicts),
+      (select count(*)::text from dune.items i cross join dune.inventories inv
+        where inv.id=${inventoryId} and i.inventory_id=inv.id
+          and (i.position_index<0 or (coalesce(inv.max_item_count,0)>0 and i.position_index>=inv.max_item_count))),
+      coalesce(jsonb_agg(jsonb_build_object(
+        'itemId',o.item_id::text,'inventoryId',coalesce(o.inventory_id::text,''),'stackSize',coalesce(o.stack_size,0),
+        'position',o.position_index,'expectedPosition',o.expected_position,'template',coalesce(o.template_id,'')
+      ) order by o.item_id),'[]'::jsonb)::text
+    from observed o
+  `;
+  const row = parseDbRows(await dbQuery(sql, 15000), ["expectedStacks", "foundStacks", "matchingStacks", "foundQuantity", "duplicateSlots", "invalidPositions", "rows"])[0] || {};
+  let observedRows = [];
+  try { observedRows = JSON.parse(row.rows || "[]"); } catch {}
+  const observed = {
+    expectedStacks: Number(row.expectedStacks || 0),
+    foundStacks: Number(row.foundStacks || 0),
+    matchingStacks: Number(row.matchingStacks || 0),
+    foundQuantity: Number(row.foundQuantity || 0),
+    duplicateSlots: Number(row.duplicateSlots || 0),
+    invalidPositions: Number(row.invalidPositions || 0),
+    rows: observedRows
+  };
+  const classification = classifyStorageVerification({ stackCount: receipt.item.stackCount, quantity: receipt.item.quantity }, observed);
+  const checkedAt = new Date().toISOString();
+  const check = { checkedAt, ...classification, ...observed };
+  const checks = [...(Array.isArray(receipt.checks) ? receipt.checks : []), check].slice(-12);
+  const updated = storageDepositStore.update(receipt.receiptId, {
+    status: classification.status,
+    visibility: receipt.confirmedVisible ? "confirmed" : "unknown",
+    lastCheckedAt: checkedAt,
+    checkCount: Number(receipt.checkCount || 0) + 1,
+    checks,
+    verification: observed
+  });
+  appendAdminAudit("storage_deposit_rechecked", { receiptId: receipt.receiptId, status: classification.status, ...observed });
+  return { ok: classification.ok, receipt: updated, verification: observed, message: classification.message };
+}
+
+function confirmStorageDepositVisible(receiptId) {
+  const receipt = storageDepositReceipt(receiptId);
+  if (receipt.status !== "database-verified") throw new Error("Resolve the storage integrity warning before confirming in-game visibility.");
+  const confirmedAt = new Date().toISOString();
+  const updated = storageDepositStore.update(receipt.receiptId, { confirmedVisible: true, visibility: "confirmed", confirmedAt });
+  appendAdminAudit("storage_deposit_visibility_confirmed", { receiptId: receipt.receiptId, confirmedAt });
+  return { ok: true, receipt: updated, message: "Database integrity and in-game visibility are both confirmed." };
 }
 
 function readManagerConfigFallback() {
@@ -17450,7 +17598,13 @@ function appPage() {
               </div>
               <div class="action-row mt"><button type="button" onclick="refreshGiveStorageTargets()">Refresh Storage</button></div>
               <div id="giveStorageDetails" class="empty mt">Choose a detected storage container.</div>
-              <div class="warning mt">Storage deposit writes directly to the selected container without restarting the battlegroup. The selected player must be offline and should remain offline until the item is visible in game.</div>
+              <div class="warning mt">The selected player must be offline. The Suite verifies the database and slot integrity separately from in-game visibility; do not repeat a deposit only because the item is not immediately visible.</div>
+              <div id="storageDepositStatus" class="empty mt">No storage deposit receipt loaded.</div>
+              <div class="action-row mt">
+                <button id="storageDepositRecheckButton" type="button" onclick="recheckStorageDeposit()" disabled>Recheck Database</button>
+                <button id="storageDepositConfirmButton" type="button" onclick="confirmStorageDepositVisibility()" disabled>Confirm Visible In Game</button>
+                <button id="storageDepositRestartButton" type="button" onclick="protectedStorageBattlegroupRefresh()" disabled>Protected Battlegroup Refresh</button>
+              </div>
             </div>
             <div class="give-primary-actions">
               <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
@@ -18909,7 +19063,7 @@ let managerFrameCheckTimer=null;
 function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market")refreshMarketBot();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],latestStorageDepositReceipt=null,storageDepositPollGeneration=0,playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
 let databaseExplorerState={schemas:[],tables:[],metadata:null,rows:[],selectedTable:"",selectedRow:-1,offset:0,pageSize:50,hasMore:false,loading:false};
 let serverUpdateOperationId="",serverUpdateCheckState=null,serverUpdatePollTimer=null;
@@ -19604,6 +19758,12 @@ function giveStorageLabel(row){const type=row.typeName||row.name||"Storage";cons
 function renderGiveStorageTargets(){const select=document.getElementById("giveStorageTarget");if(!select)return;const current=select.value;const q=String(document.getElementById("giveStorageSearch")?.value||"").trim().toLowerCase();const rows=q?giveStorageTargets.filter(row=>[row.name,row.customName,row.typeName,row.kind,row.actorId,row.inventoryId,row.map,row.partitionId].join(" ").toLowerCase().includes(q)):giveStorageTargets;select.innerHTML=rows.length?rows.map(row=>'<option value="'+esc(row.inventoryId)+'">'+esc(giveStorageLabel(row))+'</option>').join(""):'<option value="">No storage found</option>';if(rows.some(row=>String(row.inventoryId)===String(current)))select.value=current;renderGiveStorageDetails();}
 function renderGiveStorageDetails(){const el=document.getElementById("giveStorageDetails");if(!el)return;const row=selectedGiveStorage();if(!row){el.textContent="Choose a detected storage container.";return;}const pos=row.position||{};const volume=row.maxItemVolume>0?(row.usedVolume+" / "+row.maxItemVolume+(row.volumeVerified?"":" estimated")):"Not limited";const target=row.customName?(row.customName+" / "+(row.typeName||row.kind)):(row.name||row.kind);const contents=(row.contents||[]).map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.count)+' × '+esc(item.template)+'</span><strong>'+esc(item.name||item.template)+'</strong></div>').join("")||'<div class="subtle">Storage is empty.</div>';el.innerHTML='<div class="detail-row"><span class="subtle">Target</span><strong>'+esc(target)+" / "+esc(row.kind)+'</strong></div><div class="detail-row"><span class="subtle">Identity</span><strong>Actor '+esc(row.actorId)+' / Inventory '+esc(row.inventoryId)+'</strong></div><div class="detail-row"><span class="subtle">Location</span><strong>'+esc(row.map||"Unknown")+' / P'+esc(row.partitionId||"-")+' / D'+esc(row.dimensionIndex)+' / '+esc(Math.round(pos.x||0))+', '+esc(Math.round(pos.y||0))+', '+esc(Math.round(pos.z||0))+'</strong></div><div class="detail-row"><span class="subtle">Capacity</span><strong>'+esc(row.itemCount)+' / '+esc(row.maxItemCount)+' slots / Volume '+esc(volume)+'</strong></div><div class="label mt">Contents</div>'+contents;}
 async function refreshGiveStorageTargets(){const el=document.getElementById("giveStorageDetails");try{if(el)el.textContent="Loading storage containers...";const data=await getJson("/api/admin/storage-targets",{timeoutMs:20000});giveStorageTargets=data.storages||[];renderGiveStorageTargets();updateGiveTargetSummary();return data;}catch(e){giveStorageTargets=[];renderGiveStorageTargets();if(el){el.className="warning mt";el.textContent=betterError(e);}return null;}}
+function renderStorageDepositReceipt(receipt=latestStorageDepositReceipt){latestStorageDepositReceipt=receipt||null;const status=document.getElementById("storageDepositStatus");const recheck=document.getElementById("storageDepositRecheckButton");const confirm=document.getElementById("storageDepositConfirmButton");const restart=document.getElementById("storageDepositRestartButton");if(recheck)recheck.disabled=!receipt;if(confirm)confirm.disabled=!receipt||receipt.status!=="database-verified"||receipt.confirmedVisible===true;if(restart)restart.disabled=!receipt||receipt.confirmedVisible===true;if(!status)return;if(!receipt){status.className="empty mt";status.textContent="No storage deposit receipt loaded.";return;}const item=receipt.item||{},storage=receipt.storage||{},integrity=receipt.status==="database-verified";const visibility=receipt.confirmedVisible?"Confirmed visible in game":"In-game visibility not yet confirmed";const check=receipt.checks?.[receipt.checks.length-1];status.className=(integrity?"empty":"warning")+" mt";status.innerHTML='<strong>'+esc(integrity?"Database verified":"Storage needs attention")+' · '+esc(visibility)+'</strong><div class="subtle mt">'+esc((item.quantity||0)+" × "+(item.name||item.id||"Item")+" / "+(storage.name||"Storage")+" / Inventory "+(storage.inventoryId||"-")+" / Receipt "+receipt.receiptId)+'</div><div class="subtle mt">'+esc(check?.message||("Status: "+(receipt.status||"unknown")+". Reopen the container, then confirm visibility. Automatic checks do not repeat the grant."))+'</div>';}
+async function loadLatestStorageDepositReceipt(){try{const data=await getJson("/api/admin/storage-deposits?limit=1",{timeoutMs:15000});renderStorageDepositReceipt(data.receipts?.[0]||null);return data;}catch(e){const el=document.getElementById("storageDepositStatus");if(el){el.className="warning mt";el.textContent="Storage receipt history unavailable: "+betterError(e);}return null;}}
+async function recheckStorageDeposit(options={}){const receipt=latestStorageDepositReceipt;if(!receipt)return null;const button=document.getElementById("storageDepositRecheckButton");const status=document.getElementById("storageDepositStatus");try{if(button)button.disabled=true;if(status){status.className="warning mt";status.textContent="Rechecking deposited item rows and storage slot integrity...";}const data=await getJson("/api/admin/storage-deposits/recheck",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({receiptId:receipt.receiptId}),timeoutMs:20000});renderStorageDepositReceipt(data.receipt);if(!data.ok&&!options.quiet)showToast(data.message||"Storage integrity warning","error");return data;}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}if(!options.quiet)showToast(betterError(e),"error");return null;}finally{if(button)button.disabled=!latestStorageDepositReceipt;}}
+async function pollStorageDeposit(receiptId){const generation=++storageDepositPollGeneration;const delays=[2000,3000,10000,15000];for(const delay of delays){await new Promise(resolve=>setTimeout(resolve,delay));if(generation!==storageDepositPollGeneration||latestStorageDepositReceipt?.receiptId!==receiptId)return;const result=await recheckStorageDeposit({quiet:true});if(!result||!result.ok)return;}}
+async function confirmStorageDepositVisibility(){const receipt=latestStorageDepositReceipt;if(!receipt)return;try{if(!(await appConfirm("Confirm Storage Visibility","Confirm that you reopened the selected container and can see the deposited item in game. This does not perform another grant.","Confirm Visible","Cancel")))return;const data=await getJson("/api/admin/storage-deposits/confirm-visible",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({receiptId:receipt.receiptId}),timeoutMs:15000});storageDepositPollGeneration+=1;renderStorageDepositReceipt(data.receipt);showToast(data.message||"Storage visibility confirmed.","success");}catch(e){showToast(betterError(e),"error");}}
+async function protectedStorageBattlegroupRefresh(){const receipt=latestStorageDepositReceipt;if(!receipt)return;await refreshScheduler();if(!schedulerState?.installed){await appAlert("Protected refresh unavailable","Install and verify the Backup & Restart Scheduler first. The Suite will not use a raw pod deletion or restart the VM.");return;}const status=document.getElementById("storageDepositStatus");if(status){status.className="warning mt";status.textContent="The protected workflow will block on online players, verify a recent backup, restart only the selected battlegroup, and wait for health checks.";}await runSchedulerAction("restart-now");}
 function syncGiveDestination(){const storage=document.getElementById("giveDestination")?.value==="storage";document.getElementById("giveStorageFields")?.classList.toggle("hidden",!storage);if(storage&&!giveStorageTargets.length)refreshGiveStorageTargets();syncQualityWarning();syncGiveItemControls();updateGiveTargetSummary();}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
 function progressionPlayerLookupValue(p){if(p?.player_controller_id)return"controller:"+p.player_controller_id;if(p?.player_state_row_id)return"row:"+p.player_state_row_id;if(p?.account_id||p?.id)return"account:"+(p.account_id||p.id);return String(p?.character_id||p?.player_pawn_id||p?.character_name||p?.name||"").trim();}
@@ -19917,7 +20077,7 @@ function wireGiveItemResult(){const source=document.getElementById("adminLog");i
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
 function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const usesDirectDbUnlock=isTechKnowledgeItem(selectedAdminItem)||isRecipeSchematicItem(selectedAdminItem);const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(!storageMode&&mode==="execute"&&!usesDbGrade&&!usesDirectDbUnlock&&!adminLiveGiveAvailable);if(give)give.disabled=blocked||(storageMode&&!selectedGiveStorage());if(add){add.disabled=storageMode||liveGiveBusy||!selectedAdminItem;add.title=storageMode?"Give Queue currently targets player inventory only.":"Add selected item to Give Queue";}if(queue)queue.disabled=storageMode||blocked||!giveQueue.length;if(retry)retry.disabled=storageMode||blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const receiver=await getJson("/api/receiver/status",{timeoutMs:5000});liveGiveServerOnline=Boolean(receiver.ok);adminLiveGiveAvailable=Boolean(receiver.ok);liveGiveTransport={mode:"http-json",configured:Boolean(receiver.ok),reachable:Boolean(receiver.ok),target:receiver.giveUrl||"",reason:receiver.ok?"":(receiver.reason||receiver.error||"Receiver is offline.")};liveGiveUnavailableMessage=receiver.ok?"":liveGiveTransportMessage(liveGiveTransport);setGiveServerStatus(receiver.ok?"Server Status: Online. Give Item receiver is available.":"Server Status: Offline. "+(receiver.reason||receiver.error||"Receiver is offline."),receiver.ok?"ok":"warn");syncLiveGiveTransportStatus();return receiver;}catch(receiverError){try{const env=await getJson("/api/live-give/env",{timeoutMs:8000});adminLiveGiveAvailable=Boolean(env.liveGiveAvailable);liveGiveTransport=env.giveTransport||liveGiveTransport;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(env.message||liveGiveTransportMessage(liveGiveTransport||env));liveGiveServerOnline=adminLiveGiveAvailable||Boolean(env.giveTransport?.reachable);setGiveServerStatus(liveGiveServerOnline?(adminLiveGiveAvailable?"Server Status: Online. Give Item is available.":"Server Status: Receiver online. Live Give transport is limited."):"Server Status: Offline. "+(liveGiveUnavailableMessage||env.error||"Start the server before using Give Item."),liveGiveServerOnline?"ok":"warn");syncLiveGiveTransportStatus();return env;}catch(envError){liveGiveServerOnline=false;adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(receiverError)+" / "+betterError(envError);setGiveServerStatus("Server Status: Offline. "+liveGiveUnavailableMessage,"warn");syncLiveGiveTransportStatus();return null;}}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
-async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="execute";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncGiveDestination();updateGiveTargetSummary();syncGiveItemControls();await Promise.all([refreshGivePlayersFast(),refreshGiveItemsFast(),checkGiveItemServerStatus()]);syncLiveGiveMode();}
+async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="execute";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncGiveDestination();updateGiveTargetSummary();syncGiveItemControls();await Promise.all([refreshGivePlayersFast(),refreshGiveItemsFast(),checkGiveItemServerStatus(),loadLatestStorageDepositReceipt()]);syncLiveGiveMode();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST",timeoutMs:${SERVER_MANAGEMENT_UI_TIMEOUTS.start}});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 function giveItemExecutionStatus(data,usesDbGrade=false){
   if(data?.status==="db-inserted")return"Database grade grant inserted.";
@@ -20003,6 +20163,7 @@ giveAdminItem=async function(){
     const data=await getJson("/api/admin/give-storage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode,confirmed:mode==="execute"}),timeoutMs:60000});
     const status=mode==="execute"?"Storage deposit verified.":"Storage dry-run passed.";
     log.textContent=status+"\n"+(data.note||"")+"\n\n"+JSON.stringify({status:data.status,verified:Boolean(data.verified),player:data.player,storage:data.storage,item:data.item},null,2);
+    if(data.receipt){renderStorageDepositReceipt(data.receipt);pollStorageDeposit(data.receipt.receiptId);}
     addActivity("grant",status,(selectedAdminItem?.name||payload.template)+" -> Actor "+storage.actorId);
     showToast(status,"success");
     await refreshGiveStorageTargets();
@@ -21175,6 +21336,30 @@ async function route(req, res) {
   if (url.pathname === "/api/admin/storage-targets" && req.method === "GET") {
     try { await json(res, await adminStorageTargets()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/storage-deposits" && req.method === "GET") {
+    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit")) || 20));
+    await json(res, { ok: true, receipts: storageDepositStore.list(limit) });
+    return;
+  }
+  if (url.pathname === "/api/admin/storage-deposits/recheck" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await verifyStorageDepositReceipt(body.receiptId);
+      await json(res, result);
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, /not found/i.test(error.message) ? 404 : 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/admin/storage-deposits/confirm-visible" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, confirmStorageDepositVisible(body.receiptId));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, /not found/i.test(error.message) ? 404 : 409);
+    }
     return;
   }
   if (url.pathname === "/api/admin/give-storage" && req.method === "POST") {

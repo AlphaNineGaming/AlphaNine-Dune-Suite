@@ -26,11 +26,13 @@ const packagedCleanerTestPath = path.join(extracted, "scripts", "test-base-clean
 const packagedLandsraadTestPath = path.join(extracted, "scripts", "test-landsraad-tiers.js");
 const packagedServerUpdateTestPath = path.join(extracted, "scripts", "test-server-update-monitor.js");
 const packagedServerHealthTestPath = path.join(extracted, "scripts", "test-server-health.js");
+const packagedStorageDepositTestPath = path.join(extracted, "scripts", "test-storage-deposits.js");
 const packagedReleaseNotesPath = path.join(extracted, `RELEASE_NOTES_${rootPackage.version}.md`);
 assert(fs.existsSync(packagedCleanerTestPath), "Packaged app is missing the Server Cleaner regression test.");
 assert(fs.existsSync(packagedLandsraadTestPath), "Packaged app is missing the Landsraad exact-five regression test.");
 assert(fs.existsSync(packagedServerUpdateTestPath), "Packaged app is missing the Server Updater regression test.");
 assert(fs.existsSync(packagedServerHealthTestPath), "Packaged app is missing the Server Health regression test.");
+assert(fs.existsSync(packagedStorageDepositTestPath), "Packaged app is missing the storage-deposit reliability regression test.");
 assert(fs.existsSync(packagedReleaseNotesPath), `Packaged app is missing release notes for ${rootPackage.version}.`);
 assert(
   packagedServerSource.includes('const actorId = requireSqlBigint(payload.actorId, "actor_id", 0n)'),
@@ -83,6 +85,16 @@ assert.equal(
   packagedServerHealthTest.status,
   0,
   `Packaged Server Health regression failed.\n${packagedServerHealthTest.stdout || ""}\n${packagedServerHealthTest.stderr || ""}`
+);
+const packagedStorageDepositTest = spawnSync(process.execPath, [packagedStorageDepositTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedStorageDepositTest.status,
+  0,
+  `Packaged storage-deposit regression failed.\n${packagedStorageDepositTest.stdout || ""}\n${packagedStorageDepositTest.stderr || ""}`
 );
 assert(
   packagedServerSource.includes("detectedTiers.length === LANDSRAAD_TIER_COUNT"),
@@ -213,6 +225,9 @@ async function waitForUi() {
     assert(html.includes('id="server-health"'), "Packaged UI is missing the Server Health page.");
     assert(html.includes("Refresh Health"), "Packaged UI is missing manual Server Health refresh.");
     assert(html.includes('getJson("/api/server-health",{timeoutMs:65000})'), "Packaged Server Health scan is missing its bounded UI deadline.");
+    assert(html.includes("Protected Battlegroup Refresh"), "Packaged Give Item UI is missing protected storage refresh.");
+    assert(html.includes('getJson("/api/admin/storage-deposits/recheck"'), "Packaged UI is missing storage receipt rechecks.");
+    assert(packagedServerSource.includes("Storage deposit failed transactional slot and quantity verification"), "Packaged backend is missing transactional storage verification.");
     console.log(`Packaged Suite smoke test passed on isolated port ${port}; version ${packagedVersion}.`);
   } finally {
     if (child.exitCode === null) child.kill();

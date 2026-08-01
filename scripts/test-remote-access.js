@@ -80,8 +80,18 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
     await waitUntilReady();
     const status = await request("http", "/api/remote-access/status");
     assert.strictEqual(status.json.configured, false);
-    assert.ok(status.json.urls.some((url) => url === `https://127.0.0.1:${httpsPort}`));
+    assert.strictEqual(status.json.lanWebPortalEnabled, false);
+    assert.strictEqual(status.json.localOnly, true);
+    assert.strictEqual(status.json.listenHost, "127.0.0.1");
+    assert.deepStrictEqual(status.json.urls, [`https://127.0.0.1:${httpsPort}`]);
     assert.ok(status.json.certificateFingerprint);
+    const localHome = await request("http", "/");
+    assert.match(localHome.text, /Phone \/ LAN Access/);
+    assert.match(localHome.text, /Disable Private LAN Access/);
+    assert.match(localHome.text, /Local only — no firewall permission needed/);
+    const unsafeEnable = await request("http", "/api/remote-access/lan", { method: "POST", body: { enabled: true } });
+    assert.strictEqual(unsafeEnable.status, 400);
+    assert.match(unsafeEnable.json.error, /password before enabling/i);
 
     const redirect = await request("https", "/");
     assert.strictEqual(redirect.status, 302);
@@ -99,6 +109,17 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
       body: { username: "admin", password: "local-test-password-42" }
     });
     assert.strictEqual(configured.status, 200);
+    const enabledLan = await request("http", "/api/remote-access/lan", { method: "POST", body: { enabled: true } });
+    assert.strictEqual(enabledLan.status, 200);
+    assert.strictEqual(enabledLan.json.lanWebPortalEnabled, true);
+    assert.strictEqual(enabledLan.json.localOnly, false);
+    assert.strictEqual(enabledLan.json.listenHost, "0.0.0.0");
+    assert.match(enabledLan.json.firewallGuidance, /Private networks only/);
+    const disabledLan = await request("http", "/api/remote-access/lan", { method: "POST", body: { enabled: false } });
+    assert.strictEqual(disabledLan.status, 200);
+    assert.strictEqual(disabledLan.json.lanWebPortalEnabled, false);
+    assert.strictEqual(disabledLan.json.localOnly, true);
+    assert.strictEqual(disabledLan.json.listenHost, "127.0.0.1");
 
     const badLogin = await request("https", "/api/auth/login", {
       method: "POST",
@@ -129,6 +150,8 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
     assert.strictEqual(blockedPost.status, 403);
     const remoteSetupBlocked = await request("https", "/api/remote-access/status", { headers: { Cookie: cookieHeader } });
     assert.strictEqual(remoteSetupBlocked.status, 403);
+    const remoteLanSetupBlocked = await request("https", "/api/remote-access/lan", { method: "POST", headers: { Cookie: cookieHeader, "X-CSRF-Token": csrf }, body: { enabled: true } });
+    assert.strictEqual(remoteLanSetupBlocked.status, 403);
     const tunnelHome = await request("http", "/", { port: internetPort, headers: { Cookie: cookieHeader } });
     assert.strictEqual(tunnelHome.status, 200);
     const tunnelSetupBlocked = await request("http", "/api/internet-access/status", { port: internetPort, headers: { Cookie: cookieHeader } });

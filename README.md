@@ -33,6 +33,7 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - Self-updates now require the SHA-256 digest and exact file size published by GitHub before the Install Update button is enabled.
 - Downloaded installers are verified locally before launch; mismatched, incomplete, unsigned, or untrusted-publisher files are deleted and never executed.
 - Added a dedicated release build that refuses to run without a configured trusted code-signing identity and verifies both Authenticode signatures after packaging.
+- The HTTPS Web Portal is local-only by default; phone/LAN access is an explicit, password-gated opt-in with Private-network firewall guidance.
 
 ### 1.0.82
 
@@ -225,6 +226,7 @@ The tunnel token is passed to `cloudflared` only when the tunnel starts and is n
 
 Remote security defaults:
 
+- The HTTPS Web Portal listens only on `127.0.0.1` until **Enable Private LAN Access** is selected locally. This prevents an unnecessary Windows Firewall prompt for local-only users.
 - New and upgraded installations default to the **Viewer** role, which exposes an explicit read-only API allowlist.
 - **Operator** permits limited server controls. **Owner** permits approved remote administration but requires password and authenticator reconfirmation every five minutes for writes.
 - Setup, credentials, configuration export, diagnostics, environment details, permissions, market automation configuration, and Server Manager remain local-only for every remote role.

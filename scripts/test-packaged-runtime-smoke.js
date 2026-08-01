@@ -27,6 +27,7 @@ const packagedLandsraadTestPath = path.join(extracted, "scripts", "test-landsraa
 const packagedServerUpdateTestPath = path.join(extracted, "scripts", "test-server-update-monitor.js");
 const packagedServerHealthTestPath = path.join(extracted, "scripts", "test-server-health.js");
 const packagedStorageDepositTestPath = path.join(extracted, "scripts", "test-storage-deposits.js");
+const packagedRemoteAccessTestPath = path.join(extracted, "scripts", "test-remote-access.js");
 const packagedUpdateIntegrityTestPath = path.join(extracted, "scripts", "test-update-integrity.js");
 const packagedReleaseNotesPath = path.join(extracted, `RELEASE_NOTES_${rootPackage.version}.md`);
 assert(fs.existsSync(packagedCleanerTestPath), "Packaged app is missing the Server Cleaner regression test.");
@@ -34,6 +35,7 @@ assert(fs.existsSync(packagedLandsraadTestPath), "Packaged app is missing the La
 assert(fs.existsSync(packagedServerUpdateTestPath), "Packaged app is missing the Server Updater regression test.");
 assert(fs.existsSync(packagedServerHealthTestPath), "Packaged app is missing the Server Health regression test.");
 assert(fs.existsSync(packagedStorageDepositTestPath), "Packaged app is missing the storage-deposit reliability regression test.");
+assert(fs.existsSync(packagedRemoteAccessTestPath), "Packaged app is missing the remote-access regression test.");
 assert(fs.existsSync(packagedUpdateIntegrityTestPath), "Packaged app is missing the self-update integrity regression test.");
 assert(fs.existsSync(packagedReleaseNotesPath), `Packaged app is missing release notes for ${rootPackage.version}.`);
 assert(
@@ -97,6 +99,16 @@ assert.equal(
   packagedStorageDepositTest.status,
   0,
   `Packaged storage-deposit regression failed.\n${packagedStorageDepositTest.stdout || ""}\n${packagedStorageDepositTest.stderr || ""}`
+);
+const packagedRemoteAccessTest = spawnSync(process.execPath, [packagedRemoteAccessTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedRemoteAccessTest.status,
+  0,
+  `Packaged remote-access regression failed.\n${packagedRemoteAccessTest.stdout || ""}\n${packagedRemoteAccessTest.stderr || ""}`
 );
 const packagedUpdateIntegrityTest = spawnSync(process.execPath, [packagedUpdateIntegrityTestPath], {
   cwd: extracted,

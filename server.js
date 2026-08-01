@@ -213,7 +213,8 @@ const defaultConfig = {
   databaseBackupLocation: DEFAULT_DATABASE_BACKUP_DIR,
   uiMode: "simple",
   uiSoundsEnabled: false,
-  uiSoundVolume: 100
+  uiSoundVolume: 100,
+  lanWebPortalEnabled: false
 };
 
 function isLocalHostLockedServerType(serverType) {
@@ -614,7 +615,7 @@ function normalizeSelectedBattlegroup(value) {
 }
 
 function saveConfig(nextConfig) {
-  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "pythonPath", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "dragTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "selectedBattlegroup"];
+  const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "pythonPath", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "dragTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "lanWebPortalEnabled", "selectedBattlegroup"];
   const current = loadConfig();
   const clean = {};
   for (const key of allowed) {
@@ -675,6 +676,7 @@ function saveConfig(nextConfig) {
   clean.uiMode = String(clean.uiMode || "simple").trim().toLowerCase() === "advanced" ? "advanced" : "simple";
   clean.uiSoundsEnabled = clean.uiSoundsEnabled === true || clean.uiSoundsEnabled === "true";
   clean.uiSoundVolume = Math.max(0, Math.min(100, Number(clean.uiSoundVolume) || 0));
+  clean.lanWebPortalEnabled = clean.lanWebPortalEnabled === true || clean.lanWebPortalEnabled === "true";
   clean.selectedBattlegroup = normalizeSelectedBattlegroup(clean.selectedBattlegroup);
   const localHostNormalized = normalizeLocalConnectionHosts(clean);
   clean.databaseHost = localHostNormalized.config.databaseHost;
@@ -1148,9 +1150,19 @@ function webPortalUrls() {
   return [`http://127.0.0.1:${PORT}`];
 }
 
-function remotePortalUrls() {
+function lanWebPortalEnabled(configValue = loadConfig()) {
+  return configValue?.lanWebPortalEnabled === true;
+}
+
+function desiredHttpsListenHost(configValue = loadConfig()) {
+  return lanWebPortalEnabled(configValue) ? HTTPS_HOST : LOCAL_HOST;
+}
+
+function remotePortalUrls(configValue = loadConfig()) {
   const urls = [`https://127.0.0.1:${HTTPS_PORT}`];
-  for (const address of localIps()) urls.push(`https://${address}:${HTTPS_PORT}`);
+  if (lanWebPortalEnabled(configValue)) {
+    for (const address of localIps()) urls.push(`https://${address}:${HTTPS_PORT}`);
+  }
   return [...new Set(urls)];
 }
 
@@ -18663,8 +18675,15 @@ DUNE_RECEIVER_SSH_KEY</pre>
         </div>
         <div class="detail-list mt">
           <div class="detail-row"><span class="subtle">Status</span><strong id="remoteAccessConfigured">Checking...</strong></div>
+          <div class="detail-row"><span class="subtle">LAN access</span><strong id="remoteLanAccessStatus">Local only — no firewall permission needed</strong></div>
           <div class="detail-row"><span class="subtle">HTTPS URLs</span><strong id="remoteAccessUrls" class="env-path-value">Checking...</strong></div>
           <div class="detail-row"><span class="subtle">Certificate SHA-256</span><strong id="remoteAccessFingerprint" class="env-path-value">Checking...</strong></div>
+        </div>
+        <div class="panel pad mt">
+          <div class="label">Phone / LAN Access</div>
+          <div class="subtle mt">Off by default. Local Suite features need no Windows Firewall permission. Enable this only when phones or other computers must connect, and allow Private networks only if Windows asks.</div>
+          <div class="action-row mt"><button type="button" onclick="enableLanWebPortal()">Enable Private LAN Access</button><button type="button" onclick="disableLanWebPortal()">Disable Private LAN Access</button></div>
+          <div id="remoteLanAccessGuidance" class="empty mt">Local-only mode is the safest and easiest default.</div>
         </div>
         <div class="field-grid mt">
           <label>Administrator username<input id="remoteAccessUsername" value="admin" autocomplete="username"></label>
@@ -19188,8 +19207,11 @@ function renderWebPortalUrls(urls=WEB_PORTAL_URLS){const resolved=urls&&urls.len
 function openWebPortal(){const url=(WEB_PORTAL_URLS&&WEB_PORTAL_URLS[0])||location.origin;window.open(url,"_blank","noopener");setText("webPortalStatus","Opened "+url);playUiSound("click");}
 async function copyWebPortalUrl(){const text=portalUrlText(WEB_PORTAL_URLS);try{await navigator.clipboard.writeText(text);setText("webPortalStatus","Web portal URL copied.");showToast("Web Portal URL copied","success");playUiSound("success");}catch(error){setText("webPortalStatus",betterError(error));playUiSound("warning");}}
 async function applyRemoteRoleUi(){if(location.protocol!=="https:")return;try{const session=await getJson("/api/auth/session");const allowed={viewer:new Set(["dashboard","players","live-map","progression","landsraad","item-database"]),operator:new Set(["dashboard","players","live-map","progression","landsraad","item-database","server","scheduler"]),owner:null}[session.role]||new Set(["dashboard"]);document.body.dataset.remoteRole=session.role||"viewer";const localViews=new Set(["web-portal","settings","env","logs","diagnostics","management","operations","database-explorer"]);tabs.forEach(tab=>{const localOnly=localViews.has(tab.dataset.view);tab.style.display=(localOnly||(allowed&&!allowed.has(tab.dataset.view)))?"none":"";});const requested=location.hash.slice(1);if(localViews.has(requested)||(allowed&&!allowed.has(requested)))setView("dashboard");setText("remoteAccessConfigured","Authenticated as "+session.role);setText("remoteAccessStatus",session.role==="viewer"?"Remote Viewer mode is read-only.":session.role==="operator"?"Remote Operator mode allows limited server controls.":"Remote Owner mode; sensitive writes require password confirmation every five minutes.");}catch(error){setText("remoteAccessStatus",betterError(error));}}
-async function refreshRemoteAccessStatus(){if(location.protocol==="https:"){REMOTE_PORTAL_URLS=[location.origin];setText("remoteAccessUrls",location.origin);setText("remoteAccessFingerprint","View on the server computer");const logout=document.getElementById("remoteAccessLogout");if(logout)logout.style.display="";await applyRemoteRoleUi();return;}try{const data=await getJson("/api/remote-access/status");REMOTE_PORTAL_URLS=data.urls||[];setText("remoteAccessConfigured",data.configured?("Password configured · "+data.role+(data.totpEnabled?" · 2FA on":" · 2FA off")):"Password setup required");setText("remoteAccessUrls",portalUrlText(REMOTE_PORTAL_URLS));setText("remoteAccessFingerprint",data.certificateFingerprint||"Certificate is starting");const role=document.getElementById("remoteAccessRole");if(role)role.value=data.role||"viewer";}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function refreshRemoteAccessStatus(){if(location.protocol==="https:"){REMOTE_PORTAL_URLS=[location.origin];setText("remoteAccessUrls",location.origin);setText("remoteAccessFingerprint","View on the server computer");const logout=document.getElementById("remoteAccessLogout");if(logout)logout.style.display="";await applyRemoteRoleUi();return;}try{const data=await getJson("/api/remote-access/status");REMOTE_PORTAL_URLS=data.urls||[];setText("remoteAccessConfigured",data.configured?("Password configured · "+data.role+(data.totpEnabled?" · 2FA on":" · 2FA off")):"Password setup required");setText("remoteLanAccessStatus",data.lanWebPortalEnabled?"Enabled — Private networks only":"Local only — no firewall permission needed");setText("remoteLanAccessGuidance",data.firewallGuidance||(data.lanWebPortalEnabled?"Allow Private networks only if Windows asks.":"Local-only mode is active."));setText("remoteAccessUrls",portalUrlText(REMOTE_PORTAL_URLS));setText("remoteAccessFingerprint",data.certificateFingerprint||"Certificate is starting");const role=document.getElementById("remoteAccessRole");if(role)role.value=data.role||"viewer";}catch(error){setText("remoteAccessStatus",betterError(error));}}
 async function setRemoteAccessPassword(){const username=document.getElementById("remoteAccessUsername")?.value||"admin";const role=document.getElementById("remoteAccessRole")?.value||"viewer";const password=document.getElementById("remoteAccessPassword")?.value||"";const confirm=document.getElementById("remoteAccessPasswordConfirm")?.value||"";if(password!==confirm){setText("remoteAccessStatus","Passwords do not match.");return;}try{await getJson("/api/remote-access/password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password,role})});document.getElementById("remoteAccessPassword").value="";document.getElementById("remoteAccessPasswordConfirm").value="";setText("remoteAccessStatus","Remote credentials and "+role+" permission saved. Existing remote sessions were signed out.");showToast("Remote access security saved","success");await refreshRemoteAccessStatus();}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function setLanWebPortal(enabled){try{if(enabled){const confirmed=await appConfirm("Enable Private LAN Access","Allow phones and other computers on your private network to open the authenticated HTTPS portal?\n\nWindows may show a firewall prompt. Select Private networks only and leave Public networks unchecked.","Enable LAN Access","Cancel");if(!confirmed)return;}const data=await getJson("/api/remote-access/lan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled})});REMOTE_PORTAL_URLS=data.urls||REMOTE_PORTAL_URLS;setText("remoteLanAccessStatus",enabled?"Enabled — Private networks only":"Local only — no firewall permission needed");setText("remoteLanAccessGuidance",data.firewallGuidance||"");setText("remoteAccessUrls",portalUrlText(REMOTE_PORTAL_URLS));setText("remoteAccessStatus",enabled?"LAN portal enabled. If Windows asks, allow Private networks only.":"Private LAN access disabled. Internet Access is unchanged.");showToast(enabled?"Private LAN access enabled":"Private LAN access disabled","success");}catch(error){setText("remoteAccessStatus",betterError(error));showToast(betterError(error),"error");}}
+function enableLanWebPortal(){return setLanWebPortal(true);}
+function disableLanWebPortal(){return setLanWebPortal(false);}
 async function beginRemoteTotp(){try{const data=await getJson("/api/remote-access/totp/begin",{method:"POST"});setText("remoteTotpSecret","Secret: "+data.secret+"\n\nAuthenticator URI: "+data.uri);setText("remoteAccessStatus","Add the secret to your authenticator app, then enter its six-digit code.");}catch(error){setText("remoteAccessStatus",betterError(error));}}
 async function confirmRemoteTotp(){try{const code=document.getElementById("remoteTotpCode")?.value||"";await getJson("/api/remote-access/totp/confirm",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code})});document.getElementById("remoteTotpCode").value="";setText("remoteTotpSecret","2FA enabled. The setup secret is now hidden.");setText("remoteAccessStatus","Authenticator-app protection enabled. Existing remote sessions were signed out.");await refreshRemoteAccessStatus();}catch(error){setText("remoteAccessStatus",betterError(error));}}
 async function disableRemoteTotp(){const password=document.getElementById("remoteAccessPassword")?.value||"";try{if(!password)throw new Error("Enter the administrator password in New password before disabling 2FA.");await getJson("/api/remote-access/totp/disable",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})});setText("remoteTotpSecret","2FA disabled.");await refreshRemoteAccessStatus();}catch(error){setText("remoteAccessStatus",betterError(error));}}
@@ -20388,7 +20410,33 @@ async function route(req, res) {
       await json(res, { ok: false, error: "Remote access setup is available only on the local Suite." }, 403);
       return;
     }
-    await json(res, { ok: true, ...remoteAccess.publicConfig(), urls: remotePortalUrls(), certificateFingerprint: remoteAccess.certificateFingerprint() });
+    const configValue = loadConfig();
+    await json(res, { ok: true, ...remoteAccess.publicConfig(), ...httpsPortalRuntimeStatus(configValue), urls: remotePortalUrls(configValue), certificateFingerprint: remoteAccess.certificateFingerprint() });
+    return;
+  }
+  if (url.pathname === "/api/remote-access/lan" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "LAN portal setup is available only on the local Suite." }, 403);
+      return;
+    }
+    const previous = loadConfig();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      if (body.enabled !== true && body.enabled !== false) throw new Error("Choose whether LAN Web Portal access should be enabled.");
+      if (body.enabled && !remoteAccess.configured()) throw new Error("Set the Secure Remote Access password before enabling LAN Web Portal access.");
+      const next = saveConfig({ ...previous, lanWebPortalEnabled: body.enabled });
+      try {
+        await rebindHttpsPortal(next);
+      } catch (error) {
+        saveConfig(previous);
+        await rebindHttpsPortal(previous).catch(() => {});
+        throw error;
+      }
+      appendAdminAudit("lan_web_portal_changed", { enabled: body.enabled, listenHost: httpsListenHost });
+      await json(res, { ok: true, ...httpsPortalRuntimeStatus(next), urls: remotePortalUrls(next) });
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/remote-access/password" && req.method === "POST") {
@@ -21756,16 +21804,76 @@ process.once("exit", () => internetTunnel.stop());
 setInterval(() => internetTunnel.enforceIdleTimeout(), 60000).unref();
 
 let httpsServer = null;
+let httpsListenHost = "";
+
+function listenHttpsPortal(host) {
+  return new Promise((resolve, reject) => {
+    if (!httpsServer) return reject(new Error("The HTTPS portal server is not initialized."));
+    const onError = (error) => {
+      httpsServer.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      httpsServer.off("error", onError);
+      httpsListenHost = host;
+      resolve(host);
+    };
+    httpsServer.once("error", onError);
+    httpsServer.once("listening", onListening);
+    httpsServer.listen(HTTPS_PORT, host);
+  });
+}
+
+function closeHttpsPortal() {
+  return new Promise((resolve, reject) => {
+    if (!httpsServer?.listening) {
+      httpsListenHost = "";
+      resolve();
+      return;
+    }
+    httpsServer.close((error) => {
+      if (error) reject(error);
+      else {
+        httpsListenHost = "";
+        resolve();
+      }
+    });
+  });
+}
+
+async function rebindHttpsPortal(configValue = loadConfig()) {
+  const nextHost = desiredHttpsListenHost(configValue);
+  if (httpsServer?.listening && httpsListenHost === nextHost) return nextHost;
+  await closeHttpsPortal();
+  return listenHttpsPortal(nextHost);
+}
+
+function httpsPortalRuntimeStatus(configValue = loadConfig()) {
+  const enabled = lanWebPortalEnabled(configValue);
+  const desiredHost = desiredHttpsListenHost(configValue);
+  const listenHost = httpsListenHost || desiredHost;
+  return {
+    lanWebPortalEnabled: enabled,
+    listenHost,
+    localOnly: listenHost === LOCAL_HOST,
+    restartRequired: Boolean(httpsServer?.listening && listenHost !== desiredHost),
+    firewallGuidance: enabled
+      ? "If Windows asks, allow AlphaNine Dune Suite on Private networks only. Leave Public networks unchecked."
+      : "No Windows Firewall permission is needed for local-only portal access."
+  };
+}
+
 try {
   const tls = remoteAccess.ensureCertificate(localIps());
   httpsServer = https.createServer({ key: tls.key, cert: tls.cert, minVersion: "TLSv1.2" }, (req, res) => {
     handleRequest(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
   });
   httpsServer.on("error", (error) => console.error(`AlphaNine HTTPS portal failed: ${error.message}`));
-  httpsServer.listen(HTTPS_PORT, HTTPS_HOST, () => {
+  listenHttpsPortal(desiredHttpsListenHost()).then(() => {
     console.log(`AlphaNine Dune Suite secure remote portal: ${remotePortalUrls().join(" ")}`);
+    console.log(`LAN portal access: ${lanWebPortalEnabled() ? "enabled (Private network firewall permission may be requested)" : "disabled; loopback only"}`);
     console.log(`Remote administrator password: ${remoteAccess.configured() ? "configured" : "setup required in Web Portal > Secure Remote Access"}`);
-  });
+  }).catch((error) => console.error(`AlphaNine HTTPS portal could not start: ${error.message}`));
 } catch (error) {
   console.error(`AlphaNine HTTPS portal could not start: ${error.message}`);
 }

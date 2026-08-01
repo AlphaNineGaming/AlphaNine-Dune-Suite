@@ -27,12 +27,14 @@ const packagedLandsraadTestPath = path.join(extracted, "scripts", "test-landsraa
 const packagedServerUpdateTestPath = path.join(extracted, "scripts", "test-server-update-monitor.js");
 const packagedServerHealthTestPath = path.join(extracted, "scripts", "test-server-health.js");
 const packagedStorageDepositTestPath = path.join(extracted, "scripts", "test-storage-deposits.js");
+const packagedUpdateIntegrityTestPath = path.join(extracted, "scripts", "test-update-integrity.js");
 const packagedReleaseNotesPath = path.join(extracted, `RELEASE_NOTES_${rootPackage.version}.md`);
 assert(fs.existsSync(packagedCleanerTestPath), "Packaged app is missing the Server Cleaner regression test.");
 assert(fs.existsSync(packagedLandsraadTestPath), "Packaged app is missing the Landsraad exact-five regression test.");
 assert(fs.existsSync(packagedServerUpdateTestPath), "Packaged app is missing the Server Updater regression test.");
 assert(fs.existsSync(packagedServerHealthTestPath), "Packaged app is missing the Server Health regression test.");
 assert(fs.existsSync(packagedStorageDepositTestPath), "Packaged app is missing the storage-deposit reliability regression test.");
+assert(fs.existsSync(packagedUpdateIntegrityTestPath), "Packaged app is missing the self-update integrity regression test.");
 assert(fs.existsSync(packagedReleaseNotesPath), `Packaged app is missing release notes for ${rootPackage.version}.`);
 assert(
   packagedServerSource.includes('const actorId = requireSqlBigint(payload.actorId, "actor_id", 0n)'),
@@ -95,6 +97,16 @@ assert.equal(
   packagedStorageDepositTest.status,
   0,
   `Packaged storage-deposit regression failed.\n${packagedStorageDepositTest.stdout || ""}\n${packagedStorageDepositTest.stderr || ""}`
+);
+const packagedUpdateIntegrityTest = spawnSync(process.execPath, [packagedUpdateIntegrityTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedUpdateIntegrityTest.status,
+  0,
+  `Packaged self-update integrity regression failed.\n${packagedUpdateIntegrityTest.stdout || ""}\n${packagedUpdateIntegrityTest.stderr || ""}`
 );
 assert(
   packagedServerSource.includes("detectedTiers.length === LANDSRAAD_TIER_COUNT"),

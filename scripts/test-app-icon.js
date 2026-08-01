@@ -13,6 +13,13 @@ const selectedIconSha256 = "12e014503ff98d034a8e9945eceb28c43487e02ae4e29f88c823
 assert.equal(packageJson.build?.win?.icon, iconRelative, "Windows executable and installer must use the selected Suite icon.");
 assert.equal(packageJson.build?.win?.signAndEditExecutable, true, "Executable resource editing must remain enabled so Windows receives the icon.");
 assert.equal(packageJson.build?.win?.signExecutable, false, "Unsigned local builds should still edit Windows icon resources.");
+assert.match(packageJson.scripts?.["build:release:win"] || "", /--config\.win\.signExecutable=true/);
+assert.match(packageJson.scripts?.["build:release:win"] || "", /release-tools\/verify-windows-signatures\.js/);
+assert.doesNotMatch(
+  packageJson.scripts?.["build:release:win"] || "",
+  /electron-builder[\s\S]*ensure-admin-manifest\.js/,
+  "Release builds must not edit the application executable after Authenticode signing."
+);
 assert.ok(packageJson.build?.files?.includes("assets/**"), "The selected icon must be bundled into every install and update package.");
 assert.ok(fs.existsSync(iconPath), `Suite icon is missing: ${iconPath}`);
 

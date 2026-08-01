@@ -28,6 +28,12 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### Unreleased — planned 1.0.83
+
+- Self-updates now require the SHA-256 digest and exact file size published by GitHub before the Install Update button is enabled.
+- Downloaded installers are verified locally before launch; mismatched, incomplete, unsigned, or untrusted-publisher files are deleted and never executed.
+- Added a dedicated release build that refuses to run without a configured trusted code-signing identity and verifies both Authenticode signatures after packaging.
+
 ### 1.0.82
 
 - Storage deposits now choose the lowest valid unused positions instead of extending beyond a finite container's slot range when holes exist.
@@ -183,6 +189,17 @@ Imported blueprint items require the player to relog before the inventory view r
 5. Run as Administrator if you need VM or Hyper-V controls.
 
 The installer includes the suite app and receiver files. Settings are stored in the Windows app data folder so they survive updates.
+
+### Windows release signing
+
+`npm run build:win` is for local unsigned testing only. Public installers must be produced with `npm run build:release:win`.
+
+The release command requires either:
+
+- `CSC_LINK` and `CSC_KEY_PASSWORD` for a trusted PFX certificate, or
+- `CSC_NAME` for a trusted code-signing certificate installed in the Windows certificate store.
+
+The release build fails before packaging when no signing identity is configured. After packaging, it independently requires valid Authenticode signatures on both the installed application executable and the NSIS installer. Self-signed certificates are not suitable for public releases.
 
 ## Mobile App
 

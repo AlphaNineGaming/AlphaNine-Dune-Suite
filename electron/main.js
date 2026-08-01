@@ -6,6 +6,8 @@ const http = require("http");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { updateVerificationMetadata, verifyUpdateFile } = require("../lib/update-integrity");
+const { verifyTrustedAuthenticode } = require("../lib/windows-authenticode");
 
 const APP_PORT = Number(process.env.PORT || 8810);
 const RECEIVER_DEFAULT_HOST = "127.0.0.1";
@@ -720,6 +722,8 @@ ipcMain.handle("open-path", async (_event, targetPath) => {
 });
 
 ipcMain.handle("self-update-install", async (_event, update) => {
+  let destination = "";
+  let verified = false;
   try {
     if (!app.isPackaged) {
       throw new Error("Self update is only available in the installed desktop app.");
@@ -732,12 +736,18 @@ ipcMain.handle("self-update-install", async (_event, update) => {
     if (!/setup.*\.exe$/i.test(fileName) && !/\.exe$/i.test(fileName)) {
       throw new Error("The selected update asset is not a Windows installer.");
     }
-    const destination = userPath("updates", fileName);
+    const verification = updateVerificationMetadata({ digest: update?.digest, size: update?.size });
+    destination = userPath("updates", fileName);
     appendLog("desktop", `Downloading self update ${update?.version || ""} from ${downloadUrl}`);
     sendUpdateProgress({ state: "starting", downloaded: 0, total: 0 });
     const downloaded = await downloadUpdateFile(downloadUrl, destination);
-    appendLog("desktop", `Self update downloaded to ${downloaded.path} (${downloaded.downloaded} bytes). Launching installer.`);
-    sendUpdateProgress({ state: "launching", downloaded: downloaded.downloaded, total: downloaded.total, path: downloaded.path });
+    sendUpdateProgress({ state: "verifying", downloaded: downloaded.downloaded, total: downloaded.total, path: downloaded.path });
+    const result = await verifyUpdateFile(downloaded.path, verification);
+    sendUpdateProgress({ state: "verifying-signature", downloaded: result.size, total: verification.size, path: downloaded.path });
+    const signature = verifyTrustedAuthenticode(downloaded.path);
+    verified = true;
+    appendLog("desktop", `Self update verified: ${result.digest}, ${result.size} bytes, publisher ${signature.Subject} (${signature.Thumbprint}). Launching installer.`);
+    sendUpdateProgress({ state: "launching", downloaded: result.size, total: verification.size, path: downloaded.path, digest: result.digest, publisher: signature.Subject });
     const child = spawn(downloaded.path, [], {
       detached: true,
       stdio: "ignore",
@@ -750,6 +760,9 @@ ipcMain.handle("self-update-install", async (_event, update) => {
     }, 1200);
     return { ok: true, installerPath: downloaded.path, message: "Installer launched. AlphaNine Dune Suite will close so the update can continue." };
   } catch (error) {
+    if (destination && !verified) {
+      try { fs.rmSync(destination, { force: true }); } catch {}
+    }
     appendLog("desktop", `Self update failed: ${error.stack || error.message}`);
     sendUpdateProgress({ state: "failed", error: error.message });
     return { ok: false, error: error.message };

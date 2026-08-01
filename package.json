@@ -43,7 +43,7 @@
     "test:remote-access": "node scripts/test-remote-access.js",
     "test:internet-tunnel": "node scripts/test-internet-tunnel.js",
     "build:win": "npm run test:app-icon && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=false && node scripts/ensure-admin-manifest.js",
-    "build:release:win": "npm run test:update-integrity && npm run build:win && npm run test:packaged"
+    "build:release:win": "node scripts/require-code-signing.js && npm run test:update-integrity && npm run test:app-icon && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=true && node release-tools/verify-windows-signatures.js"
   },
   "dependencies": {
     "express": "^5.2.1",

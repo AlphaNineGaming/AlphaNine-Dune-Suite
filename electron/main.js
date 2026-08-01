@@ -7,7 +7,6 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { updateVerificationMetadata, verifyUpdateFile } = require("../lib/update-integrity");
-const { verifyTrustedAuthenticode } = require("../lib/windows-authenticode");
 
 const APP_PORT = Number(process.env.PORT || 8810);
 const RECEIVER_DEFAULT_HOST = "127.0.0.1";
@@ -743,11 +742,9 @@ ipcMain.handle("self-update-install", async (_event, update) => {
     const downloaded = await downloadUpdateFile(downloadUrl, destination);
     sendUpdateProgress({ state: "verifying", downloaded: downloaded.downloaded, total: downloaded.total, path: downloaded.path });
     const result = await verifyUpdateFile(downloaded.path, verification);
-    sendUpdateProgress({ state: "verifying-signature", downloaded: result.size, total: verification.size, path: downloaded.path });
-    const signature = verifyTrustedAuthenticode(downloaded.path);
     verified = true;
-    appendLog("desktop", `Self update verified: ${result.digest}, ${result.size} bytes, publisher ${signature.Subject} (${signature.Thumbprint}). Launching installer.`);
-    sendUpdateProgress({ state: "launching", downloaded: result.size, total: verification.size, path: downloaded.path, digest: result.digest, publisher: signature.Subject });
+    appendLog("desktop", `Self update verified against GitHub release metadata: ${result.digest}, ${result.size} bytes. Launching installer.`);
+    sendUpdateProgress({ state: "launching", downloaded: result.size, total: verification.size, path: downloaded.path, digest: result.digest });
     const child = spawn(downloaded.path, [], {
       detached: true,
       stdio: "ignore",

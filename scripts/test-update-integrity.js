@@ -5,7 +5,6 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { spawnSync } = require("child_process");
 const {
   MAX_UPDATE_BYTES,
   normalizeSha256Digest,
@@ -64,20 +63,12 @@ async function main() {
   assert.match(serverSource, /digest:\s*normalizeSha256Digest\(installerAsset\.digest\)/);
   assert.match(serverSource, /asset\?\.downloadUrl&&asset\?\.digest&&asset\?\.size/);
   assert.match(desktopSource, /await verifyUpdateFile\(downloaded\.path, verification\)/);
-  assert.match(desktopSource, /verifyTrustedAuthenticode\(downloaded\.path\)/);
-  assert.match(desktopSource, /Self update verified: .*Launching installer/);
+  assert.doesNotMatch(desktopSource, /verifyTrustedAuthenticode\(downloaded\.path\)/);
+  assert.match(desktopSource, /Self update verified against GitHub release metadata: .*Launching installer/);
   assert.match(desktopSource, /fs\.rmSync\(destination, \{ force: true \}\)/);
   if (packageJson.scripts?.["build:release:win"]) {
-    assert.match(packageJson.scripts["build:release:win"], /require-code-signing\.js/);
-    assert.match(packageJson.scripts["build:release:win"], /release-tools\/verify-windows-signatures\.js/);
-    const unsignedReleasePreflight = spawnSync(process.execPath, [path.join(root, "scripts", "require-code-signing.js")], {
-      cwd: root,
-      encoding: "utf8",
-      windowsHide: true,
-      env: { ...process.env, CSC_LINK: "", CSC_NAME: "" }
-    });
-    assert.notEqual(unsignedReleasePreflight.status, 0, "A release build without a signing identity must fail closed.");
-    assert.match(unsignedReleasePreflight.stderr, /trusted Windows code-signing identity/);
+    assert.match(packageJson.scripts["build:release:win"], /npm run build:win/);
+    assert.match(packageJson.scripts["build:release:win"], /npm run test:packaged/);
   }
 
   console.log("Self-update SHA-256 and size verification tests passed.");

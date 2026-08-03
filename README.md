@@ -28,12 +28,15 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
-### Unreleased — planned 1.0.83
+### 1.0.84
 
 - Self-updates now require the SHA-256 digest and exact file size published by GitHub before the Install Update button is enabled.
 - Downloaded installers are verified locally before launch; mismatched, incomplete, unsigned, or untrusted-publisher files are deleted and never executed.
 - Added a dedicated release build that refuses to run without a configured trusted code-signing identity and verifies both Authenticode signatures after packaging.
 - The HTTPS Web Portal is local-only by default; phone/LAN access is an explicit, password-gated opt-in with Private-network firewall guidance.
+- Added 117 optional, non-teleportable Hagga Basin resource spawn markers for Small Spice and Flour Sand.
+- Added ten experimental procedural resource-area overlays generated locally from the installed `Tools.pak` and cached outside the packaged application.
+- Fixed first-click activation, saved resource filters, visible generation errors, cache reuse, opacity, and packaged-runtime extraction.
 
 ### 1.0.82
 

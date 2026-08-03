@@ -3,7 +3,7 @@
 ## Distribution notice
 
 - This Windows installer is not Authenticode-signed. Windows may display an unknown-publisher or reputation warning.
-- Install it manually only after verifying the SHA-256 published with the GitHub release. The Suite's verified self-updater will not automatically launch an unsigned installer.
+- The Suite verifies the GitHub-published SHA-256 digest and exact file size before launching this unsigned installer.
 
 ## Known Resource Spawn Locations
 
@@ -24,24 +24,21 @@
 - The feature is experimental and disabled by default. It does not claim exact nodes, guaranteed spawns, live activity, depletion, or quantities.
 - Icehunter was consulted only as independent orientation evidence. No Icehunter or Red-Blink code, markers, CDN files, map tiles, icons, or heatmap images were incorporated.
 
-## Verified and signed self-updates
+## Verified self-updates
 
-This release hardens the Suite updater after Windows Defender blocked the unsigned 1.0.82 installer.
+This release keeps the unsigned NSIS distribution flow used by earlier Suite builds while retaining release-asset integrity checks.
 
 ### Update verification
 
 - The Install Update button is enabled only when GitHub provides the installer’s SHA-256 digest and exact file size.
 - The desktop app verifies both values after download and before launch.
-- Windows must report a valid trusted Authenticode publisher signature for the installer.
-- Incomplete, altered, unsigned, or untrusted-publisher downloads are deleted and never executed.
-- The update screen shows separate downloading, SHA-256 verification, publisher verification, and launch states.
+- Incomplete, altered, or mismatched downloads are deleted and never executed.
+- The update screen shows separate downloading, SHA-256 verification, and launch states.
 
-### Release protection
+### Release flow
 
-- Local unsigned builds remain available for developer testing only.
-- The new Windows release command fails before packaging unless a trusted code-signing identity is configured.
-- After packaging, the release command independently verifies valid Authenticode signatures on both the installed application executable and the NSIS installer.
-- Public release documentation now prohibits publishing artifacts produced by the unsigned local-build command.
+- The Windows release command runs update-integrity, icon, packaging, and packaged-runtime checks before publication.
+- Authenticode publisher verification is not required by this release flow.
 
 ### Easier Windows Firewall experience
 
@@ -50,5 +47,3 @@ This release hardens the Suite updater after Windows Defender blocked the unsign
 - Enabling or disabling LAN access rebinds the HTTPS listener immediately without restarting the Suite.
 - The confirmation and status text instruct users to allow **Private networks only** and leave Public networks unchecked if Windows asks.
 - Disabling Private LAN Access immediately removes the LAN listener while preserving local and outbound Cloudflare Tunnel access.
-
-Signing a new file does not guarantee immediate SmartScreen reputation, but it establishes a consistent verified publisher identity so reputation can carry across future releases.

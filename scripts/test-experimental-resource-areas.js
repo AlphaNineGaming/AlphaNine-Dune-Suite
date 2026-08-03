@@ -140,6 +140,7 @@ if (packageJson.build) {
 assert.doesNotMatch(JSON.stringify(ExperimentalResourceAreas.RESOURCES), /stone|fiber|fuel|scrap|rogue|t6resource/i);
 const resourceModuleSource = fs.readFileSync(path.join(root, "lib", "experimental-resource-areas.js"), "utf8");
 assert.doesNotMatch(resourceModuleSource, /https?:\/\/|Red-Blink/i, "Resource areas must not depend on third-party URLs or Red-Blink.");
+assert.doesNotMatch(resourceModuleSource, /Reinstall AlphaNine Dune Suite 1\.0\.83/, "Resource-area recovery guidance must not name an obsolete Suite version.");
 assert.doesNotMatch(resourceModuleSource, /catch\s*\([^)]*\)\s*\{\s*\}/, "Resource-area backend errors must not be swallowed by empty catch blocks.");
 assert.match(resourceModuleSource, /app\.asar\.unpacked/, "The packaged generator must resolve its writable/executable helper outside app.asar.");
 assert.match(serverSource, /path\.join\(DATA_DIR,\s*"experimental-resource-areas"\)/, "Generated overlays must use the writable Suite data directory.");

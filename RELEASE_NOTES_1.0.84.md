@@ -24,6 +24,16 @@
 - The feature is experimental and disabled by default. It does not claim exact nodes, guaranteed spawns, live activity, depletion, or quantities.
 - Icehunter was consulted only as independent orientation evidence. No Icehunter or Red-Blink code, markers, CDN files, map tiles, icons, or heatmap images were incorporated.
 
+### How to use Experimental Resource Areas
+
+1. Open **Live Map** and select **Hagga Basin**.
+2. Enable **Experimental Resource Areas**. On first activation, all ten resource filters are selected automatically.
+3. Wait for **Preparing resource areas…** to change to **Resource areas ready.** The first generation can take time because the Suite reads the locally installed `Tools.pak` and creates a writable local cache.
+4. Use the individual resource filters and the opacity control. Turning the master toggle off hides the overlays without erasing those selections.
+5. If `Tools.pak` is not detected, select **Select Game Folder** and choose the Dune Awakening installation folder containing `DuneSandbox\Content\Paks\Tools.pak`, then select **Retry**.
+
+The overlays require the locally installed game files on the Suite computer. They remain disabled by default and represent heatmap intensity—not exact nodes, guaranteed spawns, active resources, quantities, or depletion state.
+
 ## Verified self-updates
 
 This release keeps the unsigned NSIS distribution flow used by earlier Suite builds while retaining release-asset integrity checks.

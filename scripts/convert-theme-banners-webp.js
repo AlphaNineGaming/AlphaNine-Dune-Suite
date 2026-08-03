@@ -47,7 +47,7 @@ async function main() {
         img.src = "data:image/png;base64,${pngBase64}";
       })
     `);
-    const base64 = String(result.dataUrl || "").replace(/^data:image\\/webp;base64,/, "");
+    const base64 = String(result.dataUrl || "").replace(/^data:image\/webp;base64,/, "");
     fs.writeFileSync(webpPath, Buffer.from(base64, "base64"));
     return {
       name,

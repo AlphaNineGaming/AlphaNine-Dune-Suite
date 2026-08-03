@@ -105,7 +105,13 @@ function testInlineUiSyntax() {
   const script = source.slice(start + "<script>".length, end)
     .replace("${JSON.stringify(portalUrls)}", "[]")
     .replace("${JSON.stringify(HYDRATION_TOOLTIP)}", JSON.stringify("Hydration"))
-    .replaceAll("${APP_VERSION}", "1.0.55");
+    .replaceAll("${HTTPS_PORT}", "443")
+    .replaceAll("${SERVER_UPDATE_TIMEOUTS.uiPollMs}", "30000")
+    .replaceAll("${SERVER_UPDATE_TIMEOUTS.uiStartMs}", "30000")
+    .replaceAll("${SERVER_UPDATE_TIMEOUTS.uiCheckMs}", "120000")
+    .replaceAll("${APP_VERSION}", "1.0.83")
+    .replace("${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)}", "{}")
+    .replaceAll("${SERVER_MANAGEMENT_UI_TIMEOUTS.start}", "960000");
   assert.doesNotThrow(() => new Function(script));
   assert.match(script, /function openBlueprints\(/);
   assert.match(script, /function importBlueprintFiles\(/);

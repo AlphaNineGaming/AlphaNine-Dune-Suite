@@ -7,6 +7,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const Coordinates = require("./assets/coordinate-system");
+const ExperimentalResourceAreas = require("./lib/experimental-resource-areas");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError } = require("./lib/operations");
@@ -146,6 +147,9 @@ const UI_OVERRIDE_CSS_PATH = path.join(DATA_DIR, "ui-overrides.css");
 const BUNDLED_DATA_DIR = packagedAssetPath("data");
 const BUNDLED_UI_OVERRIDE_CSS_PATH = path.join(BUNDLED_DATA_DIR, "ui-overrides.css");
 const DUNE_ITEMS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-items-catalog.json");
+const DUNE_RESOURCE_SPAWN_LOCATIONS_PATH = path.join(BUNDLED_DATA_DIR, "dune-resource-spawn-locations.json");
+const EXPERIMENTAL_RESOURCE_AREA_CACHE_DIR = process.env.ALPHANINE_RESOURCE_AREA_CACHE || path.join(DATA_DIR, "experimental-resource-areas");
+const EXPERIMENTAL_RESOURCE_AREA_SETTINGS_PATH = path.join(DATA_DIR, "experimental-resource-areas.json");
 const DUNE_SKILLS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-skills-catalog.json");
 const MANAGER_ITEM_CATALOG_PATH = path.join(MANAGER_DIR, "dune-item-catalog.json");
 const DUNE_ITEMS_CACHE_PATH = path.join(DATA_DIR, "dune-items-cache.json");
@@ -11158,6 +11162,110 @@ function liveMapCoordinateDebug(rawRows, normalizedRows) {
   };
 }
 
+let liveMapResourceDatasetCache = null;
+function loadKnownResourceSpawnLocations() {
+  if (liveMapResourceDatasetCache) return liveMapResourceDatasetCache;
+  const payload = JSON.parse(fs.readFileSync(DUNE_RESOURCE_SPAWN_LOCATIONS_PATH, "utf8"));
+  const map = String(payload.map || "");
+  const bounds = Coordinates.mapConfig(map);
+  if (map !== "HaggaBasin" || !Array.isArray(payload.locations)) throw new Error("Known resource spawn dataset must contain Hagga Basin locations.");
+  const counts = { smallSpice: 0, flourSand: 0, total: payload.locations.length };
+  const rows = payload.locations.map((entry, index) => {
+    const keys = Object.keys(entry).sort().join(",");
+    if (keys !== "name,x,y,z") throw new Error(`Known resource spawn row ${index + 1} contains unsupported packaged fields.`);
+    const name = String(entry.name || "");
+    const resourceType = name === "Small Spice" ? "small-spice" : name === "Flour Sand" ? "flour-sand" : "";
+    const x = Number(entry.x);
+    const y = Number(entry.y);
+    const z = Number(entry.z);
+    if (!resourceType || ![x, y, z].every(Number.isFinite)) throw new Error(`Known resource spawn row ${index + 1} is invalid.`);
+    if (!Coordinates.withinBounds({ x, y }, bounds)) throw new Error(`Known resource spawn row ${index + 1} is outside Hagga Basin bounds.`);
+    if (resourceType === "small-spice") counts.smallSpice += 1;
+    else counts.flourSand += 1;
+    return {
+      id: `known-resource-${index + 1}`,
+      type: "resource",
+      resourceType,
+      name,
+      map,
+      x,
+      y,
+      z,
+      status: "Possible spawn location; current activity is not proven.",
+      staticSpawnLocation: true
+    };
+  });
+  if (counts.total !== 117 || counts.smallSpice !== 87 || counts.flourSand !== 30) throw new Error(`Known resource spawn dataset count mismatch: expected 87 Small Spice and 30 Flour Sand, received ${counts.smallSpice} and ${counts.flourSand}.`);
+  liveMapResourceDatasetCache = { rows, counts, provenance: payload.provenance || {}, map };
+  return liveMapResourceDatasetCache;
+}
+
+let experimentalResourceAreaPaksDirLoaded = false;
+let experimentalResourceAreaPaksDirOverride = "";
+
+function configuredExperimentalResourceAreaPaksDir() {
+  const environmentPath = String(process.env.ALPHANINE_DUNE_PAKS_DIR || "").trim();
+  if (environmentPath) return environmentPath;
+  if (!experimentalResourceAreaPaksDirLoaded) {
+    experimentalResourceAreaPaksDirLoaded = true;
+    try {
+      const saved = JSON.parse(fs.readFileSync(EXPERIMENTAL_RESOURCE_AREA_SETTINGS_PATH, "utf8"));
+      experimentalResourceAreaPaksDirOverride = String(saved?.paksDir || "").trim();
+    } catch (error) {
+      if (error?.code !== "ENOENT") console.warn(`Experimental Resource Areas settings could not be read: ${error.message || error}`);
+    }
+  }
+  return experimentalResourceAreaPaksDirOverride;
+}
+
+function saveExperimentalResourceAreaGameFolder(selectedFolder) {
+  const selected = String(selectedFolder || "").trim();
+  if (!selected) throw new Error("Select the Dune Awakening game folder first.");
+  const paksDir = ExperimentalResourceAreas.findPaksDirectory(selected);
+  fs.mkdirSync(path.dirname(EXPERIMENTAL_RESOURCE_AREA_SETTINGS_PATH), { recursive: true });
+  const temporary = `${EXPERIMENTAL_RESOURCE_AREA_SETTINGS_PATH}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify({ schemaVersion: 1, paksDir }, null, 2)}\n`, "utf8");
+  fs.renameSync(temporary, EXPERIMENTAL_RESOURCE_AREA_SETTINGS_PATH);
+  experimentalResourceAreaPaksDirLoaded = true;
+  experimentalResourceAreaPaksDirOverride = paksDir;
+  return paksDir;
+}
+
+function experimentalResourceAreaOptions() {
+  return {
+    paksDir: configuredExperimentalResourceAreaPaksDir(),
+    buildId: process.env.ALPHANINE_DUNE_BUILD_ID || ""
+  };
+}
+
+function experimentalResourceAreaStatus() {
+  const result = ExperimentalResourceAreas.status(EXPERIMENTAL_RESOURCE_AREA_CACHE_DIR, {
+    ...experimentalResourceAreaOptions()
+  });
+  return {
+    ...result,
+    disabledByDefault: true,
+    semantics: "Procedural distribution data; not exact nodes or guaranteed spawns.",
+    intensityLabel: "Heatmap intensity",
+    overlayUrlTemplate: result.cacheKey ? `/api/live-map/resource-areas/overlay/${result.cacheKey}/source-top-max-y/{resource}.png` : ""
+  };
+}
+
+function generateExperimentalResourceAreas() {
+  ExperimentalResourceAreas.generate({
+    cacheDir: EXPERIMENTAL_RESOURCE_AREA_CACHE_DIR,
+    ...experimentalResourceAreaOptions(),
+    repakExe: process.env.ALPHANINE_REPAK_EXE || "",
+    appDir: __dirname
+  });
+  return experimentalResourceAreaStatus();
+}
+
+function selectExperimentalResourceAreaGameFolder(selectedFolder) {
+  const paksDir = saveExperimentalResourceAreaGameFolder(selectedFolder);
+  return { ...experimentalResourceAreaStatus(), selectedGamePath: path.resolve(selectedFolder), paksDir };
+}
+
 function normalizeLiveMapActorRow(row, type, fallbackName) {
   const x = liveMapNumber(row.x);
   const y = liveMapNumber(row.y);
@@ -11307,7 +11415,7 @@ function liveMapConfigPayload() {
 }
 
 function liveMapDebugFromLayers(layers, diagnostics, db = null, errors = []) {
-  const all = [...(layers.players || []), ...(layers.vehicles || []), ...(layers.bases || [])];
+  const all = [...(layers.players || []), ...(layers.vehicles || []), ...(layers.bases || []), ...(layers.resources || [])];
   const xs = all.map((row) => row.x).filter((value) => value !== null && Number.isFinite(Number(value)));
   const ys = all.map((row) => row.y).filter((value) => value !== null && Number.isFinite(Number(value)));
   const rejectedCoordinateCount = Object.values(diagnostics).reduce((sum, item) => sum + Number(item?.rejectedCoordinateCount || 0), 0);
@@ -11338,7 +11446,8 @@ function liveMapDebugFromLayers(layers, diagnostics, db = null, errors = []) {
     rowCounts: {
       players: layers.players.length,
       vehicles: layers.vehicles.length,
-      bases: layers.bases.length
+      bases: layers.bases.length,
+      resources: (layers.resources || []).length
     },
     rawDbRowCounts: {
       players: diagnostics.players?.rawRowCount || 0,
@@ -11363,6 +11472,7 @@ function liveMapDebugFromLayers(layers, diagnostics, db = null, errors = []) {
 
 function liveMapDemoMarkersPayload() {
   const generatedAt = new Date().toISOString();
+  const resourceDataset = loadKnownResourceSpawnLocations();
   const layers = {
     players: [
       { id: "debug-player-1", type: "player", name: "Debug Player", x: -102400, y: -80600, z: 312, status: "debug", updatedAt: generatedAt, actor_id: "debug-player-1", map: "HaggaBasin", hasPosition: true, source: "debugMarkers=1" }
@@ -11372,24 +11482,27 @@ function liveMapDemoMarkersPayload() {
     ],
     bases: [
       { id: "debug-base-1", type: "base", name: "Debug Base", x: -248000, y: 118000, z: 289, status: "debug", updatedAt: generatedAt, actor_id: "debug-base-1", map: "HaggaBasin", hasPosition: true, source: "debugMarkers=1" }
-    ]
+    ],
+    resources: resourceDataset.rows
   };
   const diagnostics = {
     players: liveMapCoordinateDebug(layers.players, layers.players),
     vehicles: liveMapCoordinateDebug(layers.vehicles, layers.vehicles),
     bases: liveMapCoordinateDebug(layers.bases, layers.bases)
   };
-  const rows = [...layers.players, ...layers.vehicles, ...layers.bases];
+  const rows = [...layers.players, ...layers.vehicles, ...layers.bases, ...layers.resources];
   const debug = liveMapDebugFromLayers(layers, diagnostics, null, []);
   return {
     ok: true,
     generatedAt,
     demo: true,
-    message: "Debug marker mode is enabled by ?debugMarkers=1. These are fake markers for UI rendering validation only.",
+    message: "Debug marker mode adds fake player, vehicle, and base markers for UI validation. Resource markers remain the bundled static known spawn locations.",
     layers,
     rows,
     bounds: { minX: Math.min(...rows.map((row) => row.x)), maxX: Math.max(...rows.map((row) => row.x)), minY: Math.min(...rows.map((row) => row.y)), maxY: Math.max(...rows.map((row) => row.y)) },
-    sources: [{ kind: "debug", table: "debugMarkers=1", status: "fake", rows: rows.length, coordinateRows: rows.length }],
+    resourceCounts: resourceDataset.counts,
+    resourceProvenance: resourceDataset.provenance,
+    sources: [{ kind: "debug", table: "debugMarkers=1", status: "fake", rows: 3, coordinateRows: 3 }, { kind: "resources", table: "bundled known spawn locations", status: "static", rows: resourceDataset.rows.length, coordinateRows: resourceDataset.rows.length, coordinates: "world X/Y/Z; existing Suite conversion" }],
     errors: [],
     debug: { ...debug, dbConnected: false, connectionSource: "debug-markers", resolvedSource: "debug-markers", debugMarkers: true, dbUnavailableMessage: "" },
     ...liveMapConfigPayload()
@@ -11404,19 +11517,23 @@ async function liveMapLayer(kind) {
 }
 
 async function liveMapMarkersPayload() {
+  const resourceDataset = loadKnownResourceSpawnLocations();
   const result = {
     ok: true,
     generatedAt: new Date().toISOString(),
-    layers: { players: [], vehicles: [], bases: [] },
+    layers: { players: [], vehicles: [], bases: [], resources: resourceDataset.rows },
+    resourceCounts: resourceDataset.counts,
+    resourceProvenance: resourceDataset.provenance,
     rows: [],
     sources: [],
     errors: [],
     bounds: null,
     debug: {}
   };
-  const diagnostics = { players: null, vehicles: null, bases: null };
+  const diagnostics = { players: null, vehicles: null, bases: null, resources: liveMapCoordinateDebug(resourceDataset.rows, resourceDataset.rows) };
   const errors = [];
   let db = null;
+  result.sources.push({ kind: "resources", table: "bundled known spawn locations", status: "static", rows: resourceDataset.rows.length, coordinateRows: resourceDataset.rows.length, coordinates: "world X/Y/Z; existing Suite conversion" });
   try {
     const players = await liveMapActorsTransformPlayers();
     result.layers.players = players.rows;
@@ -11450,7 +11567,7 @@ async function liveMapMarkersPayload() {
     result.errors.push(`bases transform query: ${error.message}`);
     result.sources.push({ kind: "bases", table: "dune.buildings + dune.building_instances + dune.actor_fgl_entities + dune.actors", status: "unavailable", rows: 0, coordinateRows: 0, join: "building_instances.owner_entity_id = actor_fgl_entities.entity_id; actors.id = actor_fgl_entities.actor_id", coordinates: "((actors.transform).location).x/y/z", error: error.message });
   }
-  const allPoints = [...result.layers.players, ...result.layers.vehicles, ...result.layers.bases];
+  const allPoints = [...result.layers.players, ...result.layers.vehicles, ...result.layers.bases, ...result.layers.resources];
   if (allPoints.length) {
     const xs = allPoints.map((row) => row.x);
     const ys = allPoints.map((row) => row.y);
@@ -15602,9 +15719,12 @@ function appPage() {
     @keyframes liveTeleportTargetPulse { 0%,100% { transform:scale(.9); opacity:.82; } 50% { transform:scale(1.08); opacity:1; } }
     .live-map-marker.vehicle { color:#8bc8ff; background:#1b6daa; border-color:#b9dcff; transform:rotate(45deg); border-radius:4px; }
     .live-map-marker.base { color:var(--gold-bright); background:var(--gold-bright); border-color:#fff0c7; border-radius:6px; box-shadow:0 0 14px rgba(243,204,140,.65); }
+    .live-map-marker.resource-small-spice { color:#f5b841; background:#8b4b08; border-color:#ffe1a0; border-radius:999px; box-shadow:0 0 15px rgba(245,184,65,.72); }
+    .live-map-marker.resource-flour-sand { color:#d8ecf0; background:#607b80; border-color:#f4ffff; border-radius:3px; transform:rotate(45deg); box-shadow:0 0 15px rgba(216,236,240,.68); }
     .live-map-cluster { width:46px; height:46px; border:2px solid rgba(255,240,199,.82); border-radius:999px; background:rgba(18,100,184,.84); color:var(--text); box-shadow:0 0 28px rgba(139,200,255,.45); display:grid; place-items:center; font-weight:1000; font-size:13px; }
     .live-map-cluster.base { background:rgba(243,204,140,.84); color:#211408; box-shadow:0 0 28px rgba(243,204,140,.42); }
     .live-map-cluster.vehicle { background:rgba(139,200,255,.78); color:#071019; }
+    .live-map-cluster.resource { background:rgba(139,75,8,.9); color:#fff4d4; border-color:#ffe1a0; box-shadow:0 0 28px rgba(245,184,65,.48); }
     .live-map-panel { width:360px; min-width:0; display:grid; gap:var(--panel-gap); }
     .live-map-layer-row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(214,166,69,.1); }
     .live-map-filter-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px; }
@@ -15617,6 +15737,35 @@ function appPage() {
     .live-map-filter-chip.players:has(input:checked) { color:#a9f5b2; border-color:rgba(117,217,130,.48); background:rgba(117,217,130,.12); box-shadow:0 0 16px rgba(117,217,130,.16); }
     .live-map-filter-chip.bases:has(input:checked) { color:var(--gold-bright); border-color:rgba(246,202,135,.52); background:rgba(246,202,135,.13); box-shadow:0 0 16px rgba(246,202,135,.16); }
     .live-map-filter-chip.vehicles:has(input:checked) { color:#b9dcff; border-color:rgba(139,200,255,.48); background:rgba(139,200,255,.12); box-shadow:0 0 16px rgba(139,200,255,.16); }
+    .live-map-filter-chip.resources:has(input:checked), .live-map-filter-chip.small-spice:has(input:checked) { color:#ffe1a0; border-color:rgba(245,184,65,.58); background:rgba(139,75,8,.22); box-shadow:0 0 16px rgba(245,184,65,.18); }
+    .live-map-filter-chip.flour-sand:has(input:checked) { color:#e8fbff; border-color:rgba(216,236,240,.56); background:rgba(96,123,128,.24); box-shadow:0 0 16px rgba(216,236,240,.16); }
+    .live-resource-controls { margin-top:10px; padding:11px; border:1px solid rgba(245,184,65,.24); border-radius:12px; background:rgba(65,38,9,.16); }
+    .live-resource-search { width:100%; margin-top:9px; }
+    .live-resource-actions { display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
+    .live-resource-counts { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:9px; }
+    .live-resource-count { padding:8px; border:1px solid rgba(245,184,65,.18); border-radius:9px; background:rgba(0,0,0,.16); }
+    .live-resource-count span { display:block; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
+    .live-resource-count strong { display:block; margin-top:3px; color:var(--gold-bright); font-size:17px; }
+    .live-resource-note { margin-top:9px; color:var(--muted); font-size:11px; line-height:1.45; }
+    .live-map-filter-chip.experimental:has(input:checked) { color:#d7b7ff; border-color:rgba(166,107,221,.62); background:rgba(92,47,127,.22); box-shadow:0 0 16px rgba(166,107,221,.2); }
+    .live-resource-controls.experimental { border-color:rgba(166,107,221,.3); background:rgba(48,24,69,.2); }
+    .live-experimental-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:9px; }
+    .live-experimental-grid .live-map-filter-chip { justify-content:flex-start; overflow:hidden; }
+    .live-experimental-swatch { width:12px; height:12px; margin-right:7px; border-radius:3px; background:var(--resource-color); box-shadow:0 0 10px var(--resource-color); }
+    .live-experimental-settings { display:grid; grid-template-columns:1fr; gap:9px; margin-top:10px; }
+    .live-experimental-settings label { display:grid; gap:5px; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
+    .live-experimental-opacity { width:100%; accent-color:#a66bdd; }
+    .live-experimental-legend { display:flex; align-items:center; gap:9px; margin-top:10px; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }
+    .live-experimental-legend-gradient { flex:1; height:10px; border:1px solid rgba(255,255,255,.16); border-radius:999px; background:linear-gradient(90deg,transparent,var(--legend-color,#a66bdd)); }
+    .live-experimental-state { padding:8px 9px; border:1px solid rgba(166,107,221,.26); border-radius:9px; background:rgba(0,0,0,.16); }
+    .live-experimental-state.preparing { color:var(--warn); border-color:rgba(255,189,94,.44); }
+    .live-experimental-state.ready { color:var(--good); border-color:rgba(117,217,130,.4); }
+    .live-experimental-state.error { color:var(--bad); border-color:rgba(255,112,95,.5); }
+    .live-experimental-state.empty { color:var(--warn); }
+    .live-experimental-diagnostics { margin-top:9px; color:var(--muted); font-size:10px; }
+    .live-experimental-diagnostics summary { cursor:pointer; font-weight:900; text-transform:uppercase; letter-spacing:.07em; }
+    .live-experimental-diagnostics pre { max-height:220px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-size:10px; line-height:1.4; }
+    .leaflet-image-layer.live-map-resource-area-overlay { pointer-events:none; image-rendering:auto; }
     body.theme-royal #maps,
     body.theme-royal #live-map,
     body.theme-royal .map-explorer,
@@ -17437,6 +17586,36 @@ function appPage() {
               <label class="live-map-filter-chip players"><input id="liveLayerPlayers" type="checkbox" checked onchange="renderLiveMapLayers()"><span class="live-map-filter-icon">●</span><span>Players</span></label>
               <label class="live-map-filter-chip bases"><input id="liveLayerBases" type="checkbox" checked onchange="renderLiveMapLayers()"><span class="live-map-filter-icon">◆</span><span>Bases</span></label>
               <label class="live-map-filter-chip vehicles"><input id="liveLayerVehicles" type="checkbox" checked onchange="renderLiveMapLayers()"><span class="live-map-filter-icon">◇</span><span>Vehicles</span></label>
+              <label class="live-map-filter-chip resources"><input id="liveLayerResources" type="checkbox" onchange="toggleKnownResourceLayer(this.checked)"><span class="live-map-filter-icon">✦</span><span>Known Resource Spawn Locations</span></label>
+              <label class="live-map-filter-chip experimental"><input id="liveLayerExperimentalResources" type="checkbox" onchange="toggleExperimentalResourceAreas(this.checked)"><span class="live-map-filter-icon">▧</span><span>Experimental Resource Areas</span></label>
+            </div>
+            <div class="live-resource-controls">
+              <div class="label">Known Resource Spawn Locations</div>
+              <input id="liveResourceSearch" class="live-resource-search" type="search" placeholder="Search resource type or X/Y/Z" oninput="renderLiveMapLayers()">
+              <div class="live-map-filter-row" aria-label="Resource type filters">
+                <label class="live-map-filter-chip small-spice"><input id="liveResourceSmallSpice" type="checkbox" checked onchange="renderLiveMapLayers()"><span class="live-map-filter-icon">●</span><span>Small Spice</span></label>
+                <label class="live-map-filter-chip flour-sand"><input id="liveResourceFlourSand" type="checkbox" checked onchange="renderLiveMapLayers()"><span class="live-map-filter-icon">◆</span><span>Flour Sand</span></label>
+              </div>
+              <div class="live-resource-actions"><button type="button" onclick="showAllKnownResources()">Show All</button><button type="button" onclick="hideAllKnownResources()">Hide All</button></div>
+              <div class="live-resource-counts">
+                <div class="live-resource-count"><span>Small Spice</span><strong id="liveResourceSmallCount">87</strong></div>
+                <div class="live-resource-count"><span>Flour Sand</span><strong id="liveResourceFlourCount">30</strong></div>
+              </div>
+              <div id="liveResourceShownCount" class="micro mt">0 of 117 shown</div>
+              <div class="live-resource-note">Possible spawn locations only. A marker does not prove that a resource is currently active.</div>
+            </div>
+            <div class="live-resource-controls experimental">
+              <div class="label">Experimental Resource Areas</div>
+              <div id="liveExperimentalResourceStatus" class="micro mt live-experimental-state preparing" role="status">Preparing resource areas…</div>
+              <div id="liveExperimentalResourceErrorActions" class="live-resource-actions hidden"><button id="liveExperimentalResourceRetry" type="button" onclick="retryExperimentalResourceAreas()">Retry</button><button id="liveExperimentalResourceSelectFolder" type="button" onclick="selectExperimentalResourceGameFolder()">Select Game Folder</button></div>
+              <div id="liveExperimentalResourceFilters" class="live-experimental-grid" aria-label="Experimental resource-area filters"></div>
+              <div class="live-experimental-settings">
+                <label>Opacity <span id="liveExperimentalResourceOpacityValue">45%</span><input id="liveExperimentalResourceOpacity" class="live-experimental-opacity" type="range" min="5" max="90" step="5" value="45" oninput="changeExperimentalResourceOpacity(this.value)"></label>
+              </div>
+              <div class="live-experimental-legend"><span>No intensity</span><span id="liveExperimentalResourceLegend" class="live-experimental-legend-gradient"></span><span>Higher intensity</span></div>
+              <div class="live-resource-actions"><button type="button" onclick="showAllExperimentalResourceAreas()">Show All</button><button type="button" onclick="hideAllExperimentalResourceAreas()">Hide All</button><button id="liveExperimentalResourceGenerate" type="button" onclick="generateExperimentalResourceAreas()">Generate From Installed Assets</button></div>
+              <details class="live-experimental-diagnostics"><summary>Diagnostic log</summary><pre id="liveExperimentalResourceDiagnosticLog">No resource-area events yet.</pre></details>
+              <div class="live-resource-note">Procedural distribution data only—not exact resource nodes or guaranteed spawns. Grayscale values are displayed as <strong>Heatmap intensity</strong>; a contrast display curve makes low nonzero intensity visible without changing its location. Calibration remains experimental and overlays remain disabled by default. Maximum-Y orientation and IgwLevelBounds were independently cross-checked against Icehunter; no Icehunter code, markers, CDN files, map tiles, icons, heatmap PNGs, or other project assets were incorporated.</div>
             </div>
             <div id="liveMapBoundsWarning" class="warning mt hidden">Some markers are outside configured map bounds.</div>
             <div id="liveEntityAvailability" class="warning mt hidden"><span id="liveEntityAvailabilityText">Live Map data unavailable.</span><button id="liveMapRetryTunnel" type="button" class="mt hidden" onclick="retryLiveMapDatabaseTunnel()">Retry DB Tunnel</button></div>
@@ -17447,6 +17626,7 @@ function appPage() {
               <div class="detail-row"><span class="subtle">Players</span><strong id="liveDebugPlayers">0</strong></div>
               <div class="detail-row"><span class="subtle">Vehicles</span><strong id="liveDebugVehicles">0</strong></div>
               <div class="detail-row"><span class="subtle">Bases</span><strong id="liveDebugBases">0</strong></div>
+              <div class="detail-row"><span class="subtle">Known resource spawns</span><strong id="liveDebugResources">0</strong></div>
               <div class="detail-row"><span class="subtle">Rendered</span><strong id="liveDebugMarkers">0</strong></div>
             </div>
             <div class="table-wrap live-map-marker-table mt">
@@ -19277,12 +19457,15 @@ LIVE_MAP_CONFIGS.DeepDesert.fallbackImage="/assets/world-map-overland.png";
 LIVE_MAP_CONFIGS.Arrakeen.image="/assets/world-map-overland.png";
 LIVE_MAP_CONFIGS.HarkoVillage.image="/assets/world-map-overland.png";
 let liveMapKey="HaggaBasin",liveMapUserSelected=false,liveMapImageOverlay=null,liveMapMarkerIndex={},liveMapMarkerRowsIndex={};
+let liveExperimentalResourceStatus=null,liveExperimentalResourceOverlays=new Map(),liveExperimentalResourceStatusPromise=null,liveExperimentalResourceGenerationPromise=null,liveExperimentalResourceRenderSerial=0;
+const liveExperimentalResourceDiagnostics=[];
+const LIVE_EXPERIMENTAL_RESOURCE_SETTINGS_KEY="alphanine.experimental-resource-areas.v1";
 function liveMapConfig(){return LIVE_MAP_CONFIGS[liveMapKey]||LIVE_MAP_CONFIGS.HaggaBasin;}
 function liveMapLabel(key=liveMapKey){return LIVE_MAP_CONFIGS[key]?.label||key||"Map";}
 function liveMapSelectableKeys(){return ["HaggaBasin","DeepDesert"].filter(key=>LIVE_MAP_CONFIGS[key]);}
 function syncLiveMapSelector(){const select=document.getElementById("liveMapSelector");if(!select)return;const current=select.value||liveMapKey;select.innerHTML=liveMapSelectableKeys().map(key=>'<option value="'+esc(key)+'">'+esc(liveMapLabel(key))+'</option>').join("");select.value=LIVE_MAP_CONFIGS[current]?current:liveMapKey;}
 function mergeLiveMapConfig(data){if(data?.maps){Object.entries(data.maps).forEach(([key,value])=>{LIVE_MAP_CONFIGS[key]={...(LIVE_MAP_CONFIGS[key]||{}),...value,key};});}if(data?.map){const key=data.map.key||data.map.actorMap||liveMapKey;LIVE_MAP_CONFIGS[key]={...(LIVE_MAP_CONFIGS[key]||{}),...data.map,key};if(!liveMapUserSelected)liveMapKey=key;}syncLiveMapSelector();}
-function selectLiveMap(key){if(!LIVE_MAP_CONFIGS[key])return;liveMapUserSelected=true;liveMapKey=key;liveSelectedCoordinates=null;liveMapSelectedEntity=null;liveMapSelectedMarkerKey="";invalidateTeleportPreview();syncLiveMapSelector();setLiveMapImage();renderLiveMapLayers();updateLiveMapDebug();setText("liveMapStamp",liveMapLabel()+" DB overlay");addActivity("maps","Live map selected",liveMapLabel());}
+function selectLiveMap(key){if(!LIVE_MAP_CONFIGS[key])return;liveMapUserSelected=true;liveMapKey=key;liveSelectedCoordinates=null;liveMapSelectedEntity=null;liveMapSelectedMarkerKey="";invalidateTeleportPreview();syncLiveMapSelector();setLiveMapImage();renderLiveMapLayers();renderExperimentalResourceAreas();updateLiveMapDebug();setText("liveMapStamp",liveMapLabel()+" DB overlay");addActivity("maps","Live map selected",liveMapLabel());}
 function liveMapBounds(){const cfg=liveMapConfig();const width=Number(cfg.width||LIVE_MAP_IMAGE.width),height=Number(cfg.height||LIVE_MAP_IMAGE.height);return [[0,0],[height,width]];}
 function liveMapSize(cfg=liveMapConfig()){return {width:Number(cfg.width||LIVE_MAP_IMAGE.width),height:Number(cfg.height||LIVE_MAP_IMAGE.height)};}
 function liveMapWithinBounds(row,cfg=liveMapConfig()){return LIVE_COORDINATES.withinBounds(row,cfg);}
@@ -19298,7 +19481,31 @@ function invalidateTeleportPreview(){liveTeleportPreviewSignature="";liveTelepor
 function syncTeleportButtons(){const exactPreviewReady=liveTeleportReady&&liveTeleportPreviewExecutable&&Boolean(liveTeleportPreviewSignature);const button=document.getElementById("liveTeleportButton");const playerButton=document.getElementById("liveTeleportToPlayerButton");if(button)button.disabled=!liveTeleportReady;if(playerButton)playerButton.disabled=!exactPreviewReady;}
 function currentTeleportPlayer(){return findLiveMapPlayerByTeleportId(document.getElementById("teleportPlayerId")?.value||"");}
 function setLiveMapImage(){if(!liveMap)return;const cfg=liveMapConfig(),bounds=liveMapBounds();if(liveMapImageOverlay){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=null;}liveMapImageOverlay=L.imageOverlay(cfg.image||"/assets/hagga-basin-map.png",bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);liveMapImageOverlay.once("error",()=>{if(cfg.fallbackImage&&liveMap){liveMap.removeLayer(liveMapImageOverlay);liveMapImageOverlay=L.imageOverlay(cfg.fallbackImage,bounds,{maxZoom:4,maxNativeZoom:4,noWrap:true}).addTo(liveMap);setText("liveMapStamp","Primary map image missing; using fallback.");}});liveMap.fitBounds(bounds);}
-function initLiveMap(){if(!window.L||!LIVE_COORDINATES){setText("liveMapStamp","Map coordinate runtime unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;document.getElementById("liveMapDiagnosticsPanel")?.classList.toggle("hidden",!liveMapDebugEnabled());syncLiveMapSelector();syncLiveMapDragToggle();if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});setLiveMapImage();liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>handleLiveMapDestinationClick(event.latlng));liveMap.on("zoomend moveend",()=>{renderLiveMapLayers();updateLiveMapDebug();});document.getElementById("teleportPlayerId")?.addEventListener("input",invalidateTeleportPreview);["teleportX","teleportY"].forEach(id=>document.getElementById(id)?.addEventListener("input",()=>{invalidateTeleportPreview();liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("unknown",false);}));document.getElementById("teleportTargetPlayerId")?.addEventListener("input",invalidateTeleportPreview);}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
+// EXPERIMENTAL_RESOURCE_AREAS_CLIENT_START
+function experimentalResourceSelectedKeys(){return Array.from(document.querySelectorAll("[data-experimental-resource] input:checked"),input=>String(input.value||""));}
+function experimentalResourceLog(event,detail={}){const entry={time:new Date().toISOString(),event,...detail};liveExperimentalResourceDiagnostics.push(entry);if(liveExperimentalResourceDiagnostics.length>120)liveExperimentalResourceDiagnostics.splice(0,liveExperimentalResourceDiagnostics.length-120);const output=document.getElementById("liveExperimentalResourceDiagnosticLog");if(output)output.textContent=liveExperimentalResourceDiagnostics.map(row=>row.time+" "+row.event+" "+JSON.stringify(Object.fromEntries(Object.entries(row).filter(pair=>!['time','event'].includes(pair[0]))))).join("\n");console.debug("[AlphaNine Resource Areas]",entry);return entry;}
+function setExperimentalResourceState(kind,message,options={}){const status=document.getElementById("liveExperimentalResourceStatus");if(status){status.className="micro mt live-experimental-state "+kind;status.textContent=message;}const actions=document.getElementById("liveExperimentalResourceErrorActions");if(actions)actions.classList.toggle("hidden",!options.retry&&!options.selectFolder);const retry=document.getElementById("liveExperimentalResourceRetry");if(retry)retry.classList.toggle("hidden",!options.retry);const select=document.getElementById("liveExperimentalResourceSelectFolder");if(select)select.classList.toggle("hidden",!options.selectFolder);}
+function experimentalResourceSafeReason(error){return betterError(error)||"Resource-area operation failed.";}
+function showExperimentalResourceError(error){const reason=experimentalResourceSafeReason(error);const toolsMissing=/Tools\.pak.*not found/i.test(reason);const detected=liveExperimentalResourceStatus?.source?.detectedGamePath||liveExperimentalResourceStatus?.source?.pakPath||"No Dune Awakening game path was detected";const message=toolsMissing?("Tools.pak was not found. Detected game path: "+detected+". "+reason):reason;setExperimentalResourceState("error",message,{retry:true,selectFolder:toolsMissing});experimentalResourceLog("visible-error",{reason:message});playUiSound("warning");return message;}
+function liveExperimentalResourceSettings(){let saved={};try{saved=JSON.parse(localStorage.getItem(LIVE_EXPERIMENTAL_RESOURCE_SETTINGS_KEY)||"{}");}catch(error){experimentalResourceLog("settings-read-failure",{reason:String(error?.message||error)});}return{opacity:Math.max(5,Math.min(90,Number(saved.opacity)||45)),selected:Array.isArray(saved.selected)?saved.selected.map(String):[]};}
+function saveLiveExperimentalResourceSettings(){const opacity=Number(document.getElementById("liveExperimentalResourceOpacity")?.value)||45;const selected=experimentalResourceSelectedKeys();try{localStorage.setItem(LIVE_EXPERIMENTAL_RESOURCE_SETTINGS_KEY,JSON.stringify({opacity,selected}));}catch(error){experimentalResourceLog("settings-save-failure",{reason:String(error?.message||error)});}return{opacity,selected};}
+function renderExperimentalResourceControls(){const host=document.getElementById("liveExperimentalResourceFilters");if(!host||!liveExperimentalResourceStatus)return;const settings=liveExperimentalResourceSettings();const valid=new Set((liveExperimentalResourceStatus.resources||[]).map(resource=>resource.key));const selected=settings.selected.filter(key=>valid.has(key));host.innerHTML=(liveExperimentalResourceStatus.resources||[]).map(resource=>'<label class="live-map-filter-chip" data-experimental-resource="'+esc(resource.key)+'" style="--resource-color:'+esc(resource.color)+'"><input type="checkbox" value="'+esc(resource.key)+'" '+(selected.includes(resource.key)?'checked ':'')+'onchange="changeExperimentalResourceFilter()"><span class="live-experimental-swatch"></span><span>'+esc(resource.name)+'</span></label>').join("");const opacity=document.getElementById("liveExperimentalResourceOpacity");if(opacity)opacity.value=String(settings.opacity);setText("liveExperimentalResourceOpacityValue",settings.opacity+"%");updateExperimentalResourceLegend();experimentalResourceLog("controls-populated",{selected:experimentalResourceSelectedKeys(),resourceCount:(liveExperimentalResourceStatus.resources||[]).length});}
+function updateExperimentalResourceLegend(){const selected=experimentalResourceSelectedKeys();const resource=(liveExperimentalResourceStatus?.resources||[]).find(row=>row.key===selected[0]);const legend=document.getElementById("liveExperimentalResourceLegend");if(legend)legend.style.setProperty("--legend-color",selected.length===1&&resource?resource.color:"#a66bdd");}
+function selectAllExperimentalResourceFilters(){document.querySelectorAll("[data-experimental-resource] input").forEach(input=>{input.checked=true;});const saved=saveLiveExperimentalResourceSettings();updateExperimentalResourceLegend();experimentalResourceLog("empty-selection-populated",{selected:saved.selected});return saved.selected;}
+function clearExperimentalResourceAreas(){liveExperimentalResourceRenderSerial+=1;liveExperimentalResourceOverlays.forEach(overlay=>{if(liveMap?.hasLayer(overlay))liveMap.removeLayer(overlay);});liveExperimentalResourceOverlays.clear();}
+async function renderExperimentalResourceAreas(){const renderSerial=liveExperimentalResourceRenderSerial+1;clearExperimentalResourceAreas();liveExperimentalResourceRenderSerial=renderSerial;if(!liveMap||liveMapKey!=="HaggaBasin"||!liveMapChecked("liveLayerExperimentalResources")||!liveExperimentalResourceStatus?.available||!liveExperimentalResourceStatus.cacheKey){experimentalResourceLog("render-skipped",{master:liveMapChecked("liveLayerExperimentalResources"),map:liveMapKey,available:Boolean(liveExperimentalResourceStatus?.available)});return 0;}const opacity=Math.max(5,Math.min(90,Number(document.getElementById("liveExperimentalResourceOpacity")?.value)||45))/100;const selected=new Set(experimentalResourceSelectedKeys());if(!selected.size){setExperimentalResourceState("empty","No resource types selected.");experimentalResourceLog("render-empty-selection",{master:true});return 0;}const resources=(liveExperimentalResourceStatus.resources||[]).filter(resource=>selected.has(resource.key));const bounds=liveMapBounds();const outcomes=resources.map((resource,index)=>new Promise(resolve=>{const url="/api/live-map/resource-areas/overlay/"+encodeURIComponent(liveExperimentalResourceStatus.cacheKey)+"/source-top-max-y/"+encodeURIComponent(resource.key)+".png?v="+encodeURIComponent(liveExperimentalResourceStatus.generatedAt||"");experimentalResourceLog("overlay-request",{resource:resource.key,route:url,bounds,opacity,zIndex:300+index});let settled=false;const finish=(ok,reason="")=>{if(settled)return;settled=true;experimentalResourceLog(ok?"image-load-success":"image-load-failure",{resource:resource.key,route:url,reason});resolve({resource:resource.key,ok});};const overlay=L.imageOverlay(url,bounds,{opacity,interactive:false,className:"live-map-resource-area-overlay"});overlay.on("load",()=>finish(true));overlay.on("error",event=>finish(false,String(event?.error?.message||"Image request failed")));overlay.setZIndex?.(300+index);overlay.addTo(liveMap);liveExperimentalResourceOverlays.set(resource.key,overlay);}));const results=await Promise.all(outcomes);if(renderSerial!==liveExperimentalResourceRenderSerial)return 0;const failed=results.filter(result=>!result.ok);const attached=Array.from(liveExperimentalResourceOverlays.values()).filter(overlay=>liveMap?.hasLayer(overlay)).length;experimentalResourceLog("render-complete",{selected:Array.from(selected),requested:resources.length,loaded:results.length-failed.length,failed:failed.length,attached});if(failed.length){showExperimentalResourceError(new Error(failed.length+" of "+results.length+" resource overlay images failed to load. Retry to request them again."));}else if(attached>0){setExperimentalResourceState("ready","Resource areas ready.");}return attached;}
+async function toggleExperimentalResourceAreas(show){experimentalResourceLog("master-toggle",{enabled:Boolean(show),selected:experimentalResourceSelectedKeys()});if(!show){clearExperimentalResourceAreas();if(experimentalResourceSelectedKeys().length)setExperimentalResourceState("ready","Resource areas ready.");else setExperimentalResourceState("empty","No resource types selected.");experimentalResourceLog("master-disabled",{selected:experimentalResourceSelectedKeys(),attached:0});return 0;}if(!liveExperimentalResourceStatus)await refreshExperimentalResourceAreaStatus(false);if(!experimentalResourceSelectedKeys().length)selectAllExperimentalResourceFilters();if(liveExperimentalResourceGenerationPromise)await liveExperimentalResourceGenerationPromise;if(!liveExperimentalResourceStatus?.available){if(liveExperimentalResourceStatus?.needsGeneration){const generated=await generateExperimentalResourceAreas(true,false);if(!generated)return 0;}else{return showExperimentalResourceError(liveExperimentalResourceStatus?.source?.error||"Resource areas are unavailable."),0;}}return renderExperimentalResourceAreas();}
+async function changeExperimentalResourceFilter(){const saved=saveLiveExperimentalResourceSettings();updateExperimentalResourceLegend();experimentalResourceLog("individual-filter-change",{master:liveMapChecked("liveLayerExperimentalResources"),selected:saved.selected});if(!liveMapChecked("liveLayerExperimentalResources")){clearExperimentalResourceAreas();return 0;}if(!saved.selected.length){clearExperimentalResourceAreas();setExperimentalResourceState("empty","No resource types selected.");return 0;}return renderExperimentalResourceAreas();}
+function changeExperimentalResourceOpacity(value){const opacity=Math.max(5,Math.min(90,Number(value)||45));setText("liveExperimentalResourceOpacityValue",opacity+"%");saveLiveExperimentalResourceSettings();liveExperimentalResourceOverlays.forEach(overlay=>overlay.setOpacity(opacity/100));experimentalResourceLog("opacity-change",{opacity,attached:liveExperimentalResourceOverlays.size});}
+async function showAllExperimentalResourceAreas(){const layer=document.getElementById("liveLayerExperimentalResources");if(layer)layer.checked=true;selectAllExperimentalResourceFilters();return toggleExperimentalResourceAreas(true);}
+function hideAllExperimentalResourceAreas(){const layer=document.getElementById("liveLayerExperimentalResources");if(layer)layer.checked=false;document.querySelectorAll("[data-experimental-resource] input").forEach(input=>{input.checked=false;});saveLiveExperimentalResourceSettings();updateExperimentalResourceLegend();clearExperimentalResourceAreas();setExperimentalResourceState("empty","No resource types selected.");experimentalResourceLog("hide-all",{selected:[],attached:0});}
+function logExperimentalResourceBackendState(status,event="status-result"){experimentalResourceLog(event,{master:liveMapChecked("liveLayerExperimentalResources"),selected:experimentalResourceSelectedKeys(),toolsPakPath:status?.source?.pakPath||status?.source?.detectedGamePath||"",toolsPakExists:Boolean(status?.source?.pakExists),cacheDirectory:status?.cache?.directory||"",cacheHit:Boolean(status?.cache?.hit),cacheSchema:status?.cache?.schema,needsGeneration:Boolean(status?.needsGeneration),maximumYBounds:status?.calibration?.distributionBounds||null,generationResult:status?.available?"available":"unavailable"});}
+async function refreshExperimentalResourceAreaStatus(autoPrepare=true){if(liveExperimentalResourceStatusPromise)return liveExperimentalResourceStatusPromise;liveExperimentalResourceStatusPromise=(async()=>{try{liveExperimentalResourceStatus=await getJson("/api/live-map/resource-areas/status",{timeoutMs:30000});renderExperimentalResourceControls();logExperimentalResourceBackendState(liveExperimentalResourceStatus,"status-result");if(liveExperimentalResourceStatus.available){setExperimentalResourceState("ready","Resource areas ready.");return liveExperimentalResourceStatus;}if(liveExperimentalResourceStatus.needsGeneration){setExperimentalResourceState("preparing","Preparing resource areas…");if(autoPrepare)return await generateExperimentalResourceAreas(true,liveMapChecked("liveLayerExperimentalResources"));return liveExperimentalResourceStatus;}showExperimentalResourceError(liveExperimentalResourceStatus.source?.error||"Resource areas are unavailable.");return liveExperimentalResourceStatus;}catch(error){showExperimentalResourceError(error);return null;}finally{liveExperimentalResourceStatusPromise=null;}})();return liveExperimentalResourceStatusPromise;}
+async function generateExperimentalResourceAreas(automatic=false,renderAfter=liveMapChecked("liveLayerExperimentalResources")){if(liveExperimentalResourceGenerationPromise){const existing=await liveExperimentalResourceGenerationPromise;if(existing&&renderAfter&&liveMapChecked("liveLayerExperimentalResources"))await renderExperimentalResourceAreas();return existing;}const button=document.getElementById("liveExperimentalResourceGenerate");if(button)button.disabled=true;setExperimentalResourceState("preparing","Preparing resource areas…");experimentalResourceLog("generation-request-start",{route:"/api/live-map/resource-areas/generate",automatic:Boolean(automatic),cacheSchema:3});liveExperimentalResourceGenerationPromise=(async()=>{try{liveExperimentalResourceStatus=await getJson("/api/live-map/resource-areas/generate",{method:"POST",timeoutMs:180000});renderExperimentalResourceControls();logExperimentalResourceBackendState(liveExperimentalResourceStatus,"generation-result");if(!liveExperimentalResourceStatus.available)throw new Error(liveExperimentalResourceStatus.error||"Generation completed without usable overlays.");if(!renderAfter||!liveMapChecked("liveLayerExperimentalResources"))setExperimentalResourceState("ready","Resource areas ready.");if(!automatic)playUiSound("success");return liveExperimentalResourceStatus;}catch(error){showExperimentalResourceError(error);return null;}finally{if(button)button.disabled=false;liveExperimentalResourceGenerationPromise=null;}})();const result=await liveExperimentalResourceGenerationPromise;if(result&&renderAfter&&liveMapChecked("liveLayerExperimentalResources"))await renderExperimentalResourceAreas();return result;}
+async function retryExperimentalResourceAreas(){experimentalResourceLog("retry",{master:liveMapChecked("liveLayerExperimentalResources"),selected:experimentalResourceSelectedKeys()});liveExperimentalResourceStatus=null;const status=await refreshExperimentalResourceAreaStatus(false);if(!status)return null;if(status.available)return liveMapChecked("liveLayerExperimentalResources")?renderExperimentalResourceAreas():status;if(status.needsGeneration)return generateExperimentalResourceAreas(false,liveMapChecked("liveLayerExperimentalResources"));showExperimentalResourceError(status.source?.error||"Resource areas are unavailable.");return null;}
+async function selectExperimentalResourceGameFolder(){try{if(!window.alphaNineSuite?.chooseGameFolder)throw new Error("Select Game Folder is available in the packaged desktop application.");const selected=await window.alphaNineSuite.chooseGameFolder();if(selected?.canceled)return null;if(!selected?.folderPath)throw new Error("No game folder was selected.");setExperimentalResourceState("preparing","Preparing resource areas…");experimentalResourceLog("game-folder-selected",{selectedGamePath:selected.folderPath});liveExperimentalResourceStatus=await getJson("/api/live-map/resource-areas/game-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({folder:selected.folderPath}),timeoutMs:30000});renderExperimentalResourceControls();logExperimentalResourceBackendState(liveExperimentalResourceStatus,"game-folder-result");if(liveExperimentalResourceStatus.needsGeneration)return generateExperimentalResourceAreas(false,liveMapChecked("liveLayerExperimentalResources"));if(liveExperimentalResourceStatus.available)return liveMapChecked("liveLayerExperimentalResources")?renderExperimentalResourceAreas():liveExperimentalResourceStatus;throw new Error(liveExperimentalResourceStatus.source?.error||"The selected folder does not contain Tools.pak.");}catch(error){showExperimentalResourceError(error);return null;}}
+// EXPERIMENTAL_RESOURCE_AREAS_CLIENT_END
+function initLiveMap(){if(!window.L||!LIVE_COORDINATES){setText("liveMapStamp","Map coordinate runtime unavailable");return;}const el=document.getElementById("liveMapCanvas");if(!el)return;document.getElementById("liveMapDiagnosticsPanel")?.classList.toggle("hidden",!liveMapDebugEnabled());syncLiveMapSelector();syncLiveMapDragToggle();if(!liveMap){liveMap=L.map(el,{crs:L.CRS.Simple,minZoom:-3,maxZoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true});setLiveMapImage();liveMapLayerGroup=L.layerGroup().addTo(liveMap);const readout=document.createElement("div");readout.id="liveMouseReadout";readout.className="live-map-coordinate-readout";readout.textContent="X -- / Y --";el.appendChild(readout);liveMap.on("mousemove",event=>updateLiveMouseCoordinates(event.latlng));liveMap.on("click",event=>handleLiveMapDestinationClick(event.latlng));liveMap.on("zoomend moveend",()=>{renderLiveMapLayers();updateLiveMapDebug();});document.getElementById("teleportPlayerId")?.addEventListener("input",invalidateTeleportPreview);["teleportX","teleportY"].forEach(id=>document.getElementById(id)?.addEventListener("input",()=>{invalidateTeleportPreview();liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("unknown",false);}));document.getElementById("teleportTargetPlayerId")?.addEventListener("input",invalidateTeleportPreview);}setTimeout(()=>{liveMap.invalidateSize();updateLiveMapDebug();},80);refreshExperimentalResourceAreaStatus();loadTeleportPresets();refreshLiveMap();refreshTeleportReadiness();}
 function liveMapChecked(id){const el=document.getElementById(id);return !el||el.checked;}
 function liveMapProject(entity){const x=Number(entity.x),y=Number(entity.y);if(!Number.isFinite(x)||!Number.isFinite(y))return null;return duneToLeaflet(x,y);}
 function syncLiveMapDragToggle(){setChecked("liveMapDragTeleportToggle",dragTeleportEnabled());}
@@ -19319,7 +19526,7 @@ function clearCachedTeleportPlayer(playerId){if(!liveMapData?.layers?.players)re
 function renderPendingTeleportMarker(){if(!liveTeleportPending||!liveMapLayerGroup||!liveMapChecked("liveLayerPlayers"))return 0;const target=liveTeleportPending.target;if(!target)return 0;const point=duneToLeaflet(target.x,target.y);const marker=L.marker(point,{icon:L.divIcon({className:"",html:'<div class="live-map-marker pending" style="width:18px;height:18px"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).bindPopup('<strong>Teleport pending</strong><br>Teleport sent, waiting for server position update...<br>'+esc(formatLivePosition(target)));marker.addTo(liveMapLayerGroup);return 1;}
 function reconcileTeleportPending(){if(!liveTeleportPending)return;const player=findLiveMapPlayerByTeleportId(liveTeleportPending.playerId);const next=liveMapPosition(player);if(!next)return;const nearTarget=liveMapDistance(next,liveTeleportPending.target)<50;if(nearTarget){const detail="Player "+liveTeleportPending.playerId+" old "+formatLivePosition(liveTeleportPending.oldPosition)+" -> new "+formatLivePosition(next);console.debug("[AlphaNine Live Map] teleport position refresh",{playerId:liveTeleportPending.playerId,oldPosition:liveTeleportPending.oldPosition,newPosition:next,target:liveTeleportPending.target});addActivity("maps","Teleport position confirmed",detail);const log=document.getElementById("teleportLog");if(log&&!/Server position confirmed/.test(log.textContent||""))log.textContent+=(log.textContent?"\n\n":"")+"Server position confirmed.\n"+detail;liveTeleportPending=null;}}
 function liveMapMarkerKey(row){return String(row?.type||"marker")+":"+String(row?.id||row?.actor_id||row?.name||"");}
-function liveMapTypeKind(type){const key=String(type||"marker").toLowerCase();if(key.includes("player"))return"player";if(key.includes("vehicle"))return"vehicle";if(key.includes("base")||key.includes("building"))return"base";return"marker";}
+function liveMapTypeKind(type){const key=String(type||"marker").toLowerCase();if(key.includes("player"))return"player";if(key.includes("vehicle"))return"vehicle";if(key.includes("base")||key.includes("building"))return"base";if(key.includes("resource"))return"resource";return"marker";}
 function liveMapTypeIcon(type){const kind=liveMapTypeKind(type);return kind==="player"?"●":kind==="vehicle"?"◇":kind==="base"?"◆":"✦";}
 function liveMapTypeBadge(type){const label=String(type||"marker");const kind=liveMapTypeKind(label);return '<span class="live-map-type-cell"><span class="live-map-type-icon '+esc(kind)+'">'+esc(liveMapTypeIcon(label))+'</span>'+esc(label)+'</span>';}
 function hydrationValueText(h){if(!h||h.value==null)return"Unavailable";const value=Number(h.rounded??h.value);return Number.isFinite(value)?value.toFixed(1):"Unavailable";}
@@ -19337,13 +19544,23 @@ function captureLiveMapMarkerAsTeleport(event,marker){if(!dragTeleportEnabled()|
 async function handleLiveMapDestinationClick(latlng){if(!latlng)return;selectLiveCoordinates(latlng,{fillTeleport:true});if(!dragTeleportEnabled()){showLiveMapResultBadge("Click-to-teleport is disabled in Settings","fail");return;}const player=liveMapTeleportSourcePlayer();if(!player){const log=document.getElementById("teleportLog");if(log)log.textContent="Select a player from the marker list first, then click the map destination.";showLiveMapResultBadge("Select a player from the list first","working");return;}if(liveMapClickTeleportBusy){showLiveMapResultBadge("A teleport is already in progress","working");return;}const payload=liveMapClickTeleportPayload(player,latlng);applyClickTeleportPayloadToForm(payload,latlng);showLiveMapTeleportDestinationMarker(latlng);const destination="X "+payload.x+" / Y "+payload.y;const playerName=liveMapPlayerDisplayName(player);const log=document.getElementById("teleportLog");if(log)log.textContent="Destination accepted for "+playerName+" at "+destination+". Sending teleport now...";showLiveMapResultBadge("Destination accepted - teleporting "+playerName+" to "+destination,"working",0);playUiSound("click");liveMapClickTeleportBusy=true;let success=false;try{success=await executeLiveTeleport(false,payload);finishLiveMapTeleportDestinationMarker(success);}finally{liveMapClickTeleportBusy=false;}}
 function liveMapClusterRows(kind,rows){if(!liveMap||!rows||rows.length<36)return rows.map(row=>({type:"row",row}));const zoom=liveMap.getZoom();const bucketSize=zoom>=2?72:zoom>=1?96:128;const buckets=new Map();rows.forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;const layer=liveMap.latLngToLayerPoint(point);const key=Math.floor(layer.x/bucketSize)+":"+Math.floor(layer.y/bucketSize);if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(row);});const output=[];buckets.forEach(group=>{if(group.length>=7){let sx=0,sy=0;group.forEach(row=>{const p=liveMapProject(row);sx+=p[0];sy+=p[1];});output.push({type:"cluster",kind,count:group.length,point:[sx/group.length,sy/group.length],rows:group});}else group.forEach(row=>output.push({type:"row",row}));});return output;}
 function addLiveMapMarkers(kind,rows){const enabled={players:liveMapChecked("liveLayerPlayers"),vehicles:liveMapChecked("liveLayerVehicles"),bases:liveMapChecked("liveLayerBases")}[kind];if(!enabled)return 0;let count=0;liveMapClusterRows(kind,rows||[]).forEach(item=>{if(item.type==="cluster"){const clusterKind=kind==="players"?"player":kind==="vehicles"?"vehicle":"base";const marker=L.marker(item.point,{icon:liveMapClusterIcon(clusterKind,item.count),bubblingMouseEvents:false}).bindPopup('<strong>'+esc(item.count)+' '+esc(kind)+'</strong><br>Zoom in or use the marker table to inspect individual entries.');marker.on("click",event=>{if(captureLiveMapMarkerAsTeleport(event,marker))return;});marker.addTo(liveMapLayerGroup);count+=item.count;return;}const row=item.row;const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;count+=1;const key=liveMapMarkerKey(row);const markerKind=liveMapTypeKind(row.type||kind.slice(0,-1)||kind);const marker=L.marker(point,{icon:liveMapIcon(markerKind,key===liveMapSelectedMarkerKey),draggable:false,bubblingMouseEvents:false}).bindPopup(liveMapMarkerPopup(row));liveMapMarkerIndex[key]=marker;liveMapMarkerRowsIndex[key]=row;marker.on("click",event=>{if(captureLiveMapMarkerAsTeleport(event,marker))return;if(kind==="players"){selectLiveMapTeleportPlayer(row,key);const selectedMarker=liveMapMarkerIndex[key];if(selectedMarker)selectedMarker.openPopup();return;}liveMapSelectedEntity=row;liveMapSelectedMarkerKey=key;selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});renderLiveMapLayers();const selectedMarker=liveMapMarkerIndex[key];if(selectedMarker)selectedMarker.openPopup();updateLiveMapDebug();});marker.addTo(liveMapLayerGroup);});return count;}
+function liveMapResourceRows(){const query=String(document.getElementById("liveResourceSearch")?.value||"").trim().toLowerCase();const small=liveMapChecked("liveResourceSmallSpice"),flour=liveMapChecked("liveResourceFlourSand");return liveMapRowsForSelectedMap(liveMapData?.layers?.resources).filter(row=>{if(row.resourceType==="small-spice"&&!small)return false;if(row.resourceType==="flour-sand"&&!flour)return false;if(!query)return true;return [row.name,row.resourceType,row.x,row.y,row.z].join(" ").toLowerCase().includes(query);});}
+function renderLiveMapResourceCounts(){const all=liveMapRowsForSelectedMap(liveMapData?.layers?.resources);const small=all.filter(row=>row.resourceType==="small-spice").length;const flour=all.filter(row=>row.resourceType==="flour-sand").length;setText("liveResourceSmallCount",String(small));setText("liveResourceFlourCount",String(flour));const shown=liveMapChecked("liveLayerResources")?liveMapResourceRows().length:0;setText("liveResourceShownCount",shown+" of "+all.length+" shown");}
+function toggleKnownResourceLayer(show){if(show&&!liveMapChecked("liveResourceSmallSpice")&&!liveMapChecked("liveResourceFlourSand")){const small=document.getElementById("liveResourceSmallSpice"),flour=document.getElementById("liveResourceFlourSand");if(small)small.checked=true;if(flour)flour.checked=true;}renderLiveMapLayers();}
+function showAllKnownResources(){const layer=document.getElementById("liveLayerResources"),small=document.getElementById("liveResourceSmallSpice"),flour=document.getElementById("liveResourceFlourSand"),search=document.getElementById("liveResourceSearch");if(layer)layer.checked=true;if(small)small.checked=true;if(flour)flour.checked=true;if(search)search.value="";renderLiveMapLayers();}
+function hideAllKnownResources(){const layer=document.getElementById("liveLayerResources"),small=document.getElementById("liveResourceSmallSpice"),flour=document.getElementById("liveResourceFlourSand");if(layer)layer.checked=false;if(small)small.checked=false;if(flour)flour.checked=false;renderLiveMapLayers();}
+function liveMapResourceIcon(row){const kind=row.resourceType==="flour-sand"?"resource-flour-sand":"resource-small-spice";const size=14;return L.divIcon({className:"",html:'<div class="live-map-marker '+kind+'" style="width:'+size+'px;height:'+size+'px"></div>',iconSize:[size,size],iconAnchor:[size/2,size/2]});}
+function liveMapResourcePopup(row){return '<strong>'+esc(row.name)+'</strong><br>Known Resource Spawn Location<br>Possible spawn location; current activity is not proven.<br>World X '+esc(formatLiveCoord(row.x))+' / World Y '+esc(formatLiveCoord(row.y))+' / World Z '+esc(formatLiveCoord(row.z));}
+function liveMapResourceClusterRows(rows){if(!liveMap||!rows?.length)return[];if(liveMap.getZoom()>=3)return rows.map(row=>({type:"row",row}));const bucketSize=liveMap.getZoom()>=2?62:liveMap.getZoom()>=1?92:132;const buckets=new Map();rows.forEach(row=>{const point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;const layer=liveMap.latLngToLayerPoint(point);const key=Math.floor(layer.x/bucketSize)+":"+Math.floor(layer.y/bucketSize);if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(row);});const output=[];buckets.forEach(group=>{if(group.length>=3){let x=0,y=0;group.forEach(row=>{const point=liveMapProject(row);x+=point[0];y+=point[1];});output.push({type:"cluster",count:group.length,point:[x/group.length,y/group.length],rows:group});}else group.forEach(row=>output.push({type:"row",row}));});return output;}
+function addKnownResourceMarkers(rows){if(!liveMapChecked("liveLayerResources"))return 0;let count=0;liveMapResourceClusterRows(rows||[]).forEach(item=>{if(item.type==="cluster"){const small=item.rows.filter(row=>row.resourceType==="small-spice").length,flour=item.count-small;const marker=L.marker(item.point,{icon:liveMapClusterIcon("resource",item.count),draggable:false,bubblingMouseEvents:false}).bindPopup('<strong>'+esc(item.count)+' known resource spawn locations</strong><br>'+small+' Small Spice / '+flour+' Flour Sand<br>Possible spawn locations; current activity is not proven.');marker.on("click",event=>{if(event?.originalEvent)L.DomEvent.stop(event.originalEvent);});marker.addTo(liveMapLayerGroup);count+=item.count;return;}const row=item.row,point=liveMapProject(row);if(!point||!liveMapWithinBounds(row))return;const key=liveMapMarkerKey(row);const marker=L.marker(point,{icon:liveMapResourceIcon(row),draggable:false,bubblingMouseEvents:false}).bindPopup(liveMapResourcePopup(row));liveMapMarkerIndex[key]=marker;liveMapMarkerRowsIndex[key]=row;marker.on("click",event=>{if(event?.originalEvent)L.DomEvent.stop(event.originalEvent);liveMapSelectedMarkerKey=key;marker.openPopup();renderLiveMapMarkerTable();});marker.addTo(liveMapLayerGroup);count+=1;});return count;}
 function liveMapRowMatchesSelectedMap(row){const rowMap=String(row?.map||liveMapKey||"").trim();return !rowMap||rowMap===liveMapKey;}
 function liveMapRowsForSelectedMap(rows){return (rows||[]).filter(liveMapRowMatchesSelectedMap);}
-function liveMapVisibleRows(){const layers=liveMapData?.layers||{};const rows=[];if(liveMapChecked("liveLayerPlayers"))rows.push(...liveMapRowsForSelectedMap(layers.players));if(liveMapChecked("liveLayerVehicles"))rows.push(...liveMapRowsForSelectedMap(layers.vehicles));if(liveMapChecked("liveLayerBases"))rows.push(...liveMapRowsForSelectedMap(layers.bases));return rows;}
-function renderLiveMapMarkerTable(){const body=document.getElementById("liveMapMarkerRows");if(!body)return;const rows=liveMapVisibleRows();if(!rows.length){body.innerHTML='<tr><td colspan="3">No markers loaded.</td></tr>';return;}body.innerHTML=rows.slice(0,300).map(row=>{const key=liveMapMarkerKey(row);return '<tr data-live-marker-key="'+esc(key)+'" class="'+(key===liveMapSelectedMarkerKey?'selected':'')+'"><td>'+liveMapTypeBadge(row.type)+'</td><td>'+esc(row.name||row.id||"Marker")+'<span class="live-map-marker-label">'+esc(row.status||"unknown")+(row.updatedAt?" / "+row.updatedAt:"")+'</span></td><td>'+esc(formatLiveCoord(row.x))+'<br>'+esc(formatLiveCoord(row.y))+'</td></tr>';}).join("");body.querySelectorAll("[data-live-marker-key]").forEach(tableRow=>tableRow.addEventListener("click",()=>selectLiveMapMarkerFromTable(tableRow.dataset.liveMarkerKey)));}
-function selectLiveMapMarkerFromTable(key){const rows=liveMapVisibleRows();const row=rows.find(item=>liveMapMarkerKey(item)===key);if(!row)return;if(liveMapTypeKind(row.type)==="player"){selectLiveMapTeleportPlayer(row,key);return;}centerLiveMapMarker(key);}
+function liveMapVisibleRows(){const layers=liveMapData?.layers||{};const rows=[];if(liveMapChecked("liveLayerPlayers"))rows.push(...liveMapRowsForSelectedMap(layers.players));if(liveMapChecked("liveLayerVehicles"))rows.push(...liveMapRowsForSelectedMap(layers.vehicles));if(liveMapChecked("liveLayerBases"))rows.push(...liveMapRowsForSelectedMap(layers.bases));if(liveMapChecked("liveLayerResources"))rows.push(...liveMapResourceRows());return rows;}
+function renderLiveMapMarkerTable(){const body=document.getElementById("liveMapMarkerRows");if(!body)return;const rows=liveMapVisibleRows();if(!rows.length){body.innerHTML='<tr><td colspan="3">No markers loaded.</td></tr>';return;}body.innerHTML=rows.slice(0,300).map(row=>{const key=liveMapMarkerKey(row),typeLabel=row.type==="resource"?row.name:row.type;return '<tr data-live-marker-key="'+esc(key)+'" class="'+(key===liveMapSelectedMarkerKey?'selected':'')+'"><td>'+liveMapTypeBadge(typeLabel)+'</td><td>'+esc(row.name||row.id||"Marker")+'<span class="live-map-marker-label">'+esc(row.status||"unknown")+(row.updatedAt?" / "+row.updatedAt:"")+'</span></td><td>'+esc(formatLiveCoord(row.x))+'<br>'+esc(formatLiveCoord(row.y))+'</td></tr>';}).join("");body.querySelectorAll("[data-live-marker-key]").forEach(tableRow=>tableRow.addEventListener("click",()=>selectLiveMapMarkerFromTable(tableRow.dataset.liveMarkerKey)));}
+function selectLiveMapMarkerFromTable(key){const rows=liveMapVisibleRows();const row=rows.find(item=>liveMapMarkerKey(item)===key);if(!row)return;if(row.type==="resource"){centerLiveMapResourceMarker(key);return;}if(liveMapTypeKind(row.type)==="player"){selectLiveMapTeleportPlayer(row,key);return;}centerLiveMapMarker(key);}
+function centerLiveMapResourceMarker(key){const row=liveMapResourceRows().find(item=>liveMapMarkerKey(item)===key);if(!row||!liveMap)return;liveMapSelectedMarkerKey=key;const point=liveMapProject(row);if(!point)return;liveMap.panTo(point);const marker=liveMapMarkerIndex[key];if(marker)marker.openPopup();renderLiveMapMarkerTable();playUiSound("click");}
 function centerLiveMapMarker(key){const rows=liveMapVisibleRows();const row=rows.find(item=>liveMapMarkerKey(item)===key);if(!row)return;liveMapSelectedEntity=row;liveMapSelectedMarkerKey=key;const point=liveMapProject(row);if(point&&liveMap){liveMap.panTo(point);selectLiveCoordinates({lat:point[0],lng:point[1]},{fillTeleport:false});renderLiveMapLayers();const marker=liveMapMarkerIndex[key];if(marker)marker.openPopup();playUiSound("click");}}
-function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;reconcileTeleportPending();liveMapLayerGroup.clearLayers();liveMapMarkerIndex={};liveMapMarkerRowsIndex={};liveMarkerCount=0;syncLiveMapDragToggle();const playerRows=liveTeleportPending?liveMapRowsForSelectedMap(liveMapData.layers?.players).filter(row=>!sameLiveMapPlayer(row,liveTeleportPending.playerId)):liveMapRowsForSelectedMap(liveMapData.layers?.players);liveMarkerCount+=addLiveMapMarkers("players",playerRows);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapRowsForSelectedMap(liveMapData.layers?.vehicles));liveMarkerCount+=addLiveMapMarkers("bases",liveMapRowsForSelectedMap(liveMapData.layers?.bases));liveMarkerCount+=renderPendingTeleportMarker();renderLiveMapMarkerTable();updateLiveMapDebug();}
+function renderLiveMapLayers(){if(!liveMap||!liveMapLayerGroup||!liveMapData)return;reconcileTeleportPending();liveMapLayerGroup.clearLayers();liveMapMarkerIndex={};liveMapMarkerRowsIndex={};liveMarkerCount=0;syncLiveMapDragToggle();const playerRows=liveTeleportPending?liveMapRowsForSelectedMap(liveMapData.layers?.players).filter(row=>!sameLiveMapPlayer(row,liveTeleportPending.playerId)):liveMapRowsForSelectedMap(liveMapData.layers?.players);liveMarkerCount+=addLiveMapMarkers("players",playerRows);liveMarkerCount+=addLiveMapMarkers("vehicles",liveMapRowsForSelectedMap(liveMapData.layers?.vehicles));liveMarkerCount+=addLiveMapMarkers("bases",liveMapRowsForSelectedMap(liveMapData.layers?.bases));liveMarkerCount+=addKnownResourceMarkers(liveMapResourceRows());liveMarkerCount+=renderPendingTeleportMarker();renderLiveMapResourceCounts();renderLiveMapMarkerTable();updateLiveMapDebug();}
 function updateLiveMouseCoordinates(latlng){const coords=leafletToDune(latlng);const readout=document.getElementById("liveMouseReadout");if(readout)readout.textContent="World X "+formatLiveCoord(coords.x)+" / World Y "+formatLiveCoord(coords.y);}
 function selectLiveCoordinates(latlng,options={}){const coords=leafletToDune(latlng);liveSelectedCoordinates={...coords,lat:Number(latlng.lat),lng:Number(latlng.lng)};setText("liveClickedX",formatLiveCoord(coords.x));setText("liveClickedY",formatLiveCoord(coords.y));const searchX=document.getElementById("liveSearchX");const searchY=document.getElementById("liveSearchY");if(searchX)searchX.value=formatLiveCoord(coords.x);if(searchY)searchY.value=formatLiveCoord(coords.y);if(options.fillTeleport){setValue("teleportX",Math.round(coords.x));setValue("teleportY",Math.round(coords.y));setValue("teleportZ",5000);liveTeleportPresetName="";liveTeleportTargetActorId="";liveTeleportTargetActorType="";setTeleportElevationSource("safe-ground",true);}updateLiveMapDebug(latlng);}
 async function copyLiveCoordinates(){if(!liveSelectedCoordinates){playUiSound("warning");return;}const text="X "+formatLiveCoord(liveSelectedCoordinates.x)+", Y "+formatLiveCoord(liveSelectedCoordinates.y);try{await navigator.clipboard.writeText(text);playUiSound("success");addActivity("maps","Coordinates copied",text);}catch{playUiSound("warning");}}
@@ -19383,9 +19600,9 @@ function updateLiveMapDebug(latlng){
   setText("liveDebugTeleportReason",verification.reason||(teleportDiag.blockers||[]).join(" ")||"--");
   setText("liveDebugVerification",liveTeleportVerificationResult?JSON.stringify(liveTeleportVerificationResult):"--");
   setText("liveDebugBounds",liveMapLabel()+" / "+cfg.minX+".."+cfg.maxX+" / "+cfg.minY+".."+cfg.maxY+" / flipY "+Boolean(cfg.flipY));
-  const counts={players:liveMapRowsForSelectedMap(liveMapData?.layers?.players).length,vehicles:liveMapRowsForSelectedMap(liveMapData?.layers?.vehicles).length,bases:liveMapRowsForSelectedMap(liveMapData?.layers?.bases).length};
+  const counts={players:liveMapRowsForSelectedMap(liveMapData?.layers?.players).length,vehicles:liveMapRowsForSelectedMap(liveMapData?.layers?.vehicles).length,bases:liveMapRowsForSelectedMap(liveMapData?.layers?.bases).length,resources:liveMapRowsForSelectedMap(liveMapData?.layers?.resources).length};
   const raw=liveMapData?.debug?.rawDbRowCounts||{};
-  setText("liveDebugPlayers",String(counts.players||0)+" rows / raw "+(raw.players||0));setText("liveDebugVehicles",String(counts.vehicles||0)+" rows / raw "+(raw.vehicles||0));setText("liveDebugBases",String(counts.bases||0)+" rows / raw "+(raw.bases||0));setText("liveDebugMarkers",String(liveMarkerCount));
+  setText("liveDebugPlayers",String(counts.players||0)+" rows / raw "+(raw.players||0));setText("liveDebugVehicles",String(counts.vehicles||0)+" rows / raw "+(raw.vehicles||0));setText("liveDebugBases",String(counts.bases||0)+" rows / raw "+(raw.bases||0));setText("liveDebugResources",String(counts.resources||0)+" known");setText("liveDebugMarkers",String(liveMarkerCount));
   const debug=liveMapData?.debug||{};
   setText("liveDebugPositionSource",(debug.connectionSource||"--")+" "+(debug.usedHost?debug.usedHost+":"+debug.usedPort:""));
   setText("liveDebugEntitySource","Tunnel "+(debug.tunnelListening?"running":"not running")+" / Get-VM "+(debug.didCallGetVM?"called":"not called"));
@@ -19407,7 +19624,7 @@ async function refreshLiveMap(){
     setLiveMapImage();
     liveMapData=data;
     renderLiveMapLayers();
-    const counts={players:liveMapRowsForSelectedMap(data.layers?.players).length,vehicles:liveMapRowsForSelectedMap(data.layers?.vehicles).length,bases:liveMapRowsForSelectedMap(data.layers?.bases).length};
+    const counts={players:liveMapRowsForSelectedMap(data.layers?.players).length,vehicles:liveMapRowsForSelectedMap(data.layers?.vehicles).length,bases:liveMapRowsForSelectedMap(data.layers?.bases).length,resources:liveMapRowsForSelectedMap(data.layers?.resources).length};
     const elapsed=Math.round(performance.now()-started);
     const boundsWarning=document.getElementById("liveMapBoundsWarning");
     const allRows=liveMapRowsForSelectedMap(data.rows);
@@ -19420,19 +19637,19 @@ async function refreshLiveMap(){
       const unavailable=document.getElementById("liveEntityAvailability");
       const text=document.getElementById("liveEntityAvailabilityText");
       if(unavailable)unavailable.className="empty mt";
-      if(text)text.textContent="Debug marker mode: fake markers are shown for UI rendering validation only.";
+      if(text)text.textContent="Debug marker mode: fake player, vehicle, and base markers plus static known resource spawn locations.";
       document.getElementById("liveMapRetryTunnel")?.classList.add("hidden");
-      setText("liveMapStamp",liveMapLabel()+" debug markers / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");
+      setText("liveMapStamp",liveMapLabel()+" debug markers / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / Resources "+(counts.resources||0)+" / "+elapsed+" ms");
     }else if(data.debug?.dbConnected===false||(data.errors||[]).length){
       const message=data.debug?.tunnelLastError||data.debug?.lastDbError||(data.errors||[])[0]||"Database connection failed.";
       setLiveMapDatabaseNotice("failed",message);
     }else{
-      setLiveMapDatabaseNotice("connected",liveMapLabel()+" / Database connected / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / "+elapsed+" ms");
+      setLiveMapDatabaseNotice("connected",liveMapLabel()+" / Database connected / Players "+(counts.players||0)+" / Vehicles "+(counts.vehicles||0)+" / Bases "+(counts.bases||0)+" / Resources "+(counts.resources||0)+" / "+elapsed+" ms");
     }
     const log=document.getElementById("liveMapLog");
-    if(log)log.textContent=JSON.stringify({demo:Boolean(data.demo),message:data.message||"",db:{connected:data.debug?.dbConnected,source:data.debug?.connectionSource,resolvedSource:data.debug?.resolvedSource,manualDbConfigExists:data.debug?.manualDbConfigExists,configuredHost:data.debug?.configuredDbHost,configuredPort:data.debug?.configuredDbPort,configuredName:data.debug?.configuredDbName,usedHost:data.debug?.usedHost,usedPort:data.debug?.usedPort,tunnelExpected:data.debug?.tunnelExpected,tunnelListening:data.debug?.tunnelListening,tunnelState:data.debug?.tunnelState,tunnelAttemptCount:data.debug?.tunnelAttemptCount,tunnelLastError:data.debug?.tunnelLastError,lastDbError:data.debug?.lastDbError,didCallGetVM:data.debug?.didCallGetVM},rowCounts:data.debug?.rowCounts,rawDbRowCounts:data.debug?.rawDbRowCounts,rejectedCoordinateCount:data.debug?.rejectedCoordinateCount,coordinateRange:data.debug?.coordinateRange,bounds:data.debug?.bounds,sources:data.sources||[],errors:data.errors||[],sample:{player:data.layers?.players?.[0]||null,vehicle:data.layers?.vehicles?.[0]||null,base:data.layers?.bases?.[0]||null}},null,2);
+    if(log)log.textContent=JSON.stringify({demo:Boolean(data.demo),message:data.message||"",db:{connected:data.debug?.dbConnected,source:data.debug?.connectionSource,resolvedSource:data.debug?.resolvedSource,manualDbConfigExists:data.debug?.manualDbConfigExists,configuredHost:data.debug?.configuredDbHost,configuredPort:data.debug?.configuredDbPort,configuredName:data.debug?.configuredDbName,usedHost:data.debug?.usedHost,usedPort:data.debug?.usedPort,tunnelExpected:data.debug?.tunnelExpected,tunnelListening:data.debug?.tunnelListening,tunnelState:data.debug?.tunnelState,tunnelAttemptCount:data.debug?.tunnelAttemptCount,tunnelLastError:data.debug?.tunnelLastError,lastDbError:data.debug?.lastDbError,didCallGetVM:data.debug?.didCallGetVM},rowCounts:data.debug?.rowCounts,rawDbRowCounts:data.debug?.rawDbRowCounts,rejectedCoordinateCount:data.debug?.rejectedCoordinateCount,coordinateRange:data.debug?.coordinateRange,bounds:data.debug?.bounds,sources:data.sources||[],errors:data.errors||[],resourceCounts:data.resourceCounts||{},sample:{player:data.layers?.players?.[0]||null,vehicle:data.layers?.vehicles?.[0]||null,base:data.layers?.bases?.[0]||null,resource:data.layers?.resources?.[0]||null}},null,2);
     updateLiveMapDebug();
-    addActivity("maps",data.demo?"Live map debug markers rendered":"Live map refreshed",(counts.players||0)+" players / "+(counts.vehicles||0)+" vehicles / "+(counts.bases||0)+" bases / "+liveMarkerCount+" rendered");
+    addActivity("maps",data.demo?"Live map debug markers rendered":"Live map refreshed",(counts.players||0)+" players / "+(counts.vehicles||0)+" vehicles / "+(counts.bases||0)+" bases / "+(counts.resources||0)+" known resource spawns / "+liveMarkerCount+" rendered");
   }catch(e){
     const message=betterError(e);
     setLiveMapDatabaseNotice("failed",message);
@@ -20246,7 +20463,7 @@ function isRemotePortalRequest(req) {
 
 const REMOTE_LOCAL_ONLY_PREFIXES = [
   "/api/config", "/api/setup/", "/api/test/", "/api/settings/", "/api/ssh-key/", "/api/server-install-path/",
-  "/api/live-give/env", "/api/blueprints", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/",
+  "/api/live-give/env", "/api/blueprints", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/", "/api/live-map/resource-areas/generate", "/api/live-map/resource-areas/game-folder",
   "/api/admin/probe", "/api/admin/tuned-channels", "/api/admin/permissions", "/api/gear/discovery", "/api/discovery",
   "/api/market-automator/logs", "/api/director", "/api/database-browser/", "/manager-api/"
 ];
@@ -20254,7 +20471,7 @@ const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/status", "/api/vm-monitor", "/api/server-update/check", "/api/scheduler", "/api/receiver/status",
   "/api/battlegroups", "/api/battlegroups/selected", "/api/database/status", "/api/database/tunnel/status", "/api/database/backups",
   "/api/maps", "/api/world-map/metadata", "/api/live-map/markers", "/api/live-map/entities", "/api/live-map/players",
-  "/api/live-map/vehicles", "/api/live-map/bases", "/api/live-map/teleport/presets", "/api/live-map/teleport/status",
+  "/api/live-map/vehicles", "/api/live-map/bases", "/api/live-map/teleport/presets", "/api/live-map/teleport/status", "/api/live-map/resource-areas/status",
   "/api/admin/players", "/api/admin/repair/inspect", "/api/admin/repair/queue", "/api/players/feed", "/api/admin/items",
   "/api/give-items", "/api/gear-codex/items", "/api/item-database/items", "/api/items/catalog/status", "/api/give-items/capabilities",
   "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/progression/house-scrip", "/api/landsraad/tiers",
@@ -20275,11 +20492,11 @@ function remoteRoutePolicy(req, activeSession, url) {
   if (pathname === "/api/auth/session" || pathname === "/api/auth/logout" || pathname === "/api/auth/reauth") return { allowed: true };
   if (!pathname.startsWith("/api/") && !pathname.startsWith("/manager-api/")) return { allowed: true };
   if (role === "viewer") {
-    const allowed = method === "GET" && (REMOTE_VIEWER_GET_PATHS.has(pathname) || pathname.startsWith("/api/database/import-status/") || pathname.startsWith("/api/database/restore-status/"));
+    const allowed = method === "GET" && (REMOTE_VIEWER_GET_PATHS.has(pathname) || pathname.startsWith("/api/live-map/resource-areas/overlay/") || pathname.startsWith("/api/database/import-status/") || pathname.startsWith("/api/database/restore-status/"));
     return allowed ? { allowed: true } : { allowed: false, status: 403, error: "Remote Viewer access is read-only and this endpoint is not approved." };
   }
   if (role === "operator") {
-    if (method === "GET" && REMOTE_VIEWER_GET_PATHS.has(pathname)) return { allowed: true };
+    if (method === "GET" && (REMOTE_VIEWER_GET_PATHS.has(pathname) || pathname.startsWith("/api/live-map/resource-areas/overlay/"))) return { allowed: true };
     if (method === "POST" && (REMOTE_OPERATOR_POST_PATHS.has(pathname) || pathname.startsWith("/api/action/") || pathname.startsWith("/api/vm/"))) return { allowed: true };
     return { allowed: false, status: 403, error: "This action requires the Remote Owner role." };
   }
@@ -20877,13 +21094,37 @@ async function route(req, res) {
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }
+  if (url.pathname === "/api/live-map/resource-areas/status" && req.method === "GET") {
+    await json(res, experimentalResourceAreaStatus());
+    return;
+  }
+  if (url.pathname === "/api/live-map/resource-areas/generate" && req.method === "POST") {
+    try { await json(res, generateExperimentalResourceAreas()); }
+    catch (error) { await json(res, { ok: false, available: false, error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/live-map/resource-areas/game-folder" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, selectExperimentalResourceAreaGameFolder(body.folder));
+    } catch (error) {
+      await json(res, { ok: false, available: false, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname.startsWith("/api/live-map/resource-areas/overlay/") && req.method === "GET") {
+    const match = /^\/api\/live-map\/resource-areas\/overlay\/([^/]+)\/([^/]+)\/([^/]+)\.png$/.exec(url.pathname);
+    const filePath = match ? ExperimentalResourceAreas.overlayFile(EXPERIMENTAL_RESOURCE_AREA_CACHE_DIR, decodeURIComponent(match[3]), decodeURIComponent(match[2]), decodeURIComponent(match[1])) : "";
+    if (!filePath || !serveStatic(res, path.dirname(filePath), path.basename(filePath))) send(res, 404, "text/plain", "Experimental resource-area overlay not found");
+    return;
+  }
   if ((url.pathname === "/api/live-map/markers" || url.pathname === "/api/live-map/entities") && req.method === "GET") {
     if (url.searchParams.get("debugMarkers") === "1") {
       await json(res, liveMapDemoMarkersPayload());
       return;
     }
     try { await json(res, await liveMapMarkersPayload()); }
-    catch (error) { await json(res, { ok: false, rows: [], layers: { players: [], vehicles: [], bases: [] }, debug: liveMapDebugFromLayers({ players: [], vehicles: [], bases: [] }, { players: null, vehicles: null, bases: null }, null, [error]), errors: [error.message], error: error.message, ...liveMapConfigPayload() }, 500); }
+    catch (error) { await json(res, { ok: false, rows: [], layers: { players: [], vehicles: [], bases: [], resources: [] }, debug: liveMapDebugFromLayers({ players: [], vehicles: [], bases: [], resources: [] }, { players: null, vehicles: null, bases: null, resources: null }, null, [error]), errors: [error.message], error: error.message, ...liveMapConfigPayload() }, 500); }
     return;
   }
   if (url.pathname === "/api/live-map/debug" && req.method === "GET") {

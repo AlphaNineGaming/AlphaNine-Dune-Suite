@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("assert");
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -29,6 +30,12 @@ const packagedServerHealthTestPath = path.join(extracted, "scripts", "test-serve
 const packagedStorageDepositTestPath = path.join(extracted, "scripts", "test-storage-deposits.js");
 const packagedRemoteAccessTestPath = path.join(extracted, "scripts", "test-remote-access.js");
 const packagedUpdateIntegrityTestPath = path.join(extracted, "scripts", "test-update-integrity.js");
+const packagedLiveMapResourcesTestPath = path.join(extracted, "scripts", "test-live-map-resources.js");
+const packagedLiveMapResourcesDataPath = path.join(extracted, "data", "dune-resource-spawn-locations.json");
+const packagedExperimentalResourcesTestPath = path.join(extracted, "scripts", "test-experimental-resource-areas.js");
+const packagedExperimentalResourcesUiTestPath = path.join(extracted, "scripts", "test-experimental-resource-areas-ui.js");
+const packagedExperimentalResourcesModulePath = path.join(extracted, "lib", "experimental-resource-areas.js");
+const packagedRepakDir = path.join(outputDir, "win-unpacked", "resources", "app.asar.unpacked", "tools", "repak");
 const packagedReleaseNotesPath = path.join(extracted, `RELEASE_NOTES_${rootPackage.version}.md`);
 assert(fs.existsSync(packagedCleanerTestPath), "Packaged app is missing the Server Cleaner regression test.");
 assert(fs.existsSync(packagedLandsraadTestPath), "Packaged app is missing the Landsraad exact-five regression test.");
@@ -37,6 +44,15 @@ assert(fs.existsSync(packagedServerHealthTestPath), "Packaged app is missing the
 assert(fs.existsSync(packagedStorageDepositTestPath), "Packaged app is missing the storage-deposit reliability regression test.");
 assert(fs.existsSync(packagedRemoteAccessTestPath), "Packaged app is missing the remote-access regression test.");
 assert(fs.existsSync(packagedUpdateIntegrityTestPath), "Packaged app is missing the self-update integrity regression test.");
+assert(fs.existsSync(packagedLiveMapResourcesTestPath), "Packaged app is missing the Live Map resource regression test.");
+assert(fs.existsSync(packagedLiveMapResourcesDataPath), "Packaged app is missing the known resource spawn dataset.");
+assert(fs.existsSync(packagedExperimentalResourcesTestPath), "Packaged app is missing the Experimental Resource Areas regression test.");
+assert(fs.existsSync(packagedExperimentalResourcesUiTestPath), "Packaged app is missing the Experimental Resource Areas UI regression test.");
+assert(fs.existsSync(packagedExperimentalResourcesModulePath), "Packaged app is missing the local Experimental Resource Areas generator.");
+for (const filename of ["repak.exe", "LICENSE-MIT", "LICENSE-APACHE", "README.md", "oo2core_9_win64.dll", "ooz-source/COPYING", "ooz-source/BUILD.md"]) assert(fs.existsSync(path.join(packagedRepakDir, filename)), `Packaged app is missing the unpacked repak ${filename}.`);
+const packagedDecompressorHash = crypto.createHash("sha256").update(fs.readFileSync(path.join(packagedRepakDir, "oo2core_9_win64.dll"))).digest("hex");
+assert.equal(packagedDecompressorHash, "5ac5e474887a110bcee8ec454df99c2f0133102cd54f74bb309868fdd7253db3", "Packaged app is missing the approved open-source offline decompressor.");
+assert.notEqual(packagedDecompressorHash, "6f5d41a7892ea6b2db420f2458dad2f84a63901c9a93ce9497337b16c195f457", "Packaged app contains the proprietary downloader-provided Oodle DLL.");
 assert(fs.existsSync(packagedReleaseNotesPath), `Packaged app is missing release notes for ${rootPackage.version}.`);
 assert(
   packagedServerSource.includes('const actorId = requireSqlBigint(payload.actorId, "actor_id", 0n)'),
@@ -120,6 +136,44 @@ assert.equal(
   0,
   `Packaged self-update integrity regression failed.\n${packagedUpdateIntegrityTest.stdout || ""}\n${packagedUpdateIntegrityTest.stderr || ""}`
 );
+const packagedLiveMapResourcesTest = spawnSync(process.execPath, [packagedLiveMapResourcesTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedLiveMapResourcesTest.status,
+  0,
+  `Packaged Live Map resource regression failed.\n${packagedLiveMapResourcesTest.stdout || ""}\n${packagedLiveMapResourcesTest.stderr || ""}`
+);
+const packagedExperimentalResourcesTest = spawnSync(process.execPath, [packagedExperimentalResourcesTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedExperimentalResourcesTest.status,
+  0,
+  `Packaged Experimental Resource Areas regression failed.\n${packagedExperimentalResourcesTest.stdout || ""}\n${packagedExperimentalResourcesTest.stderr || ""}`
+);
+const packagedExperimentalResourcesUiTest = spawnSync(process.execPath, [packagedExperimentalResourcesUiTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedExperimentalResourcesUiTest.status,
+  0,
+  `Packaged Experimental Resource Areas UI regression failed.\n${packagedExperimentalResourcesUiTest.stdout || ""}\n${packagedExperimentalResourcesUiTest.stderr || ""}`
+);
+const packagedExperimentalResourcesModule = fs.readFileSync(packagedExperimentalResourcesModulePath, "utf8");
+assert(!/https?:\/\/|Red-Blink/i.test(packagedExperimentalResourcesModule), "Packaged Experimental Resource Areas code contains an external URL or Red-Blink reference.");
+assert(packagedExperimentalResourcesModule.includes("app.asar.unpacked"), "Packaged Resource Areas generator cannot locate its extraction helper outside app.asar.");
+const packagedEntries = asar.listPackage(archive).map((entry) => entry.replaceAll("\\", "/").replace(/^\//, ""));
+for (const entry of packagedEntries) {
+  assert(!/experimental-resource-areas\/|\.source-top-(?:max|min)-y\.png$/i.test(entry), `Packaged app contains a generated resource-area cache artifact: ${entry}`);
+  assert(!/\.(?:pak|uasset|uexp)$/i.test(entry), `Packaged app contains a raw Funcom package asset: ${entry}`);
+}
 assert(
   packagedServerSource.includes("detectedTiers.length === LANDSRAAD_TIER_COUNT"),
   "Packaged Landsraad inspection is missing the exact-five fail-closed invariant."
@@ -204,6 +258,7 @@ const child = spawn(process.execPath, [path.join(extracted, "server.js")], {
     PORT: String(port),
     ALPHANINE_HTTPS_PORT: String(httpsPort),
     ALPHANINE_DATA_DIR: dataDir,
+    ALPHANINE_DUNE_PAKS_DIR: path.join(scratch, "missing-paks"),
     ALPHANINE_SKIP_MANAGER: "1",
     ALPHANINE_SKIP_STARTUP_SERVICES: "1"
   },
@@ -231,6 +286,11 @@ async function waitForUi() {
 (async () => {
   try {
     const html = await waitForUi();
+    const resourceAreaStatusResponse = await fetch(`http://127.0.0.1:${port}/api/live-map/resource-areas/status`);
+    const resourceAreaStatus = await resourceAreaStatusResponse.json();
+    assert.equal(resourceAreaStatusResponse.status, 200, "Missing Tools.pak must not crash the packaged status API.");
+    assert.equal(resourceAreaStatus.available, false, "A clean install without Tools.pak must not claim overlays are available.");
+    assert.match(resourceAreaStatus.source?.error || "", /Tools\.pak was not found/i, "Missing Tools.pak needs a clear packaged-runtime explanation.");
     assert(html.includes("loadSharedPlayerDirectory"), "Packaged UI is missing the shared player directory.");
     assert(html.includes("keeping the last confirmed directory"), "Packaged UI is missing stale player preservation.");
     assert(html.includes("Player Building Blueprints"), "Packaged UI is missing blueprint management.");
@@ -249,6 +309,10 @@ async function waitForUi() {
     assert(html.includes('id="server-health"'), "Packaged UI is missing the Server Health page.");
     assert(html.includes("Refresh Health"), "Packaged UI is missing manual Server Health refresh.");
     assert(html.includes('getJson("/api/server-health",{timeoutMs:65000})'), "Packaged Server Health scan is missing its bounded UI deadline.");
+    assert(html.includes("Preparing resource areas…"), "Packaged UI is missing the preparing state for Resource Areas.");
+    assert(html.includes("Resource areas ready."), "Packaged UI is missing the ready state for Resource Areas.");
+    assert(html.includes("No resource types selected."), "Packaged UI is missing the empty selection state for Resource Areas.");
+    assert(html.includes("Select Game Folder"), "Packaged UI is missing the Resource Areas game-folder recovery action.");
     assert(html.includes("Protected Battlegroup Refresh"), "Packaged Give Item UI is missing protected storage refresh.");
     assert(html.includes('getJson("/api/admin/storage-deposits/recheck"'), "Packaged UI is missing storage receipt rechecks.");
     assert(packagedServerSource.includes("Storage deposit failed transactional slot and quantity verification"), "Packaged backend is missing transactional storage verification.");

@@ -1,5 +1,24 @@
 # AlphaNine Dune Suite 1.0.83
 
+## Known Resource Spawn Locations
+
+- Adds an optional Live Map layer containing 117 Hagga Basin spawn locations: 87 Small Spice and 30 Flour Sand.
+- Adds resource-type filters, search, counts, Show All, Hide All, clustering, and X/Y/Z marker details.
+- The layer is disabled by default and clearly identifies these as possible spawn locations, not live active-resource state.
+- Resource markers are non-draggable, cannot become teleport targets, and use the Suite's existing world-coordinate conversion.
+- The packaged dataset contains only resource names and numeric coordinates with provenance metadata; no game map or proprietary asset is bundled.
+
+## Experimental Resource Areas
+
+- Adds ten optional procedural-distribution overlays for Bauxite, Magnetite, Azurite, Dolomite, Erythrite, Jasmium, Basalt, Cistanche, Primrose Field, and Saguaro.
+- Uses Maximum-Y orientation with authoritative IgwLevelBounds of `-457200..355600` on both axes and labels values only as heatmap intensity.
+- Generates overlays locally from the user's installed `Tools.pak`; no raw or derived heatmap images are included in the installer.
+- Keys the local cache to the installed Steam build ID and full `Tools.pak` SHA-256 so a changed build or PAK regenerates instead of reusing stale overlays.
+- Applies a monotonic contrast display curve so low nonzero heatmap intensity remains visible at the default 45% opacity; zero intensity stays transparent and location data is unchanged.
+- Fixes packaged first-click activation: a cache miss now uses the bundled, licensed local extraction helper, selects all ten types when no prior selection exists, reports preparation and image-load failures visibly, and preserves saved filters across master-toggle off/on cycles.
+- The feature is experimental and disabled by default. It does not claim exact nodes, guaranteed spawns, live activity, depletion, or quantities.
+- Icehunter was consulted only as independent orientation evidence. No Icehunter or Red-Blink code, markers, CDN files, map tiles, icons, or heatmap images were incorporated.
+
 ## Verified and signed self-updates
 
 This release hardens the Suite updater after Windows Defender blocked the unsigned 1.0.82 installer.

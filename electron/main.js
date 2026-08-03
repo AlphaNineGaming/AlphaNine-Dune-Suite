@@ -692,6 +692,15 @@ ipcMain.handle("choose-server-install-folder", async () => {
   return { canceled: false, folderPath: result.filePaths[0] };
 });
 
+ipcMain.handle("choose-game-folder", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select Dune Awakening game folder",
+    properties: ["openDirectory"]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  return { canceled: false, folderPath: result.filePaths[0] };
+});
+
 ipcMain.handle("choose-database-backup-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Select database backup folder",

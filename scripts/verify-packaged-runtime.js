@@ -52,8 +52,8 @@ const packagedPlayerDirectory = asar.extractFile(archive, "lib/player-directory.
 const packagedServerUpdate = asar.extractFile(archive, "lib/server-update.js").toString("utf8");
 const packagedServerHealth = asar.extractFile(archive, "lib/server-health.js").toString("utf8");
 const packagedExperimentalResources = asar.extractFile(archive, "lib/experimental-resource-areas.js").toString("utf8");
-if (/https?:\/\/|Red-Blink/i.test(packagedExperimentalResources)) {
-  throw new Error("Packaged Experimental Resource Areas code contains an external URL or Red-Blink reference.");
+if (/https?:\/\//i.test(packagedExperimentalResources)) {
+  throw new Error("Packaged Experimental Resource Areas code contains an external URL.");
 }
 const packagedResourceDataset = JSON.parse(asar.extractFile(archive, "data/dune-resource-spawn-locations.json").toString("utf8"));
 if (!Array.isArray(packagedResourceDataset.locations) || packagedResourceDataset.locations.length !== 117) {

@@ -17,7 +17,7 @@
 - Applies a monotonic contrast display curve so low nonzero heatmap intensity remains visible at the default 45% opacity; zero intensity stays transparent and location data is unchanged.
 - Fixes packaged first-click activation: a cache miss now uses the bundled, licensed local extraction helper, selects all ten types when no prior selection exists, reports preparation and image-load failures visibly, and preserves saved filters across master-toggle off/on cycles.
 - The feature is experimental and disabled by default. It does not claim exact nodes, guaranteed spawns, live activity, depletion, or quantities.
-- Icehunter was consulted only as independent orientation evidence. No Icehunter or Red-Blink code, markers, CDN files, map tiles, icons, or heatmap images were incorporated.
+- Maximum-Y orientation was independently cross-checked. No third-party code, markers, CDN files, map tiles, icons, or heatmap images were incorporated.
 
 ## Verified and signed self-updates
 

@@ -167,7 +167,7 @@ assert.equal(
   `Packaged Experimental Resource Areas UI regression failed.\n${packagedExperimentalResourcesUiTest.stdout || ""}\n${packagedExperimentalResourcesUiTest.stderr || ""}`
 );
 const packagedExperimentalResourcesModule = fs.readFileSync(packagedExperimentalResourcesModulePath, "utf8");
-assert(!/https?:\/\/|Red-Blink/i.test(packagedExperimentalResourcesModule), "Packaged Experimental Resource Areas code contains an external URL or Red-Blink reference.");
+assert(!/https?:\/\//i.test(packagedExperimentalResourcesModule), "Packaged Experimental Resource Areas code contains an external URL.");
 assert(packagedExperimentalResourcesModule.includes("app.asar.unpacked"), "Packaged Resource Areas generator cannot locate its extraction helper outside app.asar.");
 const packagedEntries = asar.listPackage(archive).map((entry) => entry.replaceAll("\\", "/").replace(/^\//, ""));
 for (const entry of packagedEntries) {

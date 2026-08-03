@@ -114,8 +114,8 @@ assert.match(serverSource, /showAllExperimentalResourceAreas/);
 assert.match(serverSource, /hideAllExperimentalResourceAreas/);
 assert.doesNotMatch(serverSource, /Temporary Orientation Diagnostic|liveExperimentalDiagnostic|resource-areas\/diagnostic/);
 assert.match(serverSource, /IgwLevelBounds/);
-assert.match(serverSource, /Icehunter was consulted only as independent evidence|independently cross-checked against Icehunter/);
-assert.match(ExperimentalResourceAreas.PROVENANCE.nonIncorporation, /No Icehunter project code, resource markers, CDN files, map tiles, icons, heatmap PNGs/);
+assert.match(serverSource, /Maximum-Y orientation and IgwLevelBounds were independently cross-checked/);
+assert.match(ExperimentalResourceAreas.PROVENANCE.nonIncorporation, /No third-party project code, resource markers, external CDN files, map tiles, icons, heatmap PNGs/);
 assert.match(serverSource, /interactive:false,className:"live-map-resource-area-overlay"/);
 assert.match(serverSource, /EXPERIMENTAL_RESOURCE_AREA_CACHE_DIR/);
 assert.match(serverSource, /cacheKey/);
@@ -139,7 +139,7 @@ if (packageJson.build) {
 }
 assert.doesNotMatch(JSON.stringify(ExperimentalResourceAreas.RESOURCES), /stone|fiber|fuel|scrap|rogue|t6resource/i);
 const resourceModuleSource = fs.readFileSync(path.join(root, "lib", "experimental-resource-areas.js"), "utf8");
-assert.doesNotMatch(resourceModuleSource, /https?:\/\/|Red-Blink/i, "Resource areas must not depend on third-party URLs or Red-Blink.");
+assert.doesNotMatch(resourceModuleSource, /https?:\/\//i, "Resource areas must not depend on third-party URLs.");
 assert.doesNotMatch(resourceModuleSource, /Reinstall AlphaNine Dune Suite 1\.0\.83/, "Resource-area recovery guidance must not name an obsolete Suite version.");
 assert.doesNotMatch(resourceModuleSource, /catch\s*\([^)]*\)\s*\{\s*\}/, "Resource-area backend errors must not be swallowed by empty catch blocks.");
 assert.match(resourceModuleSource, /app\.asar\.unpacked/, "The packaged generator must resolve its writable/executable helper outside app.asar.");

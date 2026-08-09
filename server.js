@@ -6,12 +6,72 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { assertCapturedDestinationBinding, publicProfileBinding, resolveProfileBinding, verifyProfileBinding } = require("./lib/profile-binding");
+// Resolve an explicit profile argument inside this process. This deliberately
+// does not depend on transient environment inherited across UAC elevation.
+const SELECTED_PROFILE_BINDING = resolveProfileBinding({ argv: process.argv });
+const { createStartupPolicy } = require("./lib/startup-policy");
+const {
+  BattlegroupControlJournal,
+  buildMergePatch: buildBattlegroupControlMergePatch,
+  resourceEvidence: battlegroupControlResourceEvidence
+} = require("./lib/battlegroup-control");
+const { assertRenderedInlineJavaScript } = require("./lib/rendered-script-check");
+const { runWithStdin } = require("./lib/stdin-process");
+const { inspectRecoveryArchive } = require("./lib/recovery-archive-transport");
+const { buildMaintenanceTransport, validateRemoteEvidence: validateRemoteMaintenanceEvidence } = require("./lib/maintenance-transport");
 const Coordinates = require("./assets/coordinate-system");
 const ExperimentalResourceAreas = require("./lib/experimental-resource-areas");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
-const { OperationRegistry, OperationBusyError } = require("./lib/operations");
+const { OperationRegistry, OperationBusyError, operationsConflict } = require("./lib/operations");
+const {
+  BANNER: MIGRATION_MAINTENANCE_BANNER,
+  ENTER_CONFIRMATION: MIGRATION_MAINTENANCE_ENTER_CONFIRMATION,
+  PHASES: MIGRATION_MAINTENANCE_PHASES,
+  createMigrationMaintenance,
+  readOperationJournal
+} = require("./lib/migration-maintenance");
+const {
+  BANNER: MIGRATION_OFFLINE_BANNER,
+  ENTER_CONFIRMATION: MIGRATION_OFFLINE_ENTER_CONFIRMATION,
+  EXIT_CONFIRMATION: MIGRATION_OFFLINE_EXIT_CONFIRMATION,
+  createMigrationOfflineMode
+} = require("./lib/migration-offline-mode");
+const { installMigrationUiSafety } = require("./lib/migration-ui-safety");
+const { runMaintenanceBootstrap, runMaintenanceBootstrapRecovery } = require("./lib/maintenance-bootstrap");
+const {
+  CONFIRMATION: MARKET_BOT_RECONCILIATION_CONFIRMATION,
+  PHASES: MARKET_BOT_RECONCILIATION_PHASES,
+  PauseReconciliationState,
+  assertNewGeneration: assertNewMarketBotReconciliationGeneration,
+  boundaryDigest: marketBotBoundaryDigest,
+  classifyLocalState: classifyMarketBotReconciliationLocalState,
+  nextGeneration: nextMarketBotReconciliationGeneration,
+  runPauseReconciliation,
+  semanticConfigView: marketBotSemanticConfigView,
+  semanticDifferenceCategories: marketBotSemanticDifferenceCategories,
+  validateRemoteQuiescence: validateReconciliationRemoteQuiescence
+} = require("./lib/market-bot-reconciliation");
+const {
+  CONFIRMATION: OFFLINE_MARKET_BOT_RECONCILIATION_CONFIRMATION,
+  EXPECTED: OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED,
+  PHASES: OFFLINE_MARKET_BOT_RECONCILIATION_PHASES,
+  OfflineMarketBotReconciliationState,
+  assertAllowedLocalEvidenceUpdate,
+  digestFile: offlineMarketBotDigestFile,
+  runOfflineMarketBotReconciliation
+} = require("./lib/market-bot-offline-reconciliation");
 const { StorageDepositStore, classifyStorageVerification } = require("./lib/storage-deposits");
+const {
+  SET_DURABILITY_VALUE: GIVE_ITEM_DURABILITY_VALUE,
+  DURABILITY_SQL_PATH: GIVE_ITEM_DURABILITY_SQL_PATH,
+  durabilityExpectation,
+  itemStatsJsonForGrant,
+  classifyDurabilityReadBack,
+  buildDurabilityInvestigationSql,
+  requestedDurability
+} = require("./lib/give-item-durability");
 const { normalizeSha256Digest, normalizeExpectedSize } = require("./lib/update-integrity");
 const { createRemoteAccess } = require("./lib/remote-access");
 const { createInternetTunnel } = require("./lib/internet-tunnel");
@@ -33,20 +93,189 @@ const { createDatabaseBrowser } = require("./lib/database-browser");
 const { createMarketAutomator } = require("./lib/market-automator");
 const {
   createMarketBotStore,
+  VM_MARKET_BOT_BINARY,
+  VM_MARKET_BOT_CONFIG,
   normalizeConfig: normalizeMarketBotConfig,
+  pinnedCatalogPolicy: buildPinnedMarketBotCatalogPolicy,
   buildItemPolicies: buildMarketBotItemPolicies,
   runtimeConfig: buildMarketBotRuntimeConfig,
   activationFingerprint: marketBotActivationFingerprint,
   buildInstallCommand: buildMarketBotInstallCommand,
+  buildPausedRuntimeDeploymentCommand: buildMarketBotPausedRuntimeDeploymentCommand,
+  buildPausedRuntimeRollbackCleanupCommand: buildMarketBotPausedRuntimeRollbackCleanupCommand,
+  buildPausedRuntimeRollbackRestoreCommand: buildMarketBotPausedRuntimeRollbackRestoreCommand,
+  buildPausedConfigPublishCommand: buildMarketBotPausedConfigPublishCommand,
   buildStatusCommand: buildMarketBotStatusCommand,
+  buildMigrationStoppedEvidenceCommand: buildMarketBotMigrationStoppedEvidenceCommand,
+  buildMigrationStopCommand: buildMarketBotMigrationStopCommand,
+  buildMigrationUninstallCommand: buildMarketBotMigrationUninstallCommand,
   buildActionCommand: buildMarketBotActionCommand,
   parseJsonOutput: parseMarketBotJson
 } = require("./lib/market-bot");
+const {
+  PAUSE_STATES: MARKET_BOT_PAUSE_STATES,
+  MARKET_BOT_MIGRATION_SAMPLE_SQL,
+  nextGeneration: nextMarketBotGeneration,
+  evaluateAuthoritativeQuiescence: evaluateMarketBotQuiescence
+} = require("./lib/market-bot-verification");
+const {
+  parseDatabaseEnvelope: parseMarketBotDatabaseEnvelope,
+  parseSingleObject: parseMarketBotSingleObject,
+  buildEvidenceEnvelope: buildMarketBotEvidenceEnvelope,
+  evaluationInput: marketBotEvidenceEvaluationInput
+} = require("./lib/market-bot-evidence");
+const {
+  buildAuthoritativeMarketBotEvidence
+} = require("./lib/market-bot-authoritative-evidence");
+const {
+  assertMigrationSafetyCheckpoint: assertMarketBotMigrationSafetyCheckpoint,
+  evaluateMigrationMarketBotSafety
+} = require("./lib/market-bot-migration-safety");
+const {
+  evaluateReadOnlySafetyGates,
+  parseBattlegroupStatus,
+  validateMarketBotInfrastructureEvidence,
+  validateMarketBotStopCompletion
+} = require("./lib/migration-preflight");
 const { createItemCatalogProvider, isValidTemplateId, rawFallback } = require("./lib/item-catalog-provider");
 const { createItemServerDiscovery } = require("./lib/item-server-discovery");
 const { createZipArchive } = require("./lib/zip-archive");
 const { buildServerHealthReport } = require("./lib/server-health");
 const {
+  ACTIVE_WRITERS_SQL,
+  CODEX_BACKUP_ARTIFACTS: MIGRATION_CODEX_BACKUP_ARTIFACTS,
+  CODEX_BACKUP_ARTIFACT_SQL: MIGRATION_CODEX_BACKUP_ARTIFACT_SQL,
+  DATABASE_FACTS_SQL,
+  DUMP_FLAGS: MIGRATION_DUMP_FLAGS,
+  ENTITY_TABLES: MIGRATION_ENTITY_TABLES,
+  MARKET_BOT_TABLES: MIGRATION_MARKET_BOT_TABLES,
+  FRESH_DESTINATION_SQL: MIGRATION_FRESH_DESTINATION_SQL,
+  PATCH_CATALOG_SQL: MIGRATION_PATCH_SQL,
+  RELATIONSHIP_SQL: MIGRATION_RELATIONSHIP_SQL,
+  REQUIRED_EXTENSIONS: MIGRATION_REQUIRED_EXTENSIONS,
+  SCHEMA_CATALOG_SQL: MIGRATION_SCHEMA_SQL,
+  SEQUENCE_SQL: MIGRATION_SEQUENCE_SQL,
+  SUPPORTED_PROFILE: MIGRATION_SUPPORTED_PROFILE,
+  VERIFICATION_QUERY_VERSION: MIGRATION_VERIFICATION_QUERY_VERSION,
+  assessOutputPath,
+  assertMigrationRollbackOfflineCheckpoint,
+  assertStableStructuredMigrationOfflineSamples,
+  buildMigrationManifest,
+  buildMigrationRollbackOfflineCheckpoint,
+  classifyMigrationOfflineStatus,
+  classifyStructuredMigrationOfflineSample,
+  collectIndependentWriterSamples,
+  entityCountsSql,
+  evaluateIndependentWriterSamples,
+  marketBotTableCountsSql,
+  parseJsonResult: parseMigrationJson,
+  sha256Text: migrationSha256Text,
+  validateMigrationManifest,
+  validatePgRestoreToc,
+  validateVerificationEvidence
+} = require("./lib/server-migration");
+const {
+  CONFIRMATION: EMPTY_MARKET_CONFIRMATION,
+  buildCleanupSql: buildEmptyMarketCleanupSql,
+  buildPortableEvidenceSql: buildPortableEmptyMarketEvidenceSql,
+  buildPreviewSql: buildEmptyMarketPreviewSql,
+  migrationMarketIsEmpty,
+  runEmptyMarket,
+  validatePreview: validateEmptyMarketPreview
+} = require("./lib/migration-empty-market");
+const {
+  buildDestinationMarketCleanupSql,
+  emptyDestinationMarketEvidence,
+  validateDestinationCleanupResult,
+  validateSourceMarketEvidence
+} = require("./lib/migration-destination-market");
+const {
+  FORMAT_VERSION: MIGRATION_PACKAGE_FORMAT_VERSION,
+  canonicalJson: canonicalMigrationJson,
+  extractMigrationEntry,
+  hashFile: hashMigrationFile,
+  inspectMigrationPackage,
+  streamMigrationEntry,
+  writeMigrationPackage
+} = require("./lib/migration-package");
+const {
+  ARCHIVE_INSPECTION_MARKER,
+  EXPORT_TRANSPORT_VERSION: MIGRATION_EXPORT_TRANSPORT_VERSION,
+  POD_ARCHIVE_PATHS,
+  cleanupPodArchivePaths,
+  generateValidatedPodArchive,
+  installPodPgpass,
+  inspectClosedArchive,
+  partialPaths: migrationPartialPaths,
+  publishVerifiedPackage,
+  podExecArgs,
+  requirePodCommand,
+  runPodStage,
+  safeRemove: removeMigrationPartials,
+  streamCommandToFile,
+  verifyPackagedComponents
+} = require("./lib/server-migration-export");
+const {
+  CROSS_SCHEMA_DEPENDENCY_SQL: MIGRATION_CROSS_SCHEMA_DEPENDENCY_SQL,
+  DUNE_RESTORE_FLAGS: MIGRATION_DUNE_RESTORE_FLAGS,
+  OUTSIDE_DUNE_BOUNDARY_SQL: MIGRATION_OUTSIDE_DUNE_BOUNDARY_SQL,
+  normalizeCrossSchemaDependencyEvidence: normalizeMigrationCrossSchemaDependencyEvidence,
+  normalizeOutsideDuneBoundary: normalizeMigrationOutsideDuneBoundary,
+  runAtomicDuneSchemaRestore
+} = require("./lib/migration-schema-restore");
+const {
+  PROGRESS_API_VERSION: MIGRATION_PROGRESS_API_VERSION,
+  begin: beginMigrationJobProgress,
+  bytes: updateMigrationJobBytes,
+  heartbeat: touchMigrationJobProgress,
+  initialize: initializeMigrationJobProgress,
+  publicView: publicMigrationJobProgress,
+  whileAlive: whileMigrationJobAlive
+} = require("./lib/migration-job-progress");
+const { verifyMigrationRuntimeIdentity } = require("./lib/migration-runtime-identity");
+const { runReadOnlySshWithRetry } = require("./lib/migration-ssh-retry");
+const { startupSuppressedRouteDecision } = require("./lib/migration-startup-suppressed-routes");
+const {
+  CONFIRMATION: MIGRATION_VM_IP_REBIND_CONFIRMATION,
+  approvalDigest: migrationVmIpApprovalDigest,
+  atomicReplacePair: atomicReplaceMigrationVmIpFiles,
+  buildReboundFiles: buildMigrationVmIpReboundFiles,
+  normalizeIpv4: normalizeMigrationVmIpv4,
+  parsePinnedEd25519: parseMigrationPinnedEd25519,
+  sha256: migrationVmIpSha256
+} = require("./lib/migration-vm-ip-reconciliation");
+const {
+  IMPORT_CONFIRMATION: MIGRATION_IMPORT_CONFIRMATION,
+  ImportJournal,
+  ROLLBACK_FLAGS: MIGRATION_ROLLBACK_FLAGS,
+  runServerMigrationImport,
+  expectedFinalEntityCounts,
+  validateDestinationPreflight: validateMigrationDestinationPreflight
+} = require("./lib/server-migration-import");
+const { buildMigrationWorkerPlan } = require("./lib/migration-worker-plan");
+const { WORKER_TRANSPORT_VERSION: MIGRATION_WORKER_TRANSPORT_VERSION, prepareSignedJob } = require("./lib/migration-destination-worker");
+const { deploySignedWorkerJob, readWorkerStatus, startWorker } = require("./lib/migration-worker-transport");
+const {
+  BACKUP_INVENTORY_PROFILES,
+  DATA_DESCRIPTORS,
+  buildExpectedBackupInventory,
+  hashFile: hashDatabaseBackupFile,
+  parsePgRestoreToc,
+  readHeader: readDatabaseBackupHeader,
+  resolveVendorArtifactIdentity,
+  validateFullBackupToc,
+  validatePgDumpHeader,
+  validateStableSamples,
+  validateVendorTerminalOperation,
+  writeJsonAtomic: writeDatabaseBackupJsonAtomic
+} = require("./lib/database-backup");
+const {
+  CRON_BEGIN: VM_SCHEDULER_CRON_BEGIN,
+  CRON_END: VM_SCHEDULER_CRON_END,
+  VM_SCHEDULER_DIR,
+  VM_SCHEDULER_SCRIPT,
+  VM_SCHEDULER_CONFIG,
+  VM_SCHEDULER_CRON_FILE,
   defaultSchedulerConfig,
   normalizeSchedulerConfig,
   readSchedulerConfig,
@@ -65,15 +294,50 @@ const {
 } = require("./lib/player-rename");
 
 const { version: APP_VERSION } = require("./package.json");
+// Server Migration is intentionally not shipped in this Suite build. Keep the
+// dormant implementation isolated until it is either removed from source or
+// deliberately reintroduced as a separately reviewed product feature.
+const SERVER_MIGRATION_ENABLED = false;
+const SUITE_STARTUP_POLICY = createStartupPolicy();
+const SIDE_EFFECT_FREE_RUNNER = SUITE_STARTUP_POLICY.sideEffectFree;
+const MAINTENANCE_BOOTSTRAP_RUNNER = SUITE_STARTUP_POLICY.maintenanceBootstrap;
+const MIGRATION_STARTUP_SUPPRESSED_RUNNER = SUITE_STARTUP_POLICY.migrationStartupSuppressed;
+if (!SERVER_MIGRATION_ENABLED && (MAINTENANCE_BOOTSTRAP_RUNNER || MIGRATION_STARTUP_SUPPRESSED_RUNNER)) {
+  throw new Error("Server Migration is not included in this build.");
+}
+let MIGRATION_RUNTIME_IDENTITY;
+try {
+  MIGRATION_RUNTIME_IDENTITY = verifyMigrationRuntimeIdentity({
+    rootDir: __dirname,
+    manifestPath: path.join(__dirname, "migration-runtime-identity.json"),
+    packageFormatVersion: MIGRATION_PACKAGE_FORMAT_VERSION,
+    exportTransportVersion: MIGRATION_EXPORT_TRANSPORT_VERSION,
+    progressApiVersion: MIGRATION_PROGRESS_API_VERSION,
+    migrationWorkerTransportVersion: MIGRATION_WORKER_TRANSPORT_VERSION
+  });
+} catch (error) {
+  MIGRATION_RUNTIME_IDENTITY = Object.freeze({
+    verified: false,
+    sourceBuildFingerprint: "",
+    packageFormatVersion: String(MIGRATION_PACKAGE_FORMAT_VERSION),
+    exportTransportVersion: MIGRATION_EXPORT_TRANSPORT_VERSION,
+    progressApiVersion: MIGRATION_PROGRESS_API_VERSION,
+    migrationWorkerTransportVersion: MIGRATION_WORKER_TRANSPORT_VERSION,
+    error: "Migration runtime identity verification failed."
+  });
+}
+if (MIGRATION_STARTUP_SUPPRESSED_RUNNER && !MIGRATION_RUNTIME_IDENTITY.verified) throw new Error("Startup-suppressed migration mode refused to start because the local migration runtime identity does not match the pinned current build.");
 const RUNTIME_PLATFORM = process.env.ALPHANINE_PLATFORM_OVERRIDE || process.platform;
 const IS_WINDOWS = RUNTIME_PLATFORM === "win32";
 const LOCAL_HOST = "127.0.0.1";
+const PROCESS_STARTED_AT = new Date().toISOString();
 const PORT = Number(process.env.PORT || 8810);
 const HTTPS_HOST = process.env.ALPHANINE_HTTPS_HOST || "0.0.0.0";
 const HTTPS_PORT = Number(process.env.ALPHANINE_HTTPS_PORT || 8811);
 const INTERNET_ORIGIN_PORT = Number(process.env.ALPHANINE_INTERNET_ORIGIN_PORT || 8813);
-const MANAGER_PORT = 8812;
-const APPDATA_DIR = process.env.ALPHANINE_DATA_DIR
+const MANAGER_PORT = Number(process.env.ALPHANINE_MANAGER_PORT || 8812);
+const APPDATA_DIR = SELECTED_PROFILE_BINDING?.profileDir
+  || process.env.ALPHANINE_DATA_DIR
   || (IS_WINDOWS && process.env.APPDATA ? path.join(process.env.APPDATA, "AlphaNine Dune Suite") : "")
   || (!IS_WINDOWS ? path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "alphanine-dune-suite") : "");
 const REMOTE_ACCESS_DIR = process.env.ALPHANINE_REMOTE_ACCESS_DIR || path.join(APPDATA_DIR || __dirname, "remote-access");
@@ -82,7 +346,7 @@ const internetTunnel = createInternetTunnel({
   dataDir: path.join(REMOTE_ACCESS_DIR, "cloudflared"),
   originUrl: `http://127.0.0.1:${INTERNET_ORIGIN_PORT}`
 });
-const CONFIG_PATH = process.env.ALPHANINE_CONFIG_PATH || (APPDATA_DIR ? path.join(APPDATA_DIR, "config.json") : path.join(__dirname, "config.json"));
+const CONFIG_PATH = SELECTED_PROFILE_BINDING?.configPath || process.env.ALPHANINE_CONFIG_PATH || (APPDATA_DIR ? path.join(APPDATA_DIR, "config.json") : path.join(__dirname, "config.json"));
 const BUNDLED_TELEPORT_PRESETS_PATH = path.join(__dirname, "assets", "teleport-location-presets.json");
 const TELEPORT_PRESETS_PATH = process.env.ALPHANINE_TELEPORT_PRESETS_PATH
   || path.join(APPDATA_DIR || path.join(__dirname, "data"), "teleport-location-presets.json");
@@ -94,6 +358,8 @@ const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progressi
 const PLAYER_RENAME_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "player-rename-backups");
 const REPAIR_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "repair-backups");
 const REPAIR_QUEUE_PATH = path.join(PROGRESSION_DATA_DIR, "repair-queue.json");
+const BATTLEGROUP_CONTROL_STATE_PATH = path.join(PROGRESSION_DATA_DIR, "battlegroup-control.json");
+const BATTLEGROUP_CONTROL_AUDIT_PATH = path.join(PROGRESSION_DATA_DIR, "logs", "battlegroup-control.jsonl");
 const DATABASE_TUNNEL_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "database-tunnel.log");
 const RECEIVER_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "receiver.log");
 let databaseTunnelStartPromise = null;
@@ -132,14 +398,42 @@ const MANAGER_DIR = packagedUnpackedPath("manager");
 const CODEX_DIR = path.join(__dirname, "gear-codex");
 const DATA_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "data") : path.join(__dirname, "data");
 const OPERATION_HISTORY_PATH = path.join(DATA_DIR, "operations.json");
+const MIGRATION_MAINTENANCE_PATH = path.join(DATA_DIR, "migration-maintenance.json");
+const MIGRATION_OFFLINE_PATH = path.join(DATA_DIR, "migration-offline-mode.json");
+const MIGRATION_IMPORT_JOURNAL_PATH = path.join(DATA_DIR, "server-migration-import.json");
+const MIGRATION_WORKER_POINTER_PATH = path.join(DATA_DIR, "server-migration-worker.json");
+const MIGRATION_WORKER_STAGING_ROOT = path.join(DATA_DIR, "migration-worker-staging");
+const MARKET_BOT_RECONCILIATION_PATH = path.join(DATA_DIR, "market-bot-pause-reconciliation.json");
+const OFFLINE_MARKET_BOT_RECONCILIATION_PATH = path.join(DATA_DIR, "market-bot-offline-evidence-reconciliation.json");
 const STORAGE_DEPOSIT_HISTORY_PATH = path.join(DATA_DIR, "storage-deposits.json");
+const GIVE_ITEM_RECEIPT_HISTORY_PATH = path.join(DATA_DIR, "give-item-receipts.json");
 const SCHEDULER_CONFIG_PATH = path.join(DATA_DIR, "vm-scheduler.json");
 const SCHEDULER_SCRIPT_PATH = packagedAssetPath("assets", "scheduler", "alphanine-scheduler.sh");
 const MARKET_BOT_CONFIG_PATH = path.join(DATA_DIR, "market-bot.json");
 const MARKET_BOT_BINARY_PATH = packagedAssetPath("assets", "market-bot", "linux-amd64", "alphanine-market-bot");
+const MIGRATION_WORKER_BINARY_PATH = packagedAssetPath("assets", "migration-worker", "linux-amd64", "alphanine-migration-worker");
+const MIGRATION_WORKER_PIN_PATH = packagedAssetPath("assets", "migration-worker", "linux-amd64", "alphanine-migration-worker.sha256");
+const marketBotReconciliationState = new PauseReconciliationState(MARKET_BOT_RECONCILIATION_PATH);
+const offlineMarketBotReconciliationState = new OfflineMarketBotReconciliationState(OFFLINE_MARKET_BOT_RECONCILIATION_PATH);
+const migrationMaintenance = createMigrationMaintenance({
+  statePath: MIGRATION_MAINTENANCE_PATH,
+  sideEffectFree: SIDE_EFFECT_FREE_RUNNER,
+  journalActive: () => readOperationJournal(OPERATION_HISTORY_PATH),
+  externalHold: () => marketBotReconciliationState.startupHold()
+});
+const migrationOfflineMode = createMigrationOfflineMode({
+  statePath: MIGRATION_OFFLINE_PATH,
+  sideEffectFree: SIDE_EFFECT_FREE_RUNNER,
+  journalActive: () => readOperationJournal(OPERATION_HISTORY_PATH)
+});
 const marketBotStore = createMarketBotStore({ configPath: MARKET_BOT_CONFIG_PATH, dataDir: DATA_DIR });
 const operationRegistry = new OperationRegistry(OPERATION_HISTORY_PATH, { maxHistory: 100 });
+const battlegroupControlJournal = new BattlegroupControlJournal({
+  statePath: BATTLEGROUP_CONTROL_STATE_PATH,
+  auditPath: BATTLEGROUP_CONTROL_AUDIT_PATH
+});
 const storageDepositStore = new StorageDepositStore(STORAGE_DEPOSIT_HISTORY_PATH, { maxHistory: 100 });
+const giveItemReceiptStore = new StorageDepositStore(GIVE_ITEM_RECEIPT_HISTORY_PATH, { maxHistory: 100 });
 const DUNE_SERVER_STEAM_APP_ID = 4754530;
 const SERVER_UPDATE_CHECK_TTL_MS = 10 * 60 * 1000;
 let serverUpdateCheckCoordinator = null;
@@ -560,6 +854,7 @@ function applyConfigRuntimeEnv(configValue = loadConfig()) {
 
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
+    if (MIGRATION_STARTUP_SUPPRESSED_RUNNER) return { ...defaultConfig };
     const token = generateReceiverToken();
     const generated = { ...defaultConfig, receiverToken: token, adminGiveItemToken: token, receiverTokenSource: "generated" };
     const detected = autoDetectInitialConfig(generated).config;
@@ -590,7 +885,7 @@ function loadConfig() {
     changed = true;
   }
   assertNoMaskedSecrets(configValue, "config.json");
-  if (changed) fs.writeFileSync(CONFIG_PATH, JSON.stringify(configValue, null, 2));
+  if (changed && !MIGRATION_STARTUP_SUPPRESSED_RUNNER) fs.writeFileSync(CONFIG_PATH, JSON.stringify(configValue, null, 2));
   return configValue;
 }
 
@@ -892,7 +1187,9 @@ function loadRuntimeEnvFilesIntoProcess() {
 
 loadRuntimeEnvFilesIntoProcess();
 const config = loadConfig();
-const startupManagedEnv = writeManagedEnvFile(config);
+const startupManagedEnv = MIGRATION_STARTUP_SUPPRESSED_RUNNER
+  ? { path: MANAGED_ENV_PATH, values: managedEnvValues(config), suppressed: true }
+  : writeManagedEnvFile(config);
 process.env.ALPHANINE_MANAGED_ENV_PATH = startupManagedEnv.path;
 applyConfigRuntimeEnv(config);
 const VM_NAME = config.vmName;
@@ -2096,6 +2393,8 @@ function run(command, args, options = {}) {
       resolve({
         ok: !error,
         code: error && typeof error.code === "number" ? error.code : 0,
+        signal: error?.signal || null,
+        timedOut: Boolean(error?.killed && /timed out/i.test(String(error?.message || ""))),
         stdout: String(stdout || ""),
         stderr: String(stderr || ""),
         error: error ? String(error.message || error) : ""
@@ -2448,46 +2747,6 @@ function regenerateReceiverToken() {
   process.env.DUNE_ADMIN_GIVE_ITEM_TOKEN = next.adminGiveItemToken || next.receiverToken;
   appendAdminAudit("receiver_token_regenerated", { configPath: CONFIG_PATH });
   return next;
-}
-
-function runWithStdin(command, args, inputPath, options = {}) {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
-    const timeoutMs = options.timeout || 120000;
-    const maxBuffer = options.maxBuffer || 1024 * 1024 * 8;
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill("SIGKILL");
-      resolve({ ok: false, code: 0, stdout, stderr, error: `Command timed out after ${timeoutMs} ms.` });
-    }, timeoutMs);
-    const finish = (payload) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(payload);
-    };
-    child.stdout.on("data", (chunk) => {
-      if (stdout.length < maxBuffer) stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      if (stderr.length < maxBuffer) stderr += chunk.toString();
-    });
-    child.on("error", (error) => finish({ ok: false, code: 0, stdout, stderr, error: String(error.message || error) }));
-    child.on("close", (code) => finish({ ok: code === 0, code, stdout, stderr, error: code === 0 ? "" : `Command exited with code ${code}.` }));
-    child.stdin.on("error", (error) => {
-      if (!settled && error.code !== "EPIPE") finish({ ok: false, code: 0, stdout, stderr, error: String(error.message || error) });
-    });
-    const input = fs.createReadStream(inputPath);
-    input.on("error", (error) => {
-      child.kill("SIGKILL");
-      finish({ ok: false, code: 0, stdout, stderr, error: String(error.message || error) });
-    });
-    input.pipe(child.stdin);
-  });
 }
 
 async function ps(script, timeout = 120000) {
@@ -3075,7 +3334,8 @@ async function suiteStatusSnapshot() {
     confirmationSources: topServerStatus.confirmationSources,
     sshKey: sshKeyStatus(SSH_KEY),
     directorUrl: lastDirectorUrl,
-    runtimeTransport
+    runtimeTransport,
+    migrationMaintenance: migrationMaintenance.status()
   };
 }
 
@@ -3135,7 +3395,9 @@ async function vmConnectionMonitor() {
 }
 
 async function sshCommand(command, timeout = 180000, options = {}) {
-  const sync = await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
+  const sync = MAINTENANCE_BOOTSTRAP_RUNNER
+    ? { config: loadConfig() }
+    : await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
   const cfg = sync.config || loadConfig();
   const info = sync.vm || await vmInfo(cfg.vmName || configuredVmName());
   const ip = normalizeIpv4(info.ip) || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
@@ -3467,6 +3729,7 @@ fi
 }
 
 function startServerUpdateJob() {
+  assertWorkloadStartAllowed("update or restart the battlegroup");
   const operation = operationRegistry.begin("battlegroup:update", "Dune Server Update", {
     category: "server",
     stage: "Starting update",
@@ -3484,27 +3747,36 @@ function startServerUpdateJob() {
       command,
       stage: lastPublishedStage,
       timeoutMs: SERVER_UPDATE_TIMEOUTS.updateCommandMs,
-      execute: () => sshStreamingCommand(command, {
-        timeout: SERVER_UPDATE_TIMEOUTS.updateCommandMs,
-        maxBuffer: 1024 * 1024 * 4,
-        onStage: (stage, elapsedMs) => {
-          lastPublishedStage = stage;
-          operationRegistry.update(operation, stage, `Elapsed ${elapsedMs} ms.`, { progress });
-        },
-        onLine: (line) => {
-          const parsed = serverUpdateProgress(line, progress);
-          progress = parsed.progress;
-          const now = Date.now();
-          const changed = parsed.stage !== lastPublishedStage || parsed.progress !== lastPublishedProgress;
-          if (changed || now - lastPublishedAt >= 250) {
-            operationRegistry.update(operation, parsed.stage, parsed.line.slice(0, 500), { progress, logLine: parsed.line });
-            lastPublishedAt = now;
-            lastPublishedStage = parsed.stage;
-            lastPublishedProgress = parsed.progress;
+      execute: async () => {
+        const control = await prepareAttributedVendorBattlegroupAction("update", {
+          operationId: operation.id,
+          reason: "Explicit administrator server update",
+          callSite: "server.js:startServerUpdateJob"
+        });
+        const result = await sshStreamingCommand(command, {
+          timeout: SERVER_UPDATE_TIMEOUTS.updateCommandMs,
+          maxBuffer: 1024 * 1024 * 4,
+          onStage: (stage, elapsedMs) => {
+            lastPublishedStage = stage;
+            operationRegistry.update(operation, stage, `Elapsed ${elapsedMs} ms.`, { progress });
+          },
+          onLine: (line) => {
+            const parsed = serverUpdateProgress(line, progress);
+            progress = parsed.progress;
+            const now = Date.now();
+            const changed = parsed.stage !== lastPublishedStage || parsed.progress !== lastPublishedProgress;
+            if (changed || now - lastPublishedAt >= 250) {
+              operationRegistry.update(operation, parsed.stage, parsed.line.slice(0, 500), { progress, logLine: parsed.line });
+              lastPublishedAt = now;
+              lastPublishedStage = parsed.stage;
+              lastPublishedProgress = parsed.progress;
+            }
+            return parsed.stage;
           }
-          return parsed.stage;
-        }
-      }),
+        });
+        await recordAttributedVendorBattlegroupOutcome(control, result);
+        return result;
+      },
       onSuccess: (result) => {
         operationRegistry.finish(operation, "success");
         serverUpdateCheckCoordinator?.reset();
@@ -3554,9 +3826,13 @@ function localSchedulerConfig() {
   }
 }
 
-async function vmSchedulerStatus() {
+async function vmSchedulerStatus(options = {}) {
   const localConfig = localSchedulerConfig();
-  const result = await sshCommand(buildVmSchedulerStatusCommand(), 45000, { maxBuffer: 1024 * 1024 * 2 });
+  const result = await migrationReadOnlyEvidenceResult(buildVmSchedulerStatusCommand(), 45000, {
+    ...options,
+    maxBuffer: 1024 * 1024 * 2,
+    purpose: options.purpose || "Import preflight: AlphaNine automatic-restart scheduler evidence"
+  });
   if (!result.ok) {
     return {
       ok: false,
@@ -3616,6 +3892,8 @@ function startVmSchedulerAction(action) {
   ]);
   const definition = allowed.get(action);
   if (!definition) throw new Error("Unknown scheduler action.");
+  if (action === "restart-now") assertWorkloadStartAllowed("run a scheduled battlegroup restart");
+  const checkpoint = action === "backup-now" ? migrationMaintenance.captureCheckpoint("Scheduled database backup") : null;
   const operation = operationRegistry.begin(definition.key, definition.title, {
     category: "scheduler",
     stage: action === "self-test" ? "Checking scheduler" : "Starting VM scheduler action",
@@ -3625,9 +3903,11 @@ function startVmSchedulerAction(action) {
   setImmediate(async () => {
     try {
       appendAdminAudit("vm_scheduler_action_started", { action, operationId: operation.id });
+      if (checkpoint) await verifyMaintenanceCheckpointRemote(checkpoint, "before scheduled backup execution");
       operationRegistry.update(operation, action === "self-test" ? "Running non-destructive checks" : "VM scheduler is working", "The job continues inside the Funcom VM.", { progress: action === "self-test" ? 35 : 15 });
       const result = await sshCommand(buildVmSchedulerActionCommand(action), definition.timeout, { maxBuffer: 1024 * 1024 * 4 });
       if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || `${definition.title} failed.`);
+      if (checkpoint) await verifyMaintenanceCheckpointRemote(checkpoint, "after scheduled backup execution");
       const status = await vmSchedulerStatus();
       const last = status.lastStatus || null;
       operationRegistry.update(operation, last?.message || "Scheduler action completed", last?.status || "Verified on the VM.", { progress: 100, logLine: JSON.stringify(last || status.selfTest || {}) });
@@ -3666,6 +3946,10 @@ function publicMarketBotLocal(config = localMarketBotConfig()) {
     schemaVersion: config.schemaVersion,
     enabled: config.enabled,
     paused: config.paused,
+    pauseState: config.pauseState || MARKET_BOT_PAUSE_STATES.UNKNOWN,
+    configGeneration: String(config.configGeneration || "0"),
+    pauseGeneration: String(config.pauseGeneration || "0"),
+    runtimeFingerprint: config.runtimeFingerprint || "",
     activated: config.activated,
     economyStyle: config.economyStyle,
     listingCategory: config.listingCategory || "",
@@ -3673,6 +3957,12 @@ function publicMarketBotLocal(config = localMarketBotConfig()) {
     intervalMinutes: config.intervalMinutes,
     expiryDays: config.expiryDays,
     safety: config.safety,
+    catalogPolicy: {
+      mode: config.catalogPolicy?.mode || "dynamic",
+      version: config.catalogPolicy?.version || 1,
+      itemCount: String(config.catalogPolicy?.itemCount || "0"),
+      fingerprint: config.catalogPolicy?.fingerprint || ""
+    },
     overrideCount: Object.keys(config.overrides || {}).length,
     legacyMigration: {
       detected: config.legacyMigration?.detected === true,
@@ -3694,7 +3984,7 @@ async function marketBotTarget() {
   return target;
 }
 
-async function marketBotStatus() {
+async function marketBotStatus(options = {}) {
   const localConfig = localMarketBotConfig();
   const result = await sshCommand(buildMarketBotStatusCommand(), 45000, { maxBuffer: 1024 * 1024 * 8 });
   if (!result.ok) {
@@ -3709,19 +3999,45 @@ async function marketBotStatus() {
     };
   }
   try {
-    const remote = parseMarketBotJson(result.stdout);
+    const remote = options.strictEvidence === true
+      ? parseMarketBotSingleObject({ stdout: result.stdout, stderr: result.stderr }, "Market Bot remote status evidence").value
+      : parseMarketBotJson(result.stdout);
     const state = remote.state || {};
+    const remoteConfig = remote.config || {};
+    const pauseProtocolCompatible = Number(remoteConfig.schemaVersion || 0) >= 2
+      && /^[a-f0-9]{64}$/.test(String(remoteConfig.configFingerprint || ""))
+      && Object.prototype.hasOwnProperty.call(state, "pauseState")
+      && Object.prototype.hasOwnProperty.call(state, "incompleteCycle");
+    const generationMatch = String(localConfig.configGeneration || "") !== ""
+      && String(localConfig.configGeneration) === String(remoteConfig.configGeneration || "")
+      && String(localConfig.pauseGeneration) === String(remoteConfig.pauseGeneration || "")
+      && String(state.configGeneration || "") === String(remoteConfig.configGeneration || "")
+      && String(state.pauseGeneration || "") === String(remoteConfig.pauseGeneration || "")
+      && String(localConfig.pauseState || "") === String(remoteConfig.pauseState || "")
+      && /^[a-f0-9]{64}$/.test(String(localConfig.runtimeFingerprint || ""))
+      && String(localConfig.runtimeFingerprint) === String(remoteConfig.configFingerprint || "");
+    const authoritativeStatus = generationMatch ? String(state.status || MARKET_BOT_PAUSE_STATES.UNKNOWN) : MARKET_BOT_PAUSE_STATES.UNKNOWN;
+    const quiescent = authoritativeStatus === MARKET_BOT_PAUSE_STATES.QUIESCENT
+      && state.pauseState === MARKET_BOT_PAUSE_STATES.QUIESCENT
+      && remoteConfig.paused === true && localConfig.paused === true
+      && remoteConfig.pauseState === MARKET_BOT_PAUSE_STATES.REQUESTED
+      && String(remoteConfig.configGeneration) === String(remoteConfig.pauseGeneration)
+      && state.cycleQueued === false && state.cycleRunning === false && state.incompleteCycle === false;
     return {
       ...remote,
       reachable: true,
-      status: state.status || remote.status || (localConfig.paused ? "Paused" : "Running"),
-      message: state.message || remote.message || "",
+      status: authoritativeStatus,
+      pauseState: authoritativeStatus,
+      quiescent,
+      generationMatch,
+      pauseProtocolCompatible,
+      message: generationMatch ? (state.message || remote.message || "") : "Local, remote, and runtime Market Bot generations do not agree.",
       lastCycle: state.lastCycle || null,
       lastRunAt: state.lastRunAt || "",
       nextRunAt: state.nextRunAt || "",
       installedVersion: remote.config?.runtimeVersion || remote.version || "",
       expectedVersion: APP_VERSION,
-      updateRequired: Boolean(remote.installed && String(remote.config?.runtimeVersion || "") !== String(APP_VERSION)),
+      updateRequired: Boolean(remote.installed && (String(remote.config?.runtimeVersion || "") !== String(APP_VERSION) || !pauseProtocolCompatible)),
       localConfig: publicMarketBotLocal(localConfig)
     };
   } catch (error) {
@@ -3745,6 +4061,7 @@ async function installMarketBot(configInput, options = {}) {
   }
   const binary = fs.readFileSync(MARKET_BOT_BINARY_PATH);
   const runtime = buildMarketBotRuntimeConfig(config, target, marketBotCatalog(), APP_VERSION);
+  const persistedConfig = normalizeMarketBotConfig({ ...config, runtimeFingerprint: runtime.configFingerprint });
   const installerSource = `#!/bin/sh\n${buildMarketBotInstallCommand({ config: runtime, binary, appVersion: APP_VERSION })}\n`;
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const installerPath = path.join(DATA_DIR, `market-bot-install-${process.pid}-${Date.now()}.sh`);
@@ -3758,7 +4075,7 @@ async function installMarketBot(configInput, options = {}) {
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot VM installation failed.");
   const remote = parseMarketBotJson(result.stdout);
   if (remote.ok === false) throw new Error(remote.error || remote.message || "Market Bot VM self-test failed.");
-  const saved = options.save === false ? config : marketBotStore.save(config);
+  const saved = options.save === false ? persistedConfig : marketBotStore.save(persistedConfig);
   appendAdminAudit("market_bot_installed", {
     version: APP_VERSION,
     battlegroup: target.name,
@@ -3776,16 +4093,21 @@ async function prepareMarketBot(input = {}) {
   if (current.activated) throw new Error("Market Bot is already activated. Use Preview Market to inspect the current plan.");
   const listingCategory = String(input.listingCategory ?? current.listingCategory ?? "").trim();
   if (listingCategory && !marketBotCategories().includes(listingCategory)) throw new Error(`Unknown market category: ${listingCategory}`);
+  const stagedGeneration = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
   const staged = normalizeMarketBotConfig({
     ...current,
     economyStyle: input.economyStyle || current.economyStyle,
     listingCategory,
     enabled: false,
     paused: true,
+    pauseState: MARKET_BOT_PAUSE_STATES.UNKNOWN,
+    configGeneration: stagedGeneration,
+    pauseGeneration: stagedGeneration,
     activated: false
   });
   const installed = await installMarketBot(staged);
   const fingerprint = marketBotActivationFingerprint(installed.runtime);
+  staged.runtimeFingerprint = installed.runtime.configFingerprint;
   staged.legacyMigration.activationFingerprint = fingerprint;
   marketBotStore.save(staged);
   const previewRaw = await sshCommand(buildMarketBotActionCommand("preview", { cycleId: `activation-preview-${fingerprint.slice(0, 24)}` }), 120000, { maxBuffer: 1024 * 1024 * 32 });
@@ -3826,7 +4148,14 @@ async function activateMarketBot(input = {}) {
   }
   marketBotStore.disableLegacy(current);
   marketAutomator.save({ ...marketAutomator.getConfig(), enabled: false });
-  const active = normalizeMarketBotConfig({ ...current, enabled: true, paused: false, activated: true });
+  const active = normalizeMarketBotConfig({
+    ...current,
+    enabled: true,
+    paused: false,
+    pauseState: MARKET_BOT_PAUSE_STATES.RUNNING,
+    configGeneration: nextMarketBotGeneration(current.configGeneration, current.pauseGeneration),
+    activated: true
+  });
   active.legacyMigration.activatedAt = new Date().toISOString();
   const installed = await installMarketBot(active);
   appendAdminAudit("market_bot_activated", {
@@ -3845,7 +4174,17 @@ async function previewMarketBot(input = {}) {
   const requestedCategory = String(input.listingCategory ?? current.listingCategory ?? "").trim();
   if (requestedCategory && !marketBotCategories().includes(requestedCategory)) throw new Error(`Unknown market category: ${requestedCategory}`);
   if (!status.installed || status.updateRequired || requestedStyle !== current.economyStyle || requestedCategory !== current.listingCategory) {
-    const staged = normalizeMarketBotConfig({ ...current, economyStyle: requestedStyle, listingCategory: requestedCategory });
+    if (status.installed && current.activated && !status.quiescent) {
+      throw new Error("Pause and drain Market Bot to Quiescent before installing a changed preview configuration.");
+    }
+    const stagedGeneration = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
+    const staged = normalizeMarketBotConfig({
+      ...current,
+      economyStyle: requestedStyle,
+      listingCategory: requestedCategory,
+      configGeneration: stagedGeneration,
+      pauseGeneration: current.paused ? stagedGeneration : current.pauseGeneration
+    });
     await installMarketBot(staged);
     status = await marketBotStatus();
   }
@@ -3857,15 +4196,204 @@ async function previewMarketBot(input = {}) {
   return { ...parsed, preview: parsed.result || parsed, status };
 }
 
-async function setMarketBotPaused(paused) {
+async function publishProtectedMarketBotPause(paused, generation, options = {}) {
+  const result = await sshCommand(buildMarketBotActionCommand(paused ? "pause" : "resume", { generation }), 45000, { maxBuffer: 1024 * 1024 * 8 });
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot pause configuration could not be persisted remotely.");
+  const remote = options.strictEvidence === true
+    ? parseMarketBotSingleObject({ stdout: result.stdout, stderr: result.stderr }, "Market Bot pause response").value
+    : parseMarketBotJson(result.stdout);
+  if (remote.ok === false) throw new Error(remote.error || remote.message || "Market Bot pause configuration was rejected remotely.");
+  if (typeof options.onRemotePublished === "function") await options.onRemotePublished(remote);
+  let authoritative = await marketBotStatus({ strictEvidence: options.strictEvidence === true });
+  if (paused === true) {
+    for (let attempt = 0; attempt < 180 && !authoritative.quiescent; attempt += 1) {
+      await sleepMs(1000);
+      authoritative = await marketBotStatus({ strictEvidence: options.strictEvidence === true });
+      if (!authoritative.reachable || authoritative.status === "Error") break;
+    }
+    if (!authoritative.quiescent) {
+      throw new Error(`Market Bot pause remains ${authoritative.status || "Unknown"}; quiescence was not proven for generation ${generation}.`);
+    }
+  } else if (!authoritative.generationMatch || authoritative.config?.paused !== false) {
+    throw new Error("Market Bot resume generation was not acknowledged by the remote runtime.");
+  }
+  appendAdminAudit(paused ? "market_bot_paused" : "market_bot_resumed", {
+    generation,
+    state: authoritative.status,
+    message: paused ? "Active listings left unchanged after authoritative drain." : "Target-stock reconciliation resumed."
+  });
+  if (typeof options.onAuthoritative === "function") await options.onAuthoritative(authoritative);
+  return authoritative;
+}
+
+async function publishPinnedPausedMarketBotPolicy(before, stagingGeneration, finalGeneration, options = {}) {
+  const stagedRuntime = {
+    ...before.expectedRuntime,
+    paused: true,
+    pauseState: MARKET_BOT_PAUSE_STATES.REQUESTED,
+    configGeneration: String(stagingGeneration),
+    pauseGeneration: String(stagingGeneration)
+  };
+  stagedRuntime.configFingerprint = marketBotActivationFingerprint(stagedRuntime);
+  if (stagedRuntime.configFingerprint !== before.expectedFingerprint) throw new Error("Pinned Market Bot policy fingerprint changed before publication.");
+  const publisherSource = `#!/bin/sh\n${buildMarketBotPausedConfigPublishCommand({
+    config: stagedRuntime,
+    expectedCurrentSha256: before.remoteConfigSha256
+  })}\n`;
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const publisherPath = path.join(DATA_DIR, `market-bot-policy-${process.pid}-${Date.now()}.sh`);
+  fs.writeFileSync(publisherPath, publisherSource, { encoding: "utf8", mode: 0o600 });
+  let result;
+  try {
+    result = await sshCommand("bash -s", 45000, { maxBuffer: 1024 * 1024 * 2, inputPath: publisherPath });
+  } finally {
+    try { fs.rmSync(publisherPath, { force: true }); } catch {}
+  }
+  if (!result.ok) throw new Error(result.stderr || result.error || "Paused Market Bot policy publication failed closed.");
+  const published = parseMarketBotSingleObject({ stdout: result.stdout, stderr: result.stderr }, "Market Bot paused policy publication").value;
+  if (published.ok !== true) throw new Error("Paused Market Bot policy publication was not acknowledged.");
+  const verification = await remoteMarketBotRuntimeEvidence();
+  const differences = marketBotSemanticDifferenceCategories(stagedRuntime, verification.config);
+  if (differences.length || verification.config.configFingerprint !== before.expectedFingerprint
+    || marketBotActivationFingerprint(verification.config) !== before.expectedFingerprint
+    || String(verification.config.configGeneration || "") !== String(stagingGeneration)
+    || String(verification.config.pauseGeneration || "") !== String(stagingGeneration)) {
+    throw new Error("The atomically published paused Market Bot policy did not verify exactly.");
+  }
+  return publishProtectedMarketBotPause(true, finalGeneration, options);
+}
+
+async function setMarketBotPaused(paused, options = {}) {
+  if (!paused) assertWorkloadStartAllowed("resume Market Bot");
   const current = localMarketBotConfig();
   if (!current.activated) throw new Error("Market Bot has not been activated.");
-  const next = normalizeMarketBotConfig({ ...current, enabled: true, paused: paused === true });
-  await installMarketBot(next);
-  appendAdminAudit(paused ? "market_bot_paused" : "market_bot_resumed", {
-    message: paused ? "Active listings left unchanged." : "Target-stock reconciliation resumed."
-  });
-  return marketBotStatus();
+  const status = await marketBotStatus({ strictEvidence: options.strictEvidence === true });
+  if (!status.installed || status.updateRequired) {
+    throw new Error("The installed Market Bot runtime cannot perform the authoritative pause/drain handshake. Deploy the compatible runtime through a controlled update first.");
+  }
+  if (paused !== true && !status.quiescent) {
+    throw new Error("Market Bot cannot resume until the requested pause generation is authoritatively Quiescent.");
+  }
+  const minimumGeneration = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration, status.config?.configGeneration, status.config?.pauseGeneration);
+  const generation = options.generation == null ? minimumGeneration : String(options.generation);
+  if (!/^[1-9]\d*$/.test(generation) || BigInt(generation) < BigInt(minimumGeneration)) {
+    throw new Error("The requested pause generation is not newer than all persisted generations.");
+  }
+  const next = marketBotStore.save(normalizeMarketBotConfig({
+    ...current,
+    enabled: true,
+    paused: paused === true,
+    pauseState: paused === true ? MARKET_BOT_PAUSE_STATES.REQUESTED : MARKET_BOT_PAUSE_STATES.RUNNING,
+    configGeneration: generation,
+    pauseGeneration: paused === true ? generation : current.pauseGeneration,
+    runtimeFingerprint: options.runtimeFingerprint || current.runtimeFingerprint
+  }));
+  if (typeof options.onLocalPersisted === "function") await options.onLocalPersisted(next);
+  return publishProtectedMarketBotPause(paused, generation, options);
+}
+
+async function deployPausedMarketBotRuntime(input = {}) {
+  if (!MIGRATION_STARTUP_SUPPRESSED_RUNNER) throw new Error("Controlled paused runtime deployment requires --migration-startup-suppressed.");
+  if (String(input.confirmText || "") !== "DEPLOY PAUSED MARKET BOT") {
+    throw new Error("Type DEPLOY PAUSED MARKET BOT exactly to authorize the controlled runtime deployment.");
+  }
+  const expectedNextSize = String(input.expectedSize || "");
+  const expectedNextSha256 = String(input.expectedSha256 || "").toLowerCase();
+  const expectedPreviousSha256 = String(input.expectedPreviousSha256 || "").toLowerCase();
+  if (!/^[1-9]\d*$/.test(expectedNextSize) || !/^[a-f0-9]{64}$/.test(expectedNextSha256) || !/^[a-f0-9]{64}$/.test(expectedPreviousSha256)) {
+    throw new Error("Exact previous and next runtime identities are required.");
+  }
+  const bundled = fs.readFileSync(MARKET_BOT_BINARY_PATH);
+  const bundledSha256 = crypto.createHash("sha256").update(bundled).digest("hex");
+  if (String(bundled.length) !== expectedNextSize || bundledSha256 !== expectedNextSha256
+    || expectedNextSha256 !== OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.runtimeBinarySha256) {
+    throw new Error("The bundled runtime does not match the approved supported migration fingerprint.");
+  }
+  const offline = migrationOfflineMode.status();
+  if (!offline.active || offline.failClosed || String(offline.generation) !== "1") throw new Error("Healthy Migration Offline Mode generation 1 is required.");
+  const offlineCheckpoint = migrationOfflineMode.captureCheckpoint("Controlled paused Market Bot runtime deployment");
+  const journalBefore = offlineMarketBotReconciliationState.status();
+  if (journalBefore.active || journalBefore.phase !== OFFLINE_MARKET_BOT_RECONCILIATION_PHASES.COMPLETE) throw new Error("The completed local evidence reconciliation journal must remain inactive.");
+  const current = localMarketBotConfig();
+  if (!current.activated || current.paused !== true) throw new Error("Controlled runtime deployment requires the activated Market Bot to remain locally paused.");
+  const preflight = await migrationOfflineMarketBotReconciliationPreflight({ internal: true, allowCurrent: true, requireCurrent: true, expectedRuntimeBinarySha256: expectedPreviousSha256, ignoreOperationId: input.ignoreOperationId });
+  if (!preflight.ok) throw new Error(`Paused runtime deployment preflight failed: ${preflight.error}`);
+  const generation = String(preflight.remoteGeneration || "");
+  if (generation !== OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.remoteGeneration) throw new Error("The approved generation changed before deployment.");
+  migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, "before paused runtime publication");
+  const identityResult = await sshCommand(`size=$(sudo -n wc -c < ${shQuote(VM_MARKET_BOT_BINARY)} | tr -d ' '); sha=$(sudo -n sha256sum ${shQuote(VM_MARKET_BOT_BINARY)} | awk '{print $1}'); printf '{"size":"%s","sha256":"%s"}\\n' "$size" "$sha"`, 30000, { maxBuffer: 1024 * 16 });
+  if (!identityResult.ok) throw new Error("The existing remote Market Bot binary identity could not be read.");
+  const priorIdentity = parseMarketBotSingleObject({ stdout: identityResult.stdout, stderr: identityResult.stderr || "" }, "Market Bot binary identity").value;
+  const expectedPreviousSize = String(priorIdentity.size || "");
+  if (!/^[1-9]\d*$/.test(expectedPreviousSize) || String(priorIdentity.sha256 || "") !== expectedPreviousSha256) throw new Error("The existing remote Market Bot binary changed before deployment.");
+  const rollbackToken = crypto.randomUUID();
+  const deploymentScript = `#!/bin/sh\n${buildMarketBotPausedRuntimeDeploymentCommand({ binary: bundled, expectedPreviousSha256, expectedPreviousSize, rollbackToken })}\n`;
+  const scriptPath = path.join(DATA_DIR, `market-bot-paused-deploy-${process.pid}-${Date.now()}.sh`);
+  fs.writeFileSync(scriptPath, deploymentScript, { encoding: "utf8", mode: 0o600 });
+  let published = false;
+  try {
+    appendAdminAudit("market_bot_runtime_deployment_started", { generation, paused: true, priorSha256: expectedPreviousSha256, nextSha256: expectedNextSha256 });
+    const deployment = await sshCommand("bash -s", 10 * 60 * 1000, { maxBuffer: 1024 * 1024, inputPath: scriptPath });
+    if (!deployment.ok) throw new Error(deployment.stderr || deployment.error || "Paused Market Bot runtime publication failed.");
+    const deploymentEvidence = parseMarketBotSingleObject({ stdout: deployment.stdout, stderr: deployment.stderr || "" }, "Paused Market Bot runtime deployment").value;
+    if (deploymentEvidence.ok !== true || deploymentEvidence.nextSize !== expectedNextSize || deploymentEvidence.nextSha256 !== expectedNextSha256 || deploymentEvidence.previousSize !== expectedPreviousSize || deploymentEvidence.previousSha256 !== expectedPreviousSha256) throw new Error("Paused Market Bot runtime publication evidence disagreed with the approved identities.");
+    published = true;
+    migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, "after paused runtime publication");
+    const readyDeadline = Date.now() + 60000;
+    let ready = null;
+    while (Date.now() < readyDeadline) {
+      const status = await marketBotStatus({ strictEvidence: true });
+      if (status.status === MARKET_BOT_PAUSE_STATES.QUIESCENT && status.quiescent === true && String(status.config?.pauseGeneration || "") === generation) { ready = status; break; }
+      await sleepMs(3000);
+    }
+    if (!ready) throw new Error("The corrected Market Bot runtime did not reach matching-generation Quiescent within the bounded activation window.");
+    const statusSamples = [];
+    for (let index = 0; index < 7; index += 1) {
+      const status = await marketBotStatus({ strictEvidence: true });
+      const state = status.state || {};
+      if (status.status !== MARKET_BOT_PAUSE_STATES.QUIESCENT || status.quiescent !== true || state.pauseState !== MARKET_BOT_PAUSE_STATES.QUIESCENT
+        || String(status.config?.configGeneration || "") !== generation || String(status.config?.pauseGeneration || "") !== generation
+        || state.cycleQueued || state.cycleRunning || state.incompleteCycle) throw new Error(`Market Bot status sample ${index + 1} left authoritative Quiescent.`);
+      statusSamples.push({ sample: String(index + 1), capturedAt: new Date().toISOString(), state: status.status, generation, cycleQueued: false, cycleRunning: false, incompleteCycle: false });
+      if (index < 6) await sleepMs(10000);
+    }
+    const postflight = await migrationOfflineMarketBotReconciliationPreflight({ internal: true, allowCurrent: true, requireCurrent: true, expectedRuntimeBinarySha256: expectedNextSha256, ignoreOperationId: input.ignoreOperationId });
+    if (!postflight.ok) throw new Error(`Paused runtime deployment postflight failed: ${postflight.error}`);
+    if (postflight.boundaryDigest !== preflight.boundaryDigest || postflight.semanticDigest !== preflight.semanticDigest || postflight.remoteConfigSha256 !== preflight.remoteConfigSha256) throw new Error("Market Bot database or configuration evidence changed during runtime deployment.");
+    migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, "before paused runtime rollback cleanup");
+    const journalAfter = offlineMarketBotReconciliationState.status();
+    if (journalAfter.active || journalAfter.phase !== OFFLINE_MARKET_BOT_RECONCILIATION_PHASES.COMPLETE) throw new Error("The completed reconciliation journal changed during runtime deployment.");
+    const cleanup = await sshCommand(buildMarketBotPausedRuntimeRollbackCleanupCommand({ rollbackToken, expectedPreviousSha256, expectedPreviousSize, expectedCurrentSha256: expectedNextSha256, expectedCurrentSize: expectedNextSize }), 45000, { maxBuffer: 1024 * 64 });
+    if (!cleanup.ok || parseMarketBotJson(cleanup.stdout).rollbackRemoved !== true) throw new Error("The verified rollback artifact could not be removed safely.");
+    appendAdminAudit("market_bot_runtime_deployment_completed", { generation, state: "Quiescent", nextSha256: expectedNextSha256, observationSamples: String(statusSamples.length), rollbackRemoved: true });
+    return {
+      ok: true,
+      deployed: { size: expectedNextSize, sha256: expectedNextSha256 },
+      previous: { size: expectedPreviousSize, sha256: expectedPreviousSha256 },
+      generation,
+      configurationFingerprint: preflight.remoteFingerprint,
+      catalogItemCount: preflight.catalogItemCount,
+      catalogFingerprint: preflight.catalogFingerprint,
+      counts: {
+        totalTracking: String(postflight.marketBotSample?.totalTracking || ""), activeTracking: String(postflight.marketBotSample?.activeTracking || ""),
+        protectedOrders: String(postflight.marketBotSample?.protectedOrders || ""), protectedSellOrders: String(postflight.marketBotSample?.protectedSellOrders || ""), protectedItems: String(postflight.marketBotSample?.protectedItems || ""), fulfilledPayments: String(postflight.marketBotSample?.fulfilledPayments || "")
+      },
+      digests: { botOwned: String(postflight.marketBotSample?.botOwnedDigest || ""), protected: String(postflight.marketBotSample?.protectedDigest || ""), cycleEvidence: String(postflight.marketBotSample?.cycleEvidenceDigest || "") },
+      statusSamples,
+      rollback: { retainedDuringValidation: true, removedAfterValidation: true, restored: false },
+      offlineMode: migrationOfflineMode.status(),
+      reconciliation: journalAfter
+    };
+  } catch (error) {
+    if (published) {
+      const restore = await sshCommand(buildMarketBotPausedRuntimeRollbackRestoreCommand({ rollbackToken, expectedPreviousSha256, expectedPreviousSize, expectedCurrentSha256: expectedNextSha256, expectedCurrentSize: expectedNextSize }), 60000, { maxBuffer: 1024 * 64 }).catch(() => null);
+      error.rollbackRestored = Boolean(restore?.ok);
+    }
+    appendAdminAudit("market_bot_runtime_deployment_failed", { generation, stage: published ? "post-publication-validation" : "publication", rollbackRestored: error.rollbackRestored === true });
+    throw error;
+  } finally {
+    try { fs.rmSync(scriptPath, { force: true }); } catch {}
+  }
 }
 
 function saveMarketBotOverrides(input = {}) {
@@ -3893,30 +4421,50 @@ function saveMarketBotOverrides(input = {}) {
       targetListings: requireInteger(change.targetListings, "target listing count", 0, 100)
     };
   }
-  const next = marketBotStore.save({ ...current, overrides });
+  const generation = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
+  const next = marketBotStore.save({
+    ...current,
+    overrides,
+    configGeneration: generation,
+    pauseGeneration: current.paused ? generation : current.pauseGeneration
+  });
   appendAdminAudit("market_bot_item_overrides_saved", { changedItems: changes.map((item) => String(item.id || "")).filter(Boolean) });
   return next;
 }
 
 async function updateMarketBotOverrides(input = {}) {
+  const before = await marketBotStatus();
+  const current = localMarketBotConfig();
+  if (before.installed && current.activated && !before.quiescent) {
+    throw new Error("Pause and drain Market Bot to Quiescent before changing its persisted configuration.");
+  }
   const next = saveMarketBotOverrides(input);
-  const status = await marketBotStatus();
-  if (status.installed) await installMarketBot(next);
+  if (before.installed) await installMarketBot(next);
   return { ok: true, config: publicMarketBotLocal(next), items: buildMarketBotItemPolicies(marketBotCatalog(), next), status: await marketBotStatus() };
 }
 
 async function updateMarketBotCategory(input = {}) {
   const current = localMarketBotConfig();
+  const before = await marketBotStatus();
+  if (before.installed && current.activated && !before.quiescent) {
+    throw new Error("Pause and drain Market Bot to Quiescent before changing its persisted configuration.");
+  }
   const listingCategory = String(input.listingCategory || "").trim();
   if (listingCategory && !marketBotCategories().includes(listingCategory)) throw new Error(`Unknown market category: ${listingCategory}`);
-  const next = marketBotStore.save({ ...current, listingCategory });
-  const status = await marketBotStatus();
-  if (status.installed) await installMarketBot(next);
+  const generation = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
+  const next = marketBotStore.save({
+    ...current,
+    listingCategory,
+    configGeneration: generation,
+    pauseGeneration: current.paused ? generation : current.pauseGeneration
+  });
+  if (before.installed) await installMarketBot(next);
   appendAdminAudit("market_bot_listing_category_saved", { listingCategory: listingCategory || "All categories" });
   return { ok: true, config: publicMarketBotLocal(next), status: await marketBotStatus() };
 }
 
 async function restockMarketBot(input = {}) {
+  assertWorkloadStartAllowed("run a Market Bot cycle");
   const cycleId = String(input.cycleId || `manual-${crypto.randomUUID()}`).slice(0, 160);
   const result = await sshCommand(buildMarketBotActionCommand("restock", { cycleId }), 180000, { maxBuffer: 1024 * 1024 * 32 });
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market restock failed.");
@@ -3926,13 +4474,19 @@ async function restockMarketBot(input = {}) {
 }
 
 async function cleanMarketBot(input = {}) {
+  const checkpoint = maintenanceCheckpoint("Market Bot cleanup", input.maintenanceCheckpoint || null);
+  await verifyMaintenanceCheckpointRemote(checkpoint, "before Clean Bot ownership verification");
   if (input.confirmed !== true) throw new Error("Explicit confirmation is required before cleaning Market Bot listings.");
   const current = localMarketBotConfig();
   if (!current.activated) throw new Error("Market Bot has not been activated.");
-  const paused = normalizeMarketBotConfig({ ...current, enabled: true, paused: true });
-  await installMarketBot(paused);
+  const status = await marketBotStatus();
+  if (!status.quiescent || !status.generationMatch || current.paused !== true) {
+    throw new Error("Clean Bot requires an authoritative Quiescent Market Bot with matching local and remote pause generations.");
+  }
+  await verifyMaintenanceCheckpointRemote(checkpoint, "before Clean Bot deletion");
   const result = await sshCommand(buildMarketBotActionCommand("clean"), 180000, { maxBuffer: 1024 * 1024 * 32 });
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot cleanup failed.");
+  await verifyMaintenanceCheckpointRemote(checkpoint, "after Clean Bot deletion");
   const parsed = parseMarketBotJson(result.stdout);
   appendAdminAudit("market_bot_cleaned", {
     removed: parsed.result?.removed ?? parsed.removed ?? 0,
@@ -3943,15 +4497,20 @@ async function cleanMarketBot(input = {}) {
 }
 
 async function rollbackMarketBot() {
-  const current = localMarketBotConfig();
+  let current = localMarketBotConfig();
   if (current.activated) {
     await setMarketBotPaused(true);
+    current = localMarketBotConfig();
   }
   const restored = marketBotStore.restoreLegacy(current);
+  const generation = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
   const next = marketBotStore.save({
     ...current,
     enabled: false,
     paused: true,
+    pauseState: MARKET_BOT_PAUSE_STATES.UNKNOWN,
+    configGeneration: generation,
+    pauseGeneration: generation,
     activated: false,
     legacyMigration: { ...current.legacyMigration, activationFingerprint: "" }
   });
@@ -3965,6 +4524,7 @@ async function rollbackMarketBot() {
 }
 
 async function ensureMarketBotInstalled() {
+  if (SERVER_MIGRATION_ENABLED && migrationMaintenance.status().active) return { ok: true, skipped: "Migration Maintenance Mode blocks background Market Bot installation or activation." };
   const config = localMarketBotConfig();
   const status = await marketBotStatus();
   if (!config.activated) {
@@ -3975,7 +4535,11 @@ async function ensureMarketBotInstalled() {
     marketBotStore.disableLegacy(config);
     marketBotStore.save(config);
   }
-  if (!status.installed || status.updateRequired) return installMarketBot(config);
+  if (!status.installed) return installMarketBot(config);
+  if (status.updateRequired) {
+    if (config.activated && !status.quiescent) return { ok: false, skipped: "controlled Market Bot runtime update requires authoritative quiescence", status };
+    return installMarketBot(config);
+  }
   return status;
 }
 
@@ -4052,73 +4616,150 @@ printf "__HOST__ "; hostname
 }
 
 function parseStatus(text) {
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const summary = {};
-  const servers = [];
-  let inServers = false;
-  let statusColumns = [];
-  for (const line of lines) {
-    if (/^Battlegroup:/.test(line)) summary.battlegroup = line.replace(/^Battlegroup:\s*/, "");
-    const keyValues = [...line.matchAll(/\b(PHASE|SERVERGROUP|GATEWAY|DIRECTOR)\s*[:=]\s*([A-Za-z-]+)/gi)];
-    for (const match of keyValues) {
-      const key = match[1].toLowerCase();
-      const value = match[2];
-      if (key === "phase") {
-        summary.phase = value;
-        summary.status = value;
-      } else if (key === "servergroup") {
-        summary.servergroup = value;
-      } else {
-        summary[key] = value;
-      }
-    }
-    if (/^(Status|Phase)\s+/i.test(line) && /(Gateway|Director)/i.test(line)) {
-      statusColumns = line.split(/\s+/).map((part) => part.toLowerCase());
-      continue;
-    }
-    if (/^(Healthy|Reconciling|Running|Updating|Starting|Progressing|Unhealthy|Ready|Pending|Stopped|Failed|Error|Unreachable|Missing)\s+/i.test(line) && (!summary.status || !summary.gateway || !summary.director || !summary.servergroup)) {
-      const parts = line.split(/\s+/);
-      summary.status = parts[0];
-      summary.phase = parts[0];
-      if (statusColumns.length) {
-        for (let index = 1; index < statusColumns.length && index < parts.length; index += 1) {
-          const column = statusColumns[index];
-          if (column === "servergroup" || column === "server-group") summary.servergroup = parts[index];
-          else if (column === "database") summary.database = parts[index];
-          else if (column === "gateway") summary.gateway = parts[index];
-          else if (column === "director") summary.director = parts[index];
-          else if (column === "uptime") summary.uptime = parts.slice(index).join(" ");
-        }
-      } else {
-        summary.database = parts[1];
-        summary.gateway = parts[2];
-        summary.director = parts[3];
-        summary.uptime = parts.slice(4).join(" ");
-      }
-    }
-    if (/^Game Servers/i.test(line)) {
-      inServers = true;
-      continue;
-    }
-    if (inServers && !/^[-\s]*$/.test(line) && !/^Map\s+/i.test(line)) {
-      const parts = line.split(/\s+/);
-      if (parts.length >= 5) {
-        servers.push({
-          map: parts[0],
-          phase: parts[1],
-          ready: parts[2],
-          players: parts[3],
-          age: parts.slice(4).join(" ")
-        });
-      }
-    }
-  }
-  return { summary, servers, raw: text };
+  return parseBattlegroupStatus(String(text || ""));
 }
 
-async function battlegroup(action) {
+function battlegroupControlProcessIdentity() {
+  return `${path.basename(process.execPath)}:${process.pid}:${PROCESS_STARTED_AT}`;
+}
+
+function configuredBattlegroupControlTarget() {
+  const selected = normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup);
+  if (!selected) throw new Error("Select an exact battlegroup before changing its control state.");
+  return selected;
+}
+
+async function readBattlegroupControlResource(target) {
+  const command = `sudo kubectl get battlegroup ${shQuote(target.name)} -n ${shQuote(target.namespace)} -o json`;
+  const result = await sshCommand(command, 30000, { maxBuffer: 1024 * 1024 * 2 });
+  if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Battlegroup control evidence could not be read.");
+  let value;
+  try { value = JSON.parse(String(result.stdout || "")); }
+  catch { throw new Error("Battlegroup control evidence returned malformed JSON."); }
+  return { value, evidence: battlegroupControlResourceEvidence(value) };
+}
+
+function beginBattlegroupControlIntent(action, stop, options = {}) {
+  const target = options.target || configuredBattlegroupControlTarget();
+  const operationId = String(options.operationId || `suite-${action}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`);
+  return {
+    target,
+    intent: battlegroupControlJournal.begin({
+      action,
+      stop,
+      explicit: options.explicit !== false,
+      expectedGeneration: options.expectedGeneration,
+      minimumGeneration: options.minimumGeneration,
+      operationId,
+      reason: options.reason || `${action} requested by the Suite`,
+      callSite: options.callSite || "server.js:battlegroup",
+      processIdentity: battlegroupControlProcessIdentity(),
+      profileIdentity: path.resolve(CONFIG_PATH),
+      battlegroupIdentity: `${target.namespace}/${target.name}`
+    })
+  };
+}
+
+async function applyBattlegroupControlIntent(control) {
+  battlegroupControlJournal.assertCurrent(control.intent);
+  const before = await readBattlegroupControlResource(control.target);
+  const patch = buildBattlegroupControlMergePatch(control.intent, before.evidence.resourceVersion);
+  const command = `sudo kubectl patch battlegroup ${shQuote(control.target.name)} -n ${shQuote(control.target.namespace)} --type=merge -p ${shQuote(JSON.stringify(patch))}`;
+  const result = await sshCommand(command, 30000, { maxBuffer: 1024 * 1024 });
+  if (!result.ok) {
+    battlegroupControlJournal.append({ version: 1, at: new Date().toISOString(), outcome: "failed", operationId: control.intent.operationId, generation: control.intent.generation, action: control.intent.action, error: String(result.stderr || result.error || "Battlegroup patch failed.").slice(0, 500) });
+    throw new Error(result.stderr || result.stdout || result.error || "Battlegroup control mutation failed.");
+  }
+  const after = await readBattlegroupControlResource(control.target);
+  if (after.evidence.stop !== control.intent.stop || after.evidence.generation !== control.intent.generation || after.evidence.operationId !== control.intent.operationId) {
+    throw new Error("Battlegroup control mutation did not retain its generation and operation attribution.");
+  }
+  const attribution = battlegroupControlJournal.record(control.intent, before.evidence, after.evidence);
+  appendAdminAudit("battlegroup_control_mutation", attribution);
+  return { ok: true, stdout: `Battlegroup ${control.intent.action} intent accepted.`, stderr: "", attribution };
+}
+
+async function waitForBattlegroupStop(target, timeoutMs = 90000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const current = await readBattlegroupControlResource(target);
+    const phase = String(current.value?.status?.phase || "").toLowerCase();
+    const server = String(current.value?.status?.serverGroupPhase || "").toLowerCase();
+    if (current.evidence.stop === true && phase === "stopped" && server === "stopped") return current;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error("Battlegroup did not reach the authoritative stopped state before the control timeout.");
+}
+
+async function runAttributedBattlegroupAction(action, options = {}) {
+  const target = configuredBattlegroupControlTarget();
+  const initial = await readBattlegroupControlResource(target);
+  const base = { ...options, target, explicit: options.explicit !== false, minimumGeneration: initial.evidence.generation };
+  if (action === "start") {
+    const refresh = await sshCommand(`script_root=$(dirname "$(readlink -f /home/dune/.dune/bin/battlegroup)"); "$script_root/setup/battlegroup_ip.sh" refresh`, 30000, { maxBuffer: 1024 * 256 });
+    if (!refresh.ok) throw new Error(refresh.stderr || refresh.stdout || refresh.error || "Battlegroup address refresh failed before start.");
+    return applyBattlegroupControlIntent(beginBattlegroupControlIntent("start", false, base));
+  }
+  if (action === "stop") {
+    const result = await applyBattlegroupControlIntent(beginBattlegroupControlIntent("stop", true, base));
+    await waitForBattlegroupStop(target);
+    return { ...result, stdout: `${result.stdout}\nBattlegroup reached the authoritative stopped state.` };
+  }
+  if (action === "restart") {
+    const stopControl = beginBattlegroupControlIntent("restart", true, { ...base, operationId: `${base.operationId || `suite-restart-${Date.now()}`}:stop`, reason: `${base.reason || "Explicit Suite restart"} — stop phase` });
+    await applyBattlegroupControlIntent(stopControl);
+    await waitForBattlegroupStop(target);
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    const stopped = await readBattlegroupControlResource(target);
+    const startControl = beginBattlegroupControlIntent("restart", false, { ...base, minimumGeneration: stopped.evidence.generation, operationId: `${base.operationId || stopControl.intent.operationId.replace(/:stop$/, "")}:start`, reason: `${base.reason || "Explicit Suite restart"} — start phase` });
+    return applyBattlegroupControlIntent(startControl);
+  }
+  throw new Error("Attributed battlegroup action is unsupported.");
+}
+
+async function prepareAttributedVendorBattlegroupAction(action, options = {}) {
+  const target = configuredBattlegroupControlTarget();
+  const current = await readBattlegroupControlResource(target);
+  const control = beginBattlegroupControlIntent(action, current.evidence.stop, {
+    ...options,
+    target,
+    explicit: true,
+    minimumGeneration: current.evidence.generation
+  });
+  await applyBattlegroupControlIntent(control);
+  return { ...control, vendorBefore: (await readBattlegroupControlResource(target)).evidence };
+}
+
+async function recordAttributedVendorBattlegroupOutcome(control, result) {
+  const after = await readBattlegroupControlResource(control.target);
+  const entry = {
+    version: 1,
+    at: new Date().toISOString(),
+    outcome: result?.ok ? "vendor-command-completed" : "vendor-command-failed",
+    operationId: control.intent.operationId,
+    generation: control.intent.generation,
+    action: control.intent.action,
+    reason: control.intent.reason,
+    callSite: control.intent.callSite,
+    processIdentity: control.intent.processIdentity,
+    profileIdentity: control.intent.profileIdentity,
+    battlegroupIdentity: control.intent.battlegroupIdentity,
+    oldResourceVersion: control.vendorBefore.resourceVersion,
+    newResourceVersion: after.evidence.resourceVersion,
+    oldStop: control.vendorBefore.stop,
+    newStop: after.evidence.stop,
+    exitCode: Number.isInteger(result?.code) ? result.code : null
+  };
+  battlegroupControlJournal.append(entry);
+  appendAdminAudit("battlegroup_vendor_control_outcome", entry);
+  return after;
+}
+
+async function battlegroup(action, options = {}) {
   const allowed = new Set(["status", "start", "restart", "stop", "update", "backup", "logs-export", "operator-logs-export"]);
   if (!allowed.has(action)) return { ok: false, error: "Unsupported action." };
+  if (["start", "restart", "update"].includes(action)) assertWorkloadStartAllowed(`${action} the battlegroup`);
+  if (action === "backup") migrationMaintenance.assertWorkflowActive("Database backup");
   if (action !== "status") {
     const readiness = serverControlConfigured();
     if (!readiness.configured) {
@@ -4134,6 +4775,7 @@ async function battlegroup(action) {
       config: readiness.summary
     });
   }
+  if (["start", "stop", "restart"].includes(action)) return runAttributedBattlegroupAction(action, options);
   return sshCommand(`/home/dune/.dune/bin/battlegroup ${action}`, serverManagementTimeoutMs(action));
 }
 
@@ -4326,8 +4968,11 @@ async function detectSetupDatabaseCredentials(body = {}) {
   };
 }
 
-async function battlegroupResource() {
-  const result = await sshCommand("sudo kubectl get igwbg -A -o json", 30000);
+async function battlegroupResource(options = {}) {
+  const result = await migrationReadOnlyEvidenceResult("sudo kubectl get igwbg -A -o json", 30000, {
+    ...options,
+    purpose: options.purpose || "Import preflight: battlegroup resource discovery"
+  });
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Could not read battlegroup resource.");
   let data = null;
   try { data = JSON.parse(result.stdout || "{}"); }
@@ -5145,7 +5790,7 @@ function sanitizeGearItemForUi(item = {}) {
   const icon = gearImageUrlFromPath(imageLocalPath)
     || (explicitLocalIcon.startsWith("/") && !explicitLocalIcon.startsWith("//") ? explicitLocalIcon : rawFallback(item.id)?.icon || "");
   const category = isSchematicItem(item) ? "Schematics" : normalizeItemCategory(item.category);
-  return {
+  const sanitized = {
     id: String(item.id || ""),
     name: String(item.name || item.id || ""),
     category,
@@ -5164,6 +5809,8 @@ function sanitizeGearItemForUi(item = {}) {
     hasDisplayName: item.hasDisplayName === true,
     spawnable: item.spawnable !== false
   };
+  sanitized.durability = durabilityExpectation(sanitized, false);
+  return sanitized;
 }
 
 function gearItemDedupeScore(item = {}) {
@@ -5329,11 +5976,12 @@ function scheduleServerDiscoveredItemCatalog() {
   refreshServerDiscoveredItemCatalog().catch(() => {});
 }
 const startupMarketBotConfig = localMarketBotConfig();
-if (startupMarketBotConfig.activated) {
+if (startupMarketBotConfig.activated && SUITE_STARTUP_POLICY.allowBackgroundWriters) {
   marketBotStore.disableLegacy(startupMarketBotConfig);
   marketBotStore.save(startupMarketBotConfig);
 }
 const marketAutomator = createMarketAutomator({
+  startupSuppressed: !SUITE_STARTUP_POLICY.allowBackgroundWriters,
   dataDir: DATA_DIR,
   inspect: () => marketPostingStatus(),
   list: (payload) => marketListings(payload),
@@ -5906,7 +6554,7 @@ async function selectValidatedDatabaseCandidate(candidates, diagnostics, ordered
   return null;
 }
 
-async function databaseRuntimeTarget() {
+async function databaseRuntimeTarget(options = {}) {
   const diagnostics = {
     selectedBattlegroup: "",
     selectedNamespace: "",
@@ -5924,7 +6572,7 @@ async function databaseRuntimeTarget() {
   };
   let item;
   try {
-    item = await battlegroupResource();
+    item = await battlegroupResource(options);
   } catch (error) {
     diagnostics.failureReason = error.message;
     diagnostics.lastCommand = "battlegroupResource()";
@@ -6011,6 +6659,930 @@ function operationsSnapshot() {
   return operationRegistry.snapshot();
 }
 
+function activeMaintenanceWorkflow() {
+  return operationsSnapshot().operations.some((operation) => {
+    if (operation.key === "maintenance:mode") return false;
+    const relevant = ["migration:export", "migration:import", "database:backup", "database:import", "market-bot:clean", "maintenance:bootstrap"]
+      .some((prefix) => operation.key === prefix || String(operation.key || "").startsWith(`${prefix}:`));
+    return relevant && ["pending", "running", "interrupted"].includes(operation.status);
+  });
+}
+
+function maintenanceCheckpoint(workflow, existing = null) {
+  return existing || migrationMaintenance.captureCheckpoint(workflow);
+}
+
+function verifyMaintenanceCheckpoint(checkpoint, stage) {
+  return migrationMaintenance.verifyCheckpoint(checkpoint, stage);
+}
+
+function assertWorkloadStartAllowed(action) {
+  if (!SERVER_MIGRATION_ENABLED) return;
+  migrationMaintenance.assertWorkloadStartAllowed(action);
+  migrationOfflineMode.assertWorkloadStartAllowed(action);
+}
+
+const REMOTE_MIGRATION_MAINTENANCE_HOLD = "/home/dune/.dune/alphanine-migration-maintenance.json";
+
+async function setRemoteMigrationMaintenanceHold(active, state = migrationMaintenance.status()) {
+  if (migrationMaintenance.sideEffectFree) throw new Error("Side-effect-free runner cannot change the remote maintenance hold.");
+  if (active) {
+    const generation = String(state.generation || "0");
+    const holdDigest = String(state.holdDigest || "");
+    if (!/^[1-9]\d*$/.test(generation) || !/^[a-f0-9]{64}$/.test(holdDigest)) throw new Error("Local maintenance identity is invalid; the VM hold was not changed.");
+    const schedulerSource = fs.existsSync(SCHEDULER_SCRIPT_PATH) ? fs.readFileSync(SCHEDULER_SCRIPT_PATH) : null;
+    if (!schedulerSource) throw new Error("The bundled scheduler runtime is unavailable; maintenance cannot safely suspend VM restart automation.");
+    const transport = buildMaintenanceTransport({
+      scheduler: schedulerSource,
+      generation,
+      holdDigest,
+      schedulerPath: VM_SCHEDULER_SCRIPT,
+      schedulerConfigPath: VM_SCHEDULER_CONFIG,
+      schedulerDir: VM_SCHEDULER_DIR,
+      sentinelPath: REMOTE_MIGRATION_MAINTENANCE_HOLD,
+      cronPath: VM_SCHEDULER_CRON_FILE,
+      cronBegin: VM_SCHEDULER_CRON_BEGIN,
+      cronEnd: VM_SCHEDULER_CRON_END
+    });
+    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-maintenance-transport-"));
+    const inputPath = path.join(temporaryDirectory, "guard.tar");
+    const handle = fs.openSync(inputPath, "wx", 0o600);
+    try {
+      fs.writeFileSync(handle, transport.stdin);
+      fs.fsyncSync(handle);
+    } finally { fs.closeSync(handle); }
+    let result;
+    try {
+      result = await sshCommand(transport.command, 60000, { maxBuffer: 1024 * 1024, inputPath });
+    } finally {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+    if (!result.ok || result.inputComplete !== true) throw new Error(result.stderr || result.error || "The VM maintenance guard transfer did not complete.");
+    let acknowledgement;
+    try { acknowledgement = JSON.parse(String(result.stdout || "").trim()); } catch { throw new Error("The VM maintenance guard returned malformed acknowledgement evidence."); }
+    if (Object.keys(acknowledgement || {}).sort().join(",") !== "ok,schedulerMode,status" || acknowledgement.ok !== true || acknowledgement.status !== "guarded"
+      || !new Set(["installed", "absent"]).has(acknowledgement.schedulerMode)) {
+      throw new Error("The VM maintenance guard was not acknowledged after atomic publication.");
+    }
+    const verified = await verifyRemoteMigrationMaintenanceArtifacts(transport, acknowledgement.schedulerMode);
+    return { active: true, generation, holdDigest, artifacts: verified };
+  }
+  const result = await sshCommand(`sudo -n rm -f ${shQuote(REMOTE_MIGRATION_MAINTENANCE_HOLD)}`, 45000, { maxBuffer: 1024 * 1024 });
+  if (!result.ok) throw new Error(result.stderr || result.error || "The VM maintenance hold could not be released.");
+  return { active: false };
+}
+
+async function verifyRemoteMigrationMaintenanceArtifacts(transport, expectedSchedulerMode = "") {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-maintenance-verify-"));
+  const inputPath = path.join(temporaryDirectory, "verify.sh");
+  fs.writeFileSync(inputPath, transport.verifyStdin, { mode: 0o600 });
+  let result;
+  try {
+    result = await sshCommand(transport.verifyCommand, 30000, { maxBuffer: 1024 * 1024, inputPath });
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+  if (!result.ok || result.inputComplete !== true) throw new Error(result.stderr || result.error || "The VM maintenance artifacts are missing or unreadable.");
+  let evidence;
+  try { evidence = JSON.parse(String(result.stdout || "").trim()); } catch { throw new Error("The VM maintenance artifact verification response is malformed."); }
+  const expected = expectedSchedulerMode ? { ...transport.expected, schedulerMode: expectedSchedulerMode } : transport.expected;
+  return validateRemoteMaintenanceEvidence(evidence, expected);
+}
+
+async function remoteMigrationMaintenanceHoldStatus(expectedGeneration = "", expectedHoldDigest = "") {
+  try {
+    const schedulerSource = fs.existsSync(SCHEDULER_SCRIPT_PATH) ? fs.readFileSync(SCHEDULER_SCRIPT_PATH) : null;
+    if (!schedulerSource) throw new Error("The bundled scheduler runtime is unavailable.");
+    const transport = buildMaintenanceTransport({
+      scheduler: schedulerSource,
+      generation: expectedGeneration,
+      holdDigest: expectedHoldDigest,
+      schedulerPath: VM_SCHEDULER_SCRIPT,
+      schedulerConfigPath: VM_SCHEDULER_CONFIG,
+      schedulerDir: VM_SCHEDULER_DIR,
+      sentinelPath: REMOTE_MIGRATION_MAINTENANCE_HOLD,
+      cronPath: VM_SCHEDULER_CRON_FILE,
+      cronBegin: VM_SCHEDULER_CRON_BEGIN,
+      cronEnd: VM_SCHEDULER_CRON_END
+    });
+    const verified = await verifyRemoteMigrationMaintenanceArtifacts(transport);
+    return { ok: true, active: true, generation: verified.generation, holdDigest: verified.holdDigest, artifacts: verified, error: "" };
+  } catch (error) {
+    return { ok: false, active: false, generation: "", error: migrationPublicError(error.message || "The VM maintenance hold is missing or unreadable.") };
+  }
+}
+
+async function verifyMaintenanceCheckpointRemote(checkpoint, stage) {
+  const local = verifyMaintenanceCheckpoint(checkpoint, stage);
+  const remote = await remoteMigrationMaintenanceHoldStatus(checkpoint.generation, checkpoint.holdDigest);
+  if (!remote.ok) throw new Error(`${remote.error} The operation was aborted at ${stage}.`);
+  return { local, remote };
+}
+
+const maintenanceBootstrapRuntime = {
+  status: MAINTENANCE_BOOTSTRAP_RUNNER ? "ready" : "disabled",
+  stage: "Waiting for local administrator confirmation",
+  history: [],
+  result: null,
+  shutdownRequested: false
+};
+
+function maintenanceBootstrapPublicState() {
+  return {
+    ok: true,
+    bootstrap: MAINTENANCE_BOOTSTRAP_RUNNER,
+    status: maintenanceBootstrapRuntime.status,
+    stage: maintenanceBootstrapRuntime.stage,
+    history: maintenanceBootstrapRuntime.history.slice(),
+    result: maintenanceBootstrapRuntime.result,
+    maintenance: migrationMaintenance.status(),
+    message: "Preparing Migration Maintenance Mode — Automatic server startup is disabled."
+  };
+}
+
+function setMaintenanceBootstrapStage(row, history) {
+  maintenanceBootstrapRuntime.status = row.status === "failed" ? "failed" : "running";
+  maintenanceBootstrapRuntime.stage = row.stage;
+  maintenanceBootstrapRuntime.history = history;
+}
+
+function bootstrapStableEvidence(evidence, offline) {
+  const sample = evidence.marketBot?.samples?.[0] || {};
+  return {
+    offline: {
+      battlegroupPhase: offline.battlegroupPhase,
+      componentsOffline: offline.componentsOffline === true,
+      runningGameWorkloads: String(offline.runningGamePods || "")
+    },
+    writers: (evidence.writerSamples || []).map((row) => ({
+      unexpectedActiveClients: String(row.unexpectedActiveClients || ""),
+      openTransactions: String(row.openTransactions || "")
+    })),
+    marketBot: {
+      state: evidence.marketBot?.state || "Unknown",
+      generation: String(evidence.marketBot?.generation || ""),
+      activeTracking: String(sample.activeTracking || ""),
+      totalTracking: String(sample.totalTracking || ""),
+      protectedOrders: String(sample.protectedOrders || ""),
+      protectedSellOrders: String(sample.protectedSellOrders || ""),
+      protectedItems: String(sample.protectedItems || ""),
+      fulfilledPayments: String(sample.fulfilledPayments || ""),
+      invalidBotTracking: String(sample.invalidBotTracking || ""),
+      invalidProtected: String(sample.invalidProtected || ""),
+      protectedDigest: String(sample.protectedDigest || ""),
+      botOwnedDigest: String(sample.botOwnedDigest || "")
+    },
+    entityCounts: evidence.entityCounts,
+    fingerprints: evidence.fingerprints,
+    relationships: evidence.relationships,
+    sequences: evidence.sequences
+  };
+}
+
+async function maintenanceBootstrapPreflight(options = {}) {
+  if (!MAINTENANCE_BOOTSTRAP_RUNNER) throw new Error("Maintenance bootstrap preflight is available only from --maintenance-bootstrap.");
+  const conditions = [];
+  const reconciliation = marketBotReconciliationState.status();
+  conditions.push(migrationCondition("pause-reconciliation-complete", reconciliation.active !== true, reconciliation.active ? "Market Bot pause reconciliation is incomplete and must remain fail closed." : "Market Bot pause reconciliation has no incomplete recovery state."));
+  const active = operationRegistry.snapshot().active.filter((operation) => operation.id !== options.ignoreOperationId);
+  conditions.push(migrationCondition("conflicting-suite-operations", active.length === 0, active.length ? "A conflicting Suite operation is active." : "No conflicting Suite operation is active.", { activeCount: String(active.length) }));
+  const vendor = await runningDumpOperations();
+  conditions.push(migrationCondition("vendor-database-operations", vendor.ok && vendor.running.length === 0, vendor.ok && !vendor.running.length ? "No vendor DatabaseOperation is active." : "A vendor operation is active or ambiguous.", { activeCount: String(vendor.running.length) }));
+  const target = await databaseRuntimeTarget();
+  const [statusResult, podsText] = await Promise.all([
+    battlegroup("status"),
+    migrationSshCommand(`sudo kubectl get pods -n ${shQuote(target.namespace)} -o json`, 30000, { maxBuffer: 1024 * 1024 * 8 })
+  ]);
+  if (!statusResult.ok) throw new Error("Battlegroup status could not be verified.");
+  const pods = parseMigrationJson(podsText, "bootstrap workload");
+  const offline = classifyMigrationOfflineStatus(parseStatus(statusResult.stdout || "").summary || {}, pods);
+  conditions.push(migrationCondition("battlegroup-stopped", offline.authoritativePhaseOffline, offline.authoritativePhaseOffline ? "Battlegroup is authoritatively stopped." : "Battlegroup is not authoritatively stopped.", { phase: offline.battlegroupPhase }));
+  conditions.push(migrationCondition("controllers-suspended", offline.componentsOffline, offline.componentsOffline ? "Game-facing controllers are suspended." : "Controller state is active or ambiguous.", { componentStates: offline.componentStates }));
+  conditions.push(migrationCondition("running-game-workloads", offline.runningGamePods === "0", offline.runningGamePods === "0" ? "Zero game workloads are running." : "One or more game workloads are running.", { count: offline.runningGamePods }));
+  const evidence = await migrationEvidence(target);
+  const databaseHealthy = evidence.database.reachable === true && String(evidence.database.database) === "dune";
+  conditions.push(migrationCondition("postgresql-health", databaseHealthy, databaseHealthy ? "PostgreSQL is healthy." : "PostgreSQL health is unavailable or ambiguous."));
+  const writerEvidence = evaluateIndependentWriterSamples(evidence.writerSamples);
+  conditions.push(migrationCondition("writers-and-transactions", writerEvidence.ok, writerEvidence.ok ? "Writers and open transactions are zero across independent samples." : "Writer or transaction evidence failed closed.", { samples: writerEvidence.samples }));
+  conditions.push(migrationCondition("market-bot-quiescent", evidence.marketBot?.ok === true, evidence.marketBot?.ok === true ? "Market Bot is authoritatively Quiescent." : (evidence.marketBot?.reasons || ["Market Bot state is ambiguous."]).join(" "), { generation: evidence.marketBot?.generation || "", diagnostics: evidence.marketBot?.diagnostics || null }));
+  const lockSamples = evidence.marketBot?.lockSamples || [];
+  const locksClear = lockSamples.length >= 2 && lockSamples.every((row) => row.advisoryLocks === "0" && row.incompleteCycles === "0");
+  conditions.push(migrationCondition("locks-and-incomplete-cycles", locksClear, locksClear ? "Advisory locks and incomplete cycles are zero." : "Lock or cycle evidence failed closed.", { samples: lockSamples }));
+  const stable = bootstrapStableEvidence(evidence, offline);
+  const stableDigests = /^[a-f0-9]{64}$/.test(stable.marketBot.protectedDigest) && /^[a-f0-9]{64}$/.test(stable.marketBot.botOwnedDigest);
+  conditions.push(migrationCondition("stable-counts-and-digests", evidence.marketBot?.samples?.length >= 2 && stableDigests, stableDigests ? "Counts and both canonical digests are stable across independent sessions." : "Stable canonical evidence is unavailable.", { counts: stable.marketBot }));
+  const evidenceDigest = migrationSha256Text(canonicalMigrationJson(stable));
+  const ok = conditions.every((condition) => condition.ok);
+  return { ok, conditions, evidence: stable, evidenceDigest, error: ok ? "" : conditions.filter((condition) => !condition.ok).map((condition) => condition.message).join(" ") };
+}
+
+function readLocalMarketBotConfigText() {
+  try { return fs.readFileSync(MARKET_BOT_CONFIG_PATH, "utf8"); }
+  catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw new Error("The local Market Bot configuration is unreadable.");
+  }
+}
+
+function sha256FileSync(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function localTcpListenerPresent(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: LOCAL_HOST, port: Number(port) });
+    const finish = (present) => { socket.destroy(); resolve(present); };
+    socket.setTimeout(750, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+async function remoteMarketBotRuntimeEvidence() {
+  const captureCommand = [
+    "set -eu",
+    `config_sha_before=$(sudo -n sha256sum ${shQuote(VM_MARKET_BOT_CONFIG)} | awk '{print $1}')`,
+    `config_base64=$(sudo -n base64 -w 0 ${shQuote(VM_MARKET_BOT_CONFIG)})`,
+    `config_sha_after=$(sudo -n sha256sum ${shQuote(VM_MARKET_BOT_CONFIG)} | awk '{print $1}')`,
+    `binary_sha=$(sudo -n sha256sum ${shQuote(VM_MARKET_BOT_BINARY)} | awk '{print $1}')`,
+    "printf '{\"version\":1,\"configSha256Before\":\"%s\",\"configSha256After\":\"%s\",\"binarySha256\":\"%s\",\"configBase64\":\"%s\"}\\n' \"$config_sha_before\" \"$config_sha_after\" \"$binary_sha\" \"$config_base64\""
+  ].join("\n");
+  const captureResult = await migrationSshCommand(captureCommand, 30000, { maxBuffer: 1024 * 1024 * 12, returnResult: true });
+  const capture = parseMarketBotSingleObject(captureResult, "Market Bot remote configuration capture").value;
+  const keys = Object.keys(capture).sort();
+  const expectedKeys = ["binarySha256", "configBase64", "configSha256After", "configSha256Before", "version"];
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index]) || capture.version !== 1) {
+    throw new Error("The remote Market Bot configuration capture envelope is malformed.");
+  }
+  const remoteBinaryHash = String(capture.binarySha256 || "");
+  const configSha256 = String(capture.configSha256Before || "");
+  const configBase64 = String(capture.configBase64 || "");
+  if (!/^[a-f0-9]{64}$/.test(remoteBinaryHash) || !/^[a-f0-9]{64}$/.test(configSha256)
+    || configSha256 !== String(capture.configSha256After || "") || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(configBase64)) {
+    throw new Error("The remote Market Bot configuration changed during evidence capture.");
+  }
+  const configBytes = Buffer.from(configBase64, "base64");
+  if (configBytes.toString("base64") !== configBase64 || crypto.createHash("sha256").update(configBytes).digest("hex") !== configSha256) {
+    throw new Error("The transported Market Bot configuration identity is invalid.");
+  }
+  const config = parseMarketBotSingleObject({ stdout: configBytes.toString("utf8"), stderr: "" }, "Market Bot remote configuration").value;
+  return { config, remoteBinaryHash, configSha256 };
+}
+
+async function remoteMarketBotStoppedServiceEvidence() {
+  const result = await migrationSshCommand(buildMarketBotMigrationStoppedEvidenceCommand(), 30000, { maxBuffer: 1024 * 64, returnResult: true });
+  const value = parseMarketBotSingleObject(result, "Market Bot stopped-service evidence").value;
+  validateMarketBotInfrastructureEvidence(value);
+  return value;
+}
+
+function publicMarketBotInfrastructureEvidence(value, options = {}) {
+  const proof = validateMarketBotInfrastructureEvidence(value, options);
+  return {
+    state: proof.mode === "service-absent" ? "Service absent" : "Service stopped",
+    authoritative: true,
+    serviceInstalled: proof.serviceInstalled,
+    runtimeInstalled: proof.runtimeInstalled,
+    pidPresent: proof.evidence.pidFilePresent,
+    matchingProcesses: proof.matchingProcessCount,
+    supervisorProcesses: proof.supervisorProcessCount,
+    defaultRunlevelRegistered: proof.evidence.defaultRunlevelRegistered,
+    restartPathActive: proof.evidence.restartPathActive
+  };
+}
+
+async function stopMarketBotForMigration() {
+  // OpenRC may write an informational "already stopped" warning to stderr while
+  // exiting successfully. Transport success is determined by the exit status;
+  // the stopped postcondition is then proven by a separate read-only capture.
+  const stopResult = await migrationSshCommand(buildMarketBotMigrationStopCommand(), 60000, { maxBuffer: 1024 * 64, returnResult: true });
+  const evidence = await remoteMarketBotStoppedServiceEvidence();
+  validateMarketBotStopCompletion(stopResult, evidence);
+  return publicMarketBotInfrastructureEvidence(evidence);
+}
+
+async function uninstallMarketBotForMigration() {
+  const token = crypto.randomBytes(16).toString("hex");
+  const result = await migrationSshCommand(buildMarketBotMigrationUninstallCommand({ token }), 60000, { maxBuffer: 1024 * 64, returnResult: true });
+  const value = parseMarketBotSingleObject(result, "Market Bot migration removal evidence").value;
+  return publicMarketBotInfrastructureEvidence(value, { requireAbsent: true });
+}
+
+async function collectAuthoritativeMarketBotEvidence(target, options = {}) {
+  const capture = async () => {
+    const [status, runtime, databaseResult] = await Promise.all([
+      marketBotStatus({ strictEvidence: true }),
+      remoteMarketBotRuntimeEvidence(),
+      migrationSql(target, MARKET_BOT_MIGRATION_SAMPLE_SQL, 120000, { returnResult: true })
+    ]);
+    return {
+      status,
+      runtime,
+      sample: parseMarketBotDatabaseEnvelope(databaseResult).sample
+    };
+  };
+  const first = await capture();
+  await sleepMs(750);
+  const second = await capture();
+  return buildAuthoritativeMarketBotEvidence({
+    statusSamples: [first.status, second.status],
+    runtimeCaptures: [first.runtime, second.runtime],
+    samples: [first.sample, second.sample],
+    writers: options.writers,
+    localConfig: options.localConfig,
+    requireLocalAgreement: options.requireLocalAgreement !== false,
+    expected: {
+      runtimeVersion: APP_VERSION,
+      ...(options.expected || {})
+    }
+  });
+}
+
+async function collectMigrationMarketBotSafety(target, options = {}) {
+  void target;
+  const first = await remoteMarketBotStoppedServiceEvidence();
+  await sleepMs(750);
+  const second = await remoteMarketBotStoppedServiceEvidence();
+  return evaluateMigrationMarketBotSafety({ serviceSamples: [first, second], requireAbsent: options.requireAbsent === true });
+}
+
+async function verifyAcceptedRollbackBackup(expected = {}) {
+  const expectedSize = String(expected.size || "").trim();
+  const expectedSha256 = String(expected.sha256 || "").trim().toLowerCase();
+  if (!/^[1-9]\d*$/.test(expectedSize) || !/^[a-f0-9]{64}$/.test(expectedSha256)) {
+    return { ok: false, size: "", sha256: "", reason: "accepted-backup-evidence-missing" };
+  }
+  let candidates = [];
+  try {
+    const folder = databaseBackupDir();
+    for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".json")) continue;
+      try {
+        const metadata = JSON.parse(fs.readFileSync(path.join(folder, entry.name), "utf8"));
+        if (metadata.type === "verified-database-backup" && metadata.verified === true && metadata.usableForRestore === true
+          && String(metadata.size || "") === expectedSize && String(metadata.sha256 || "").toLowerCase() === expectedSha256) {
+          candidates.push(metadata);
+        }
+      } catch {}
+    }
+  } catch {
+    return { ok: false, size: "", sha256: "", reason: "accepted-backup-metadata-unreadable" };
+  }
+  if (candidates.length !== 1) return { ok: false, size: "", sha256: "", reason: "accepted-backup-identity-ambiguous" };
+  const payloadPath = path.resolve(String(candidates[0].localBackupPath || ""));
+  try {
+    const first = fs.statSync(payloadPath, { bigint: true });
+    if (!first.isFile() || first.size.toString(10) !== expectedSize) throw new Error("size");
+    await sleepMs(750);
+    const second = fs.statSync(payloadPath, { bigint: true });
+    if (!second.isFile() || second.size !== first.size || second.mtimeNs !== first.mtimeNs) throw new Error("unstable");
+    validatePgDumpHeader(await readDatabaseBackupHeader(payloadPath));
+    const actual = await hashDatabaseBackupFile(payloadPath);
+    return { ok: actual.size === expectedSize && actual.sha256 === expectedSha256, size: actual.size, sha256: actual.sha256, reason: actual.sha256 === expectedSha256 ? "" : "accepted-backup-digest-changed" };
+  } catch {
+    return { ok: false, size: "", sha256: "", reason: "accepted-backup-payload-invalid" };
+  }
+}
+
+function publicPauseReconciliationPreflight(result) {
+  return {
+    ok: result.ok === true,
+    conditions: result.conditions || [],
+    localClassification: result.localClassification || "unknown",
+    semanticDifferenceCategories: result.semanticDifferenceCategories || [],
+    generation: String(result.remoteGeneration || ""),
+    boundaryDigest: result.boundaryDigest || "",
+    semanticDigest: result.semanticDigest || "",
+    evidence: result.evidence || null,
+    error: result.error || ""
+  };
+}
+
+async function maintenanceBootstrapPauseReconciliationPreflight(options = {}) {
+  if (!MAINTENANCE_BOOTSTRAP_RUNNER) throw new Error("Market Bot pause reconciliation is available only from --maintenance-bootstrap.");
+  const conditions = [];
+  const normalListeners = await Promise.all([HTTPS_PORT, INTERNET_ORIGIN_PORT, MANAGER_PORT].map(localTcpListenerPresent));
+  conditions.push(migrationCondition("normal-suite-absent", normalListeners.every((present) => !present), normalListeners.some(Boolean) ? "A normal Suite or background listener is present." : "No normal Suite background listener is present.", { listenerCount: String(normalListeners.filter(Boolean).length) }));
+  const persistedMaintenance = migrationMaintenance.persistedStatus();
+  conditions.push(migrationCondition("maintenance-inactive", persistedMaintenance.active !== true, persistedMaintenance.active ? "Migration Maintenance Mode is already active or requires recovery." : "Migration Maintenance Mode is inactive."));
+  const active = operationRegistry.snapshot().active.filter((operation) => operation.id !== options.ignoreOperationId);
+  conditions.push(migrationCondition("conflicting-suite-operations", active.length === 0, active.length ? "A conflicting Suite operation is active." : "No conflicting Suite operation is active.", { activeCount: String(active.length) }));
+  const [vendor, scheduler, acceptedBackup] = await Promise.all([
+    runningDumpOperations(),
+    vmSchedulerStatus(),
+    verifyAcceptedRollbackBackup(options.acceptedBackup || {})
+  ]);
+  conditions.push(migrationCondition("vendor-database-operations", vendor.ok && vendor.running.length === 0, vendor.ok && !vendor.running.length ? "No vendor DatabaseOperation is active." : "A vendor operation is active or ambiguous.", { activeCount: String(vendor.running.length) }));
+  const schedulerDisabled = scheduler.reachable === true && scheduler.ok !== false && scheduler.ambiguousRegistration !== true
+    && (scheduler.installed === false || scheduler.config?.enabled === false || scheduler.config?.restart?.enabled === false);
+  conditions.push(migrationCondition("automatic-restart-disabled", schedulerDisabled, schedulerDisabled ? "Automatic restart scheduling is disabled." : "Automatic restart scheduling is active or ambiguous."));
+  conditions.push(migrationCondition("accepted-rollback-backup", acceptedBackup.ok, acceptedBackup.ok ? "The accepted verified rollback backup still matches its exact size and SHA-256." : "The accepted verified rollback backup is missing, ambiguous, or changed.", { size: acceptedBackup.size, sha256: acceptedBackup.sha256, reason: acceptedBackup.reason }));
+  const target = await databaseRuntimeTarget();
+  const [statusResult, podsText, remoteStatus, runtimeEvidence] = await Promise.all([
+    battlegroup("status"),
+    migrationSshCommand(`sudo kubectl get pods -n ${shQuote(target.namespace)} -o json`, 30000, { maxBuffer: 1024 * 1024 * 8 }),
+    marketBotStatus({ strictEvidence: true }),
+    remoteMarketBotRuntimeEvidence()
+  ]);
+  if (!statusResult.ok) throw new Error("Battlegroup status could not be verified.");
+  const offline = classifyMigrationOfflineStatus(parseStatus(statusResult.stdout || "").summary || {}, parseMigrationJson(podsText, "pause reconciliation workload"));
+  conditions.push(migrationCondition("battlegroup-stopped", offline.authoritativePhaseOffline, offline.authoritativePhaseOffline ? "Battlegroup is authoritatively stopped." : "Battlegroup is not authoritatively stopped."));
+  conditions.push(migrationCondition("controllers-suspended", offline.componentsOffline, offline.componentsOffline ? "Game-facing controllers are suspended." : "Controller state is active or ambiguous."));
+  conditions.push(migrationCondition("running-game-workloads", offline.runningGamePods === "0", offline.runningGamePods === "0" ? "Zero game workloads are running." : "One or more game workloads are running.", { count: offline.runningGamePods }));
+  const databaseText = await migrationSql(target, DATABASE_FACTS_SQL);
+  const database = parseMigrationJson(databaseText, "pause reconciliation database");
+  conditions.push(migrationCondition("postgresql-health", database.reachable === true && String(database.database) === "dune", "PostgreSQL health was checked read-only."));
+  const firstWriterText = await migrationSql(target, ACTIVE_WRITERS_SQL);
+  const firstSampleResult = await migrationSql(target, MARKET_BOT_MIGRATION_SAMPLE_SQL, 120000, { returnResult: true });
+  await sleepMs(750);
+  const secondWriterText = await migrationSql(target, ACTIVE_WRITERS_SQL);
+  const secondSampleResult = await migrationSql(target, MARKET_BOT_MIGRATION_SAMPLE_SQL, 120000, { returnResult: true });
+  const writers = [parseMigrationJson(firstWriterText, "pause reconciliation writer"), parseMigrationJson(secondWriterText, "pause reconciliation writer")];
+  const samples = [parseMarketBotDatabaseEnvelope(firstSampleResult).sample, parseMarketBotDatabaseEnvelope(secondSampleResult).sample];
+  const localConfig = localMarketBotConfig();
+  const localState = classifyMarketBotReconciliationLocalState(readLocalMarketBotConfigText(), localConfig);
+  const preserveRemoteCatalog = options.catalogSelection === "preserve-remote";
+  const expectedRemoteCatalogCount = String(options.expectedRemoteCatalogCount || "").trim();
+  let remoteCatalogPolicy = null;
+  try { remoteCatalogPolicy = buildPinnedMarketBotCatalogPolicy(runtimeEvidence.config.items); } catch {}
+  const catalogSelectionValid = preserveRemoteCatalog
+    && remoteCatalogPolicy !== null
+    && /^[1-9]\d*$/.test(expectedRemoteCatalogCount)
+    && remoteCatalogPolicy.itemCount === expectedRemoteCatalogCount;
+  conditions.push(migrationCondition(
+    "explicit-remote-catalog-policy",
+    catalogSelectionValid,
+    catalogSelectionValid ? "The complete existing remote Market Bot catalog is selected as the explicit local policy." : "The remote catalog selection is missing, malformed, or changed.",
+    { mode: preserveRemoteCatalog ? "preserve-remote" : "unspecified", expectedItemCount: expectedRemoteCatalogCount, observedItemCount: remoteCatalogPolicy?.itemCount || "" }
+  ));
+  const candidateLocalConfig = catalogSelectionValid
+    ? normalizeMarketBotConfig({ ...localConfig, catalogPolicy: remoteCatalogPolicy })
+    : localConfig;
+  const recovery = marketBotReconciliationState.status();
+  const localAllowed = localState.classification === "legacy-incompatible"
+    || (options.allowCurrent === true && localState.classification === "current")
+    || (recovery.active && localState.classification === "current");
+  conditions.push(migrationCondition("local-state-classification", localAllowed, localAllowed ? `Local state is ${localState.classification}.` : `Local state classification ${localState.classification} is not eligible for reconciliation.`));
+  if (options.requireCompleteEnvelope === true) {
+    let completeEnvelopeValid = false;
+    try {
+      const completeEnvelope = buildMarketBotEvidenceEnvelope({ localConfig: { ...candidateLocalConfig, evidencePersisted: true }, remote: remoteStatus, samples, writers });
+      marketBotEvidenceEvaluationInput(completeEnvelope);
+      completeEnvelopeValid = true;
+    } catch {}
+    conditions.push(migrationCondition("complete-versioned-evidence", completeEnvelopeValid, completeEnvelopeValid ? "The complete versioned Market Bot evidence envelope passed strict validation." : "The complete versioned Market Bot evidence envelope is missing, malformed, or inconsistent."));
+  }
+  const expectedRuntime = buildMarketBotRuntimeConfig({
+    ...candidateLocalConfig,
+    enabled: true,
+    paused: true,
+    pauseState: MARKET_BOT_PAUSE_STATES.REQUESTED,
+    activated: true
+  }, target, marketBotCatalog(), APP_VERSION);
+  const semanticDifferenceCategories = marketBotSemanticDifferenceCategories(expectedRuntime, runtimeEvidence.config);
+  conditions.push(migrationCondition("semantic-configuration", semanticDifferenceCategories.length === 0, semanticDifferenceCategories.length ? "Local and remote semantic Market Bot configuration differs." : "Local and remote semantic Market Bot configuration matches.", { differingCategories: semanticDifferenceCategories }));
+  const expectedFingerprint = marketBotActivationFingerprint(expectedRuntime);
+  const remoteCanonicalFingerprint = marketBotActivationFingerprint(runtimeEvidence.config);
+  const remoteStoredFingerprint = String(runtimeEvidence.config.configFingerprint || "");
+  const remoteStatusFingerprint = String(remoteStatus.config?.configFingerprint || "");
+  const remoteFingerprintCurrent = remoteCanonicalFingerprint === expectedFingerprint
+    && remoteStoredFingerprint === expectedFingerprint
+    && remoteStatusFingerprint === expectedFingerprint;
+  const staleFingerprintRefreshAllowed = !options.expectedGeneration
+    && catalogSelectionValid
+    && remoteCanonicalFingerprint === expectedFingerprint
+    && /^[a-f0-9]{64}$/.test(remoteStoredFingerprint)
+    && remoteStoredFingerprint === remoteStatusFingerprint;
+  const remoteFingerprintValid = remoteFingerprintCurrent || staleFingerprintRefreshAllowed;
+  conditions.push(migrationCondition(
+    "configuration-fingerprint",
+    remoteFingerprintValid,
+    remoteFingerprintCurrent ? "Runtime and configuration fingerprints match." : staleFingerprintRefreshAllowed ? "The stored remote fingerprint is stale but the current canonical remote policy matches exactly and is eligible for protected refresh." : "Runtime or configuration fingerprint evidence does not match.",
+    { classification: remoteFingerprintCurrent ? "current" : staleFingerprintRefreshAllowed ? "stale-derived-evidence" : "invalid" }
+  ));
+  const bundledBinaryHash = fs.existsSync(MARKET_BOT_BINARY_PATH) ? sha256FileSync(MARKET_BOT_BINARY_PATH) : "";
+  const remoteCheck = validateReconciliationRemoteQuiescence({
+    remote: remoteStatus,
+    samples,
+    writers,
+    expectedVersion: APP_VERSION,
+    expectedConfigFingerprint: staleFingerprintRefreshAllowed ? remoteStoredFingerprint : expectedFingerprint,
+    expectedBinaryHash: bundledBinaryHash,
+    remoteBinaryHash: runtimeEvidence.remoteBinaryHash
+  });
+  conditions.push(migrationCondition("remote-authoritative-quiescent", remoteCheck.ok, remoteCheck.ok ? "Remote Market Bot is authoritatively Quiescent." : "Remote Market Bot quiescence evidence failed closed.", { reasons: remoteCheck.reasons }));
+  const currentBoundaryDigest = marketBotBoundaryDigest(samples, writers);
+  const semanticDigest = migrationSha256Text(canonicalMigrationJson(marketBotSemanticConfigView(expectedRuntime)));
+  if (recovery.active && recovery.boundaryDigest) {
+    conditions.push(migrationCondition("recovery-boundary", recovery.boundaryDigest === currentBoundaryDigest && recovery.semanticDigest === semanticDigest, "Interrupted reconciliation evidence was compared with the current boundary."));
+  }
+  if (options.expectedGeneration) {
+    conditions.push(migrationCondition("matching-pause-generation", remoteCheck.generation === String(options.expectedGeneration), "The requested pause generation was revalidated."));
+  }
+  const ok = conditions.every((condition) => condition.ok);
+  const result = {
+    ok,
+    conditions,
+    localClassification: localState.classification,
+    semanticDifferenceCategories,
+    remoteGeneration: remoteCheck.generation,
+    boundaryDigest: currentBoundaryDigest,
+    semanticDigest,
+    evidence: {
+      activeTracking: String(samples[0]?.activeTracking || ""),
+      totalTracking: String(samples[0]?.totalTracking || ""),
+      protectedOrders: String(samples[0]?.protectedOrders || ""),
+      protectedSellOrders: String(samples[0]?.protectedSellOrders || ""),
+      protectedItems: String(samples[0]?.protectedItems || ""),
+      fulfilledPayments: String(samples[0]?.fulfilledPayments || ""),
+      cycleEvidenceRows: String(samples[0]?.cycleEvidenceRows || ""),
+      botOwnedDigest: String(samples[0]?.botOwnedDigest || ""),
+      protectedDigest: String(samples[0]?.protectedDigest || ""),
+      cycleEvidenceDigest: String(samples[0]?.cycleEvidenceDigest || "")
+    },
+    expectedFingerprint,
+    expectedRuntime,
+    localConfig: candidateLocalConfig,
+    remoteRuntimeConfig: runtimeEvidence.config,
+    remoteConfigSha256: runtimeEvidence.configSha256,
+    remoteStatus,
+    error: ok ? "" : conditions.filter((condition) => !condition.ok).map((condition) => condition.message).join(" ")
+  };
+  return options.internal === true ? result : publicPauseReconciliationPreflight(result);
+}
+
+async function reconcilePausedMarketBotFromBootstrap(input = {}) {
+  if (!MAINTENANCE_BOOTSTRAP_RUNNER) throw new Error("Market Bot pause reconciliation is available only from --maintenance-bootstrap.");
+  if (String(input.confirmText || "") !== MARKET_BOT_RECONCILIATION_CONFIRMATION) throw new Error(`Type ${MARKET_BOT_RECONCILIATION_CONFIRMATION} exactly.`);
+  const catalogSelection = String(input.catalogPolicy?.mode || "");
+  const expectedRemoteCatalogCount = String(input.catalogPolicy?.expectedItemCount || "").trim();
+  if (catalogSelection !== "preserve-remote" || !/^[1-9]\d*$/.test(expectedRemoteCatalogCount)) {
+    throw new Error("Explicit preserve-remote Market Bot catalog policy selection and expected item count are required.");
+  }
+  const operation = operationRegistry.begin("market-bot:pause-reconcile", "Reconcile Paused Market Bot State", { category: "migration", detail: "Bootstrap-only protected Pause workflow" });
+  try {
+    const result = await runPauseReconciliation({
+      preflight: () => maintenanceBootstrapPauseReconciliationPreflight({ internal: true, ignoreOperationId: operation.id, allowCurrent: marketBotReconciliationState.status().active, acceptedBackup: input.acceptedBackup, catalogSelection, expectedRemoteCatalogCount }),
+      generation: (before) => {
+        const priorStateGeneration = marketBotReconciliationState.status().generation === "unknown" ? "0" : marketBotReconciliationState.status().generation;
+        const stagingGeneration = nextMarketBotReconciliationGeneration(before.localConfig.configGeneration, before.localConfig.pauseGeneration, before.remoteGeneration, priorStateGeneration);
+        const generation = nextMarketBotReconciliationGeneration(stagingGeneration);
+        return assertNewMarketBotReconciliationGeneration(generation, before.localConfig.configGeneration, before.localConfig.pauseGeneration, before.remoteGeneration, priorStateGeneration);
+      },
+      prepare: ({ before, generation }) => marketBotReconciliationState.begin({ generation, boundaryDigest: before.boundaryDigest, semanticDigest: before.semanticDigest }),
+      persistLocal: ({ before, generation }) => {
+        marketBotStore.save(normalizeMarketBotConfig({
+          ...before.localConfig,
+          enabled: true,
+          activated: true,
+          paused: true,
+          pauseState: MARKET_BOT_PAUSE_STATES.REQUESTED,
+          configGeneration: generation,
+          pauseGeneration: generation,
+          runtimeFingerprint: before.expectedFingerprint
+        }));
+        return marketBotReconciliationState.transition(MARKET_BOT_RECONCILIATION_PHASES.LOCAL_PERSISTED);
+      },
+      publishPause: ({ before, generation }) => publishPinnedPausedMarketBotPolicy(before, (BigInt(generation) - 1n).toString(10), generation, {
+        strictEvidence: true,
+        onRemotePublished: () => marketBotReconciliationState.transition(MARKET_BOT_RECONCILIATION_PHASES.REMOTE_PUBLISHED),
+        onAuthoritative: (authoritative) => {
+          if (!authoritative.quiescent || String(authoritative.config?.pauseGeneration || "") !== generation) throw new Error("The new pause generation did not become authoritatively Quiescent.");
+        }
+      }),
+      markRemotePublished: () => marketBotReconciliationState.status(),
+      waitQuiescent: () => marketBotReconciliationState.status(),
+      postflight: ({ generation }) => maintenanceBootstrapPauseReconciliationPreflight({ internal: true, ignoreOperationId: operation.id, allowCurrent: true, requireCompleteEnvelope: true, expectedGeneration: generation, acceptedBackup: input.acceptedBackup, catalogSelection, expectedRemoteCatalogCount }),
+      complete: () => marketBotReconciliationState.complete(),
+      recover: (code) => marketBotReconciliationState.recover(code)
+    });
+    operationRegistry.finish(operation, "success");
+    appendAdminAudit("market_bot_pause_reconciled", { generation: result.generation, boundaryDigest: result.after.boundaryDigest, semanticDigest: result.after.semanticDigest });
+    return { ok: true, generation: result.generation, state: "Quiescent", preflight: publicPauseReconciliationPreflight(result.before), revalidation: publicPauseReconciliationPreflight(result.after) };
+  } catch (error) {
+    operationRegistry.finish(operation, "failed", migrationPublicError(error.message), { stage: error.reconciliationStage || "reconciliation" });
+    appendAdminAudit("market_bot_pause_reconciliation_failed", { stage: error.reconciliationStage || "reconciliation", recoveryRetained: marketBotReconciliationState.status().active });
+    throw error;
+  }
+}
+
+function publicOfflineMarketBotReconciliationPreflight(result = {}) {
+  return {
+    ok: result.ok === true,
+    conditions: result.conditions || [],
+    localClassification: result.localClassification || "unknown",
+    localAlreadyReconciled: result.localAlreadyReconciled === true,
+    generation: String(result.remoteGeneration || ""),
+    configurationFingerprint: String(result.remoteFingerprint || ""),
+    catalogItemCount: String(result.catalogItemCount || ""),
+    catalogFingerprint: String(result.catalogFingerprint || ""),
+    boundaryDigest: String(result.boundaryDigest || ""),
+    semanticDigest: String(result.semanticDigest || ""),
+    reconciliation: offlineMarketBotReconciliationState.status(),
+    error: String(result.error || "")
+  };
+}
+
+function exactOfflineMarketBotLocalEvidence(config = {}) {
+  return String(config.configGeneration || "") === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.remoteGeneration
+    && String(config.pauseGeneration || "") === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.remoteGeneration
+    && config.paused === true
+    && config.pauseState === MARKET_BOT_PAUSE_STATES.REQUESTED
+    && String(config.runtimeFingerprint || "") === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.configFingerprint
+    && config.catalogPolicy?.mode === "pinned"
+    && String(config.catalogPolicy?.itemCount || "") === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.catalogItemCount
+    && String(config.catalogPolicy?.fingerprint || "") === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.catalogFingerprint;
+}
+
+async function migrationOfflineMarketBotReconciliationPreflight(options = {}) {
+  if (!MIGRATION_STARTUP_SUPPRESSED_RUNNER) throw new Error("Local Market Bot evidence reconciliation is available only from --migration-startup-suppressed.");
+  const conditions = [];
+  const offline = migrationOfflineMode.status();
+  const offlineReady = offline.active === true && offline.failClosed !== true
+    && String(offline.generation) === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.offlineGeneration
+    && /^[a-f0-9]{64}$/.test(String(offline.digest || ""));
+  conditions.push(migrationCondition("offline-mode-generation", offlineReady, offlineReady ? "Migration Offline Mode generation 1 is active and healthy." : "Healthy Migration Offline Mode generation 1 is required.", { generation: String(offline.generation || ""), failClosed: offline.failClosed === true }));
+  const offlineCheckpoint = offlineReady ? migrationOfflineMode.captureCheckpoint("Local Market Bot evidence reconciliation") : null;
+  const journal = offlineMarketBotReconciliationState.status();
+  const journalEligible = journal.active !== true || (journal.failClosed === true && Object.values(OFFLINE_MARKET_BOT_RECONCILIATION_PHASES).includes(journal.phase));
+  conditions.push(migrationCondition("recovery-journal", journalEligible, journalEligible ? (journal.active ? "An interrupted local-only reconciliation is eligible for exact recovery." : "No incomplete local evidence reconciliation exists.") : "The local evidence reconciliation journal is ambiguous."));
+  const active = operationRegistry.snapshot().active.filter((operation) => operation.id !== options.ignoreOperationId);
+  conditions.push(migrationCondition("conflicting-suite-operations", active.length === 0, active.length ? "A conflicting Suite operation is active." : "No conflicting Suite operation is active.", { activeCount: String(active.length) }));
+  const vendor = await runningDumpOperations();
+  conditions.push(migrationCondition("vendor-database-operations", vendor.ok && vendor.running.length === 0, vendor.ok && !vendor.running.length ? "No vendor DatabaseOperation is active." : "A vendor operation is active or ambiguous.", { activeCount: String(vendor.running.length) }));
+
+  const target = await databaseRuntimeTarget();
+  const [statusResult, podsText] = await Promise.all([
+    battlegroup("status"),
+    migrationSshCommand(`sudo kubectl get pods -n ${shQuote(target.namespace)} -o json`, 30000, { maxBuffer: 1024 * 1024 * 8 })
+  ]);
+  if (!statusResult.ok) throw new Error("Battlegroup status could not be verified.");
+  const workloadState = classifyMigrationOfflineStatus(parseStatus(statusResult.stdout || "").summary || {}, parseMigrationJson(podsText, "offline reconciliation workload"));
+  conditions.push(migrationCondition("battlegroup-stopped", workloadState.authoritativePhaseOffline, workloadState.authoritativePhaseOffline ? "Battlegroup is authoritatively stopped." : "Battlegroup is not authoritatively stopped.", { phase: workloadState.battlegroupPhase }));
+  conditions.push(migrationCondition("controllers-suspended", workloadState.componentsOffline, workloadState.componentsOffline ? "Controllers are suspended." : "Controller state is active or ambiguous.", { componentStates: workloadState.componentStates }));
+  conditions.push(migrationCondition("running-game-workloads", workloadState.runningGamePods === "0", workloadState.runningGamePods === "0" ? "Zero game workloads are running." : "One or more game workloads are running.", { count: workloadState.runningGamePods }));
+
+  const database = parseMigrationJson(await migrationSql(target, DATABASE_FACTS_SQL), "offline reconciliation database");
+  conditions.push(migrationCondition("postgresql-health", database.reachable === true && String(database.database) === "dune", "PostgreSQL health was checked read-only."));
+  const writers = await collectIndependentWriterSamples(
+    async () => parseMigrationJson(await migrationSql(target, ACTIVE_WRITERS_SQL), "offline reconciliation writer"),
+    () => sleepMs(750)
+  );
+  const writerEvidence = evaluateIndependentWriterSamples(writers);
+  conditions.push(migrationCondition("writers-and-transactions", writerEvidence.ok, writerEvidence.ok ? "Writers and open transactions are zero across two independent sessions." : "Writer or transaction evidence failed closed.", { samples: writerEvidence.samples }));
+  const expectedRuntimeBinarySha256 = String(options.expectedRuntimeBinarySha256 || OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.runtimeBinarySha256);
+  const authoritative = await collectAuthoritativeMarketBotEvidence(target, {
+    writers,
+    requireLocalAgreement: false,
+    expected: {
+      generation: OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.remoteGeneration,
+      configFingerprint: OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.configFingerprint,
+      runtimeBinarySha256: expectedRuntimeBinarySha256,
+      catalogItemCount: OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.catalogItemCount,
+      catalogFingerprint: OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.catalogFingerprint
+    }
+  });
+  const samples = authoritative.samples;
+  const runtimeConfig = authoritative.configuration;
+  const remoteCatalogPolicy = authoritative.catalogPolicy;
+  const catalogExact = remoteCatalogPolicy?.itemCount === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.catalogItemCount
+    && remoteCatalogPolicy?.fingerprint === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.catalogFingerprint;
+  conditions.push(migrationCondition("pinned-catalog", catalogExact, catalogExact ? "The complete pinned 2,131-item remote catalog has the supported fingerprint." : "The remote pinned catalog count or fingerprint changed.", { itemCount: String(remoteCatalogPolicy?.itemCount || ""), fingerprint: String(remoteCatalogPolicy?.fingerprint || "") }));
+  const remoteCanonicalFingerprint = marketBotActivationFingerprint(runtimeConfig);
+  const remoteStoredFingerprint = String(runtimeConfig.configFingerprint || "");
+  const remoteStatusFingerprint = authoritative.publicEvidence.configurationFingerprint;
+  const fingerprintExact = remoteCanonicalFingerprint === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.configFingerprint
+    && remoteStoredFingerprint === remoteCanonicalFingerprint && remoteStatusFingerprint === remoteCanonicalFingerprint;
+  conditions.push(migrationCondition("remote-configuration-fingerprint", fingerprintExact, fingerprintExact ? "The remote stored fingerprint recalculates to the supported fingerprint." : "Remote stored, recalculated, or runtime configuration fingerprints disagree."));
+  const runtimeBinaryExact = authoritative.publicEvidence.runtimeBinaryFingerprint === expectedRuntimeBinarySha256;
+  conditions.push(migrationCondition("runtime-binary-fingerprint", runtimeBinaryExact, runtimeBinaryExact ? "The authoritative remote runtime binary matches the accepted fingerprint." : "The remote runtime binary fingerprint changed."));
+  const remoteCheck = {
+    ok: authoritative.ok,
+    generation: authoritative.publicEvidence.generation,
+    reasons: authoritative.quiescence.reasons || []
+  };
+  const generationExact = remoteCheck.generation === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.remoteGeneration;
+  conditions.push(migrationCondition("remote-authoritative-quiescent", remoteCheck.ok && generationExact, remoteCheck.ok && generationExact ? "Remote Market Bot generation 6 is authoritatively Quiescent with zero cycles and locks." : "Remote Market Bot generation, quiescence, cycle, lock, or stability evidence failed closed.", { generation: remoteCheck.generation, reasons: remoteCheck.reasons }));
+
+  const rawLocal = readLocalMarketBotConfigText();
+  const localConfig = localMarketBotConfig();
+  const localState = classifyMarketBotReconciliationLocalState(rawLocal, localConfig);
+  const localCurrent = exactOfflineMarketBotLocalEvidence(localConfig);
+  const localEligible = localState.classification === "legacy-incompatible" || (localState.classification === "current" && localCurrent && (journal.active === true || options.allowCurrent === true));
+  conditions.push(migrationCondition("stale-local-evidence", localEligible, localEligible ? (localCurrent ? "The interrupted operation already persisted the exact local evidence and may resume verification." : "Local Market Bot evidence is specifically legacy/incompatible and eligible for narrow repair.") : "Local Market Bot evidence is current, malformed, or not eligible for this repair.", { classification: localState.classification }));
+  const candidateLocalConfig = catalogExact ? normalizeMarketBotConfig({
+    ...localConfig,
+    paused: true,
+    pauseState: MARKET_BOT_PAUSE_STATES.REQUESTED,
+    configGeneration: OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.remoteGeneration,
+    pauseGeneration: OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.remoteGeneration,
+    runtimeFingerprint: OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.configFingerprint,
+    catalogPolicy: remoteCatalogPolicy
+  }) : localConfig;
+  let updateScope = { changed: [], evidenceFields: [] };
+  try { updateScope = assertAllowedLocalEvidenceUpdate(localConfig, candidateLocalConfig); }
+  catch (error) { conditions.push(migrationCondition("local-update-scope", false, "The local evidence repair would change a forbidden policy field.", { code: error.code || "scope" })); }
+  if (!conditions.some((condition) => condition.id === "local-update-scope")) {
+    conditions.push(migrationCondition("local-update-scope", true, "Only local generation, pause state, pinned catalog, fingerprint evidence, and durability timestamp may change.", { fields: updateScope.evidenceFields }));
+  }
+  const expectedRuntime = buildMarketBotRuntimeConfig(candidateLocalConfig, target, [], APP_VERSION);
+  const semanticDifferences = marketBotSemanticDifferenceCategories(expectedRuntime, runtimeConfig);
+  conditions.push(migrationCondition("semantic-economic-policy", semanticDifferences.length === 0, semanticDifferences.length ? "Local and remote semantic economic policy differs." : "Local and remote economic policy fields are semantically identical.", { differingCategories: semanticDifferences }));
+  const localRecalculatedFingerprint = marketBotActivationFingerprint(expectedRuntime);
+  conditions.push(migrationCondition("local-recalculated-fingerprint", localRecalculatedFingerprint === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.configFingerprint, localRecalculatedFingerprint === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.configFingerprint ? "The reconciled local policy recalculates to the supported configuration fingerprint." : "The reconciled local policy would not reproduce the supported configuration fingerprint."));
+
+  const boundaryDigest = marketBotBoundaryDigest(samples, writers);
+  const semanticDigest = migrationSha256Text(canonicalMigrationJson(marketBotSemanticConfigView(expectedRuntime)));
+  const localCurrentSha256 = rawLocal === null ? "" : offlineMarketBotDigestFile(MARKET_BOT_CONFIG_PATH);
+  conditions.push(migrationCondition("local-evidence-readable", /^[a-f0-9]{64}$/.test(localCurrentSha256), /^[a-f0-9]{64}$/.test(localCurrentSha256) ? "The local evidence file has a stable pre-update identity." : "The local Market Bot evidence file is missing or unreadable."));
+  if (journal.active && journal.attempt > 0) {
+    const recoveryMatches = String(journal.offlineGeneration || "") === String(offline.generation || "")
+      && String(journal.offlineDigest || "") === String(offline.digest || "")
+      && String(journal.remoteGeneration || "") === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.remoteGeneration
+      && String(journal.remoteFingerprint || "") === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.configFingerprint
+      && String(journal.catalogItemCount || "") === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.catalogItemCount
+      && String(journal.catalogFingerprint || "") === OFFLINE_MARKET_BOT_RECONCILIATION_EXPECTED.catalogFingerprint
+      && String(journal.boundaryDigest || "") === boundaryDigest
+      && String(journal.semanticDigest || "") === semanticDigest;
+    conditions.push(migrationCondition("recovery-identity", recoveryMatches, recoveryMatches ? "Recovery journal identity matches the current Offline Mode, remote policy, and database boundary." : "Recovery journal identity drifted."));
+  }
+  if (options.requireCurrent === true) conditions.push(migrationCondition("local-evidence-current", localCurrent, localCurrent ? "Local generation, pause state, pinned catalog, and fingerprint evidence now match generation 6." : "The local evidence update is incomplete."));
+  const ok = conditions.every((condition) => condition.ok);
+  const result = {
+    ok,
+    conditions,
+    localClassification: localState.classification,
+    localAlreadyReconciled: localCurrent,
+    localCurrentSha256,
+    localConfig,
+    candidateLocalConfig,
+    offlineCheckpoint,
+    offlineGeneration: String(offline.generation || ""),
+    offlineDigest: String(offline.digest || ""),
+    remoteGeneration: remoteCheck.generation,
+    remoteFingerprint: remoteCanonicalFingerprint,
+    catalogItemCount: String(remoteCatalogPolicy?.itemCount || ""),
+    catalogFingerprint: String(remoteCatalogPolicy?.fingerprint || ""),
+    boundaryDigest,
+    semanticDigest,
+    marketBotSample: samples[0],
+    writerSamples: writers,
+    remoteConfigSha256: authoritative.publicEvidence.configurationSha256,
+    error: ok ? "" : conditions.filter((condition) => !condition.ok).map((condition) => condition.message).join(" ")
+  };
+  return options.internal === true ? result : publicOfflineMarketBotReconciliationPreflight(result);
+}
+
+async function reconcileLocalMarketBotEvidenceInOfflineMode(input = {}) {
+  if (!MIGRATION_STARTUP_SUPPRESSED_RUNNER) throw new Error("Local Market Bot evidence reconciliation is available only from --migration-startup-suppressed.");
+  if (String(input.confirmText || "") !== OFFLINE_MARKET_BOT_RECONCILIATION_CONFIRMATION) throw new Error(`Type ${OFFLINE_MARKET_BOT_RECONCILIATION_CONFIRMATION} exactly.`);
+  const operation = operationRegistry.begin("market-bot:offline-evidence-reconcile", "Reconcile Local Market Bot Evidence", { category: "migration", detail: "Offline Mode local-only evidence repair" });
+  try {
+    const result = await runOfflineMarketBotReconciliation({
+      preflight: () => migrationOfflineMarketBotReconciliationPreflight({ internal: true, ignoreOperationId: operation.id }),
+      prepare: (before) => offlineMarketBotReconciliationState.begin({ ...before, localBeforeSha256: before.localCurrentSha256 }),
+      verifyCheckpoint: (checkpoint, stage) => migrationOfflineMode.verifyCheckpoint(checkpoint, stage),
+      persistLocal: (before) => {
+        const currentSha256 = offlineMarketBotDigestFile(MARKET_BOT_CONFIG_PATH);
+        const recovery = offlineMarketBotReconciliationState.status();
+        if (before.localAlreadyReconciled || (recovery.localAfterSha256 && recovery.localAfterSha256 === currentSha256)) return { sha256: currentSha256, reused: true };
+        if (currentSha256 !== before.localCurrentSha256) throw new Error("The local Market Bot evidence changed after preflight.");
+        const saved = marketBotStore.save(before.candidateLocalConfig);
+        const reread = localMarketBotConfig();
+        assertAllowedLocalEvidenceUpdate(before.localConfig, saved);
+        assertAllowedLocalEvidenceUpdate(before.localConfig, reread);
+        if (!exactOfflineMarketBotLocalEvidence(reread)) throw new Error("The atomically persisted local Market Bot evidence did not match generation 6.");
+        return { sha256: offlineMarketBotDigestFile(MARKET_BOT_CONFIG_PATH), reused: false };
+      },
+      markLocalPersisted: (sha256) => offlineMarketBotReconciliationState.markLocalPersisted(sha256),
+      postflight: () => migrationOfflineMarketBotReconciliationPreflight({ internal: true, ignoreOperationId: operation.id, requireCurrent: true }),
+      markVerified: () => offlineMarketBotReconciliationState.markVerified(),
+      complete: () => offlineMarketBotReconciliationState.complete(),
+      recover: (code) => offlineMarketBotReconciliationState.recover(code)
+    });
+    operationRegistry.finish(operation, "success");
+    appendAdminAudit("market_bot_offline_evidence_reconciled", {
+      generation: result.after.remoteGeneration,
+      configurationFingerprint: result.after.remoteFingerprint,
+      catalogItemCount: result.after.catalogItemCount,
+      catalogFingerprint: result.after.catalogFingerprint,
+      offlineGeneration: result.after.offlineGeneration
+    });
+    return { ok: true, state: "Quiescent", generation: result.after.remoteGeneration, preflight: publicOfflineMarketBotReconciliationPreflight(result.before), revalidation: publicOfflineMarketBotReconciliationPreflight(result.after), reconciliation: offlineMarketBotReconciliationState.status() };
+  } catch (error) {
+    operationRegistry.finish(operation, "failed", migrationPublicError(error.message), { stage: error.reconciliationStage || "reconciliation" });
+    appendAdminAudit("market_bot_offline_evidence_reconciliation_failed", { stage: error.reconciliationStage || "reconciliation", recoveryRetained: offlineMarketBotReconciliationState.status().active === true });
+    throw error;
+  }
+}
+
+async function enterMigrationMaintenanceFromBootstrap(input = {}) {
+  if (!MAINTENANCE_BOOTSTRAP_RUNNER) throw new Error("Launch the local Suite with --maintenance-bootstrap before first-time maintenance entry.");
+  if (marketBotReconciliationState.status().active) throw new Error("Market Bot pause reconciliation is incomplete; maintenance entry remains blocked fail closed.");
+  if (String(input.confirmText || "") !== MIGRATION_MAINTENANCE_ENTER_CONFIRMATION) throw new Error(`Type ${MIGRATION_MAINTENANCE_ENTER_CONFIRMATION} exactly.`);
+  const existingMaintenance = migrationMaintenance.status();
+  const resumingRecovery = existingMaintenance.active === true && existingMaintenance.failClosed === true && existingMaintenance.phase === MIGRATION_MAINTENANCE_PHASES.RECOVERY;
+  if (existingMaintenance.active && !resumingRecovery) throw new Error("Maintenance state is already active or is not eligible for bootstrap recovery.");
+  const operation = operationRegistry.begin("maintenance:bootstrap", resumingRecovery ? "Resume Migration Maintenance Recovery" : "Bootstrap Migration Maintenance Mode", { category: "migration", detail: resumingRecovery ? "Resume the exact fail-closed remote-guard checkpoint" : "Local fail-closed maintenance bootstrap" });
+  let provisionalCreated = resumingRecovery;
+  try {
+    const runner = resumingRecovery ? runMaintenanceBootstrapRecovery : runMaintenanceBootstrap;
+    const result = await runner({
+      onStage: (row, history) => {
+        setMaintenanceBootstrapStage(row, history);
+        operationRegistry.update(operation, row.stage, row.detail || row.status);
+      },
+      preflight: () => maintenanceBootstrapPreflight({ ignoreOperationId: operation.id }),
+      recoveryCheckpoint: () => migrationMaintenance.recoveryCheckpoint(input.confirmText),
+      beginProvisional: () => {
+        if (resumingRecovery) throw new Error("Recovery must not create a new provisional maintenance generation.");
+        const state = migrationMaintenance.beginProvisional(input.confirmText);
+        provisionalCreated = true;
+        return state;
+      },
+      checkpoint: (phase) => migrationMaintenance.bootstrapCheckpoint(phase),
+      deployRemote: (checkpoint) => setRemoteMigrationMaintenanceHold(true, checkpoint),
+      verifyRemote: async (checkpoint) => {
+        const remote = await remoteMigrationMaintenanceHoldStatus(checkpoint.generation, checkpoint.holdDigest);
+        if (!remote.ok) throw new Error(remote.error || "The VM maintenance sentinel does not match local evidence.");
+        return remote;
+      },
+      markRemoteGuarded: (checkpoint) => migrationMaintenance.transitionBootstrap(checkpoint, MIGRATION_MAINTENANCE_PHASES.REMOTE_GUARDED),
+      revalidate: () => maintenanceBootstrapPreflight({ ignoreOperationId: operation.id }),
+      finalize: (checkpoint) => migrationMaintenance.transitionBootstrap(checkpoint, MIGRATION_MAINTENANCE_PHASES.ACTIVE),
+      recover: (checkpoint) => migrationMaintenance.retainBootstrapRecovery(checkpoint)
+    });
+    operationRegistry.finish(operation, "success");
+    maintenanceBootstrapRuntime.status = "success";
+    maintenanceBootstrapRuntime.stage = "Active maintenance hold finalized; bootstrap shutdown pending";
+    maintenanceBootstrapRuntime.result = { generation: result.checkpoint.generation, holdDigest: result.checkpoint.holdDigest, evidenceDigest: result.before.evidenceDigest };
+    maintenanceBootstrapRuntime.shutdownRequested = true;
+    appendAdminAudit("migration_maintenance_bootstrap_completed", { generation: result.checkpoint.generation, holdDigest: result.checkpoint.holdDigest, evidenceDigest: result.before.evidenceDigest, resumedRecovery: result.resumedRecovery === true });
+    return { ok: true, ...maintenanceBootstrapPublicState(), state: result.state, checkpoint: result.checkpoint, preflight: result.before, revalidation: result.after };
+  } catch (error) {
+    let recoveryRetained = false;
+    if (provisionalCreated) {
+      try {
+        migrationMaintenance.bootstrapCheckpoint(MIGRATION_MAINTENANCE_PHASES.RECOVERY);
+        recoveryRetained = true;
+      } catch {}
+    }
+    if (!provisionalCreated || recoveryRetained) operationRegistry.finish(operation, "failed", error.message, { stage: error.stage || maintenanceBootstrapRuntime.stage });
+    maintenanceBootstrapRuntime.status = "failed";
+    maintenanceBootstrapRuntime.stage = error.stage || maintenanceBootstrapRuntime.stage;
+    maintenanceBootstrapRuntime.history = error.history || maintenanceBootstrapRuntime.history;
+    maintenanceBootstrapRuntime.result = { recoveryRetained, error: migrationPublicError(error.message) };
+    appendAdminAudit("migration_maintenance_bootstrap_failed", { stage: maintenanceBootstrapRuntime.stage, recoveryRetained });
+    error.bootstrap = maintenanceBootstrapPublicState();
+    throw error;
+  }
+}
+
+async function enterMigrationMaintenanceMode(input = {}) {
+  const state = migrationMaintenance.enter(input.confirmText);
+  const remoteHold = await setRemoteMigrationMaintenanceHold(true, state);
+  const receiver = await stopManagedReceiver().catch((error) => ({ ok: false, error: error.message }));
+  let marketBot = null;
+  const current = localMarketBotConfig();
+  if (current.activated) marketBot = await setMarketBotPaused(true);
+  let offline = { offline: false, runningGamePods: "unknown", battlegroupPhase: "unknown" };
+  try {
+    const target = await databaseRuntimeTarget();
+    const [statusResult, podsText] = await Promise.all([
+      battlegroup("status"),
+      migrationSshCommand(`sudo kubectl get pods -n ${shQuote(target.namespace)} -o json`, 30000, { maxBuffer: 1024 * 1024 * 8 })
+    ]);
+    if (!statusResult.ok) throw new Error("Battlegroup status is unavailable.");
+    offline = classifyMigrationOfflineStatus(
+      parseStatus(statusResult.stdout || "").summary || {},
+      parseMigrationJson(podsText, "maintenance workload")
+    );
+  } catch (error) {
+    offline = { offline: false, runningGamePods: "unknown", battlegroupPhase: "unknown", error: migrationPublicError(error.message) };
+  }
+  if (receiver.ok === false || (marketBot && marketBot.quiescent !== true) || offline.offline !== true) {
+    appendAdminAudit("migration_maintenance_enter_incomplete", { generation: state.generation, receiverStopped: receiver.ok !== false, marketBotQuiescent: marketBot?.quiescent === true, battlegroupOffline: offline.offline === true, runningGameWorkloads: offline.runningGamePods });
+    throw new Error("Migration Maintenance Mode remains active, but writer quiescence could not be proven. Review status before starting a workflow.");
+  }
+  appendAdminAudit("migration_maintenance_entered", { generation: state.generation, remoteHold: remoteHold.active, receiverStopped: receiver.ok !== false, marketBotState: marketBot?.status || "not-activated", battlegroupOffline: true, runningGameWorkloads: offline.runningGamePods });
+  return { ok: true, ...migrationMaintenance.status(), remoteHold, receiverStopped: receiver.ok !== false, battlegroup: { offline: true, runningGameWorkloads: offline.runningGamePods, phase: offline.battlegroupPhase }, marketBot: marketBot ? { status: marketBot.status, quiescent: marketBot.quiescent === true } : null };
+}
+
+async function exitMigrationMaintenanceMode(input = {}) {
+  const state = migrationMaintenance.exit(input.confirmText, { activeWorkflow: activeMaintenanceWorkflow() });
+  let remoteHoldReleased = false;
+  try {
+    await setRemoteMigrationMaintenanceHold(false, state);
+    remoteHoldReleased = true;
+    const scheduler = await vmSchedulerStatus().catch(() => ({ installed: false }));
+    if (scheduler.installed) await installVmScheduler(localSchedulerConfig());
+  } catch (error) {
+    appendAdminAudit("migration_maintenance_remote_hold_retained", { generation: state.generation, error: error.message });
+  }
+  appendAdminAudit("migration_maintenance_exited", { generation: state.generation, remoteHoldReleased, automaticServerStart: false });
+  return { ok: true, ...state, remoteHoldReleased, automaticServerStart: false };
+}
+
 async function runTrackedOperation(key, title, task, details = {}) {
   const tracked = await operationRegistry.run(key, title, task, details);
   if (tracked.result && typeof tracked.result === "object" && !Array.isArray(tracked.result)) {
@@ -6046,6 +7618,7 @@ function finishRestoreJob(job, status, result = {}) {
 }
 
 function startDatabaseRestoreJob(payload = {}) {
+  const maintenanceCheckpoint = migrationMaintenance.captureCheckpoint("Database import or restore");
   const jobId = `import-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   const operation = operationRegistry.begin("database:import", "Database Import", {
     category: "database",
@@ -6062,6 +7635,7 @@ function startDatabaseRestoreJob(payload = {}) {
     error: "",
     result: null,
     payload: { filePath: String(payload.filePath || ""), confirmText: String(payload.confirmText || "") },
+    maintenanceCheckpoint,
     history: [],
     timeline: RESTORE_TIMELINE_STEPS
   };
@@ -6196,21 +7770,28 @@ function parseBattlegroupBackupOutput(output = "") {
   };
 }
 
-async function runningDumpOperations() {
-  const result = await sshCommand("sudo kubectl get dumps -A --no-headers 2>/dev/null || true", 15000, { maxBuffer: 1024 * 128 });
-  const rows = String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const running = rows.filter((line) => /\b(Ongoing|Running|Pending)\b/i.test(line)).map((line) => {
-    const parts = line.split(/\s+/);
-    return { namespace: parts[0] || "", name: parts[1] || parts[0] || "", phase: parts.find((part) => /^(Ongoing|Running|Pending)$/i.test(part)) || "Ongoing", raw: line };
+async function runningDumpOperations(options = {}) {
+  const result = await migrationReadOnlyEvidenceResult("sudo kubectl get databaseoperations -A -o json", 15000, {
+    ...options,
+    maxBuffer: 1024 * 1024 * 4,
+    purpose: options.purpose || "Import preflight: vendor DatabaseOperation evidence"
   });
-  return { ok: result.ok, running, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error || "" };
+  if (!result.ok) return { ok: false, running: [], error: result.error || result.stderr || "Could not inspect DatabaseOperation resources." };
+  let data;
+  try { data = JSON.parse(result.stdout || "{}"); }
+  catch { return { ok: false, running: [], error: "Could not parse DatabaseOperation resources." }; }
+  const running = (Array.isArray(data.items) ? data.items : []).filter((item) => /^(?:Ongoing|Running|Pending|Creating)$/i.test(String(item.status?.phase || item.status?.state || ""))).map((item) => ({
+    action: String(item.spec?.action || "unknown").toLowerCase(),
+    phase: String(item.status?.phase || item.status?.state || "Pending")
+  }));
+  return { ok: true, running };
 }
 
 async function collectDumpDiagnostics(operationName = "") {
   const name = String(operationName || "").trim();
   const commands = [
-    { label: "dump operations", command: "sudo kubectl get dumps -A -o wide 2>&1 || true" },
-    { label: "dump details", command: name ? `sudo kubectl describe dumps -A ${shQuote(name)} 2>&1 || true` : "echo dump operation name unavailable" },
+    { label: "database operations", command: "sudo kubectl get databaseoperations -A -o wide 2>&1 || true" },
+    { label: "database operation details", command: name ? `sudo kubectl describe databaseoperations -A ${shQuote(name)} 2>&1 || true` : "echo database operation name unavailable" },
     { label: "recent backup pods", command: "sudo kubectl get pods -A 2>&1 | grep -Ei 'dump|backup|postgres|db' | tail -n 80 || true" },
     { label: "recent operator logs", command: "sudo kubectl logs -A --tail=120 -l control-plane=controller-manager 2>&1 || true" }
   ];
@@ -6245,11 +7826,349 @@ function writeBattlegroupBackupMetadata(payload, prefix = "battlegroup-backup") 
   return fileInfo(metadataPath);
 }
 
+const FULL_BACKUP_DATA_INVENTORY_SQL = `
+select json_build_object(
+  'dataEntries', coalesce(json_agg(json_build_object(
+    'descriptor', case c.relkind when 'r' then 'TABLE DATA' when 'S' then 'SEQUENCE SET' when 'm' then 'MATERIALIZED VIEW DATA' end,
+    'schema', n.nspname,
+    'name', c.relname
+  ) order by n.nspname, c.relkind, c.relname), '[]'::json)
+)::text
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname !~ '^pg_'
+and n.nspname <> 'information_schema'
+-- pg_dump emits independent data entries only for storage-bearing regular
+-- relations, sequences, and materialized views. Declarative partition parents
+-- remain schema entries while their regular-relation leaves carry the data.
+and c.relkind in ('r','S','m')
+and not exists (
+  select 1 from pg_depend d
+  where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.objsubid = 0 and d.deptype = 'e'
+);`;
+
+function sleepMs(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function databaseOperationByName(operationName) {
+  const result = await sshCommand("sudo kubectl get databaseoperations -A -o json", 20000, { maxBuffer: 1024 * 1024 * 8 });
+  if (!result.ok) throw new Error("DatabaseOperation resources could not be inspected.");
+  let parsed;
+  try { parsed = JSON.parse(result.stdout || "{}"); }
+  catch { throw new Error("DatabaseOperation resources returned invalid JSON."); }
+  const matches = (Array.isArray(parsed.items) ? parsed.items : []).filter((item) => String(item.metadata?.name || "") === String(operationName || ""));
+  if (matches.length !== 1) throw new Error("The backup DatabaseOperation could not be resolved unambiguously.");
+  return matches[0];
+}
+
+async function waitForSuccessfulDatabaseOperation(operationName, timeoutMs = 5 * 60 * 1000) {
+  if (!operationName) throw new Error("The vendor backup did not report a DatabaseOperation identity.");
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await databaseOperationByName(operationName);
+    const phase = String(last.status?.phase || last.status?.state || "");
+    if (/^(?:Failed|Error|Cancelled|Canceled)$/i.test(phase)) throw new Error(`Vendor DatabaseOperation ended in ${phase}.`);
+    if (phase === "Succeeded") return validateVendorTerminalOperation(last, operationName) && last;
+    await sleepMs(1000);
+  }
+  throw new Error(`Vendor DatabaseOperation did not reach a successful terminal state (${String(last?.status?.phase || "unknown")}).`);
+}
+
+async function remoteBackupSample(remotePath) {
+  const command = `stat -c '%s|%Y|%d:%i' -- ${shQuote(remotePath)}`;
+  const result = await sshCommand(command, 20000, { maxBuffer: 1024 * 16 });
+  if (!result.ok) throw new Error("The vendor backup artifact could not be statted.");
+  const [size, modified, identity] = String(result.stdout || "").trim().split("|");
+  return { size, modified, identity };
+}
+
+async function fullBackupCatalogInventory(target, options = {}) {
+  const text = await migrationSql(target, FULL_BACKUP_DATA_INVENTORY_SQL, 120000);
+  let inventory;
+  try { inventory = JSON.parse(text); }
+  catch { throw new Error("The expected dune object inventory could not be parsed."); }
+  const excludedDuneNames = new Set((options.excludedDuneNames || []).map((name) => String(name)));
+  if (excludedDuneNames.size) inventory.dataEntries = (inventory.dataEntries || []).filter((entry) => !(entry.schema === "dune" && excludedDuneNames.has(String(entry.name))));
+  const includedSchemas = new Set((options.includedSchemas || []).map((name) => String(name)).filter(Boolean));
+  if (includedSchemas.size) inventory.dataEntries = (inventory.dataEntries || []).filter((entry) => includedSchemas.has(String(entry.schema || "")));
+  if (!Array.isArray(inventory.dataEntries) || inventory.dataEntries.length === 0) throw new Error("The expected backup data inventory is empty.");
+  return inventory;
+}
+
+function dumpIncludedSchemas(dumpFlags = []) {
+  const schemas = [];
+  for (let index = 0; index < dumpFlags.length; index += 1) {
+    const flag = String(dumpFlags[index] || "");
+    if (flag.startsWith("--schema=")) schemas.push(flag.slice("--schema=".length));
+    else if (flag === "--schema" && index + 1 < dumpFlags.length) schemas.push(String(dumpFlags[++index] || ""));
+  }
+  return [...new Set(schemas.filter(Boolean))];
+}
+
+async function inspectRemoteBackupArchive(remotePath, target, expectedInventory) {
+  const temporaryName = `/tmp/alphanine-backup-verify-${crypto.randomUUID()}.backup`;
+  const remote = [
+    "set -o pipefail",
+    `sudo kubectl exec -i -n ${shQuote(target.namespace)} ${shQuote(target.dbPod)} -- sh -c ${shQuote(`umask 077; temporary=${shQuote(temporaryName)}; trap 'rm -f "$temporary"' EXIT; cat > "$temporary"; pg_restore --list "$temporary"; pg_restore --file=/dev/null "$temporary"`)} < ${shQuote(remotePath)}`
+  ].join("; ");
+  const result = await sshCommand(remote, 10 * 60 * 1000, { maxBuffer: 1024 * 1024 * 64 });
+  if (!result.ok) throw new Error(`Matching-version pg_restore rejected or could not fully read the vendor archive: ${shortOutput(result.stderr || result.error || "archive inspection failed")}`);
+  return { ...validateFullBackupToc(result.stdout, expectedInventory), archiveReadVerified: true };
+}
+
+async function verifyVendorBackup(parsed, operation) {
+  const identity = resolveVendorArtifactIdentity(operation, parsed.vmPath);
+  const first = await remoteBackupSample(identity.path);
+  await sleepMs(1500);
+  const second = await remoteBackupSample(identity.path);
+  const stable = validateStableSamples([first, second]);
+  const headerResult = await sshCommand(`od -An -tx1 -N5 -- ${shQuote(identity.path)}`, 20000, { maxBuffer: 1024 * 16 });
+  if (!headerResult.ok) throw new Error("The vendor backup header could not be read.");
+  const header = Buffer.from(String(headerResult.stdout || "").replace(/[^0-9a-f]/gi, ""), "hex");
+  validatePgDumpHeader(header);
+  const hashResult = await sshCommand(`sha256sum -- ${shQuote(identity.path)}`, 10 * 60 * 1000, { maxBuffer: 1024 * 16 });
+  const sha256 = String(hashResult.stdout || "").trim().match(/^([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() || "";
+  if (!hashResult.ok || !sha256) throw new Error("The vendor backup SHA-256 could not be calculated.");
+  const target = await databaseRuntimeTarget();
+  const expectedInventory = await createExpectedBackupInventory(target, { validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK });
+  const toc = await inspectRemoteBackupArchive(identity.path, target, expectedInventory);
+  return { identity, size: stable.size, sha256, toc, stableChecks: "2" };
+}
+
+function nativeDatabaseBackupFilename(prefix = "full-safety-backup") {
+  const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[:T]/g, "-").replace(/Z$/, "");
+  return `${prefix}-${stamp}-${APP_VERSION}.backup`;
+}
+
+async function nativeSafetyBackupPreflight(options = {}) {
+  const running = await runningDumpOperations();
+  if (!running.ok || running.running.length) throw new Error("A vendor DatabaseOperation is active or could not be classified.");
+  const target = await databaseRuntimeTarget();
+  const offline = buildMigrationRollbackOfflineCheckpoint(
+    await collectMigrationStructuredOfflineEvidence(target, options.structuredOfflineOptions || {}),
+    target
+  );
+  if (options.expectedStructuredOfflineCheckpoint) {
+    assertMigrationRollbackOfflineCheckpoint(options.expectedStructuredOfflineCheckpoint, offline);
+  }
+  const requireMarketBot = options.requireMarketBot !== false;
+  const evidence = await migrationEvidence(target, { includeMarketBot: false });
+  if (evidence.database.reachable !== true || String(evidence.database.database) !== "dune") throw new Error("PostgreSQL is not healthy.");
+  if (evidence.writers.unexpectedActiveClients !== "0" || evidence.writers.openTransactions !== "0") throw new Error("A persistent writer or open transaction is active.");
+  if (requireMarketBot) evidence.marketBotInfrastructure = await collectMigrationMarketBotSafety(target);
+  return { target, evidence, offline };
+}
+
+async function matchingPgRestore(localPath, target, args, timeout = 10 * 60 * 1000) {
+  const connection = await migrationSshConnection();
+  const tools = await migrationPodArchiveTools(target);
+  const component = await hashDatabaseBackupFile(localPath);
+  const inspected = await inspectRecoveryArchive({
+    filePath: localPath,
+    component,
+    restoreExecutable: tools.restoreExecutable,
+    sshArgs: connection.args,
+    target,
+    runCommand: run,
+    timeout
+  });
+  if (args.length === 1 && args[0] === "--list") return inspected.toc;
+  if (args.length === 1 && args[0] === "--file=/dev/null") return "";
+  throw new Error("An unsupported matching-version archive inspection was requested.");
+}
+
+async function inspectSeekableArchive(localPath, target, options = {}) {
+  const connection = await migrationSshConnection();
+  return inspectClosedArchive({
+    filePath: localPath,
+    scope: options.scope || "full-backup",
+    label: options.label || "PostgreSQL backup archive",
+    validateToc: options.validateToc || ((toc) => ({ toc })),
+    runInspection: async ({ filePath, component }) => {
+      const inspected = await inspectRecoveryArchive({
+        filePath,
+        component,
+        sshArgs: connection.args,
+        target,
+        runCommand: run,
+        timeout: 10 * 60 * 1000
+      });
+      return {
+        ok: true,
+        inputComplete: inspected.inputComplete,
+        stdout: `${ARCHIVE_INSPECTION_MARKER}\t${component.size}\t${component.sha256}\n${inspected.toc}`,
+        stderr: inspected.stderr
+      };
+    }
+  });
+}
+
+async function inspectLocalArchive(localPath, target) {
+  return inspectSeekableArchive(localPath, target, { label: "schema-only PostgreSQL archive" });
+}
+
+async function createExpectedBackupInventory(target, options = {}) {
+  const temporaryDirectory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "alphanine-backup-schema-"));
+  const schemaPath = path.join(temporaryDirectory, "schema-only.backup");
+  try {
+    const connection = await migrationSshConnection();
+    const podTools = options.podTools || await migrationPodArchiveTools(target);
+    const validationProfile = String(options.validationProfile || "");
+    if (!Object.values(BACKUP_INVENTORY_PROFILES).includes(validationProfile)) throw new Error("An explicit backup inventory validation profile is required.");
+    const dumpFlags = options.dumpFlags || ["--format=custom", "--no-owner", "--no-privileges"];
+    const includedSchemas = dumpIncludedSchemas(dumpFlags);
+    if (validationProfile === BACKUP_INVENTORY_PROFILES.MIGRATION_PACKAGE && (includedSchemas.length !== 1 || includedSchemas[0] !== "dune")) throw new Error("The migration-package inventory profile requires an exact --schema=dune boundary.");
+    if (validationProfile === BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK && includedSchemas.length) throw new Error("The destination rollback inventory profile requires complete database scope without schema filters.");
+    const catalog = await fullBackupCatalogInventory(target, { ...options, includedSchemas });
+    const generated = await generateValidatedPodArchive({
+      kind: "schemaInventory", target, dbSvc: target.dbSvc, sshArgs: connection.args, runCommand: run,
+      runCredentialScript: runMigrationCredentialScript,
+      dumpExecutable: podTools.dumpExecutable, restoreExecutable: podTools.restoreExecutable,
+      outputPath: schemaPath, dumpFlags: [...dumpFlags, "--schema-only"], timeoutMs: 10 * 60 * 1000,
+      onHeartbeat: options.onHeartbeat,
+      validateToc: (toc) => {
+        return { inventory: buildExpectedBackupInventory(toc, catalog, {
+          validationProfile,
+          requiredExtensions: options.requiredExtensions,
+          excludedRelations: (options.excludedDuneNames || []).map((name) => ({ schema: "dune", name })),
+          includedSchemas
+        }) };
+      }
+    });
+    return generated.boundary.inventory;
+  } finally {
+    await fs.promises.rm(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+async function inspectLocalBackupArchive(localPath, target, expectedInventory, options = {}) {
+  return inspectSeekableArchive(localPath, target, {
+    label: "full PostgreSQL rollback backup",
+    validateToc: (toc) => validateFullBackupToc(toc, expectedInventory, options)
+  });
+}
+
+async function createNativeDatabaseBackup(options = {}) {
+  const started = Date.now();
+  const offlineCheckpoint = options.offlineCheckpoint || null;
+  const checkpoint = offlineCheckpoint || maintenanceCheckpoint("Verified database backup", options.maintenanceCheckpoint || null);
+  const verifySafetyCheckpoint = async (stage) => offlineCheckpoint
+    ? migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, stage)
+    : verifyMaintenanceCheckpointRemote(checkpoint, stage);
+  const folder = ensureDatabaseBackupDir();
+  const finalPath = path.join(folder, nativeDatabaseBackupFilename(options.prefix || "full-safety-backup"));
+  const partialPath = `${finalPath}.partial-${crypto.randomUUID()}`;
+  const metadataPath = `${finalPath}.json`;
+  let published = false;
+  let completed = false;
+  try {
+    await verifySafetyCheckpoint("before backup preflight");
+    options.onStatus?.("Preflight", "Verifying paused/offline state, PostgreSQL health, and active writers.");
+    const preflight = await nativeSafetyBackupPreflight({
+      requireMarketBot: options.requireMarketBot !== false,
+      expectedStructuredOfflineCheckpoint: options.expectedStructuredOfflineCheckpoint,
+      structuredOfflineOptions: options.structuredOfflineOptions
+    });
+    const unsafeRoots = [loadConfig().serverInstallPath, loadConfig().awakeningServerPath, __dirname, os.tmpdir()].filter(Boolean).map((value) => path.resolve(value));
+    const unsafeDestination = unsafeRoots.some((root) => {
+      const relative = path.relative(root, finalPath);
+      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+    });
+    if (unsafeDestination) throw new Error("The backup destination is inside a server, Suite, or temporary directory.");
+    const probePath = path.join(folder, `.backup-write-test-${crypto.randomUUID()}`);
+    try { await fs.promises.writeFile(probePath, Buffer.from([0]), { flag: "wx", mode: 0o600 }); }
+    finally { await fs.promises.rm(probePath, { force: true }).catch(() => {}); }
+    const disk = fs.statfsSync(folder, { bigint: true });
+    const available = disk.bavail * disk.bsize;
+    const required = BigInt(String(preflight.evidence.database.databaseBytes || "0")) * 2n + 512n * 1024n * 1024n;
+    if (available < required) throw new Error("The backup destination does not have enough free space.");
+    options.onStatus?.("Inventory", "Building the expected catalog inventory from a temporary schema-only archive.");
+    const expectedInventory = await createExpectedBackupInventory(preflight.target, { validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK });
+    const connection = await migrationSshConnection();
+    const target = preflight.target;
+    const podTools = preflight.evidence.podTools || await migrationPodArchiveTools(target);
+    await verifySafetyCheckpoint("before backup streaming");
+    options.onStatus?.("Streaming", "Creating and fully validating the destination rollback archive inside the database pod before one outward stream.");
+    const generated = await generateValidatedPodArchive({
+      kind: "rollback", target, dbSvc: target.dbSvc, sshArgs: connection.args, runCommand: run,
+      runCredentialScript: runMigrationCredentialScript,
+      dumpExecutable: podTools.dumpExecutable, restoreExecutable: podTools.restoreExecutable,
+      outputPath: partialPath,
+      dumpFlags: ["--format=custom", "--no-owner", "--no-privileges"],
+      timeoutMs: 60 * 60 * 1000,
+      onHeartbeat: options.onHeartbeat,
+      validateToc: (tocText) => validateFullBackupToc(tocText, expectedInventory, { requiredAlphaTables: options.requiredAlphaTables })
+    });
+    await verifySafetyCheckpoint("after backup streaming");
+    validatePgDumpHeader(await readDatabaseBackupHeader(partialPath));
+    const firstStat = await fs.promises.stat(partialPath, { bigint: true });
+    await sleepMs(1000);
+    const secondStat = await fs.promises.stat(partialPath, { bigint: true });
+    validateStableSamples([
+      { size: firstStat.size.toString(10), modified: firstStat.mtimeNs.toString(10), identity: `${firstStat.dev}:${firstStat.ino}` },
+      { size: secondStat.size.toString(10), modified: secondStat.mtimeNs.toString(10), identity: `${secondStat.dev}:${secondStat.ino}` }
+    ]);
+    options.onStatus?.("Verifying", "Confirming the downloaded archive matches the pod-validated complete-database rollback payload.");
+    const toc = { ...generated.boundary, archiveReadVerified: generated.archiveReadVerified === true, remoteCleanupVerified: generated.remoteCleanupVerified === true };
+    const independentlyHashed = await hashDatabaseBackupFile(partialPath);
+    if (independentlyHashed.size !== generated.component.size || independentlyHashed.sha256 !== generated.component.sha256) throw new Error("The independently recalculated backup size or SHA-256 differs from the pod-validated result.");
+    await verifySafetyCheckpoint("before backup publication");
+    await publishVerifiedPackage(partialPath, finalPath);
+    published = true;
+    await verifySafetyCheckpoint("after backup publication");
+    const metadata = {
+      ok: true,
+      verified: true,
+      usableForRestore: true,
+      type: "verified-database-backup",
+      method: "suite-native-full",
+      createdAt: new Date().toISOString(),
+      version: APP_VERSION,
+      localBackupPath: finalPath,
+      fileName: path.basename(finalPath),
+      size: independentlyHashed.size,
+      sha256: independentlyHashed.sha256,
+      pgDumpFormat: "custom",
+      stableSizeChecks: "2",
+      toc,
+      preflight: {
+        battlegroupOffline: true,
+        runningGameWorkloads: preflight.offline.runningGamePods,
+        marketBotStoppedOrAbsent: true,
+        postgresqlHealthy: true,
+        activeWriters: preflight.evidence.writers.unexpectedActiveClients,
+        openTransactions: preflight.evidence.writers.openTransactions
+      }
+    };
+    await verifySafetyCheckpoint("before backup metadata publication");
+    await writeDatabaseBackupJsonAtomic(metadataPath, metadata);
+    const info = fileInfo(finalPath);
+    const metadataInfo = fileInfo(metadataPath);
+    completed = true;
+    return { ok: true, status: "verified", method: metadata.method, durationMs: Date.now() - started, elapsed: readableDuration(Date.now() - started), file: info, filePath: finalPath, localMetadataPath: metadataPath, metadataFile: metadataInfo, size: metadata.size, sha256: metadata.sha256, toc: metadata.toc, phase: "Succeeded", verified: true };
+  } catch (error) {
+    if (published) await fs.promises.rm(finalPath, { force: true }).catch(() => {});
+    return { ok: false, status: "failed", method: "suite-native-full", durationMs: Date.now() - started, elapsed: readableDuration(Date.now() - started), error: error.message, verified: false };
+  } finally {
+    // The streamed component is either atomically renamed or unconditionally
+    // removed. Failed/interrupted metadata publication cannot leave a selectable
+    // sidecar behind.
+    await fs.promises.rm(partialPath, { force: true }).catch(() => {});
+    if (!completed) await fs.promises.rm(metadataPath, { force: true }).catch(() => {});
+  }
+}
+
 async function createDatabaseBackup(options = {}) {
   const started = Date.now();
+  const checkpoint = maintenanceCheckpoint("Verified database backup", options.maintenanceCheckpoint || null);
+  options = { ...options, maintenanceCheckpoint: checkpoint };
   const timeout = Number(options.timeout || (options.safety ? 120000 : 240000));
   const isSafety = Boolean(options.safety);
   try {
+    await verifyMaintenanceCheckpointRemote(checkpoint, "before backup operation");
+    if (isSafety || options.method === "native") return await createNativeDatabaseBackup(options);
     if (options.onStatus) options.onStatus("Starting", "Starting Battlegroup backup.");
     if (isSafety) {
       const running = await runningDumpOperations().catch((error) => ({ ok: false, running: [], error: error.message }));
@@ -6261,6 +8180,7 @@ async function createDatabaseBackup(options = {}) {
     }
     if (options.onStatus) options.onStatus("Ongoing", `Safety backup still running... 0s / ${Math.round(timeout / 1000)}s`);
     const result = await sshCommand(`/home/dune/.dune/bin/battlegroup backup`, timeout, { maxBuffer: 1024 * 1024 * 32 });
+    await verifyMaintenanceCheckpointRemote(checkpoint, "after vendor backup operation");
     const combinedOutput = `${result.stdout || ""}\n${result.stderr || ""}`;
     const parsed = parseBattlegroupBackupOutput(combinedOutput);
     if (parsed.dumpOperationName) databaseBackupAudit("database_safety_backup_dump_operation", { operationName: parsed.dumpOperationName, phase: parsed.phase || "Unknown" });
@@ -6277,39 +8197,63 @@ async function createDatabaseBackup(options = {}) {
       }
       throw new Error(result.stderr || result.stdout || result.error || "Battlegroup backup command failed.");
     }
-    if (options.onStatus) options.onStatus("Succeeded", "Safety backup completed successfully.");
+    options.onStatus?.("Verifying vendor payload", "Waiting for terminal success, stable size, PGDMP signature, SHA-256, and a complete readable TOC.");
+    let operation;
+    let verification;
+    try {
+      operation = await waitForSuccessfulDatabaseOperation(parsed.dumpOperationName);
+      await verifyMaintenanceCheckpointRemote(checkpoint, "before vendor backup payload verification");
+      verification = await verifyVendorBackup(parsed, operation);
+    } catch (verificationError) {
+      databaseBackupAudit("battlegroup_backup_payload_rejected", {
+        operationName: parsed.dumpOperationName || "",
+        reportedPhase: parsed.phase || "Unknown",
+        reason: verificationError.message
+      });
+      if (options.disableNativeFallback === true) throw verificationError;
+      options.onStatus?.("Vendor payload rejected", "The vendor artifact was not usable; starting one Suite-native verified full backup instead.");
+      return await createNativeDatabaseBackup({ ...options, prefix: options.prefix || "full-safety-backup" });
+    }
+    if (options.onStatus) options.onStatus("Succeeded", "Backup payload independently verified successfully.");
     const vmBackup = vmBackupParts(parsed.vmPath);
     const metadata = {
       ok: true,
+      verified: true,
+      usableForRestore: true,
       type: "battlegroup-backup",
       createdAt: new Date().toISOString(),
       version: APP_VERSION,
       backupId: parsed.backupId,
       backupName: parsed.backupName,
       dumpOperationName: parsed.dumpOperationName,
-      phase: parsed.phase || "Succeeded",
+      phase: "Succeeded",
       vmPath: parsed.vmPath,
       battlegroupId: vmBackup.battlegroupId,
       vmBackupDir: vmBackup.vmBackupDir,
       vmBackupFilename: vmBackup.vmBackupFilename,
       vmBackupPath: vmBackup.vmBackupPath,
       vmYamlPath: vmBackup.vmYamlPath,
+      size: verification.size,
+      sha256: verification.sha256,
+      stableSizeChecks: verification.stableChecks,
+      toc: verification.toc,
       storage: parsed.vmPath ? "vm+local-metadata" : "vm-output+local-metadata",
       output: result.stdout,
       stderr: result.stderr,
-      note: "Backup was created using /home/dune/.dune/bin/battlegroup backup. Local file is metadata unless the Battlegroup command output exposes a downloadable file path."
+      note: "Backup was created by the vendor workflow and independently verified by AlphaNine before this metadata was published."
     };
+    await verifyMaintenanceCheckpointRemote(checkpoint, "before vendor backup metadata publication");
     const info = writeBattlegroupBackupMetadata(metadata, options.prefix || (options.safety ? "pre-import-safety" : "battlegroup-backup"));
     const payload = {
       ok: true,
-      status: "created",
+      status: "verified",
       method: "battlegroup",
       durationMs: Date.now() - started,
       elapsed: readableDuration(Date.now() - started),
       backupId: parsed.backupId,
       backupName: parsed.backupName,
       dumpOperationName: parsed.dumpOperationName,
-      phase: parsed.phase || "Succeeded",
+      phase: "Succeeded",
       vmPath: parsed.vmPath,
       battlegroupId: vmBackup.battlegroupId,
       vmBackupDir: vmBackup.vmBackupDir,
@@ -6317,6 +8261,10 @@ async function createDatabaseBackup(options = {}) {
       vmBackupPath: vmBackup.vmBackupPath,
       vmYamlPath: vmBackup.vmYamlPath,
       storage: metadata.storage,
+      size: verification.size,
+      sha256: verification.sha256,
+      toc: verification.toc,
+      verified: true,
       output: result.stdout,
       stderr: result.stderr,
       file: info,
@@ -6355,9 +8303,26 @@ function listDatabaseBackups() {
             info.vmBackupPath = vmBackup.vmBackupPath;
             info.vmYamlPath = vmBackup.vmYamlPath;
             info.storage = metadata.storage || "local-metadata";
-            info.availability = "Metadata only";
+            info.verified = metadata.verified === true && metadata.usableForRestore === true;
+            info.availability = info.verified ? "Verified remote payload" : "Unverified — unavailable for restore";
+          } else if (metadata.type === "verified-database-backup") {
+            info.type = metadata.type;
+            info.verified = metadata.verified === true && metadata.usableForRestore === true;
+            info.localBackupPath = metadata.localBackupPath || "";
+            info.sha256 = metadata.sha256 || "";
+            info.payloadSize = metadata.size || "0";
+            info.availability = info.verified ? "Verified local payload" : "Unverified — unavailable for restore";
           }
         } catch {}
+      } else {
+        try {
+          const sidecar = JSON.parse(fs.readFileSync(`${info.path}.json`, "utf8"));
+          info.verified = sidecar.type === "verified-database-backup" && sidecar.verified === true && sidecar.usableForRestore === true && path.resolve(sidecar.localBackupPath || "") === path.resolve(info.path);
+          info.availability = info.verified ? "Verified local payload" : "Unverified — unavailable for restore";
+        } catch {
+          info.verified = false;
+          info.availability = "Unverified — unavailable for restore";
+        }
       }
       return info;
     })
@@ -6383,12 +8348,30 @@ async function resolveBattlegroupImportSource(filePath) {
     let metadata = null;
     try { metadata = JSON.parse(fs.readFileSync(source.path, "utf8")); }
     catch { throw new Error("Selected metadata file is not valid JSON."); }
-    if (metadata.type !== "battlegroup-backup") throw new Error("Selected JSON is not an AlphaNine Battlegroup backup metadata file.");
+    if (metadata.verified !== true || metadata.usableForRestore !== true) throw new Error("Selected backup metadata does not represent an independently verified usable payload.");
+    if (metadata.type === "verified-database-backup") {
+      const localPath = path.resolve(String(metadata.localBackupPath || ""));
+      if (!localPath || !fs.existsSync(localPath)) throw new Error("The verified local backup payload is missing.");
+      const actual = await hashDatabaseBackupFile(localPath);
+      if (actual.size !== String(metadata.size || "") || actual.sha256 !== String(metadata.sha256 || "").toLowerCase()) throw new Error("The verified local backup payload no longer matches its recorded size and SHA-256.");
+      validatePgDumpHeader(await readDatabaseBackupHeader(localPath));
+      return { path: localPath, ext: path.extname(localPath).toLowerCase(), size: actual.size, sourceType: "local", metadata };
+    }
+    if (metadata.type !== "battlegroup-backup") throw new Error("Selected JSON is not an AlphaNine verified backup metadata file.");
     const vmBackup = vmBackupParts(metadata.vmBackupPath || metadata.vmPath || "", metadata);
     if (!vmBackup.vmBackupPath) throw new Error("Selected Battlegroup metadata does not include a VM backup path. Choose the actual Battlegroup backup file or create a new backup.");
     return { ...source, sourceType: "vm", remotePath: vmBackup.vmBackupPath, ...vmBackup, metadata };
   }
-  return { ...source, sourceType: "local", metadata: null };
+  let metadata;
+  try { metadata = JSON.parse(fs.readFileSync(`${source.path}.json`, "utf8")); }
+  catch { throw new Error("Local backup has no verified AlphaNine metadata and cannot be selected for restore."); }
+  if (metadata.type !== "verified-database-backup" || metadata.verified !== true || metadata.usableForRestore !== true || path.resolve(metadata.localBackupPath || "") !== source.path) {
+    throw new Error("Local backup is not marked as an independently verified usable payload.");
+  }
+  const actual = await hashDatabaseBackupFile(source.path);
+  if (actual.size !== String(metadata.size || "") || actual.sha256 !== String(metadata.sha256 || "").toLowerCase()) throw new Error("Local backup no longer matches its verified size and SHA-256.");
+  validatePgDumpHeader(await readDatabaseBackupHeader(source.path));
+  return { ...source, size: actual.size, sourceType: "local", metadata };
 }
 
 function closestVmBackup(filename = "", listing = "") {
@@ -6424,7 +8407,33 @@ async function checkVmBackupAvailable(source = {}) {
     const output = result.stdout || "";
     const backupExists = output.includes("__BACKUP_OK__");
     const yamlExists = output.includes("__YAML_OK__");
-    const available = backupExists && yamlExists;
+    let available = backupExists && yamlExists;
+    let verificationMessage = "";
+    if (available) {
+      const metadata = source.metadata || source;
+      if (metadata.verified !== true || metadata.usableForRestore !== true || !/^[a-f0-9]{64}$/i.test(String(metadata.sha256 || "")) || !/^[1-9][0-9]*$/.test(String(metadata.size || ""))) {
+        available = false;
+        verificationMessage = "The remote payload has no independently verified usable metadata.";
+      } else {
+        try {
+          const samples = [await remoteBackupSample(vmBackup.vmBackupPath)];
+          await sleepMs(1000);
+          samples.push(await remoteBackupSample(vmBackup.vmBackupPath));
+          const stable = validateStableSamples(samples);
+          if (stable.size !== String(metadata.size)) throw new Error("Remote payload size changed after verification.");
+          const headerResult = await sshCommand(`od -An -tx1 -N5 -- ${shQuote(vmBackup.vmBackupPath)}`, 20000, { maxBuffer: 1024 * 16 });
+          validatePgDumpHeader(Buffer.from(String(headerResult.stdout || "").replace(/[^0-9a-f]/gi, ""), "hex"));
+          const hashResult = await sshCommand(`sha256sum -- ${shQuote(vmBackup.vmBackupPath)}`, 10 * 60 * 1000, { maxBuffer: 1024 * 16 });
+          const digest = String(hashResult.stdout || "").trim().match(/^([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() || "";
+          if (!hashResult.ok || digest !== String(metadata.sha256).toLowerCase()) throw new Error("Remote payload SHA-256 changed after verification.");
+          const target = await databaseRuntimeTarget();
+          await inspectRemoteBackupArchive(vmBackup.vmBackupPath, target, await createExpectedBackupInventory(target, { validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK }));
+        } catch (error) {
+          available = false;
+          verificationMessage = error.message;
+        }
+      }
+    }
     const closest = available ? "" : closestVmBackup(vmBackup.vmBackupFilename, dir.listing);
     const missing = !backupExists ? "real VM backup file" : "sidecar YAML file";
     return {
@@ -6434,7 +8443,7 @@ async function checkVmBackupAvailable(source = {}) {
       yamlExists,
       closest,
       directoryListing: dir.listing,
-      message: available ? "Available on VM." : `Backup metadata exists locally, but the ${missing} was not found.${closest ? ` Closest available backup: ${closest}.` : ""}`,
+      message: available ? "Verified and available on VM." : (verificationMessage || `Backup metadata exists locally, but the ${missing} was not found.${closest ? ` Closest available backup: ${closest}.` : ""}`),
       ...vmBackup
     };
   } catch (error) {
@@ -6641,6 +8650,7 @@ async function databaseImportReadiness(payload = {}) {
   const filePath = String(payload.filePath || "").trim();
   const activeJob = activeDatabaseImportJob();
   const conditions = {
+    maintenanceActive: false,
     backupSelected: Boolean(filePath),
     backupValid: false,
     backupResolved: false,
@@ -6664,13 +8674,16 @@ async function databaseImportReadiness(payload = {}) {
   const finish = (reasonCode, message) => {
     response.reasonCode = reasonCode;
     response.message = message;
-    response.canTypeConfirmation = Boolean(conditions.backupSelected && conditions.backupValid && conditions.backupResolved && conditions.backupAvailable && conditions.serverOffline && conditions.noImportRunning && conditions.statusKnown);
+    response.canTypeConfirmation = Boolean(conditions.maintenanceActive && conditions.backupSelected && conditions.backupValid && conditions.backupResolved && conditions.backupAvailable && conditions.serverOffline && conditions.noImportRunning && conditions.statusKnown);
     response.canImport = response.canTypeConfirmation;
     response.ok = response.canImport;
     if (!response.canImport) databaseBackupAudit("database_import_readiness", { import_disabled_reason: reasonCode, message, conditions, activeJobId: response.activeJobId });
     else databaseBackupAudit("database_import_readiness", { import_enabled: true, conditions });
     return response;
   };
+  const maintenance = migrationMaintenance.status();
+  conditions.maintenanceActive = maintenance.active && !maintenance.failClosed && !maintenance.sideEffectFree;
+  if (!conditions.maintenanceActive) return finish("maintenance_required", "Enter a healthy Migration Maintenance Mode locally before import or restore.");
   if (!conditions.backupSelected) return finish("no_backup_selected", "No backup selected.");
   try {
     const source = await resolveBattlegroupImportSource(filePath);
@@ -6729,7 +8742,7 @@ async function databaseImportReadiness(payload = {}) {
   }
 }
 
-async function battlegroupImport(importTarget) {
+async function battlegroupImport(importTarget, options = {}) {
   const target = typeof importTarget === "string" ? { importArg: importTarget, remotePath: importTarget } : (importTarget || {});
   const importArg = target.importArg || target.vmBackupFilename || target.remotePath || "";
   const importFilename = String(importArg || "").split(/[\\/]/).filter(Boolean).pop() || "";
@@ -6737,8 +8750,14 @@ async function battlegroupImport(importTarget) {
   if (!readiness.configured) return { ok: false, skipped: true, stdout: "", stderr: readiness.reason, error: readiness.reason };
   appendAdminAudit("server_import_requested", { importArg: importFilename, originalImportArg: importArg, remotePath: target.remotePath || "", vmBackupDir: target.vmBackupDir || "", vmBackupFilename: target.vmBackupFilename || "", config: readiness.summary });
   appendAdminAudit("battlegroup_import_confirmation_sent", { importArg: importFilename, confirmation: "yes" });
+  const control = await prepareAttributedVendorBattlegroupAction("import", {
+    operationId: options.operationId || `battlegroup-import-${Date.now()}`,
+    reason: options.reason || "Explicit administrator battlegroup import",
+    callSite: options.callSite || "server.js:battlegroupImport"
+  });
   const command = `printf 'yes\\n' | /home/dune/.dune/bin/battlegroup import ${shQuote(importFilename)}`;
   const result = await sshCommand(command, 900000, { maxBuffer: 1024 * 1024 * 32 });
+  await recordAttributedVendorBattlegroupOutcome(control, result);
   const output = `${result.stdout || ""}\n${result.stderr || ""}\n${result.error || ""}`;
   if (!result.ok && /Type 'yes' to continue:/i.test(output) && /timed out|timeout/i.test(output)) {
     return { ...result, stderr: "Battlegroup import is waiting for confirmation input.", error: "Battlegroup import is waiting for confirmation input." };
@@ -6757,9 +8776,11 @@ async function runDatabaseRestoreJob(job) {
   let importArg = "";
   let uploaded = false;
   try {
+    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before import preparation");
     restoreJobStep(job, "Preparing import");
     importSource = await resolveBattlegroupImportSource(filePath);
     restoreJobStep(job, "Checking Battlegroup offline");
+    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before import offline verification");
     const offline = await ensureBattlegroupOfflineForImport();
     restoreJobStep(job, "Preparing backup source", { filePath, size: importSource.size, sourceType: importSource.sourceType, battlegroupStatus: offline.summary });
     if (importSource.sourceType === "vm") {
@@ -6783,15 +8804,18 @@ async function runDatabaseRestoreJob(job) {
       const remoteDir = await selectedBattlegroupDumpDir();
       restoreJobStep(job, "Uploading backup if needed", { filePath, size: importSource.size, remoteDir });
       remotePath = await copyBattlegroupImportFileToVm(importSource.path, { remoteDir });
+      await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "after import payload transfer");
       importArg = path.posix.basename(remotePath);
       uploaded = true;
     }
     restoreJobStep(job, "Backup source ready", { remotePath, importArg, sourceType: importSource.sourceType });
     restoreJobStep(job, "Creating safety backup");
+    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before import safety backup");
     const safety = await createDatabaseBackup({
       prefix: "pre-import-safety",
       safety: true,
       timeout: 120000,
+      maintenanceCheckpoint: job.maintenanceCheckpoint,
       onStatus: (status, detail) => restoreJobStep(job, "Creating safety backup", {
         safetyBackupStatus: status,
         verificationSubstep: `Safety backup: ${status}`,
@@ -6803,8 +8827,14 @@ async function runDatabaseRestoreJob(job) {
     if (!safety.file?.path || !fs.existsSync(safety.file.path)) throw new Error("Pre-import safety backup metadata could not be verified on disk.");
     restoreJobStep(job, "Safety backup verified", { safetyBackup: safety.file.path });
     restoreJobStep(job, "Importing Battlegroup backup");
-    const result = await battlegroupImport({ remotePath, importArg, sourceType: importSource.sourceType, vmBackupDir: importSource.vmBackupDir, vmBackupFilename: importSource.vmBackupFilename });
+    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before database import");
+    const result = await battlegroupImport({ remotePath, importArg, sourceType: importSource.sourceType, vmBackupDir: importSource.vmBackupDir, vmBackupFilename: importSource.vmBackupFilename }, {
+      operationId: job.jobId,
+      reason: "Explicit administrator database import",
+      callSite: "server.js:runDatabaseRestoreJob"
+    });
     if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Battlegroup import failed.");
+    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "after database import");
     restoreJobStep(job, "Verifying imported database", {
       pendingCondition: "database_status_query",
       gameServerOnlineRequired: false,
@@ -6829,6 +8859,7 @@ async function runDatabaseRestoreJob(job) {
       currentSubstep: () => verificationSubstep,
       currentCommand: () => verificationCommand
     }, 30000);
+    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before import verification publication");
     databaseBackupAudit("battlegroup_import_verified", { jobId: job.jobId, verification });
     const response = { ok: true, status: "success", message: "Import completed successfully. You may now start the server.", durationMs: Date.now() - started, elapsed: readableDuration(Date.now() - started), importedFrom: filePath, remotePath, importArg, sourceType: importSource.sourceType, safetyBackup: safety.file, verification, stdout: result.stdout.slice(-4000), stderr: result.stderr.slice(-4000), logPath: ADMIN_AUDIT_LOG };
     finishRestoreJob(job, "success", response);
@@ -6844,6 +8875,1709 @@ async function runDatabaseRestoreJob(job) {
     databaseBackupAudit("battlegroup_import_failed", { jobId: job.jobId, ...response });
     return response;
   }
+}
+
+const migrationExportJobs = new Map();
+const migrationImportJobs = new Map();
+const migrationPreflightJobs = new Map();
+const migrationImportPreflightJobs = new Map();
+
+function publicMigrationFailure(error, gate = "Preflight") {
+  const details = error?.details && typeof error.details === "object" ? error.details : {};
+  const process = details.process && typeof details.process === "object" ? details.process : details;
+  return {
+    gate: migrationPublicError(gate || "Preflight"),
+    commandPurpose: migrationPublicError(details.commandPurpose || process.stage || "Preflight gate evaluation"),
+    exitCode: Number.isInteger(process.exitCode) ? process.exitCode : (Number.isInteger(details.sshExitCode) ? details.sshExitCode : null),
+    signal: process.signal || null,
+    timedOut: process.timedOut === true,
+    category: String(details.category || process.code || (error?.code === "migration_ssh_command_failed" ? "ssh_failure" : "preflight_failure")),
+    stdout: migrationPublicError(process.stdout || ""),
+    stderr: migrationPublicError(process.stderr || details.stderr || error?.message || "No diagnostic was captured."),
+    attempts: Array.isArray(details.attempts) ? details.attempts.map((attempt) => ({ ...attempt })) : []
+  };
+}
+
+function migrationPreflightJobPublic(job) {
+  return { ok: job.status !== "failed", jobId: job.jobId, operationId: job.operation?.id || "", type: job.type, status: job.status, stage: job.stage, startedAt: job.startedAt, completedAt: job.completedAt || "", error: job.error || "", failure: job.failure || null, sshAttempts: Array.isArray(job.sshDiagnostics) ? job.sshDiagnostics.map((attempt) => ({ ...attempt })) : [], result: job.result || null, live: publicMigrationJobProgress(job) };
+}
+
+function publicAnyMigrationJob(type, job) {
+  if (type === "export") return publicMigrationExportJob(job);
+  if (type === "import") return publicMigrationImportJob(job);
+  return migrationPreflightJobPublic(job);
+}
+
+function activeMigrationJob() {
+  const all = [
+    ...[...migrationExportJobs.values()].map((job) => ({ type: "export", job })),
+    ...[...migrationImportJobs.values()].map((job) => ({ type: "import", job })),
+    ...[...migrationPreflightJobs.values()].map((job) => ({ type: "preflight", job })),
+    ...[...migrationImportPreflightJobs.values()].map((job) => ({ type: "import-preflight", job }))
+  ].sort((left, right) => String(right.job.startedAt).localeCompare(String(left.job.startedAt)));
+  const selected = all.find((row) => row.job.status === "running") || all[0];
+  if (!selected) return { ok: true, active: false, type: "", job: null };
+  return { ok: true, active: selected.job.status === "running", type: selected.type, job: publicAnyMigrationJob(selected.type, selected.job) };
+}
+
+function rejectConcurrentMigrationUiAction() {
+  if (activeMigrationJob().active) {
+    const error = new Error("A Server Migration export or import is already active. Reconnect to the existing job instead of starting another action.");
+    error.code = "migration_operation_active";
+    throw error;
+  }
+}
+const MIGRATION_EXPORT_STAGES = Object.freeze([
+  "Running export preflight",
+  "Building schema inventory",
+  "Generating authoritative archive",
+  "Downloading validated dune archive",
+  "Rechecking stable source",
+  "Inspecting PostgreSQL archive",
+  "Creating portable package",
+  "Reopening and verifying package",
+  "Publishing verified package",
+  "Verified Package"
+]);
+
+function migrationPublicError(error) {
+  let message = String(error?.message || error || "Server Migration export failed.");
+  message = redactSensitiveText(message, [loadConfig().databasePassword]);
+  message = message
+    .replace(/\b(?:[A-Za-z]:[\\/]|\\\\)[^\r\n"']+/g, "[local path redacted]")
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[address redacted]")
+    .replace(/\b[^\s@]+@[^\s]+/g, "[SSH target redacted]")
+    .replace(/\/(?:home|var|tmp|run|srv|root)\/[^\s"']*/g, "[server path redacted]");
+  return message.slice(0, 1000);
+}
+
+function migrationDiagnosticText(value) {
+  const raw = String(value?.message || value || "").trim();
+  return raw ? migrationPublicError(raw) : "";
+}
+
+function migrationKnownHostsPath() {
+  const directory = path.join(APPDATA_DIR, "keys");
+  const candidates = fs.existsSync(directory)
+    ? fs.readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^known_hosts(?:[-.].+)?$/i.test(entry.name))
+      .map((entry) => path.join(directory, entry.name))
+    : [];
+  if (candidates.length !== 1) throw new Error("Exactly one test-profile migration known-host file is required.");
+  parseMigrationPinnedEd25519(fs.readFileSync(candidates[0], "utf8"));
+  return candidates[0];
+}
+
+async function collectMigrationHyperVIdentity(vmNameValue) {
+  if (!IS_WINDOWS) throw new Error("Migration Hyper-V address reconciliation is available only on Windows.");
+  const vmName = String(vmNameValue || "").trim();
+  if (!vmName) throw new Error("The migration profile VM name is missing.");
+  const script = `
+    $ErrorActionPreference='Stop'
+    $vm=Get-VM -Name '${psSingleQuote(vmName)}'
+    $adapters=@(Get-VMNetworkAdapter -VM $vm)
+    [pscustomobject]@{
+      name=$vm.Name; id=$vm.Id.Guid; state=$vm.State.ToString();
+      adapters=@($adapters | ForEach-Object { [pscustomobject]@{ mac=$_.MacAddress; dynamicMac=[bool]$_.DynamicMacAddressEnabled; switchName=$_.SwitchName; ipAddresses=@($_.IPAddresses) } })
+    } | ConvertTo-Json -Compress -Depth 6
+  `;
+  const result = await ps(script, 30000);
+  if (!result.ok) throw new Error("Authoritative Hyper-V VM identity could not be read by the local startup-suppressed backend.");
+  let parsed;
+  try { parsed = JSON.parse(String(result.stdout || "").trim()); } catch { throw new Error("Authoritative Hyper-V VM identity returned malformed evidence."); }
+  const adapters = Array.isArray(parsed.adapters) ? parsed.adapters : parsed.adapters ? [parsed.adapters] : [];
+  if (parsed.name !== vmName || !parsed.id || String(parsed.state) !== "Running" || adapters.length !== 1) throw new Error("Authoritative Hyper-V VM identity is missing, ambiguous, or not running.");
+  const adapter = adapters[0];
+  const addresses = (Array.isArray(adapter.ipAddresses) ? adapter.ipAddresses : [adapter.ipAddresses])
+    .map(normalizeMigrationVmIpv4).filter((value) => value && !value.startsWith("169.254."));
+  if (!adapter.mac || addresses.length !== 1) throw new Error("Authoritative Hyper-V MAC or IPv4 evidence is missing or ambiguous.");
+  return { vmName: parsed.name, vmId: String(parsed.id), state: parsed.state, mac: String(adapter.mac), dynamicMac: adapter.dynamicMac === true, switchName: String(adapter.switchName || ""), detectedIp: addresses[0] };
+}
+
+function currentSelectedProfileBinding() {
+  return publicProfileBinding(verifyProfileBinding(SELECTED_PROFILE_BINDING));
+}
+
+async function collectSelectedDestinationIdentity() {
+  const selected = currentSelectedProfileBinding();
+  const identity = await collectMigrationHyperVIdentity(selected.vmName);
+  if (identity.vmName !== selected.vmName || identity.state !== "Running") throw new Error("The selected Suite profile VM differs from the authoritative running destination identity.");
+  return {
+    ...selected,
+    vmIdentityFingerprint: migrationVmIpSha256(Buffer.from(`${identity.vmId}\n${identity.mac}`, "utf8")),
+    state: identity.state
+  };
+}
+
+async function migrationVmIpReconciliationStatus() {
+  if (!MIGRATION_STARTUP_SUPPRESSED_RUNNER) throw new Error("VM address reconciliation is available only in startup-suppressed migration mode.");
+  const cfg = loadRawConfig();
+  const identity = await collectMigrationHyperVIdentity(cfg.vmName || configuredVmName());
+  const savedValues = [cfg.sshHost, cfg.vmIp, cfg.receiverSshHost].map(normalizeMigrationVmIpv4);
+  if (savedValues.some((value) => !value) || new Set(savedValues).size !== 1) throw new Error("The three test-profile VM address fields are missing or disagree.");
+  const savedIp = savedValues[0];
+  const knownHostsPath = migrationKnownHostsPath();
+  const pinned = parseMigrationPinnedEd25519(fs.readFileSync(knownHostsPath, "utf8"));
+  if (pinned.address !== savedIp) throw new Error("The test-profile known-host address does not match its saved VM address.");
+  const changed = identity.detectedIp !== savedIp;
+  const key = sshKeyStatus(cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
+  if (!key.exists) throw new Error("The configured test-only SSH key is unavailable.");
+  const user = String(cfg.sshUser || cfg.receiverSshUser || "dune").trim();
+  const args = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${knownHostsPath}`, "-o", `HostKeyAlias=${pinned.address}`, "-o", "LogLevel=ERROR", "-i", key.path, `${user}@${identity.detectedIp}`, "true"];
+  const probe = await run("ssh", args, { timeout: 20000, maxBuffer: 1024 * 64 });
+  const verified = probe.ok === true;
+  const pinnedKeySha256 = migrationVmIpSha256(Buffer.from(pinned.keyBlob, "utf8"));
+  const digest = migrationVmIpApprovalDigest({ ...identity, savedIp, pinnedKeySha256 });
+  return {
+    ok: verified,
+    changed,
+    requiresConfirmation: changed,
+    vmNameMatches: identity.vmName === String(cfg.vmName || ""),
+    vmIdentityFingerprint: migrationVmIpSha256(Buffer.from(`${identity.vmId}\n${identity.mac}`, "utf8")),
+    dynamicMac: identity.dynamicMac,
+    switchName: identity.switchName,
+    tcpAndPinnedHostKeyVerified: verified,
+    sshCategory: verified ? "authenticated_pinned_ed25519" : migrationDiagnosticText(probe.stderr || probe.error || "Pinned SSH verification failed."),
+    approvalDigest: digest,
+    confirmation: MIGRATION_VM_IP_REBIND_CONFIRMATION,
+    _private: { identity, savedIp, knownHostsPath, pinnedKeySha256 }
+  };
+}
+
+async function reconcileMigrationVmIp(body = {}) {
+  const offline = migrationOfflineMode.status();
+  if (offline.active !== true || offline.failClosed === true) throw new Error("Healthy Migration Offline Mode is required before rebinding the migration VM address.");
+  if (String(body.confirmText || "") !== MIGRATION_VM_IP_REBIND_CONFIRMATION) throw new Error(`Type ${MIGRATION_VM_IP_REBIND_CONFIRMATION} exactly.`);
+  const status = await migrationVmIpReconciliationStatus();
+  if (!status.ok || !status.changed || status.tcpAndPinnedHostKeyVerified !== true) throw new Error("A verified DHCP address change is not ready for reconciliation.");
+  if (String(body.approvalDigest || "") !== status.approvalDigest) throw new Error("The migration VM address approval evidence changed; refresh and review it again.");
+  const configText = fs.readFileSync(CONFIG_PATH, "utf8");
+  const knownHostsText = fs.readFileSync(status._private.knownHostsPath, "utf8");
+  const rebound = buildMigrationVmIpReboundFiles({ configText, knownHostsText, detectedIp: status._private.identity.detectedIp });
+  const result = atomicReplaceMigrationVmIpFiles({
+    configPath: CONFIG_PATH,
+    knownHostsPath: status._private.knownHostsPath,
+    nextConfigText: rebound.nextConfigText,
+    nextKnownHostsText: rebound.nextKnownHostsText,
+    journalPath: path.join(APPDATA_DIR, "migration-vm-ip-reconciliation.json")
+  });
+  resetVmDependentRuntime(rebound.address);
+  appendAdminAudit("migration_vm_ip_rebound", { vmIdentityFingerprint: status.vmIdentityFingerprint, approvalDigest: status.approvalDigest, configSha256: result.configSha256, knownHostsSha256: result.knownHostsSha256 });
+  const verified = await migrationVmIpReconciliationStatus();
+  if (!verified.ok || verified.changed) throw new Error("The migration VM address was written but failed final pinned-key verification; startup-suppressed mode remains fail closed.");
+  return { ok: true, changed: false, rebound: true, vmIdentityFingerprint: verified.vmIdentityFingerprint, tcpAndPinnedHostKeyVerified: true };
+}
+
+async function migrationSshConnection() {
+  const cfg = loadConfig();
+  const info = await vmInfo(cfg.vmName || configuredVmName()).catch(() => ({ exists: false, state: "Unknown" }));
+  const detectedIp = normalizeIpv4(info.ip);
+  const configuredIps = [cfg.sshHost, cfg.vmIp, cfg.receiverSshHost].map(normalizeIpv4).filter(Boolean);
+  if (MIGRATION_STARTUP_SUPPRESSED_RUNNER && (configuredIps.length !== 3 || new Set(configuredIps).size !== 1)) throw new Error("The migration VM address fields disagree; use the verified VM address reconciliation workflow.");
+  const host = configuredIps[0] || "";
+  if (MIGRATION_STARTUP_SUPPRESSED_RUNNER && detectedIp && detectedIp !== host) {
+    const error = new Error("Hyper-V reports a verified DHCP address change. Confirm the pinned-key VM address reconciliation before migration SSH is allowed.");
+    error.code = "migration_vm_ip_rebind_required";
+    throw error;
+  }
+  if (!host) throw new Error("The Dune VM SSH connection is unavailable.");
+  if (info.exists && info.state !== "Running") throw new Error("The Dune VM must be running while its battlegroup remains offline.");
+  const key = sshKeyStatus(cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
+  if (!key.exists) throw new Error("The configured SSH key is unavailable.");
+  const user = String(cfg.sshUser || cfg.receiverSshUser || "dune").trim();
+  const knownHostsPath = migrationKnownHostsPath();
+  const pinned = parseMigrationPinnedEd25519(fs.readFileSync(knownHostsPath, "utf8"));
+  if (pinned.address !== host) throw new Error("The pinned migration host-key address does not match the configured VM address.");
+  return {
+    args: ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${knownHostsPath}`, "-o", "LogLevel=ERROR", "-i", key.path, `${user}@${host}`]
+  };
+}
+
+async function migrationSshCommand(command, timeout = 60000, options = {}) {
+  const connection = await migrationSshConnection();
+  const args = [...connection.args, command];
+  const execute = () => options.inputPath
+    ? runWithStdin("ssh", args, options.inputPath, { timeout, maxBuffer: options.maxBuffer || 1024 * 1024 * 16 })
+    : run("ssh", args, { timeout, maxBuffer: options.maxBuffer || 1024 * 1024 * 16 });
+  const execution = await runReadOnlySshWithRetry({
+    execute,
+    maxRetries: ["preflight-evidence", "export-source-revalidation"].includes(String(options.readOnlyRetryPolicy || "")) ? 2 : 0,
+    sanitize: migrationDiagnosticText,
+    onAttempt: (attempt) => options.onSshAttempt?.({ ...attempt, commandPurpose: String(options.purpose || "Read-only VM command") }),
+    onRetry: options.onSshRetry
+  });
+  const result = execution.result;
+  if (!result.ok) {
+    const sanitizedStderr = migrationDiagnosticText(result.stderr || "");
+    const fallback = migrationDiagnosticText(result.error || "") || "The read-only VM command failed.";
+    const error = new Error(sanitizedStderr || fallback);
+    error.code = "migration_ssh_command_failed";
+    error.details = {
+      commandPurpose: String(options.purpose || "Read-only VM command"),
+      sshExitCode: Number.isInteger(result.code) ? result.code : null,
+      timedOut: result.timedOut === true,
+      signal: result.signal || null,
+      category: execution.attempts.at(-1)?.category || "ssh_failure",
+      stderr: sanitizedStderr || fallback,
+      attempts: execution.attempts
+    };
+    throw error;
+  }
+  const separated = { ok: true, stdout: String(result.stdout || "").trim(), stderr: String(result.stderr || ""), code: result.code };
+  return options.returnResult === true ? separated : separated.stdout;
+}
+
+async function migrationReadOnlyEvidenceResult(command, timeout = 60000, options = {}) {
+  if (options.preflightReadOnlyRetry !== true) {
+    return sshCommand(command, timeout, { maxBuffer: options.maxBuffer || 1024 * 1024 * 16 });
+  }
+  return migrationSshCommand(command, timeout, {
+    maxBuffer: options.maxBuffer || 1024 * 1024 * 16,
+    purpose: options.purpose || "Import preflight read-only evidence",
+    readOnlyRetryPolicy: "preflight-evidence",
+    onSshAttempt: options.onSshAttempt,
+    onSshRetry: options.onSshRetry,
+    returnResult: true
+  });
+}
+
+async function runMigrationCredentialScript({ command, args, script, timeoutMs = 30000 }) {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-migration-credential-"));
+  const inputPath = path.join(temporaryDirectory, "install-pgpass.sh");
+  try {
+    fs.writeFileSync(inputPath, String(script || ""), { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const result = await runWithStdin(command, args, inputPath, { timeout: timeoutMs, maxBuffer: 64 * 1024 });
+    return { ok: result.ok === true, code: result.code, inputComplete: result.inputComplete === true, stdout: String(result.stdout || ""), stderr: "", error: result.ok ? "" : "Credential setup failed." };
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+async function migrationSql(target, sql, timeout = 120000, options = {}) {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-migration-query-"));
+  const inputPath = path.join(temporaryDirectory, "query.sql");
+  fs.writeFileSync(inputPath, String(sql || ""), { encoding: "utf8", mode: 0o600 });
+  const command = `sudo kubectl exec -i -n ${shQuote(target.namespace)} ${shQuote(target.dbPod)} -- sh -c ${shQuote(`PGPASSWORD="$POSTGRES_PASSWORD" exec psql -v ON_ERROR_STOP=1 -h ${shQuote(target.dbSvc)} -p 15432 -U postgres -d dune -At -f -`)}`;
+  const readOnlyRetryPolicy = options.preflightReadOnlyRetry === true
+    ? "preflight-evidence"
+    : (options.exportSourceReadOnlyRetry === true ? "export-source-revalidation" : "");
+  try { return await migrationSshCommand(command, timeout, { inputPath, maxBuffer: 1024 * 1024 * 64, returnResult: options.returnResult === true, purpose: options.purpose || "Read-only PostgreSQL migration evidence query", readOnlyRetryPolicy, onSshAttempt: options.onSshAttempt, onSshRetry: options.onSshRetry }); }
+  finally { fs.rmSync(temporaryDirectory, { recursive: true, force: true }); }
+}
+
+async function migrationPodArchiveTools(target, options = {}) {
+  const connection = await migrationSshConnection();
+  const execute = async (args, purpose) => {
+    const execution = await runReadOnlySshWithRetry({
+      execute: () => run("ssh", args, { timeout: 30000, maxBuffer: 64 * 1024 }),
+      maxRetries: options.preflightReadOnlyRetry === true ? 2 : 0,
+      sanitize: migrationDiagnosticText,
+      onAttempt: (attempt) => options.onSshAttempt?.({ ...attempt, commandPurpose: purpose }),
+      onRetry: options.onSshRetry
+    });
+    if (!execution.result?.ok) {
+      const terminal = execution.attempts.at(-1) || {};
+      const error = new Error(terminal.stderr || "The read-only database-tool probe failed.");
+      error.code = "migration_ssh_command_failed";
+      error.details = {
+        commandPurpose: purpose,
+        sshExitCode: terminal.exitCode ?? null,
+        timedOut: terminal.timedOut === true,
+        signal: terminal.signal || null,
+        category: terminal.category || "ssh_failure",
+        stderr: terminal.stderr || "No SSH diagnostic was captured.",
+        attempts: execution.attempts
+      };
+      throw error;
+    }
+    return execution.result;
+  };
+  const resolve = async (name) => {
+    const located = await execute([...connection.args, ...podExecArgs(target, ["which", name])], `Import preflight: resolve matching-version ${name}`);
+    const executable = String(located.stdout || "").trim();
+    if (!located.ok || !/^\/[A-Za-z0-9_./+-]+$/.test(executable) || executable.includes("/../")) throw new Error(`The matching-version ${name} executable could not be resolved exactly in the database pod.`);
+    const version = await execute([...connection.args, ...podExecArgs(target, [executable, "--version"])], `Import preflight: read matching-version ${name} version`);
+    if (!version.ok) throw new Error(`The resolved ${name} executable could not be started.`);
+    return { executable, version: String(version.stdout || "").trim() };
+  };
+  const [dump, restore, psql] = await Promise.all([resolve("pg_dump"), resolve("pg_restore"), resolve("psql")]);
+  return { dumpExecutable: dump.executable, restoreExecutable: restore.executable, psqlExecutable: psql.executable, dumpVersion: dump.version, restoreVersion: restore.version, psqlVersion: psql.version };
+}
+
+function publicEmptyMarketPreview(value) {
+  return {
+    ok: value?.ok !== false,
+    counts: value?.counts || {},
+    digests: value?.digests || {},
+    diagnostics: value?.diagnostics || {},
+    confirmation: EMPTY_MARKET_CONFIRMATION,
+    warning: "Deleting player listings permanently removes the listed Exchange items; they are not returned to player inventory. A fresh verified rollback backup is mandatory."
+  };
+}
+
+async function collectEmptyMarketSafetyEvidence(options = {}) {
+  const target = options.target || await databaseRuntimeTarget();
+  const [statusOutcome, podsOutcome, vendorOutcome, evidenceOutcome, marketBotOutcome] = await Promise.allSettled([
+    battlegroup("status"),
+    migrationSshCommand(`sudo kubectl get pods -n ${shQuote(target.namespace)} -o json`, 30000, { maxBuffer: 1024 * 1024 * 8 }),
+    runningDumpOperations(),
+    migrationEvidence(target, { includeMarketBot: false }),
+    collectMigrationMarketBotSafety(target)
+  ]);
+  let pods = null;
+  if (podsOutcome.status === "fulfilled") {
+    try { pods = parseMigrationJson(podsOutcome.value, "Empty Market workload"); } catch { pods = null; }
+  }
+  const statusResult = statusOutcome.status === "fulfilled" ? statusOutcome.value : null;
+  const evidence = evidenceOutcome.status === "fulfilled" ? evidenceOutcome.value : null;
+  const marketBotSafety = marketBotOutcome.status === "fulfilled" ? marketBotOutcome.value : null;
+  const gateReport = evaluateReadOnlySafetyGates({
+    battlegroup: { ok: statusResult?.ok === true, stdout: String(statusResult?.stdout || "") },
+    kubernetes: { ok: Boolean(pods), value: pods || {} },
+    postgresql: { ok: Boolean(evidence?.database), value: evidence?.database || {} },
+    marketBot: { ok: Boolean(marketBotSafety?.samples?.[0]), value: marketBotSafety?.samples?.[0] || {} }
+  });
+  if (!gateReport.ok) {
+    const failed = Object.values(gateReport.gates).find((entry) => !entry.ok);
+    const error = new Error(`Empty Market safety gate failed: ${failed?.name || "unknown"}.`);
+    error.code = failed?.code || "empty_market_preflight_failed";
+    error.gates = gateReport.gates;
+    throw error;
+  }
+  const offline = classifyMigrationOfflineStatus(parseStatus(statusResult.stdout || "").summary || {}, pods);
+  const writerState = evaluateIndependentWriterSamples(evidence.writerSamples);
+  const active = operationRegistry.snapshot().active.filter((operation) => operation.id !== options.ignoreOperationId && operationsConflict("migration:empty-market", operation.key));
+  const vendor = vendorOutcome.status === "fulfilled" ? vendorOutcome.value : { ok: false, running: [] };
+  const infrastructure = marketBotSafety.service;
+  return {
+    target,
+    checkpoint: marketBotSafety.checkpoint,
+    evidence: {
+      offlineMode: migrationOfflineMode.status(),
+      battlegroup: { stopped: offline.authoritativePhaseOffline, controllersSuspended: gateReport.gates.controllers.ok, runningGameWorkloads: offline.runningGamePods },
+      marketBot: {
+        state: marketBotSafety.state,
+        authoritative: marketBotSafety.ok === true,
+        serviceInstalled: infrastructure.serviceInstalled,
+        runtimeInstalled: infrastructure.runtimeInstalled,
+        pidPresent: infrastructure.evidence.pidFilePresent,
+        matchingProcesses: infrastructure.matchingProcessCount,
+        supervisorProcesses: infrastructure.supervisorProcessCount,
+        defaultRunlevelRegistered: infrastructure.evidence.defaultRunlevelRegistered,
+        restartPathActive: infrastructure.evidence.restartPathActive
+      },
+      database: {
+        postgresqlHealthy: evidence.database.reachable === true && String(evidence.database.database) === "dune",
+        unexpectedWriters: writerState.ok ? "0" : String(writerState.samples[0]?.unexpectedActiveClients ?? "1"),
+        openTransactions: writerState.ok ? "0" : String(writerState.samples[0]?.openTransactions ?? "1")
+      },
+      conflictingOperations: active.length > 0 || !vendor.ok || vendor.running.length > 0
+    }
+  };
+}
+
+async function migrationEmptyMarketPreview(selection = {}, options = {}) {
+  const safety = await collectEmptyMarketSafetyEvidence(options);
+  const raw = parseMigrationJson(await migrationSql(safety.target, buildEmptyMarketPreviewSql(selection)), "Empty Market preview");
+  return { ...publicEmptyMarketPreview(raw), safety: safety.evidence, target: safety.target, checkpoint: safety.checkpoint };
+}
+
+async function executeMigrationEmptyMarket(body = {}, operation = null) {
+  const selection = {
+    deleteBotListings: body.deleteBotListings === true,
+    deletePlayerListings: body.deletePlayerListings === true,
+    deleteLegacyNpcListings: body.deleteLegacyNpcListings === true
+  };
+  const offlineCheckpoint = migrationOfflineMode.captureCheckpoint("Migration Empty Market");
+  let target = null;
+  let initialSafetyCheckpoint = null;
+  const result = await runEmptyMarket({
+    selection,
+    confirmText: String(body.confirmText || ""),
+    acknowledged: body.acknowledged === true,
+    checkpoint: async (stage) => migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, `Empty Market ${stage}`),
+    onStage: async (stage) => operation?.update?.(stage, "Migration Empty Market protected workflow"),
+    stopMarketBot: async () => stopMarketBotForMigration(),
+    verifyMarketBotStopped: async () => publicMarketBotInfrastructureEvidence(await remoteMarketBotStoppedServiceEvidence()),
+    preflight: async () => {
+      const safety = await collectEmptyMarketSafetyEvidence({ target, ignoreOperationId: operation?.id });
+      target = safety.target;
+      if (!initialSafetyCheckpoint) initialSafetyCheckpoint = safety.checkpoint;
+      else assertMarketBotMigrationSafetyCheckpoint(initialSafetyCheckpoint, safety.checkpoint, "Empty Market safety revalidation");
+      return safety.evidence;
+    },
+    preview: async (selected) => parseMigrationJson(await migrationSql(target, buildEmptyMarketPreviewSql(selected)), "Empty Market selected-set preview"),
+    createBackup: async () => {
+      const backup = await createNativeDatabaseBackup({
+        prefix: "pre-empty-market-rollback",
+        offlineCheckpoint,
+        requiredAlphaTables: [...MIGRATION_MARKET_BOT_TABLES],
+        onStatus: (stage, detail) => operation?.update?.(`Backup: ${stage}`, detail)
+      });
+      if (!backup.ok) throw new Error(backup.error || "The mandatory Empty Market rollback backup failed.");
+      return backup;
+    },
+    verifyBackup: async (backup) => ({
+      verified: backup.verified === true,
+      usableForRestore: backup.verified === true,
+      archiveReadVerified: backup.toc?.archiveReadVerified === true,
+      completeDune: backup.toc?.duneSchema === true,
+      alphaTables: backup.toc?.requiredAlphaTables || [],
+      size: String(backup.size || ""), sha256: String(backup.sha256 || ""), filePath: backup.filePath
+    }),
+    execute: async (selected, preview) => parseMigrationJson(await migrationSql(target, buildEmptyMarketCleanupSql(selected, preview), 10 * 60 * 1000), "Empty Market transaction"),
+    postVerify: async (selected) => parseMigrationJson(await migrationSql(target, buildEmptyMarketPreviewSql(selected)), "Empty Market post-verification"),
+    uninstallMarketBot: async () => uninstallMarketBotForMigration(),
+    verifyMarketBotAbsent: async () => publicMarketBotInfrastructureEvidence(await remoteMarketBotStoppedServiceEvidence(), { requireAbsent: true }),
+    restoreBackup: async (backup) => restoreCustomArchive(backup.filePath, target, MIGRATION_ROLLBACK_FLAGS),
+    verifyRestore: async (_backup, before) => {
+      const after = validateEmptyMarketPreview(parseMigrationJson(await migrationSql(target, buildEmptyMarketPreviewSql(selection)), "Empty Market rollback verification"), selection);
+      return { matchesBefore: canonicalMigrationJson(after) === canonicalMigrationJson(before) };
+    }
+  });
+  appendAdminAudit("migration_empty_market_completed", {
+    operationId: operation?.id || "", deleteBotListings: selection.deleteBotListings,
+    deletePlayerListings: selection.deletePlayerListings, deleteLegacyNpcListings: selection.deleteLegacyNpcListings,
+    removed: result.removed, removedByCategory: result.removedByCategory,
+    backupSize: result.backup.size, backupSha256: result.backup.sha256,
+    marketBotInfrastructureRemoved: result.marketBotInfrastructureRemoved === true
+  });
+  return result;
+}
+
+function migrationCondition(id, ok, message, evidence = {}) {
+  return { id, ok: ok === true, message: String(message || ""), evidence };
+}
+
+function publicMigrationPreflight(result) {
+  return {
+    ok: result.ready === true,
+    ready: result.ready === true,
+    checkedAt: result.checkedAt,
+    fileName: result.output?.fileName || "",
+    unsafeLocation: result.output?.unsafe === true,
+    warnings: result.warnings || [],
+    conditions: result.conditions || [],
+    source: result.source ? {
+      gameBuild: result.source.gameBuild,
+      postgresServerVersion: result.source.postgresServerVersion,
+      dumpToolVersion: result.source.dumpToolVersion,
+      requiredExtensions: result.source.requiredExtensions
+    } : null,
+    entityCounts: result.evidence?.entityCounts || {},
+    requiredFreeBytes: result.storage?.requiredBytes || "0",
+    availableFreeBytes: result.storage?.availableBytes || "0",
+    recoveredPartialFiles: String(result.storage?.recoveredPartialFiles || "0"),
+    recoveredPodTemporaryFiles: String(result.storage?.remoteRecoveredTemporaryFiles || "0")
+  };
+}
+
+async function cleanInterruptedMigrationPartials(finalPath) {
+  const directory = path.dirname(finalPath);
+  const prefix = `${path.basename(finalPath)}.partial-`;
+  const rows = await fs.promises.readdir(directory, { withFileTypes: true }).catch(() => []);
+  const candidates = rows.filter((row) => row.isFile() && row.name.startsWith(prefix)).map((row) => path.join(directory, row.name));
+  await removeMigrationPartials(candidates);
+  return candidates.length;
+}
+
+async function migrationOutputStorage(output, databaseBytes) {
+  await fs.promises.mkdir(output.parentPath, { recursive: true });
+  const recoveredPartialFiles = await cleanInterruptedMigrationPartials(output.resolvedPath);
+  try {
+    await fs.promises.access(output.resolvedPath, fs.constants.F_OK);
+    throw new Error("The selected migration package filename already exists. Choose a new filename.");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const probe = path.join(output.parentPath, `.a9migration-write-test-${crypto.randomUUID()}`);
+  const probeHandle = await fs.promises.open(probe, "wx", 0o600);
+  await probeHandle.close();
+  await fs.promises.rm(probe, { force: true });
+  const stats = fs.statfsSync(output.parentPath, { bigint: true });
+  const availableBytes = stats.bavail * stats.bsize;
+  const sourceBytes = BigInt(String(databaseBytes));
+  const requiredBytes = sourceBytes * 3n + 512n * 1024n * 1024n;
+  return {
+    availableBytes: availableBytes.toString(10),
+    requiredBytes: requiredBytes.toString(10),
+    sufficient: availableBytes >= requiredBytes,
+    recoveredPartialFiles: String(recoveredPartialFiles)
+  };
+}
+
+function migrationBuildFromPods(pods, battlegroupItem = {}) {
+  const images = (pods.items || []).flatMap((pod) => (pod.spec?.containers || []).map((container) => String(container.image || "")));
+  const resourceImages = [...JSON.stringify(battlegroupItem).matchAll(/[^"\s]*seabass-server[^"\s]*/ig)].map((match) => match[0]);
+  const builds = [...new Set([...images, ...resourceImages].filter((image) => /seabass-server/i.test(image) && !/(?:db|postgres|utils)/i.test(image)).map((image) => image.match(/:([0-9]+-0-[A-Za-z0-9_-]+)$/)?.[1]).filter(Boolean))];
+  if (builds.length !== 1) throw new Error("The running game-server build could not be classified exactly.");
+  return builds[0];
+}
+
+async function migrationStructuredOfflineSample(target, sampleNumber, options = {}) {
+  const retryOptions = options.preflightReadOnlyRetry === true ? {
+    readOnlyRetryPolicy: "preflight-evidence",
+    onSshAttempt: options.onSshAttempt,
+    onSshRetry: options.onSshRetry
+  } : {};
+  const [battlegroupText, workloadsText] = await Promise.all([
+    migrationSshCommand(
+      `sudo kubectl get igwbg -n ${shQuote(target.namespace)} ${shQuote(target.name)} -o json`,
+      30000,
+      { ...retryOptions, maxBuffer: 1024 * 1024 * 8, purpose: `Import preflight: structured battlegroup offline sample ${sampleNumber}` }
+    ),
+    migrationSshCommand(
+      `sudo kubectl get pods,deployments,statefulsets -n ${shQuote(target.namespace)} -o json`,
+      30000,
+      { ...retryOptions, maxBuffer: 1024 * 1024 * 16, purpose: `Import preflight: structured workload offline sample ${sampleNumber}` }
+    )
+  ]);
+  const battlegroup = parseMigrationJson(battlegroupText, `structured battlegroup sample ${sampleNumber}`);
+  const workloads = parseMigrationJson(workloadsText, `structured workload sample ${sampleNumber}`);
+  const classified = classifyStructuredMigrationOfflineSample({ battlegroup, workloads }, target);
+  return {
+    classified,
+    battlegroup,
+    workloads,
+    pods: { apiVersion: "v1", kind: "List", items: (workloads.items || []).filter((item) => item?.kind === "Pod") }
+  };
+}
+
+async function collectMigrationStructuredOfflineEvidence(target, options = {}) {
+  const first = await migrationStructuredOfflineSample(target, 1, options);
+  await sleepMs(750);
+  const second = await migrationStructuredOfflineSample(target, 2, options);
+  return {
+    ...assertStableStructuredMigrationOfflineSamples([first.classified, second.classified]),
+    battlegroup: second.battlegroup,
+    workloads: second.workloads,
+    pods: second.pods
+  };
+}
+
+async function migrationPersistentBoundary(target, pods) {
+  const pvcText = await migrationSshCommand(`sudo kubectl get pvc -n ${shQuote(target.namespace)} -o json`, 30000, { maxBuffer: 1024 * 1024 * 4 });
+  const pvcs = parseMigrationJson(pvcText, "persistent-volume");
+  const pvcCount = Array.isArray(pvcs.items) ? pvcs.items.length : 0;
+  const fileBrowser = (pods.items || []).find((pod) => String(pod.status?.phase || "") === "Running" && (pod.spec?.containers || []).some((container) => /filebrowser/i.test(`${container.name || ""} ${container.image || ""}`)));
+  if (!fileBrowser?.metadata?.name) return { ok: false, pvcCount: String(pvcCount), unknownComponents: "inspection-unavailable" };
+  const listing = await migrationSshCommand(`sudo kubectl exec -n ${shQuote(target.namespace)} ${shQuote(fileBrowser.metadata.name)} -- sh -c ${shQuote("find /srv -mindepth 1 -maxdepth 1 -printf '%f\\n' 2>/dev/null | sort")}`, 30000, { maxBuffer: 1024 * 128 });
+  const allowed = new Set(["Config", "CrashReporterLogs", "Crashes", "DatabaseDumps", "Logs", "UserSettings"]);
+  const unknown = listing.split(/\r?\n/).map((value) => value.trim()).filter(Boolean).filter((value) => !allowed.has(value));
+  return { ok: pvcCount === 2 && unknown.length === 0, pvcCount: String(pvcCount), unknownComponents: String(unknown.length) };
+}
+
+function migrationWorldDumpFlags() {
+  return [
+    ...MIGRATION_DUMP_FLAGS,
+    ...MIGRATION_CODEX_BACKUP_ARTIFACTS.flatMap((name) => [
+      `--exclude-table=dune.${name}`,
+      `--exclude-table=dune.${name}_backup_id_seq`
+    ])
+  ];
+}
+
+function portableEmptyMarketEvidence(preview) {
+  const counts = preview?.counts || {};
+  return {
+    counts: {
+      botListings: String(counts.botListings ?? ""),
+      playerListings: String(counts.playerListings ?? ""),
+      legacyNpcListings: String(counts.legacyNpcListings ?? ""),
+      unknownNpcListings: String(counts.unknownNpcListings ?? ""),
+      pendingSettlements: String(counts.pendingSettlements ?? ""),
+      invalidRelationships: String(counts.invalidRelationships ?? ""),
+      completedHistory: String(counts.completedHistory ?? "")
+    },
+    digests: { completedHistory: String(preview?.digests?.completedHistory || "") }
+  };
+}
+
+async function migrationEvidence(target, options = {}) {
+  const checkpointPurpose = String(options.checkpointPurpose || "Migration source evidence");
+  const queryOptions = {
+    preflightReadOnlyRetry: options.preflightReadOnlyRetry === true,
+    exportSourceReadOnlyRetry: options.exportSourceReadOnlyRetry === true,
+    onSshAttempt: options.onSshAttempt,
+    onSshRetry: options.onSshRetry
+  };
+  const query = (sql, timeout = 120000, purpose = "PostgreSQL evidence") => migrationSql(target, sql, timeout, { ...queryOptions, purpose: `${checkpointPurpose}: ${purpose}` });
+  // Writer detection runs by itself so the Suite's own parallel read-only evidence
+  // queries cannot be mistaken for unexpected active clients.
+  const writersText = await query(ACTIVE_WRITERS_SQL, 120000, "writer and open-transaction sample 1");
+  const includeMarketBot = options.includeMarketBot !== false;
+  const outsideDune = options.outsideDune || await migrationOutsideDuneBoundary(target, `${checkpointPurpose}: canonical outside-dune evidence`);
+  const [databaseText, patchText, schemaText, countsText, marketBotCountsText, relationshipText, sequenceText, podTools, sourceMarketText, codexBackupText] = await Promise.all([
+    query(DATABASE_FACTS_SQL, 120000, "database identity and version facts"),
+    query(MIGRATION_PATCH_SQL, 120000, "patch-set fingerprint"),
+    query(MIGRATION_SCHEMA_SQL, 240000, "portable schema fingerprint"),
+    query(entityCountsSql(), 120000, "semantic entity counts"),
+    includeMarketBot ? query(marketBotTableCountsSql(), 120000, "Market Bot table counts") : Promise.resolve("{}"),
+    query(MIGRATION_RELATIONSHIP_SQL, 120000, "relationship and orphan digest"),
+    query(MIGRATION_SEQUENCE_SQL, 120000, "sequence evidence digest"),
+    migrationPodArchiveTools(target, queryOptions),
+    query(includeMarketBot
+      ? buildEmptyMarketPreviewSql({ deleteBotListings: false, deletePlayerListings: false, deleteLegacyNpcListings: false })
+      : buildPortableEmptyMarketEvidenceSql(), 120000, "portable source-market counts and digest"),
+    query(MIGRATION_CODEX_BACKUP_ARTIFACT_SQL, 120000, "excluded Suite backup-artifact boundary")
+  ]);
+  const database = parseMigrationJson(databaseText, "database");
+  const writers = parseMigrationJson(writersText, "writer");
+  const writerSamples = await collectIndependentWriterSamples(
+    async (index) => index === 0
+      ? writers
+      : parseMigrationJson(await query(ACTIVE_WRITERS_SQL, 120000, "writer and open-transaction sample 2"), "independent writer sample"),
+    () => sleepMs(750)
+  );
+  const extensions = outsideDune.extensions.map(({ name, version }) => ({ name, version }));
+  const entityCounts = parseMigrationJson(countsText, "entity-count");
+  const marketBotTableCounts = parseMigrationJson(marketBotCountsText, "Market Bot table-count");
+  const relationshipRaw = parseMigrationJson(relationshipText, "relationship");
+  const sequenceRaw = parseMigrationJson(sequenceText, "sequence");
+  const dumpVersion = String(podTools.dumpVersion).match(/([0-9]+(?:\.[0-9]+)+)/)?.[1] || "";
+  const restoreVersion = String(podTools.restoreVersion).match(/([0-9]+(?:\.[0-9]+)+)/)?.[1] || "";
+  let marketBot;
+  let marketBotCompatibility = null;
+  if (includeMarketBot) try {
+    const localEvidenceConfig = { ...localMarketBotConfig(), evidencePersisted: fs.existsSync(MARKET_BOT_CONFIG_PATH) };
+    const sharedOptions = { writers: writerSamples, localConfig: localEvidenceConfig, requireLocalAgreement: true, expected: options.marketBotExpected || {} };
+    const authoritative = await collectAuthoritativeMarketBotEvidence(target, sharedOptions);
+    const samples = authoritative.samples;
+    const runtimeConfig = authoritative.configuration;
+    const catalogPolicy = authoritative.catalogPolicy;
+    marketBot = authoritative.quiescence;
+    marketBotCompatibility = {
+      runtimeVersion: String(runtimeConfig.runtimeVersion || ""),
+      schemaVersion: String(runtimeConfig.schemaVersion || "0"),
+      catalogItems: String(catalogPolicy.itemCount),
+      catalogSha256: String(catalogPolicy.fingerprint),
+      semanticSha256: migrationSha256Text(canonicalMigrationJson(marketBotSemanticConfigView(runtimeConfig)))
+    };
+    marketBot.writerSamples = writerSamples;
+    marketBot.lockSamples = samples.map((sample) => ({ advisoryLocks: String(sample.advisoryLocks || "0"), incompleteCycles: String(sample.incompleteCycles || "0") }));
+  } catch (error) {
+    marketBot = {
+      ok: false,
+      state: MARKET_BOT_PAUSE_STATES.UNKNOWN,
+      generation: String(localMarketBotConfig().pauseGeneration || "0"),
+      reasons: [`Authoritative Market Bot evidence is unavailable: ${migrationPublicError(error.message)}`],
+      diagnostics: error?.structure ? { code: error.code || "market_bot_evidence_error", ...error.structure } : { code: error?.code || "market_bot_evidence_error" },
+      samples: [],
+      writerSamples
+    };
+  } else marketBot = null;
+  const sourceMarket = includeMarketBot
+    ? portableEmptyMarketEvidence(parseMigrationJson(sourceMarketText, "Empty Market boundary"))
+    : validateSourceMarketEvidence(parseMigrationJson(sourceMarketText, "portable source-market boundary"));
+  const codexBackupArtifacts = parseMigrationJson(codexBackupText, "Codex backup artifact boundary");
+  return {
+    database,
+    writers,
+    writerSamples,
+    extensions,
+    outsideDune,
+    entityCounts,
+    fingerprints: { appliedPatchesSha256: migrationSha256Text(patchText), schemaCatalogSha256: migrationSha256Text(schemaText) },
+    relationships: { foreignKeyCount: relationshipRaw.foreignKeyCount, invalidForeignKeys: relationshipRaw.invalidForeignKeys, sha256: migrationSha256Text(relationshipRaw.sha256Input) },
+    sequences: { sequenceCount: sequenceRaw.sequenceCount, sha256: migrationSha256Text(sequenceRaw.sha256Input) },
+    dumpVersion,
+    restoreVersion,
+    podTools,
+    marketBot,
+    sourceMarket,
+    codexBackupArtifacts,
+    marketBotBoundary: marketBot?.ok === true && marketBot.samples?.length >= 2 ? {
+      tableCounts: marketBotTableCounts,
+      tracking: {
+        total: String(marketBot.samples[0].totalTracking),
+        active: String(marketBot.samples[0].activeTracking),
+        retired: (BigInt(String(marketBot.samples[0].totalTracking)) - BigInt(String(marketBot.samples[0].activeTracking))).toString(10)
+      },
+      digests: {
+        botOwned: String(marketBot.samples[0].botOwnedDigest),
+        protectedNonBot: String(marketBot.samples[0].protectedDigest),
+        cycleEvidence: String(marketBot.samples[0].cycleEvidenceDigest)
+      },
+      policy: marketBotCompatibility
+    } : null
+  };
+}
+
+async function revalidateMigrationMarketBotSafety(target, expectedCheckpoint, stage, options = {}) {
+  const writers = await collectIndependentWriterSamples(
+    async () => parseMigrationJson(await migrationSql(target, ACTIVE_WRITERS_SQL), `Market Bot safety writer at ${stage}`),
+    () => sleepMs(750)
+  );
+  const writerEvidence = evaluateIndependentWriterSamples(writers);
+  if (!writerEvidence.ok) throw new Error(`Market Bot migration safety failed at ${stage}: an unexpected writer or open transaction appeared.`);
+  const safety = await collectMigrationMarketBotSafety(target);
+  assertMarketBotMigrationSafetyCheckpoint(expectedCheckpoint, safety.checkpoint, stage, options);
+  return safety;
+}
+
+async function migrationExportPreflight(payload = {}, options = {}) {
+  const stage = (name, substep) => options.onStage?.({ stage: name, substep: substep || name });
+  stage("Validating request", "Checking Offline Mode, destination, and operation conflicts");
+  const checkedAt = new Date().toISOString();
+  const cfg = loadConfig();
+  const output = assessOutputPath(payload.outputPath, {
+    unsafeRoots: [cfg.serverInstallPath, cfg.awakeningServerPath, __dirname, os.tmpdir()].filter(Boolean)
+  });
+  const conditions = [];
+  const warnings = output.unsafe ? ["This location is inside a server, Suite, or temporary directory. Keep the verified package somewhere that will survive removal of the old server."] : [];
+  const offlineMode = migrationOfflineMode.status();
+  const offlineReady = offlineMode.active && !offlineMode.failClosed;
+  conditions.push(migrationCondition("migration-offline-mode", offlineReady, offlineReady ? "Local Migration Offline Mode is active; automatic startup and writer behavior is disabled." : "Enter healthy local Migration Offline Mode before migration work.", { generation: offlineMode.generation, failClosed: offlineMode.failClosed }));
+  const active = operationRegistry.snapshot().active.filter((operation) => operation.id !== options.ignoreOperationId && operationsConflict("migration:export", operation.key));
+  conditions.push(migrationCondition("operation-conflicts", active.length === 0, active.length ? "Another protected Suite operation is running." : "No conflicting Suite operation is running.", { activeCount: String(active.length) }));
+  stage("Checking operations", "Inspecting vendor database operations and restart scheduling");
+  const vendorOperations = await runningDumpOperations();
+  conditions.push(migrationCondition("vendor-database-operations", vendorOperations.ok && vendorOperations.running.length === 0, vendorOperations.ok ? (vendorOperations.running.length ? "A vendor database operation is running." : "No vendor DatabaseOperation is active.") : "DatabaseOperation resources could not be inspected.", { activeCount: String(vendorOperations.running.length) }));
+  const scheduler = await vmSchedulerStatus();
+  const automaticRestartDisabled = scheduler.reachable === true && scheduler.ambiguousRegistration !== true
+    && (scheduler.installed === false || scheduler.config?.enabled === false || scheduler.config?.restart?.enabled === false);
+  conditions.push(migrationCondition("automatic-restart-disabled", automaticRestartDisabled, automaticRestartDisabled ? "Automatic VM restart scheduling is absent or disabled." : "Automatic VM restart scheduling is active or ambiguous; disable it manually before migration."));
+  stage("Resolving database target", "Resolving the authoritative database pod and matching tools");
+  const target = await databaseRuntimeTarget();
+  let remoteTemporaryRecovery = { removedCount: "0", cleanupVerified: false, skipped: true };
+  if (active.length === 0 && vendorOperations.ok && vendorOperations.running.length === 0) {
+    stage("Checking temporary files", "Removing and verifying stale fixed-name migration artifacts");
+    const connection = await migrationSshConnection();
+    remoteTemporaryRecovery = await cleanupPodArchivePaths({ runCommand: run, sshArgs: connection.args, target });
+    remoteTemporaryRecovery.skipped = false;
+  }
+  conditions.push(migrationCondition(
+    "pod-temporary-artifact-recovery",
+    remoteTemporaryRecovery.cleanupVerified === true,
+    remoteTemporaryRecovery.cleanupVerified
+      ? (remoteTemporaryRecovery.removedCount === "0" ? "No fixed-name migration archive remained in the database pod." : "Fixed-name migration archive artifacts from an interrupted attempt were removed and absence was verified.")
+      : "Database-pod temporary cleanup was skipped because another operation is active or vendor state is ambiguous.",
+    { recoveredTemporaryFiles: remoteTemporaryRecovery.removedCount }
+  ));
+  stage("Checking workloads", "Sampling structured battlegroup, controller, and game workload evidence twice");
+  const offline = await collectMigrationStructuredOfflineEvidence(target);
+  const pods = offline.pods;
+  conditions.push(migrationCondition("battlegroup-offline", offline.offline, "Two matching Kubernetes JSON samples prove the battlegroup, controllers, and game-facing workloads are offline.", { runningGameWorkloads: offline.runningGamePods, desiredGameReplicas: offline.desiredGameReplicas, battlegroupPhase: offline.battlegroupPhase, componentsOffline: offline.componentsOffline, componentStates: offline.componentStates, sampleCount: "2" }));
+  stage("Classifying storage", "Verifying persistent-volume boundaries and source build");
+  const persistent = await migrationPersistentBoundary(target, pods);
+  conditions.push(migrationCondition("persistent-boundary", persistent.ok, persistent.ok ? "Persistent components match the classified profile." : "Persistent components are unknown or do not match the supported profile.", persistent));
+  const gameBuild = migrationBuildFromPods(pods, offline.battlegroup);
+  stage("Collecting database evidence", "Sampling PostgreSQL health, writers, versions, fingerprints, counts, and digests");
+  const evidence = await migrationEvidence(target, {
+    includeMarketBot: false,
+    preflightReadOnlyRetry: options.preflightReadOnlyRetry === true,
+    exportSourceReadOnlyRetry: options.exportSourceReadOnlyRetry === true,
+    checkpointPurpose: options.checkpointPurpose || "Pre-dump source safety checkpoint",
+    onSshAttempt: options.onSshAttempt,
+    onSshRetry: options.onSshRetry
+  });
+  const databaseHealthy = evidence.database.reachable === true && String(evidence.database.database) === "dune";
+  conditions.push(migrationCondition("postgresql-healthy", databaseHealthy, databaseHealthy ? "PostgreSQL is healthy and reachable." : "PostgreSQL health or database identity is unsupported."));
+  const writerEvidence = evaluateIndependentWriterSamples(evidence.writerSamples);
+  conditions.push(migrationCondition("active-writers", writerEvidence.ok, writerEvidence.ok ? "No unexpected database writer or open transaction is active across independent samples." : "An unexpected database session or open transaction is active, or writer state was not sampled independently.", { samples: writerEvidence.samples }));
+  conditions.push(migrationCondition(
+    "source-market-evidence",
+    true,
+    "Active, pending, invalid, and fulfilled Exchange evidence was captured read-only; active listings may be exported and are removed only on the destination inside the import transaction.",
+    { counts: evidence.sourceMarket.counts }
+  ));
+  const artifactNames = Array.isArray(evidence.codexBackupArtifacts?.names) ? [...evidence.codexBackupArtifacts.names].sort() : [];
+  const expectedArtifactNames = [...MIGRATION_CODEX_BACKUP_ARTIFACTS].sort();
+  const artifactsProven = evidence.codexBackupArtifacts?.safe === true
+    && String(evidence.codexBackupArtifacts?.count) === String(expectedArtifactNames.length)
+    && canonicalMigrationJson(artifactNames) === canonicalMigrationJson(expectedArtifactNames);
+  conditions.push(migrationCondition(
+    "codex-backup-artifact-boundary",
+    artifactsProven,
+    artifactsProven
+      ? "The exact Suite-created dune.da_codex_backup artifacts are positively identified for exclusion."
+      : "The Suite-created backup artifacts could not be positively identified; export fails closed.",
+    { count: String(evidence.codexBackupArtifacts?.count || "0") }
+  ));
+  const profileConfigured = /^[a-f0-9]{64}$/.test(MIGRATION_SUPPORTED_PROFILE.appliedPatchSha256)
+    && /^[a-f0-9]{64}$/.test(MIGRATION_SUPPORTED_PROFILE.sourcePortableSchemaSha256);
+  const gameBuildMatches = gameBuild === MIGRATION_SUPPORTED_PROFILE.gameBuild;
+  const postgresVersionMatches = String(evidence.database.serverVersion).split(".")[0] === MIGRATION_SUPPORTED_PROFILE.postgresMajor;
+  const dumpVersionMatches = String(evidence.dumpVersion).split(".")[0] === MIGRATION_SUPPORTED_PROFILE.dumpToolMajor;
+  const extensionsMatch = canonicalMigrationJson(evidence.extensions) === canonicalMigrationJson(MIGRATION_SUPPORTED_PROFILE.extensions);
+  const patchFingerprintMatches = profileConfigured && evidence.fingerprints.appliedPatchesSha256 === MIGRATION_SUPPORTED_PROFILE.appliedPatchSha256;
+  const schemaFingerprintMatches = profileConfigured && evidence.fingerprints.schemaCatalogSha256 === MIGRATION_SUPPORTED_PROFILE.sourcePortableSchemaSha256;
+  conditions.push(migrationCondition("supported-game-build", gameBuildMatches, gameBuildMatches ? "The game build matches the supported migration profile." : "The game build is not supported for migration.", { profileId: MIGRATION_SUPPORTED_PROFILE.id }));
+  conditions.push(migrationCondition("pinned-schema-fingerprint", schemaFingerprintMatches, profileConfigured ? (schemaFingerprintMatches ? "The canonical source-portable schema fingerprint matches the pinned export profile." : "The canonical source-portable schema fingerprint does not match the pinned export profile.") : "The source-portable schema fingerprint has not been pinned."));
+  conditions.push(migrationCondition("pinned-patch-set-fingerprint", patchFingerprintMatches, profileConfigured ? (patchFingerprintMatches ? "The canonical patch-set fingerprint matches the pinned profile." : "The canonical patch-set fingerprint does not match the pinned profile.") : "The reference patch-set fingerprint has not been pinned."));
+  conditions.push(migrationCondition("postgresql-version", postgresVersionMatches, postgresVersionMatches ? "The PostgreSQL server version is supported." : "The PostgreSQL server version is not supported."));
+  conditions.push(migrationCondition("dump-tool-version", dumpVersionMatches, dumpVersionMatches ? "The dump-tool version is compatible with the supported profile." : "The dump-tool version is not supported."));
+  conditions.push(migrationCondition("required-extensions", extensionsMatch, extensionsMatch ? "All required extension versions match the supported profile." : "One or more required extension versions do not match the supported profile."));
+  stage("Checking destination", "Testing destination safety, writability, cleanup, and free space");
+  const storage = await migrationOutputStorage(output, evidence.database.databaseBytes);
+  storage.remoteRecoveredTemporaryFiles = remoteTemporaryRecovery.removedCount;
+  conditions.push(migrationCondition("partial-package-recovery", true, storage.recoveredPartialFiles === "0" ? "No interrupted partial package required recovery." : "Interrupted partial package files were removed before the preflight continued.", { recoveredPartialFiles: storage.recoveredPartialFiles }));
+  conditions.push(migrationCondition("destination-writable", true, "The destination directory is writable."));
+  conditions.push(migrationCondition("free-space", storage.sufficient, storage.sufficient ? "Sufficient free space is available." : "Insufficient free space is available for the dump, package, and verification workspace.", { availableBytes: storage.availableBytes, requiredBytes: storage.requiredBytes }));
+  const acknowledged = !output.unsafe || payload.acknowledgeUnsafeLocation === true;
+  conditions.push(migrationCondition("safe-location", acknowledged, output.unsafe ? (acknowledged ? "Unsafe-location warning was explicitly acknowledged." : "Acknowledge the unsafe location warning before exporting.") : "The selected location is outside known server and temporary directories."));
+  const ready = conditions.every((condition) => condition.ok);
+  stage("Finalizing preflight", "Producing the complete gate result without starting export");
+  return {
+    ready,
+    checkedAt,
+    output,
+    warnings,
+    conditions,
+    storage,
+    target,
+    source: { gameBuild, postgresServerVersion: evidence.database.serverVersion, dumpToolVersion: evidence.dumpVersion, requiredExtensions: evidence.extensions },
+    evidence
+  };
+}
+
+async function migrationDumpToFile(preflight, dumpPath, onProgress, dumpFlags = MIGRATION_DUMP_FLAGS, expectedInventory = null, onHeartbeat = null) {
+  const connection = await migrationSshConnection();
+  const target = preflight.target;
+  if (!expectedInventory) throw new Error("The authoritative world archive inventory is missing.");
+  const generated = await generateValidatedPodArchive({
+    kind: "world", target, dbSvc: target.dbSvc, sshArgs: connection.args, runCommand: run,
+    runCredentialScript: runMigrationCredentialScript,
+    dumpExecutable: preflight.evidence.podTools.dumpExecutable, restoreExecutable: preflight.evidence.podTools.restoreExecutable,
+    outputPath: dumpPath, dumpFlags, timeoutMs: 60 * 60 * 1000, onProgress,
+    onHeartbeat,
+    validateToc: (toc) => ({
+      ...validatePgRestoreToc(toc, { scope: "dune" }),
+      inventory: validateFullBackupToc(toc, expectedInventory, { requiredAlphaTables: [] })
+    })
+  });
+  return { ...generated.boundary, component: generated.component, archiveReadVerified: generated.archiveReadVerified, remoteCleanupVerified: generated.remoteCleanupVerified };
+}
+
+function publicMigrationExportJob(job) {
+  if (!job) return null;
+  const live = publicMigrationJobProgress(job);
+  return {
+    ok: job.status !== "failed",
+    jobId: job.jobId,
+    operationId: job.operation?.id || "",
+    status: job.status,
+    stage: job.stage,
+    progress: job.progress,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt || "",
+    error: job.error || "",
+    failure: job.failure || null,
+    sshAttempts: Array.isArray(job.sshDiagnostics) ? job.sshDiagnostics.map((attempt) => ({ ...attempt })) : [],
+    heartbeat: job.heartbeat || null,
+    lastProgressAt: job.lastProgressAt || "",
+    timeline: MIGRATION_EXPORT_STAGES,
+    result: job.result || null,
+    live
+  };
+}
+
+function migrationJobUpdate(job, stage, progress, detail = "") {
+  beginMigrationJobProgress(job, stage, detail || stage);
+  job.progress = Math.max(0, Math.min(100, Number(progress) || 0));
+  job.lastProgressAt = job.lastActivityAt;
+  job.heartbeat = null;
+  operationRegistry.update(job.operation, stage, detail, { progress: job.progress });
+}
+
+function migrationJobHeartbeat(job, phase, value = {}) {
+  const substep = String(value.stage || "working");
+  if (value.bytes !== undefined && value.totalBytes !== undefined) updateMigrationJobBytes(job, value.bytes, value.totalBytes, `${phase}: ${substep}`);
+  else touchMigrationJobProgress(job, `${phase}: ${substep}`);
+  job.heartbeat = {
+    phase: String(phase || value.stage || "working"),
+    substage: String(value.stage || "working"),
+    startedAt: String(value.startedAt || ""),
+    lastProgressAt: String(value.lastProgressAt || new Date().toISOString()),
+    elapsedMs: String(value.elapsedMs ?? "0"),
+    timeoutMs: String(value.timeoutMs ?? "0"),
+    remainingMs: String(value.remainingMs ?? "0")
+  };
+  job.lastProgressAt = job.lastActivityAt;
+  operationRegistry.update(job.operation, job.stage, `${job.heartbeat.phase}: ${job.heartbeat.substage}`, { progress: job.progress, heartbeat: job.heartbeat });
+}
+
+function migrationJobExactProgress(job, stage, substep, value = {}) {
+  if (job.stage !== stage || job.activity?.substep !== substep) beginMigrationJobProgress(job, stage, substep, { totalBytes: value.totalBytes });
+  updateMigrationJobBytes(job, value.bytes, value.totalBytes, substep);
+  job.lastProgressAt = job.lastActivityAt;
+  const now = Date.now();
+  if (!job.lastJournalProgressAt || now - job.lastJournalProgressAt >= 1000 || String(value.bytes) === String(value.totalBytes)) {
+    job.lastJournalProgressAt = now;
+    operationRegistry.update(job.operation, stage, substep, { bytes: String(value.bytes), totalBytes: String(value.totalBytes), percent: job.activity.percent });
+  }
+}
+
+async function migrationJobLongStage(job, stage, substep, task) {
+  return whileMigrationJobAlive(job, stage, substep, task, {
+    intervalMs: 1000,
+    onHeartbeat: () => operationRegistry.update(job.operation, stage, substep, { heartbeat: publicMigrationJobProgress(job) })
+  });
+}
+
+function migrationImportReadinessSnapshot(checked) {
+  return {
+    package: {
+      fileName: String(checked?.package?.fileName || ""),
+      size: String(checked?.package?.size || ""),
+      sha256: String(checked?.package?.sha256 || ""),
+      sourceBuild: String(checked?.package?.sourceBuild || ""),
+      profileId: String(checked?.package?.profileId || "")
+    },
+    destination: {
+      profileBinding: checked?.destination?.profileBinding || null,
+      offlineMode: {
+        active: checked?.destination?.offlineMode?.active === true,
+        failClosed: checked?.destination?.offlineMode?.failClosed === true,
+        generation: String(checked?.destination?.offlineMode?.generation || ""),
+        digest: String(checked?.destination?.offlineMode?.digest || "")
+      },
+      battlegroup: checked?.destination?.battlegroup || null,
+      database: checked?.destination?.database || null,
+      conflictingOperations: checked?.destination?.conflictingOperations,
+      automaticRestartDisabled: checked?.destination?.automaticRestartDisabled,
+      compatibility: checked?.destination?.compatibility || null,
+      outsideDune: checked?.destination?.outsideDune || null,
+      fresh: checked?.destination?.fresh || null
+    }
+  };
+}
+
+function migrationImportReadinessDigest(checked) {
+  return migrationSha256Text(canonicalMigrationJson(migrationImportReadinessSnapshot(checked)));
+}
+
+function publicMigrationImportPreflightResult(checked) {
+  return { ready: checked.ready, checkedAt: checked.checkedAt, approvalDigest: migrationImportReadinessDigest(checked), conditions: checked.conditions, package: checked.package, selectedProfile: checked?.destination?.profileBinding || null };
+}
+
+function approvedMigrationImportPreflight(payload = {}) {
+  const packagePath = path.resolve(String(payload.packagePath || ""));
+  const approvalDigest = String(payload.preflightApprovalDigest || "");
+  if (!/^[a-f0-9]{64}$/.test(approvalDigest)) throw new Error("Run and approve a fresh destination import preflight before starting import.");
+  const matches = [...migrationImportPreflightJobs.values()].filter((candidate) => candidate.status === "success"
+    && candidate.result?.ready === true
+    && candidate.approvedCheckpoint?.packagePath === packagePath
+    && candidate.approvedCheckpoint?.digest === approvalDigest);
+  const approved = matches.at(-1)?.approvedCheckpoint;
+  if (!approved) throw new Error("The approved import-preflight checkpoint is unavailable or does not match this package.");
+  const captured = approved.snapshot?.destination?.profileBinding;
+  assertCapturedDestinationBinding(SELECTED_PROFILE_BINDING, captured);
+  return approved;
+}
+
+function assertMigrationImportReadinessUnchanged(approved, checked) {
+  const currentDigest = migrationImportReadinessDigest(checked);
+  if (currentDigest !== approved.digest) {
+    const error = new Error("The package or destination readiness checkpoint changed after approval; no rollback backup was created.");
+    error.code = "migration_import_checkpoint_drift";
+    throw error;
+  }
+  return checked;
+}
+
+function migrationPreflightJobStage(job, value = {}) {
+  beginMigrationJobProgress(job, String(value.stage || "Running preflight"), String(value.substep || value.stage || "Running preflight"));
+  operationRegistry.update(job.operation, job.stage, job.activity.substep, { heartbeat: publicMigrationJobProgress(job) });
+}
+
+async function runMigrationPreflightJob(job, payload) {
+  const timer = setInterval(() => {
+    touchMigrationJobProgress(job, job.activity?.substep || job.stage);
+    operationRegistry.update(job.operation, job.stage, job.activity?.substep || job.stage, { heartbeat: publicMigrationJobProgress(job) });
+  }, 1000);
+  try {
+    job.sshDiagnostics = [];
+    const shared = {
+      ignoreOperationId: job.operation.id,
+      onStage: (value) => migrationPreflightJobStage(job, value),
+      preflightReadOnlyRetry: true,
+      onSshAttempt: (attempt) => {
+        if (attempt.category === "success" && attempt.attempt === "1") return;
+        job.sshDiagnostics.push({ ...attempt });
+        job.sshDiagnostics = job.sshDiagnostics.slice(-12);
+        operationRegistry.update(job.operation, job.stage, job.activity?.substep || job.stage, { diagnostics: { sshAttempts: job.sshDiagnostics } });
+      },
+      onSshRetry: ({ retry, maximum }) => {
+        const detail = `SSH connection interrupted — retrying ${retry}/${maximum}.`;
+        beginMigrationJobProgress(job, job.stage || "Running preflight", detail);
+        operationRegistry.update(job.operation, job.stage, detail, { diagnostics: { sshAttempts: job.sshDiagnostics } });
+      },
+      onPackageVerifyProgress: (value) => migrationJobExactProgress(job, "Inspecting package", "Verifying package entries", value),
+      onPackageHashProgress: (value) => migrationJobExactProgress(job, "Inspecting package", "Hashing complete package", value)
+    };
+    const checked = job.type === "preflight" ? await migrationExportPreflight(payload, shared) : await migrationImportPreflight(payload, shared);
+    if (job.type === "import-preflight" && checked.ready) {
+      job.approvedCheckpoint = {
+        packagePath: path.resolve(String(checked.packagePath || "")),
+        digest: migrationImportReadinessDigest(checked),
+        snapshot: migrationImportReadinessSnapshot(checked)
+      };
+    }
+    job.result = job.type === "preflight" ? publicMigrationPreflight(checked) : publicMigrationImportPreflightResult(checked);
+    job.status = checked.ready ? "success" : "failed";
+    job.stage = checked.ready ? "Preflight verified" : "Preflight failed";
+    job.error = checked.ready ? "" : "Preflight completed with one or more blocked gates.";
+    job.completedAt = new Date().toISOString();
+    operationRegistry.finish(job.operation, checked.ready ? "success" : "failed", job.error, { stage: job.stage, diagnostics: job.sshDiagnostics.length ? { sshAttempts: job.sshDiagnostics } : undefined });
+  } catch (error) {
+    const failedGate = String(job.activity?.substep || job.stage || "Preflight");
+    job.status = "failed";
+    job.stage = "Preflight failed";
+    job.error = migrationPublicError(error);
+    job.failure = publicMigrationFailure(error, failedGate);
+    job.completedAt = new Date().toISOString();
+    try { operationRegistry.finish(job.operation, "failed", job.error, { stage: job.stage, diagnostics: { failure: job.failure, sshAttempts: job.sshDiagnostics || [] } }); } catch {}
+  } finally {
+    clearInterval(timer);
+    touchMigrationJobProgress(job, job.stage);
+  }
+}
+
+function startMigrationPreflightJob(payload = {}, type = "preflight") {
+  const importing = type === "import-preflight";
+  const operation = operationRegistry.begin(importing ? "migration:import-preflight" : "migration:preflight", importing ? "Server Migration Import Preflight" : "Server Migration Export Preflight", { category: "migration", stage: "Request received", detail: "Read-only migration preflight" });
+  const now = new Date().toISOString();
+  const job = { jobId: `migration-${type}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`, type, operation, status: "running", stage: "Request received", startedAt: now, stageStartedAt: now, lastActivityAt: now, completedAt: "", error: "", result: null };
+  initializeMigrationJobProgress(job);
+  beginMigrationJobProgress(job, "Request received", "Waiting to begin read-only checks");
+  (importing ? migrationImportPreflightJobs : migrationPreflightJobs).set(job.jobId, job);
+  runMigrationPreflightJob(job, payload).catch(() => {});
+  return migrationPreflightJobPublic(job);
+}
+
+const MIGRATION_SOURCE_STABILITY_FIELDS = Object.freeze([
+  "fingerprints",
+  "extensions",
+  "entityCounts",
+  "sourceMarket",
+  "codexBackupArtifacts",
+  "relationships",
+  "sequences"
+]);
+
+function assertMigrationSourceEvidenceCheckpoint(baseline, current, checkpoint) {
+  const writers = evaluateIndependentWriterSamples(current?.writerSamples);
+  if (!writers.ok) throw new Error(`${checkpoint} did not prove two independent zero-writer and zero-open-transaction samples.`);
+  for (const field of MIGRATION_SOURCE_STABILITY_FIELDS) {
+    if (canonicalMigrationJson(current?.[field]) !== canonicalMigrationJson(baseline?.[field])) {
+      throw new Error(`Source ${field} changed during ${checkpoint}; the package was not published.`);
+    }
+  }
+  return current;
+}
+
+function migrationExportEvidenceRetryOptions(job, checkpointPurpose) {
+  return {
+    includeMarketBot: false,
+    exportSourceReadOnlyRetry: true,
+    checkpointPurpose,
+    onSshAttempt: (attempt) => {
+      job.sshDiagnostics = [...(job.sshDiagnostics || []), { ...attempt, checkpointPurpose }].slice(-128);
+      operationRegistry.update(job.operation, job.stage, job.activity?.substep || checkpointPurpose, { diagnostics: { sshAttempts: job.sshDiagnostics } });
+    },
+    onSshRetry: ({ retry, maximum }) => {
+      const detail = `SSH interrupted during source revalidation — retrying ${retry}/${maximum}.`;
+      touchMigrationJobProgress(job, detail);
+      job.lastProgressAt = job.lastActivityAt;
+      operationRegistry.update(job.operation, job.stage, detail, { diagnostics: { sshAttempts: job.sshDiagnostics || [] } });
+    }
+  };
+}
+
+async function collectMigrationExportSourceCheckpoint(job, target, baseline, checkpointPurpose) {
+  const current = await migrationEvidence(target, migrationExportEvidenceRetryOptions(job, checkpointPurpose));
+  return assertMigrationSourceEvidenceCheckpoint(baseline, current, checkpointPurpose);
+}
+
+async function runMigrationExportJob(job, payload) {
+  let paths;
+  try {
+    migrationOfflineMode.verifyCheckpoint(job.offlineCheckpoint, "before export preflight");
+    migrationJobUpdate(job, "Running export preflight", 5);
+    const preDumpRetry = migrationExportEvidenceRetryOptions(job, "Pre-dump source safety checkpoint");
+    const preflight = await migrationJobLongStage(job, "Running export preflight", "Checking source safety and compatibility", () => migrationExportPreflight(payload, { ignoreOperationId: job.operation.id, ...preDumpRetry }));
+    if (!preflight.ready) throw new Error(preflight.conditions.find((condition) => !condition.ok)?.message || "Migration export preflight failed.");
+    assertMigrationSourceEvidenceCheckpoint(preflight.evidence, preflight.evidence, "pre-dump source safety checkpoint");
+    paths = migrationPartialPaths(preflight.output.resolvedPath);
+    migrationOfflineMode.verifyCheckpoint(job.offlineCheckpoint, "before migration dump streaming");
+    migrationJobUpdate(job, "Building schema inventory", 10);
+    const worldDumpFlags = migrationWorldDumpFlags();
+    const expectedWorldInventory = await createExpectedBackupInventory(preflight.target, {
+      validationProfile: BACKUP_INVENTORY_PROFILES.MIGRATION_PACKAGE,
+      dumpFlags: worldDumpFlags,
+      excludedDuneNames: [...MIGRATION_CODEX_BACKUP_ARTIFACTS, ...MIGRATION_CODEX_BACKUP_ARTIFACTS.map((name) => `${name}_backup_id_seq`)],
+      podTools: preflight.evidence.podTools,
+      onHeartbeat: (value) => migrationJobHeartbeat(job, "Schema inventory", value)
+    });
+    migrationJobUpdate(job, "Generating authoritative archive", 20);
+    const duneToc = await migrationDumpToFile(
+      preflight,
+      paths.dumpPartialPath,
+      (value) => migrationJobExactProgress(job, "Downloading validated dune archive", "Downloading database archive", value),
+      worldDumpFlags,
+      expectedWorldInventory,
+      (value) => migrationJobHeartbeat(job, "Authoritative world archive", value)
+    );
+    migrationOfflineMode.verifyCheckpoint(job.offlineCheckpoint, "after migration dump streaming");
+    migrationJobUpdate(job, "Rechecking stable source", 58);
+    const [afterOffline, afterVendorOperations] = await migrationJobLongStage(job, "Rechecking stable source", "Revalidating structured stopped-workload evidence and operations", () => Promise.all([
+      collectMigrationStructuredOfflineEvidence(preflight.target),
+      runningDumpOperations()
+    ]));
+    if (!afterOffline.offline) throw new Error("The battlegroup or a game-facing workload became active during export; the package was not published.");
+    if (!afterVendorOperations.ok || afterVendorOperations.running.length) throw new Error("A vendor database operation appeared during export; the package was not published.");
+    const after = await migrationJobLongStage(job, "Rechecking stable source", "Revalidating database counts and digests", () => collectMigrationExportSourceCheckpoint(job, preflight.target, preflight.evidence, "Post-dump source safety checkpoint"));
+    const verification = {
+      formatVersion: MIGRATION_PACKAGE_FORMAT_VERSION,
+      queryVersion: MIGRATION_VERIFICATION_QUERY_VERSION,
+      collectedAt: new Date().toISOString(),
+      fingerprints: after.fingerprints,
+      requiredExtensions: after.extensions,
+      entityCounts: after.entityCounts,
+      sourceMarket: after.sourceMarket,
+      relationships: after.relationships,
+      sequences: after.sequences
+    };
+    migrationJobUpdate(job, "Inspecting PostgreSQL archive", 65);
+    migrationOfflineMode.verifyCheckpoint(job.offlineCheckpoint, "before closed migration archive inspection");
+    const world = duneToc.component;
+    const verificationBytes = Buffer.from(canonicalMigrationJson(verification), "utf8");
+    const components = [
+      { path: "world.dump", mediaType: "application/vnd.postgresql.custom-dump", ...world },
+      { path: "verification.json", mediaType: "application/json", size: String(verificationBytes.length), sha256: crypto.createHash("sha256").update(verificationBytes).digest("hex") }
+    ];
+    const manifest = buildMigrationManifest({
+      suiteVersion: APP_VERSION,
+      createdAt: new Date().toISOString(),
+      gameBuild: preflight.source.gameBuild,
+      postgresServerVersion: preflight.source.postgresServerVersion,
+      dumpToolVersion: preflight.source.dumpToolVersion,
+      extensions: preflight.source.requiredExtensions,
+      appliedPatchSha256: after.fingerprints.appliedPatchesSha256,
+      schemaCatalogSha256: after.fingerprints.schemaCatalogSha256,
+      entityCounts: after.entityCounts,
+      sourceMarket: after.sourceMarket,
+      components
+    });
+    migrationJobUpdate(job, "Creating portable package", 80);
+    migrationOfflineMode.verifyCheckpoint(job.offlineCheckpoint, "before migration package creation");
+    await writeMigrationPackage({
+      partialPath: paths.packagePartialPath,
+      worldDumpPath: paths.dumpPartialPath,
+      manifest,
+      verification,
+      onHashProgress: (value) => migrationJobExactProgress(job, "Creating portable package", "Hashing database archive", value),
+      onWriteProgress: (value) => migrationJobExactProgress(job, "Creating portable package", "Writing package payload", value),
+      onVerifyProgress: (value) => migrationJobExactProgress(job, "Creating portable package", "Verifying written package", value)
+    });
+    migrationJobUpdate(job, "Reopening and verifying package", 90);
+    const inspection = await inspectMigrationPackage(paths.packagePartialPath, { onProgress: (value) => migrationJobExactProgress(job, "Reopening and verifying package", "Verifying packaged entries", value) });
+    validateMigrationManifest(inspection.manifest);
+    validateVerificationEvidence(inspection.verification, inspection.manifest);
+    verifyPackagedComponents(inspection, { "world.dump": world });
+    const packageHash = await hashMigrationFile(paths.packagePartialPath, { onProgress: (value) => migrationJobExactProgress(job, "Reopening and verifying package", "Hashing complete package", value) });
+    migrationJobUpdate(job, "Publishing verified package", 97);
+    migrationOfflineMode.verifyCheckpoint(job.offlineCheckpoint, "before migration package publication");
+    await migrationJobLongStage(job, "Publishing verified package", "Final structured workload, source, and Offline Mode checkpoint", async () => {
+      await collectMigrationStructuredOfflineEvidence(preflight.target);
+      return collectMigrationExportSourceCheckpoint(job, preflight.target, preflight.evidence, "Pre-publication source safety checkpoint");
+    });
+    const published = await publishVerifiedPackage(paths.packagePartialPath, preflight.output.resolvedPath);
+    job.status = "success";
+    job.stage = "Verified Package";
+    job.progress = 100;
+    job.completedAt = new Date().toISOString();
+    job.result = {
+      verified: true,
+      status: "Verified Package",
+      message: "Verified — Keep This File Safe",
+      fileName: published.fileName,
+      size: packageHash.size,
+      sha256: packageHash.sha256,
+      sourceBuild: preflight.source.gameBuild,
+      entityCounts: after.entityCounts,
+      sourceMarket: after.sourceMarket,
+      components: { world: { ...world } },
+      unsafeLocation: preflight.output.unsafe,
+      locationWarning: "Copy this verified package somewhere that will survive removal of the old server. Package verification does not make the source server safe to delete.",
+      toc: { dune: { entryCount: duneToc.entryCount, sha256: duneToc.sha256, archiveReadVerified: duneToc.archiveReadVerified } }
+    };
+    try { operationRegistry.finish(job.operation, "success"); } catch {}
+    try { appendAdminAudit("server_migration_export_verified", { operationId: job.operation.id, formatVersion: MIGRATION_PACKAGE_FORMAT_VERSION, sourceBuild: preflight.source.gameBuild, packageBytes: job.result.size, packageSha256: job.result.sha256, duneTocSha256: duneToc.sha256, unsafeLocationAcknowledged: payload.acknowledgeUnsafeLocation === true }); } catch {}
+  } catch (error) {
+    const failedGate = String(job.activity?.substep || job.stage || "Export");
+    job.status = "failed";
+    job.stage = "Export failed";
+    job.error = migrationPublicError(error);
+    job.failure = publicMigrationFailure(error, failedGate);
+    job.completedAt = new Date().toISOString();
+    try { operationRegistry.finish(job.operation, "failed", job.error, { stage: job.stage, diagnostics: { failure: job.failure, sshAttempts: job.sshDiagnostics || [] } }); } catch {}
+    try { appendAdminAudit("server_migration_export_failed", { operationId: job.operation.id, stage: job.stage, errorCode: String(error.code || "export_failed").slice(0, 64) }); } catch {}
+  } finally {
+    if (paths) await removeMigrationPartials([paths.packagePartialPath, paths.dumpPartialPath]);
+  }
+}
+
+function startMigrationExport(payload = {}) {
+  const offlineCheckpoint = migrationOfflineMode.captureCheckpoint("Server Migration export");
+  const operation = operationRegistry.begin("migration:export", "Server Migration Export", { category: "migration", stage: "Pending", detail: "Portable world-state export" });
+  const job = {
+    jobId: `migration-export-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`,
+    operation,
+    offlineCheckpoint,
+    status: "running",
+    stage: "Running export preflight",
+    progress: 0,
+    startedAt: new Date().toISOString(),
+    stageStartedAt: new Date().toISOString(),
+    lastProgressAt: new Date().toISOString(),
+    heartbeat: null,
+    completedAt: "",
+    error: "",
+    failure: null,
+    sshDiagnostics: [],
+    result: null
+  };
+  initializeMigrationJobProgress(job);
+  migrationExportJobs.set(job.jobId, job);
+  runMigrationExportJob(job, { outputPath: String(payload.outputPath || ""), acknowledgeUnsafeLocation: payload.acknowledgeUnsafeLocation === true }).catch(() => {});
+  return publicMigrationExportJob(job);
+}
+
+async function writeMigrationEntryToFile(packagePath, inspection, entryPath, destination, onProgress) {
+  const output = fs.createWriteStream(destination, { flags: "wx", mode: 0o600 });
+  try {
+    await streamMigrationEntry(packagePath, inspection, entryPath, output, { onProgress });
+    const handle = await fs.promises.open(destination, "r+");
+    try { await handle.sync(); } finally { await handle.close(); }
+  } catch (error) {
+    output.destroy();
+    await fs.promises.rm(destination, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function migrationStoppedEvidence(target, options = {}) {
+  return collectMigrationStructuredOfflineEvidence(target, options);
+}
+
+async function migrationImportPreflight(payload = {}, options = {}) {
+  const stage = (name, substep) => options.onStage?.({ stage: name, substep: substep || name });
+  stage("Inspecting package", "Opening and verifying the migration package");
+  const packagePath = path.resolve(String(payload.packagePath || ""));
+  if (!String(payload.packagePath || "").trim() || path.extname(packagePath).toLowerCase() !== ".a9migration") throw new Error("Choose a .a9migration package.");
+  const inspection = await inspectMigrationPackage(packagePath, { onProgress: options.onPackageVerifyProgress });
+  validateMigrationManifest(inspection.manifest);
+  validateVerificationEvidence(inspection.verification, inspection.manifest);
+  const whole = await hashMigrationFile(packagePath, { onProgress: options.onPackageHashProgress });
+  stage("Resolving destination", "Resolving the stopped destination database and workload state");
+  const selectedProfile = await collectSelectedDestinationIdentity();
+  const retryOptions = {
+    preflightReadOnlyRetry: options.preflightReadOnlyRetry === true,
+    onSshAttempt: options.onSshAttempt,
+    onSshRetry: options.onSshRetry
+  };
+  const target = await databaseRuntimeTarget(retryOptions);
+  const offline = await migrationStoppedEvidence(target, retryOptions);
+  const offlineCheckpoint = buildMigrationRollbackOfflineCheckpoint(offline, target);
+  const destinationBuild = migrationBuildFromPods({ items: [] }, await battlegroupResource({ ...retryOptions, purpose: "Import preflight: destination build resource" }));
+  stage("Checking destination compatibility", "Sampling destination versions, extensions, fingerprints, writers, and conflicts");
+  const outsideDune = await migrationOutsideDuneBoundary(target, "Import preflight: canonical outside-dune evidence");
+  const [evidence, freshText, vendor, scheduler] = await Promise.all([
+    migrationEvidence(target, { includeMarketBot: false, checkpointPurpose: "Import preflight destination evidence", outsideDune, ...retryOptions }),
+    migrationSql(target, MIGRATION_FRESH_DESTINATION_SQL, 120000, { ...retryOptions, purpose: "Import preflight: fresh-destination counts" }),
+    runningDumpOperations(retryOptions),
+    vmSchedulerStatus(retryOptions)
+  ]);
+  const fresh = parseMigrationJson(freshText, "fresh-destination");
+  const active = operationRegistry.snapshot().active.filter((operation) => operation.id !== options.ignoreOperationId && operationsConflict("migration:import", operation.key));
+  const compatibility = {
+    gameBuild: destinationBuild,
+    postgresMajor: String(evidence.database.serverVersion || "").split(".")[0],
+    restoreToolMajor: String(evidence.restoreVersion || "").split(".")[0],
+    schemaCatalogSha256: evidence.fingerprints.schemaCatalogSha256,
+    appliedPatchSha256: evidence.fingerprints.appliedPatchesSha256,
+    extensions: outsideDune.extensions.map(({ name, version }) => ({ name, version }))
+  };
+  const destination = {
+    profileBinding: selectedProfile,
+    offlineMode: migrationOfflineMode.status(),
+    battlegroup: { ...offlineCheckpoint, runningGameWorkloads: offlineCheckpoint.runningGamePods },
+    database: {
+      unexpectedWriters: String(evidence.writerSamples?.[0]?.unexpectedActiveClients || evidence.writers.unexpectedActiveClients),
+      openTransactions: String(evidence.writerSamples?.[0]?.openTransactions || evidence.writers.openTransactions)
+    },
+    conflictingOperations: active.length > 0 || !vendor.ok || vendor.running.length > 0,
+    automaticRestartDisabled: scheduler.reachable === true && scheduler.ambiguousRegistration !== true
+      && (scheduler.installed === false || scheduler.config?.enabled === false || scheduler.config?.restart?.enabled === false),
+    compatibility,
+    outsideDune,
+    fresh
+  };
+  const conditions = [];
+  try { validateMigrationDestinationPreflight(destination); conditions.push(migrationCondition("exact-fresh-destination", true, "Destination is exact-compatible, fresh, stopped, and writer-free; Market Bot is not required.")); }
+  catch (error) { conditions.push(migrationCondition("exact-fresh-destination", false, error.message)); }
+  conditions.push(migrationCondition("package-integrity", true, "Package manifest, self-digest, component hashes, verification evidence, and whole-file hash are valid.", { size: whole.size, sha256: whole.sha256 }));
+  stage("Finalizing import preflight", "Producing the complete destination gate result without starting import");
+  return { ready: conditions.every((row) => row.ok), checkedAt: new Date().toISOString(), conditions, package: { fileName: path.basename(packagePath), size: whole.size, sha256: whole.sha256, sourceBuild: inspection.manifest.source.gameBuild, profileId: inspection.manifest.compatibility.profileId }, destination, target, inspection, packagePath, evidence };
+}
+
+async function restoreCustomArchive(localPath, target, flags) {
+  const connection = await migrationSshConnection();
+  const tools = await migrationPodArchiveTools(target);
+  const component = await hashDatabaseBackupFile(localPath);
+  const timeoutMs = 60 * 60 * 1000;
+  const staged = await inspectRecoveryArchive({
+    filePath: localPath,
+    component,
+    restoreExecutable: tools.restoreExecutable,
+    sshArgs: connection.args,
+    target,
+    runCommand: run,
+    timeout: timeoutMs,
+    retainRemote: true
+  });
+  if (canonicalMigrationJson((flags || []).map(String)) !== canonicalMigrationJson(MIGRATION_DUNE_RESTORE_FLAGS)) throw new Error("The requested migration restore profile is not the atomic dune-only profile.");
+  const shared = { runCommand: run, sshArgs: connection.args, target, timeoutMs };
+  let primaryError = null;
+  try {
+    return await runAtomicDuneSchemaRestore({
+      archivePath: staged.remotePath,
+      restoreExecutable: tools.restoreExecutable,
+      psqlExecutable: tools.psqlExecutable,
+      dbSvc: target.dbSvc,
+      runCommand: run,
+      runCredentialScript: runMigrationCredentialScript,
+      runStdinScript: runMigrationCredentialScript,
+      sshArgs: connection.args,
+      target,
+      timeoutMs
+    });
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    try { await cleanupPodArchivePaths(shared, [POD_ARCHIVE_PATHS.legacyRecovery, POD_ARCHIVE_PATHS.dropSql, POD_ARCHIVE_PATHS.restoreSql, POD_ARCHIVE_PATHS.credential, POD_ARCHIVE_PATHS.credentialNext]); }
+    catch (cleanupError) {
+      if (!primaryError) throw cleanupError;
+      primaryError.details = { ...(primaryError.details || {}), archiveCleanupFailed: true, archiveCleanupError: migrationDiagnosticText(cleanupError.message) };
+    }
+  }
+}
+
+async function migrationOutsideDuneBoundary(target, purpose) {
+  const raw = parseMigrationJson(await migrationSql(target, MIGRATION_OUTSIDE_DUNE_BOUNDARY_SQL, 240000, { purpose }), "outside-dune boundary");
+  return normalizeMigrationOutsideDuneBoundary(raw);
+}
+
+async function assertMigrationCrossSchemaSafe(target, purpose) {
+  const raw = parseMigrationJson(await migrationSql(target, MIGRATION_CROSS_SCHEMA_DEPENDENCY_SQL, 120000, { purpose }), "cross-schema dependency gate");
+  return normalizeMigrationCrossSchemaDependencyEvidence(raw);
+}
+
+function migrationRestoredEvidence(evidence) {
+  return { fingerprints: evidence.fingerprints, entityCounts: evidence.entityCounts, sourceMarket: evidence.sourceMarket, relationships: evidence.relationships, sequences: evidence.sequences, relationalInvalidity: String(evidence.relationships.invalidForeignKeys) };
+}
+
+function publicMigrationImportJob(job) {
+  return { ok: job.status !== "failed", jobId: job.jobId, operationId: job.operation?.id || "", status: job.status, stage: job.stage, startedAt: job.startedAt, completedAt: job.completedAt || "", error: job.error || "", failure: job.failure || null, sshAttempts: Array.isArray(job.sshDiagnostics) ? job.sshDiagnostics.map((attempt) => ({ ...attempt })) : [], result: job.result || null, live: publicMigrationJobProgress(job) };
+}
+
+function atomicMigrationWorkerPointer(value) {
+  fs.mkdirSync(path.dirname(MIGRATION_WORKER_POINTER_PATH), { recursive: true });
+  const temporary = `${MIGRATION_WORKER_POINTER_PATH}.next-${crypto.randomUUID()}`;
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  const handle = fs.openSync(temporary, "r+"); try { fs.fsyncSync(handle); } finally { fs.closeSync(handle); }
+  try { fs.renameSync(temporary, MIGRATION_WORKER_POINTER_PATH); } finally { fs.rmSync(temporary, { force: true }); }
+}
+
+function readMigrationWorkerPointer() {
+  try {
+    const value = JSON.parse(fs.readFileSync(MIGRATION_WORKER_POINTER_PATH, "utf8"));
+    if (value?.version !== 1 || !/^migration-import-[0-9]{13}-[a-f0-9]{8}$/.test(String(value.jobId || ""))) return null;
+    return value;
+  } catch { return null; }
+}
+
+async function migrationWorkerSsh(command) {
+  const connection = await migrationSshConnection();
+  return run("ssh", [...connection.args, command], { timeout: 120000, maxBuffer: 1024 * 1024 * 4 });
+}
+
+async function migrationWorkerUpload(localPath, remotePath) {
+  const connection = await migrationSshConnection();
+  if (!/^\/tmp\/alphanine-migration-upload-migration-import-[0-9]{13}-[a-f0-9]{8}\/[A-Za-z0-9_.-]+$/.test(String(remotePath || ""))) throw new Error("Migration worker upload path is unsafe.");
+  const result = await runWithStdin("ssh", [...connection.args, `dd of=${remotePath} status=none`], localPath, { timeout: 60 * 60 * 1000, maxBuffer: 1024 * 1024 * 4 });
+  return { ...result, ok: result.ok === true && result.inputComplete === true };
+}
+
+function workerExpectedCleanup(sourceMarket) {
+  return {
+    committed: true,
+    deletedListings: String(sourceMarket.counts.activeListings),
+    deletedSellRows: String(sourceMarket.counts.activeListings),
+    deletedItems: String(sourceMarket.counts.activeListings),
+    completedHistory: String(sourceMarket.counts.completedHistory),
+    completedHistoryDigest: String(sourceMarket.digests.completedHistory)
+  };
+}
+
+function workerExactCheck(file, purpose, sql, expected, phases) { return { file, purpose, sql, kind: "exact-json", expected, phases }; }
+function workerDigestCheck(file, purpose, sql, expectedSha256, phases) { return { file, purpose, sql, expectedSha256, phases }; }
+
+async function prepareDestinationWorkerImport(job, payload) {
+  migrationOfflineMode.verifyCheckpoint(job.offlineCheckpoint, "before durable destination worker preparation");
+  const checked = await migrationImportPreflight(payload, { ignoreOperationId: job.operation.id, preflightReadOnlyRetry: true });
+  if (!checked.ready) throw new Error(checked.conditions.find((row) => !row.ok)?.message || "Import preflight failed.");
+  assertMigrationImportReadinessUnchanged(job.approvedCheckpoint, checked);
+  job.preflight = checked;
+  const outsideRaw = await migrationSql(checked.target, MIGRATION_OUTSIDE_DUNE_BOUNDARY_SQL, 240000, { purpose: "Durable worker signed outside-dune checkpoint" });
+  const crossRaw = parseMigrationJson(await migrationSql(checked.target, MIGRATION_CROSS_SCHEMA_DEPENDENCY_SQL, 120000, { purpose: "Durable worker signed cross-schema checkpoint" }), "durable worker cross-schema checkpoint");
+  const cross = normalizeMigrationCrossSchemaDependencyEvidence(crossRaw);
+  const manifest = checked.inspection.manifest;
+  const verification = checked.inspection.verification;
+  const expectedFinalCounts = expectedFinalEntityCounts(manifest.entityCounts, manifest.sourceMarket.counts.activeListings);
+  const expectedFinalMarket = emptyDestinationMarketEvidence(manifest.sourceMarket);
+  const writerZero = { unexpectedActiveClients: "0", openTransactions: "0" };
+  const checks = [
+    workerExactCheck("pre-writers.sql", "zero writers and transactions", ACTIVE_WRITERS_SQL, writerZero, ["pre"]),
+    workerExactCheck("pre-fresh.sql", "fresh destination boundary", MIGRATION_FRESH_DESTINATION_SQL, checked.destination.fresh, ["pre"]),
+    workerDigestCheck("pre-schema.sql", "fresh schema fingerprint", MIGRATION_SCHEMA_SQL, checked.evidence.fingerprints.schemaCatalogSha256, ["pre"]),
+    workerDigestCheck("pre-patch.sql", "patch fingerprint", MIGRATION_PATCH_SQL, checked.evidence.fingerprints.appliedPatchesSha256, ["pre"]),
+    workerExactCheck("pre-entities.sql", "fresh authoritative entity counts", entityCountsSql(), checked.evidence.entityCounts, ["pre"]),
+    workerExactCheck("pre-market.sql", "fresh market boundary", buildPortableEmptyMarketEvidenceSql(), checked.evidence.sourceMarket, ["pre"]),
+    { file: "pre-relationships.sql", purpose: "fresh relationship evidence", sql: MIGRATION_RELATIONSHIP_SQL, kind: "relationship", expected: checked.evidence.relationships, phases: ["pre"] },
+    { file: "pre-sequences.sql", purpose: "fresh sequence evidence", sql: MIGRATION_SEQUENCE_SQL, kind: "sequence", expected: checked.evidence.sequences, phases: ["pre"] },
+    workerDigestCheck("pre-outside.sql", "outside-dune checkpoint", MIGRATION_OUTSIDE_DUNE_BOUNDARY_SQL, migrationSha256Text(outsideRaw), ["pre", "restored", "final"]),
+    { file: "pre-cross.sql", purpose: "cross-schema dependency gate", sql: MIGRATION_CROSS_SCHEMA_DEPENDENCY_SQL, kind: "cross-schema", expected: cross, phases: ["pre", "restored", "final"] },
+    workerExactCheck("restored-writers.sql", "zero writers after restore", ACTIVE_WRITERS_SQL, writerZero, ["restored", "final"]),
+    workerDigestCheck("restored-schema.sql", "exact post-restore portable schema fingerprint", MIGRATION_SCHEMA_SQL, MIGRATION_SUPPORTED_PROFILE.restoredPortableSchemaSha256, ["restored", "final"]),
+    workerDigestCheck("restored-patch.sql", "restored patch fingerprint", MIGRATION_PATCH_SQL, manifest.fingerprints.appliedPatchesSha256, ["restored", "final"]),
+    workerExactCheck("restored-entities.sql", "restored entity counts", entityCountsSql(), manifest.entityCounts, ["restored"]),
+    workerExactCheck("restored-market.sql", "restored market evidence", buildPortableEmptyMarketEvidenceSql(), manifest.sourceMarket, ["restored"]),
+    { file: "restored-relationships.sql", purpose: "restored relationship evidence", sql: MIGRATION_RELATIONSHIP_SQL, kind: "relationship", expected: verification.relationships, phases: ["restored", "final"] },
+    { file: "restored-sequences.sql", purpose: "restored sequence evidence", sql: MIGRATION_SEQUENCE_SQL, kind: "sequence", expected: verification.sequences, phases: ["restored", "final"] },
+    workerExactCheck("final-entities.sql", "final entity counts", entityCountsSql(), expectedFinalCounts, ["final"]),
+    workerExactCheck("final-market.sql", "empty final market boundary", buildPortableEmptyMarketEvidenceSql(), expectedFinalMarket, ["final"])
+  ];
+  const checkpoint = migrationImportReadinessDigest(checked);
+  const priorWorker = readMigrationWorkerPointer();
+  const reusableArtifact = priorWorker?.active === false && priorWorker?.lastState?.rollbackVerified === true && priorWorker?.summary?.checkpoint === checkpoint
+    ? priorWorker.lastState?.artifacts?.rollbackBackup : null;
+  const reuseRollback = reusableArtifact && /^[1-9][0-9]*$/.test(String(reusableArtifact.size || "")) && /^[a-f0-9]{64}$/.test(String(reusableArtifact.sha256 || ""))
+    ? { path: "rollback.dump", size: String(reusableArtifact.size), sha256: String(reusableArtifact.sha256) } : null;
+  const reuseRollbackSource = reuseRollback ? `${String(priorWorker.remoteJobDir)}/rollback.dump` : "";
+  const plan = buildMigrationWorkerPlan({
+    target: checked.target,
+    kubectlExecutable: String(await migrationSshCommand("sudo -n which kubectl", 30000, { purpose: "Resolve privileged Kubernetes executable" })).trim(),
+    tools: { pgDump: checked.evidence.podTools.dumpExecutable, pgRestore: checked.evidence.podTools.restoreExecutable, psql: checked.evidence.podTools.psqlExecutable },
+    world: checked.inspection.entries.find((entry) => entry.path === "world.dump"),
+    checks,
+    cleanupSql: buildDestinationMarketCleanupSql(manifest.sourceMarket),
+    cleanupExpected: workerExpectedCleanup(manifest.sourceMarket),
+    injectRestoreFailure: payload.injectWorkerRestoreFailure === true,
+    reuseRollback,
+    reuseRollbackSource
+  });
+  if (payload.testWorkerStageHolds === true) {
+    const heldStages = new Set(["rollback-backup", "atomic-package-restore", "final-verification"]);
+    for (const stage of plan.stages) if (heldStages.has(stage.name)) stage.minimumDurationMs = 5000;
+  }
+  const stagingRoot = path.join(MIGRATION_WORKER_STAGING_ROOT, job.jobId);
+  const inputsRoot = path.join(stagingRoot, "inputs");
+  const bundleRoot = path.join(stagingRoot, "bundle");
+  fs.rmSync(stagingRoot, { recursive: true, force: true });
+  fs.mkdirSync(inputsRoot, { recursive: true });
+  const inputFiles = [];
+  for (const input of plan.inputs) {
+    const inputPath = path.join(inputsRoot, input.name);
+    fs.writeFileSync(inputPath, input.content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    inputFiles.push({ name: input.name, path: inputPath });
+  }
+  const worldPath = path.join(inputsRoot, "world.dump");
+  const world = await extractMigrationEntry(checked.packagePath, checked.inspection, "world.dump", worldPath);
+  if (world.size !== plan.options.world.size || world.sha256 !== plan.options.world.sha256) throw new Error("Extracted package archive differs from its verified package entry.");
+  inputFiles.push({ name: "world.dump", path: worldPath });
+  const prepared = await prepareSignedJob({
+    jobId: job.jobId, stagingDir: bundleRoot, profileDataDir: DATA_DIR,
+    packagePath: checked.packagePath, workerPath: MIGRATION_WORKER_BINARY_PATH, workerPinPath: MIGRATION_WORKER_PIN_PATH,
+    expectedPackageSize: checked.package.size, expectedPackageSha256: checked.package.sha256,
+    destinationCheckpoint: checkpoint, rollbackCheckpoint: checkpoint, inputs: inputFiles,
+    stages: plan.stages, rollbackStages: plan.rollbackStages, cleanup: plan.cleanup
+  });
+  return { checked, prepared, plan, summary: { checkpoint, reusedRollbackBackup: Boolean(reuseRollback), package: checked.package, fingerprints: manifest.fingerprints, sourceEntityCounts: manifest.entityCounts, finalEntityCounts: expectedFinalCounts, sourceMarket: manifest.sourceMarket, finalMarket: expectedFinalMarket, relationships: verification.relationships, sequences: verification.sequences, outsideDune: checked.destination.outsideDune } };
+}
+
+function applyDestinationWorkerState(job, state, summary) {
+  job.stage = state.stage;
+  job.status = state.status === "verified" ? "success" : (state.status === "failed" ? (state.rollbackVerified ? "rolled-back" : "failed") : "running");
+  beginMigrationJobProgress(job, state.stage, state.detail);
+  if (job.activity) { job.activity.lastActivityAt = state.heartbeat || state.updatedAt; job.activity.state = state.status === "verified" ? "verified" : (state.status === "failed" ? "failed" : "working"); }
+  if (state.status === "verified") {
+    job.result = { ok: true, worker: { version: state.workerVersion, durable: true }, rollbackBackup: state.artifacts?.rollbackBackup || null, ...summary, rollbackOutcome: "not-required", temporaryCleanup: "verified" };
+    job.completedAt = state.finishedAt || new Date().toISOString(); operationRegistry.finish(job.operation, "success");
+  } else if (state.status === "failed") {
+    job.error = state.error || "Destination migration worker failed closed.";
+    job.result = { ok: false, worker: { version: state.workerVersion, durable: true }, rollbackBackup: state.artifacts?.rollbackBackup || null, rollbackOutcome: state.rollbackVerified ? "verified" : (state.rollbackAttempted ? "failed" : "not-started"), errorCode: state.errorCode };
+    job.completedAt = state.finishedAt || new Date().toISOString(); operationRegistry.finish(job.operation, "failed", job.error);
+  } else operationRegistry.update(job.operation, state.stage, state.detail, { heartbeat: publicMigrationJobProgress(job) });
+}
+
+async function runDestinationWorkerImportJob(job, payload) {
+  const localStagingRoot = path.join(MIGRATION_WORKER_STAGING_ROOT, job.jobId);
+  try {
+    const worker = await prepareDestinationWorkerImport(job, payload);
+    const deployed = await deploySignedWorkerJob({ prepared: worker.prepared, ssh: migrationWorkerSsh, upload: migrationWorkerUpload });
+    // The remote worker has independently verified every uploaded byte before
+    // deploySignedWorkerJob returns.  Nothing in this local staging directory is
+    // needed to run, reconnect to, or recover the durable destination job.
+    fs.rmSync(localStagingRoot, { recursive: true, force: true });
+    const pointer = { version: 1, active: true, jobId: job.jobId, remoteJobDir: deployed.remoteJobDir, startedAt: job.startedAt, updatedAt: new Date().toISOString(), summary: worker.summary, workerSha256: deployed.workerSha256, signingKeyFingerprint: deployed.signingKeyFingerprint };
+    atomicMigrationWorkerPointer(pointer);
+    await startWorker({ jobId: job.jobId, ssh: migrationWorkerSsh });
+    for (;;) {
+      try {
+        const state = await readWorkerStatus({ jobId: job.jobId, ssh: migrationWorkerSsh });
+        applyDestinationWorkerState(job, state, worker.summary);
+        atomicMigrationWorkerPointer({ ...pointer, active: !state.terminal, updatedAt: new Date().toISOString(), lastState: state });
+        if (state.terminal) break;
+      } catch (error) {
+        beginMigrationJobProgress(job, job.stage || "destination-worker", "SSH polling unavailable; the destination worker continues independently");
+        operationRegistry.update(job.operation, job.stage, job.activity.substep, { diagnostics: { polling: migrationPublicError(error.message) } });
+      }
+      await sleepMs(1500);
+    }
+  } catch (error) {
+    job.status = "failed"; job.stage = "failed"; job.error = migrationPublicError(error); job.failure = publicMigrationFailure(error, "Durable destination worker preparation"); job.completedAt = new Date().toISOString(); operationRegistry.finish(job.operation, "failed", job.error);
+  } finally {
+    // Preparation and deployment failures must not strand package, SQL, worker,
+    // signature, or job-description copies on the Suite host.
+    fs.rmSync(localStagingRoot, { recursive: true, force: true });
+  }
+}
+
+function resumeDurableMigrationWorkerFromPointer() {
+  const pointer = readMigrationWorkerPointer();
+  if (!pointer || pointer.active !== true || migrationImportJobs.has(pointer.jobId)) return null;
+  const operation = operationRegistry.begin("migration:import", "Server Migration Import", { category: "migration", stage: "Reconnecting", detail: "Reconnecting to durable destination worker" });
+  const job = { jobId:pointer.jobId,operation,offlineCheckpoint:null,approvedCheckpoint:null,sshDiagnostics:[],status:"running",stage:String(pointer.lastState?.stage||"reconnecting"),startedAt:String(pointer.startedAt||new Date().toISOString()),completedAt:"",error:"",failure:null,result:null };
+  initializeMigrationJobProgress(job); migrationImportJobs.set(job.jobId,job);
+  (async()=>{for(;;){try{const state=await readWorkerStatus({jobId:job.jobId,ssh:migrationWorkerSsh});applyDestinationWorkerState(job,state,pointer.summary||{});atomicMigrationWorkerPointer({...pointer,active:!state.terminal,updatedAt:new Date().toISOString(),lastState:state});if(state.terminal)break}catch(error){beginMigrationJobProgress(job,job.stage,"SSH polling unavailable; the destination worker continues independently");operationRegistry.update(job.operation,job.stage,job.activity.substep,{diagnostics:{polling:migrationPublicError(error.message)}})}await sleepMs(1500)}})().catch(()=>{});
+  return job;
+}
+
+async function runMigrationImportJob(job, payload) {
+  let worldPath = "";
+  const journalStore = new ImportJournal(MIGRATION_IMPORT_JOURNAL_PATH);
+  try {
+    const result = await runServerMigrationImport({
+      confirmText: payload.confirmText,
+      inspectPackage: async () => migrationJobLongStage(job, "inspecting-package", "Inspecting package and destination", async () => {
+        const checked = await migrationImportPreflight(payload, {
+          ignoreOperationId: job.operation.id,
+          preflightReadOnlyRetry: true,
+          onSshAttempt: (attempt) => {
+            if (attempt.category === "success" && attempt.attempt === "1") return;
+            job.sshDiagnostics = [...(job.sshDiagnostics || []), { ...attempt }].slice(-64);
+            operationRegistry.update(job.operation, job.stage, job.activity?.substep || job.stage, { diagnostics: { sshAttempts: job.sshDiagnostics } });
+          },
+          onSshRetry: ({ retry, maximum }) => {
+            const detail = `SSH connection interrupted during import readiness revalidation — retrying ${retry}/${maximum}.`;
+            touchMigrationJobProgress(job, detail);
+            operationRegistry.update(job.operation, job.stage, detail, { diagnostics: { sshAttempts: job.sshDiagnostics || [] } });
+          },
+          onPackageVerifyProgress: (value) => migrationJobExactProgress(job, "inspecting-package", "Verifying package entries", value),
+          onPackageHashProgress: (value) => migrationJobExactProgress(job, "inspecting-package", "Hashing complete package", value)
+        });
+        if (!checked.ready) throw new Error(checked.conditions.find((row) => !row.ok)?.message || "Import preflight failed.");
+        assertMigrationImportReadinessUnchanged(job.approvedCheckpoint, checked);
+        job.preflight = checked;
+        return { manifest: checked.inspection.manifest, verification: checked.inspection.verification, wholePackageSha256: checked.package.sha256, wholePackageSize: checked.package.size, inspection: checked.inspection, packagePath: checked.packagePath };
+      }),
+      preflight: async () => job.preflight.destination,
+      createRollbackBackup: async () => migrationJobLongStage(job, "creating-rollback-backup", "Creating and verifying destination rollback backup", async () => {
+        const backup = await createNativeDatabaseBackup({
+          prefix: "server-migration-destination-rollback",
+          offlineCheckpoint: job.offlineCheckpoint,
+          requiredAlphaTables: [],
+          requireMarketBot: false,
+          expectedStructuredOfflineCheckpoint: job.approvedCheckpoint.snapshot.destination.battlegroup
+        });
+        if (!backup.ok) throw new Error(backup.error || "Destination rollback backup failed.");
+        return backup;
+      }),
+      verifyRollbackBackup: async (backup) => ({ validationProfile: backup.toc?.validationProfile || "", sha256: backup.sha256, size: backup.size, archiveReadVerified: backup.toc?.archiveReadVerified === true, completeDune: backup.toc?.duneSchema === true, alphaTables: backup.toc?.requiredAlphaTables || [], path: backup.filePath }),
+      readArchiveCompletely: async (packageData) => {
+        worldPath = path.join(await fs.promises.mkdtemp(path.join(os.tmpdir(), "a9migration-import-")), "world.dump");
+        await writeMigrationEntryToFile(packageData.packagePath, packageData.inspection, "world.dump", worldPath, (value) => migrationJobExactProgress(job, "reading-archive", "Extracting world archive", value));
+        const toc = await migrationJobLongStage(job, "reading-archive", "Listing PostgreSQL archive", () => matchingPgRestore(worldPath, job.preflight.target, ["--list"]));
+        // The approved package is bound to the source-portable schema pin, while
+        // the pre-import database is intentionally bound to the different clean-
+        // destination pin. Reconstructing source TABLE DATA expectations from
+        // the fresh destination catalog therefore creates false missing/extra
+        // entries. The export already performed exact source catalog-to-TOC
+        // validation; import revalidates the immutable package/component hash,
+        // strict portable boundary, complete archive read, and post-restore
+        // source fingerprint/count/relationship evidence.
+        validatePgRestoreToc(toc, { scope: "dune" });
+        await migrationJobLongStage(job, "reading-archive", "Reading and decompressing PostgreSQL archive", () => matchingPgRestore(worldPath, job.preflight.target, ["--file=/dev/null"]));
+        return { ok: true, matchingVersion: true };
+      },
+      captureOutsideDune: async (stage) => migrationJobLongStage(job, "outside-dune-checkpoint", "Capturing extensions and outside-dune boundary", () => migrationOutsideDuneBoundary(job.preflight.target, `Import ${stage}: outside-dune boundary`)),
+      assertCrossSchemaSafe: async (stage) => migrationJobLongStage(job, "cross-schema-dependency-gate", "Checking cross-schema dependencies", () => assertMigrationCrossSchemaSafe(job.preflight.target, `Import ${stage}: cross-schema dependency gate`)),
+      verifyOutsideDune: async (stage) => migrationJobLongStage(job, "outside-dune-verification", "Verifying extensions and outside-dune boundary", async () => {
+        return migrationOutsideDuneBoundary(job.preflight.target, `Import ${stage}: outside-dune verification`);
+      }),
+      restorePackage: async (_packageData, flags) => {
+        await migrationJobLongStage(job, "restoring-package", "Restoring portable world archive", () => restoreCustomArchive(worldPath, job.preflight.target, flags));
+      },
+      verifyRestored: async () => migrationJobLongStage(job, "verifying-restore", "Verifying restored schema, counts, and digests", async () => migrationRestoredEvidence(await migrationEvidence(job.preflight.target, { includeMarketBot: false }))),
+      cleanupDestinationMarket: async (packageData) => migrationJobLongStage(job, "cleaning-destination-market", "Removing portable active market listings", async () => {
+        const raw = await migrationSql(job.preflight.target, buildDestinationMarketCleanupSql(packageData.manifest.sourceMarket), 10 * 60 * 1000);
+        return validateDestinationCleanupResult(parseMigrationJson(raw, "destination market cleanup"), packageData.manifest.sourceMarket);
+      }),
+      verifyFinal: async () => migrationJobLongStage(job, "final-verification", "Performing final migration verification", async () => migrationRestoredEvidence(await migrationEvidence(job.preflight.target, { includeMarketBot: false }))),
+      restoreRollback: async (backup, flags) => migrationJobLongStage(job, "rolling-back", "Restoring destination rollback backup", () => restoreCustomArchive(backup.filePath, job.preflight.target, flags)),
+      verifyRollback: async () => migrationJobLongStage(job, "verifying-rollback", "Verifying automatic rollback", async () => {
+        const after = await migrationEvidence(job.preflight.target, { includeMarketBot: false });
+        return { matchesPreImport: canonicalMigrationJson(migrationRestoredEvidence(after)) === canonicalMigrationJson(migrationRestoredEvidence(job.preflight.evidence)) };
+      }),
+      verifyStopped: async (stage) => {
+        await migrationStoppedEvidence(job.preflight.target);
+        const writers = await collectIndependentWriterSamples(
+          async () => parseMigrationJson(await migrationSql(job.preflight.target, ACTIVE_WRITERS_SQL), `import writer check ${stage}`),
+          () => sleepMs(750)
+        );
+        if (!evaluateIndependentWriterSamples(writers).ok) throw new Error(`Destination writer state changed at import ${stage}.`);
+        return { ok: true };
+      },
+      checkpoint: async (stage) => migrationOfflineMode.verifyCheckpoint(job.offlineCheckpoint, stage),
+      journal: async (event) => { beginMigrationJobProgress(job, event.stage, "Server Migration v1 import"); operationRegistry.update(job.operation, event.stage, "Server Migration v1 import"); journalStore.write({ active: !["complete", "rolled-back", "failed"].includes(event.stage), packageSha256: job.preflight?.package?.sha256 || "", backupSha256: event.rollbackBackup?.sha256 || "", ...event }); }
+    });
+    job.status = "success"; job.stage = result.stage; job.result = result; job.completedAt = new Date().toISOString(); operationRegistry.finish(job.operation, "success");
+  } catch (error) {
+    job.status = error.code === "migration_import_rolled_back" ? "rolled-back" : "failed";
+    job.stage = job.status === "rolled-back" ? "rolled-back" : "failed";
+    job.error = migrationPublicError(error);
+    job.failure = publicMigrationFailure(error, String(job.activity?.substep || job.stage || "Import readiness revalidation"));
+    job.completedAt = new Date().toISOString();
+    operationRegistry.finish(job.operation, "failed", job.error, { stage: job.stage, diagnostics: { failure: job.failure, sshAttempts: job.sshDiagnostics || [] } });
+  } finally {
+    if (worldPath) await fs.promises.rm(path.dirname(worldPath), { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function startMigrationImport(payload = {}) {
+  if (String(payload.confirmText || "") !== MIGRATION_IMPORT_CONFIRMATION) throw new Error(`Type ${MIGRATION_IMPORT_CONFIRMATION} exactly.`);
+  const approvedCheckpoint = approvedMigrationImportPreflight(payload);
+  const offlineCheckpoint = migrationOfflineMode.captureCheckpoint("Server Migration import");
+  const operation = operationRegistry.begin("migration:import", "Server Migration Import", { category: "migration", stage: "Pending", detail: "Exact-compatible destination import with rollback" });
+  const job = { jobId: `migration-import-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`, operation, offlineCheckpoint, approvedCheckpoint, sshDiagnostics: [], status: "running", stage: "inspecting-package", startedAt: new Date().toISOString(), completedAt: "", error: "", failure: null, result: null };
+  initializeMigrationJobProgress(job);
+  migrationImportJobs.set(job.jobId, job);
+  runDestinationWorkerImportJob(job, { packagePath: String(payload.packagePath || ""), confirmText: String(payload.confirmText || ""), preflightApprovalDigest: String(payload.preflightApprovalDigest || ""), injectWorkerRestoreFailure: process.env.ALPHANINE_MIGRATION_WORKER_TEST_MODE === "1" && process.env.ALPHANINE_MIGRATION_WORKER_INJECT_RESTORE_FAILURE === "1", testWorkerStageHolds: process.env.ALPHANINE_MIGRATION_WORKER_TEST_MODE === "1" && process.env.ALPHANINE_MIGRATION_WORKER_TEST_STAGE_HOLDS === "1" }).catch(() => {});
+  return publicMigrationImportJob(job);
 }
 
 function parseDbRows(output, columns) {
@@ -9326,10 +13060,14 @@ function giveItemCapabilities() {
     qualitySupported: true,
     qualityParameterName: "quality",
     acceptedQualityValues: [0, 1, 2, 3, 4, 5],
+    setDurabilityTo200: true,
+    durabilityValue: GIVE_ITEM_DURABILITY_VALUE,
+    durabilityField: "stats.FItemStackAndDurabilityStats[1].CurrentDurability",
     notes: [
       "Grade 0 uses the live receiver route with RabbitMQ AddItemToInventory.",
       "Grades 1-5 use a database-backed inventory grant and may require the player to relog or refresh inventory.",
       "Dry-run validates the player inventory and next item slot without inserting an item.",
+      "Set Durability to 200 writes CurrentDurability only for catalog-proven weapons, armor, tools, and equipment; all other item classes show Durability not applicable.",
       "Known item metadata fields inspected for display/filtering: quality, Quality, itemQuality, durability, rarity, tier, grade, roll, statRoll, itemLevel.",
       "No database writes are performed for capability detection."
     ]
@@ -9356,6 +13094,7 @@ function validateGiveItemPayload(payload) {
     requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`
   };
   if (hasQuality) command.quality = quality;
+  command.setDurabilityTo200 = requestedDurability(payload.setDurabilityTo200);
   return command;
 }
 
@@ -10562,6 +14301,7 @@ async function processRepairQueueItem(item) {
 }
 
 async function processRepairQueue() {
+  if (SERVER_MIGRATION_ENABLED && migrationMaintenance.status().active) return { ...repairQueueSnapshot(), skipped: true, reason: MIGRATION_MAINTENANCE_BANNER };
   if (repairQueueProcessing) return repairQueueSnapshot();
   const due = repairQueue.filter((item) => item.status === "queued" && (!item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= Date.now()));
   if (!due.length) return repairQueueSnapshot();
@@ -12205,15 +15945,58 @@ function dbBackedGiveItemGrade(command) {
   return Number.isInteger(grade) && grade > 0 ? grade : 0;
 }
 
+function giveItemCatalogItem(template) {
+  const wanted = String(template || "").trim().toLowerCase();
+  return gearCatalog().find((item) => String(item.id || "").trim().toLowerCase() === wanted) || null;
+}
+
+async function investigateGiveItemDurability(template) {
+  const output = await dbQuery(buildDurabilityInvestigationSql(sqlString(template)), 15000);
+  const row = parseDbRows(output, ["dataType", "udtName", "compositeStatsType", "currentRows", "numericRows", "selectedCurrentRows", "selectedNumericRows"])[0] || {};
+  const evidence = {
+    readOnly: true,
+    table: "dune.items",
+    column: "stats",
+    dataType: String(row.dataType || ""),
+    udtName: String(row.udtName || ""),
+    saveItemCompositeStatsType: String(row.compositeStatsType || ""),
+    field: "stats.FItemStackAndDurabilityStats[1].CurrentDurability",
+    encoding: "JSON number",
+    observed: {
+      currentDurabilityRows: Number(row.currentRows || 0),
+      numericDurabilityRows: Number(row.numericRows || 0),
+      selectedTemplateRows: Number(row.selectedCurrentRows || 0),
+      selectedTemplateNumericRows: Number(row.selectedNumericRows || 0)
+    }
+  };
+  evidence.authoritative = evidence.dataType === "jsonb"
+    && evidence.udtName === "jsonb"
+    && evidence.saveItemCompositeStatsType === "jsonb"
+    && evidence.observed.currentDurabilityRows === evidence.observed.numericDurabilityRows;
+  return evidence;
+}
+
+function assertAuthoritativeDurabilityEvidence(expectation, evidence) {
+  if (expectation?.applied && !evidence?.authoritative) {
+    throw new Error("Durability schema or production-shaped encoding is not authoritative; the entire item grant was blocked before write.");
+  }
+}
+
 async function adminGiveDbItemToPlayer(command, options = {}) {
   const playerId = String(command?.playerId || "").trim();
   const template = String(command?.template || "").trim();
   const qty = requireInteger(command?.qty, "quantity", 1, 50000);
-  const grade = requireInteger(command?.quality, "grade", 1, 5);
+  const grade = requireInteger(command?.quality ?? 0, "grade", 0, 5);
   const mode = String(options.mode || "dry-run").toLowerCase();
   const dryRun = mode !== "execute";
   if (!playerId) throw new Error("Choose a player first.");
   if (!isValidTemplateId(template)) throw new Error("Choose a valid exact item template identifier.");
+  const catalogItem = giveItemCatalogItem(template);
+  const durability = durabilityExpectation(catalogItem, command?.setDurabilityTo200);
+  const durabilityEvidence = await investigateGiveItemDurability(template);
+  assertAuthoritativeDurabilityEvidence(durability, durabilityEvidence);
+  const metadata = storageItemMetadata(template);
+  const stackCount = Math.ceil(qty / metadata.stackMax);
   const targetPredicate = [
     `ps.account_id::text = ${sqlString(playerId)}`,
     `ps.player_controller_id::text = ${sqlString(playerId)}`,
@@ -12285,7 +16068,7 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
         when not exists(select 1 from target) then 'player_not_found'
         when not exists(select 1 from chosen_inventory) then 'inventory_not_found'
         when (select max_item_count from chosen_inventory limit 1) > 0
-          and (select item_count from current_count) >= (select max_item_count from chosen_inventory limit 1) then 'inventory_full'
+          and (select item_count from current_count) + ${stackCount} > (select max_item_count from chosen_inventory limit 1) then 'inventory_full'
         else 'ready'
       end,
       coalesce((select account_id from target limit 1), ''),
@@ -12303,7 +16086,7 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
   const precheck = parseDbRows(precheckOutput, ["status", "accountId", "actorId", "characterName", "onlineStatus", "inventoryId", "inventoryType", "maxItemCount", "maxItemVolume", "itemCount", "nextPosition"])[0] || {};
   if (precheck.status === "player_not_found") throw new Error(`Player was not found for item grant target: ${playerId}`);
   if (precheck.status === "inventory_not_found") throw new Error(`Player inventory was not found for ${precheck.characterName || playerId}.`);
-  if (precheck.status === "inventory_full") throw new Error(`Player inventory is full for ${precheck.characterName || playerId}.`);
+  if (precheck.status === "inventory_full") throw new Error(`Player inventory does not have the ${stackCount} free slot(s) required for ${giveItemDisplayName(template)}.`);
   if (precheck.status !== "ready") throw new Error(`Database item grant precheck failed: ${precheck.status || "unknown"}.`);
   const player = {
     accountId: precheck.accountId,
@@ -12324,82 +16107,158 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
       ok: true,
       dryRun: true,
       status: "dry-run-passed",
-      grantKind: "Inventory Item Grade Grant",
+      grantKind: "Verified Inventory Item Grant",
       transport: "database",
       command,
       player,
       inventory,
-      item: { id: template, name: giveItemDisplayName(template), qty, grade },
-      stdout: `Dry-run passed. ${giveItemDisplayName(template)} x${qty} grade ${grade} would be inserted into inventory ${inventory.id} at position ${inventory.nextPosition}.`,
+      item: { id: template, name: giveItemDisplayName(template), qty, grade, stackCount, stackMax: metadata.stackMax, durability },
+      durability,
+      durabilityEvidence,
+      stdout: `Dry-run passed. ${giveItemDisplayName(template)} x${qty} grade ${grade} would be inserted into inventory ${inventory.id}. ${durability.display}.`,
       stderr: "",
-      note: "Dry-run validated the target player inventory and next item slot. No database write was performed."
+      note: `Dry-run validated the target player inventory, ${stackCount} required slot(s), destination, and durability applicability. No database write was performed. ${durability.applicable ? durability.reason : "Durability not applicable; no durability data will be written."}`
     };
   }
-  const statsJson = JSON.stringify({ FCustomizationStats: [[], {}], FItemStackAndDurabilityStats: [[], {}] });
+  const statsJson = itemStatsJsonForGrant(durability);
   const insertSql = `
-    with selected_inventory as (
-      select id,
-             coalesce(max_item_count, 0)::int as max_item_count
-      from dune.inventories
-      where id = ${requireInteger(inventory.id, "inventory_id", 1)}
-      limit 1
-    ),
-    current_count as (
-      select count(*)::int as item_count
-      from dune.items i
-      where i.inventory_id = (select id from selected_inventory limit 1)
-    ),
-    next_position as (
-      select coalesce(max(i.position_index), -1) + 1 as position_index
-      from dune.items i
-      where i.inventory_id = (select id from selected_inventory limit 1)
-    ),
-    inserted as (
-      insert into dune.items (inventory_id, template_id, stack_size, quality_level, position_index, stats)
-      select selected_inventory.id,
-             ${sqlString(template)},
-             ${qty},
-             ${grade},
-             next_position.position_index,
-             ${sqlString(statsJson)}
-      from selected_inventory, current_count, next_position
-      where selected_inventory.max_item_count <= 0
-         or current_count.item_count < selected_inventory.max_item_count
-      returning id, inventory_id, template_id, stack_size, quality_level, position_index
-    )
-    select
-      case when exists(select 1 from inserted) then 'inserted' else 'inventory_full' end,
-      coalesce((select id::text from inserted limit 1), ''),
-      coalesce((select inventory_id::text from inserted limit 1), ''),
-      coalesce((select template_id from inserted limit 1), ''),
-      coalesce((select stack_size::text from inserted limit 1), ''),
-      coalesce((select quality_level::text from inserted limit 1), ''),
-      coalesce((select position_index::text from inserted limit 1), '')
+    begin;
+    set local search_path=dune,public;
+    select i.id from dune.inventories i
+      where i.id=${requireInteger(inventory.id, "inventory_id", 1)}
+        and i.actor_id=${requireInteger(player.actorId, "player_actor_id", 1)}
+      for update;
+    create temp table player_grant_target on commit drop as
+      select i.id inventory_id, i.actor_id, coalesce(i.max_item_count,0)::int max_item_count,
+             (select count(*)::int from dune.items it where it.inventory_id=i.id) item_count,
+             (select coalesce(max(it.position_index),-1)::bigint from dune.items it where it.inventory_id=i.id) max_position
+      from dune.inventories i
+      where i.id=${requireInteger(inventory.id, "inventory_id", 1)}
+        and i.actor_id=${requireInteger(player.actorId, "player_actor_id", 1)}
+      limit 1;
+    do $$ begin
+      if not exists(select 1 from player_grant_target) then raise exception 'Player inventory destination changed before item grant'; end if;
+      if exists(select 1 from dune.items i join player_grant_target t on t.inventory_id=i.inventory_id
+                where i.position_index is null or i.position_index<0 or (t.max_item_count>0 and i.position_index>=t.max_item_count)) then
+        raise exception 'Player inventory contains invalid occupied slot positions';
+      end if;
+      if exists(select 1 from dune.items i join player_grant_target t on t.inventory_id=i.inventory_id
+                group by i.position_index having count(*)>1) then
+        raise exception 'Player inventory contains duplicate occupied slot positions';
+      end if;
+    end $$;
+    create temp table player_grant_slots on commit drop as
+      select candidate.position_index, row_number() over(order by candidate.position_index)::int slot_number
+      from player_grant_target t
+      cross join lateral (
+        select free_slot.position_index::bigint
+        from generate_series(0,greatest(t.max_item_count-1,0)) free_slot(position_index)
+        where t.max_item_count>0
+          and not exists(select 1 from dune.items occupied where occupied.inventory_id=t.inventory_id and occupied.position_index=free_slot.position_index)
+        order by free_slot.position_index
+        limit ${stackCount}
+      ) candidate
+      union all
+      select (t.max_position+n)::bigint,n::int
+      from player_grant_target t cross join generate_series(1,${stackCount}) n
+      where t.max_item_count<=0;
+    do $$ begin
+      if (select count(*) from player_grant_slots) <> ${stackCount} then raise exception 'Player inventory no longer has enough valid free slots'; end if;
+    end $$;
+    create temp table player_grant_prepared on commit drop as
+      select t.inventory_id,
+             least(${metadata.stackMax},${qty}-(s.slot_number-1)*${metadata.stackMax})::bigint stack_size,
+             s.position_index
+      from player_grant_target t cross join player_grant_slots s;
+    create temp table player_grant_inserted on commit drop as
+      with inserted as (
+        insert into dune.items (inventory_id,template_id,stack_size,quality_level,position_index,stats)
+        select p.inventory_id,${sqlString(template)},p.stack_size,${grade},p.position_index,${sqlString(statsJson)}::jsonb
+        from player_grant_prepared p
+        returning id,inventory_id,template_id,stack_size,quality_level,position_index,stats
+      ) select * from inserted;
+    do $$ begin
+      if not coalesce((select count(*)=${stackCount}
+                              and coalesce(sum(i.stack_size),0)=${qty}
+                              and count(distinct i.position_index)=count(*)
+                              and bool_and(i.inventory_id=${requireInteger(inventory.id, "inventory_id", 1)})
+                              and bool_and(i.template_id=${sqlString(template)})
+                              and bool_and(i.quality_level=${grade})
+                              and bool_and(${durability.applied
+                                ? `jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE}`
+                                : `i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is null`})
+                         from player_grant_inserted i),false) then
+        raise exception 'Player item grant failed transactional identity, quantity, slot, grade, or durability verification';
+      end if;
+    end $$;
+    select 'inserted',count(*)::text,coalesce(sum(i.stack_size),0)::text,
+           coalesce(string_agg(i.id::text,',' order by i.id),''),
+           coalesce(string_agg(i.position_index::text,',' order by i.id),''),
+           count(*) filter(where i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is not null)::text,
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number')::text,
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text
+      from player_grant_inserted i;
+    commit;
   `;
   const insertOutput = await dbQuery(insertSql, 30000);
-  const inserted = parseDbRows(insertOutput, ["status", "itemId", "inventoryId", "templateId", "stackSize", "qualityLevel", "positionIndex"])[0] || {};
-  if (inserted.status === "inventory_full") throw new Error(`Player inventory became full before inserting ${giveItemDisplayName(template)}.`);
+  const insertedRows = parseDbRows(insertOutput, ["status", "stackCount", "quantity", "itemIds", "positions", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks"]);
+  const inserted = [...insertedRows].reverse().find((row) => row.status === "inserted") || {};
   if (inserted.status !== "inserted") throw new Error(`Database item grant failed: ${inserted.status || "unknown"}.`);
+  const itemIds = String(inserted.itemIds || "").split(",").filter(Boolean);
+  const positions = String(inserted.positions || "").split(",").filter(Boolean).map(Number);
+  const durabilityReadBack = {
+    foundStacks: Number(inserted.stackCount || 0),
+    durabilityPresentStacks: Number(inserted.durabilityPresentStacks || 0),
+    numericDurabilityStacks: Number(inserted.numericDurabilityStacks || 0),
+    exactDurabilityStacks: Number(inserted.exactDurabilityStacks || 0)
+  };
+  const durabilityVerification = classifyDurabilityReadBack(durability, durabilityReadBack);
+  if (!durabilityVerification.ok) throw new Error(durabilityVerification.message);
+  const receiptId = `give-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const receipt = {
+    receiptId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    status: "database-verified",
+    destination: "player-inventory",
+    checkCount: 0,
+    player,
+    inventory,
+    item: { id: template, name: giveItemDisplayName(template), quantity: Number(inserted.quantity || qty), grade, stackCount: Number(inserted.stackCount || stackCount), stackMax: metadata.stackMax, itemIds, positions, durability },
+    durability,
+    durabilityEvidence,
+    verification: { durability: durabilityReadBack }
+  };
+  let receiptWarning = "";
+  try { giveItemReceiptStore.add(receipt); }
+  catch (error) { receiptWarning = ` The database transaction succeeded, but the receipt could not be persisted: ${error.message}`; }
   return {
     ok: true,
     dryRun: false,
     status: "db-inserted",
-    grantKind: "Inventory Item Grade Grant",
+    grantKind: "Verified Inventory Item Grant",
     transport: "database",
     command,
     player,
     inventory,
     item: {
-      id: inserted.templateId || template,
+      id: template,
       name: giveItemDisplayName(template),
-      qty: Number(inserted.stackSize || qty),
-      grade: Number(inserted.qualityLevel || grade),
-      itemId: inserted.itemId,
-      positionIndex: Number(inserted.positionIndex || inventory.nextPosition)
+      qty: Number(inserted.quantity || qty),
+      grade,
+      stackCount: Number(inserted.stackCount || stackCount),
+      stackMax: metadata.stackMax,
+      itemIds,
+      positions,
+      durability
     },
-    stdout: `Inserted ${giveItemDisplayName(template)} x${qty} grade ${grade} into ${player.characterName || playerId}'s inventory. Item id ${inserted.itemId}, inventory ${inserted.inventoryId}, position ${inserted.positionIndex}.`,
+    durability,
+    durabilityEvidence,
+    durabilityVerification,
+    receipt,
+    stdout: `Inserted and transactionally verified ${giveItemDisplayName(template)} x${qty} grade ${grade} into ${player.characterName || playerId}'s inventory ${inventory.id}. ${durability.display}.`,
     stderr: "",
-    note: "Database grant completed. The player may need to relog or refresh inventory before the item appears."
+    note: `Database grant, destination read-back, slot allocation, and durability verification completed. The player may need to relog or refresh inventory before the item appears.${receiptWarning}`
   };
 }
 
@@ -12408,6 +16267,7 @@ async function adminGiveItem(payload) {
   let command = null;
   let mode = "dry-run";
   let auditBase = {};
+  let durabilityAudit = null;
   try {
     command = await timer.step("validate_payload", () => validateGiveItemPayload(payload));
     mode = String(payload?.mode || "dry-run").toLowerCase();
@@ -12416,9 +16276,10 @@ async function adminGiveItem(payload) {
       template: command.template,
       qty: command.qty,
       quality: command.quality,
-      requestId: command.requestId
+      requestId: command.requestId,
+      setDurabilityTo200: command.setDurabilityTo200
     };
-    const catalogItem = gearCatalog().find((row) => row.id === command.template) || (/^recipe:/i.test(command.template) ? {
+    const catalogItem = giveItemCatalogItem(command.template) || (/^recipe:/i.test(command.template) ? {
       id: command.template,
       name: recipeDisplayName(command.template.replace(/^recipe:/i, "")),
       category: "Schematics",
@@ -12434,6 +16295,8 @@ async function adminGiveItem(payload) {
       techKnowledgeKey: techKnowledgeKeyFromTemplate(command.template),
       recipeId: techKnowledgeRecipeIdCandidates(command.template)[0] || ""
     } : null);
+    const durability = durabilityExpectation(catalogItem, command.setDurabilityTo200);
+    durabilityAudit = durability;
     if (catalogItem && isTechKnowledgeItem(catalogItem)) {
       timer.skip("server_availability", "skipped: research blueprint unlock uses database TechKnowledge");
       timer.skip("runtime_transport_update", "skipped: research blueprint unlock uses database TechKnowledge");
@@ -12471,12 +16334,12 @@ async function adminGiveItem(payload) {
       return result;
     }
     const dbGrade = dbBackedGiveItemGrade(command);
-    if (dbGrade > 0) {
-      timer.skip("server_availability", "skipped: grade item grant uses database inventory insert");
-      timer.skip("runtime_transport_update", "skipped: grade item grant uses database inventory insert");
-      timer.skip("transport_health_check", "skipped: grade item grant does not use receiver transport");
+    if (dbGrade > 0 || durability.applied) {
+      timer.skip("server_availability", "skipped: verified item grant uses database inventory transaction");
+      timer.skip("runtime_transport_update", "skipped: verified item grant uses database inventory transaction");
+      timer.skip("transport_health_check", "skipped: database item grant does not use receiver transport");
       if (mode === "execute" && payload?.confirmed !== true && payload?.confirmed !== "true") {
-        const error = new Error("Confirm real grade item database grant before writing to the player inventory.");
+        const error = new Error("Confirm the real database item grant before writing to the player inventory.");
         appendAdminAudit("give_item_db_grade_blocked", { ...auditBase, reason: error.message });
         throw error;
       }
@@ -12484,6 +16347,10 @@ async function adminGiveItem(payload) {
       result.timings = timer.finish();
       appendAdminAudit(mode === "execute" ? "give_item_db_grade_inserted" : "give_item_db_grade_dry_run", {
         ...auditBase,
+        durability: result.durability,
+        durabilityEvidence: result.durabilityEvidence,
+        durabilityVerification: result.durabilityVerification,
+        receiptId: result.receipt?.receiptId || "",
         result: { ok: result.ok, status: result.status, player: result.player, inventory: result.inventory, item: result.item },
         timings: result.timings
       });
@@ -12493,9 +16360,9 @@ async function adminGiveItem(payload) {
     timer.skip("runtime_transport_update", "skipped: no server/VM/battlegroup discovery during Give Item");
     const transport = await timer.step("transport_health_check", () => checkGiveTransport());
     if (!transport.configured || !transport.reachable) {
-      const result = { ok: false, dryRun: mode !== "execute", status: "live-unavailable", command, transport: transport.mode, missingEnv: transport.missingEnv || [], stdout: "", stderr: liveGiveUnavailableMessage(transport), error: liveGiveUnavailableMessage(transport) };
+      const result = { ok: false, dryRun: mode !== "execute", status: "live-unavailable", command, durability, transport: transport.mode, missingEnv: transport.missingEnv || [], stdout: "", stderr: liveGiveUnavailableMessage(transport), error: liveGiveUnavailableMessage(transport) };
       result.timings = timer.finish();
-      appendAdminAudit("give_item_live_unavailable", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv, error: result.error }, timings: result.timings });
+      appendAdminAudit("give_item_live_unavailable", { ...auditBase, durability, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv, error: result.error }, timings: result.timings });
       return result;
     }
     if (mode !== "execute") {
@@ -12505,13 +16372,14 @@ async function adminGiveItem(payload) {
         status: "dry-run-passed",
         transport: transport.mode,
         command,
+        durability,
         requestId: command.requestId,
-        stdout: `Dry-run passed. Command validated for ${command.template} x${command.qty} -> ${command.playerId}.`,
+        stdout: `Dry-run passed. Command validated for ${command.template} x${command.qty} -> ${command.playerId}. ${durability.display}.`,
         stderr: "",
         note: "Dry-run validated the command and receiver transport. No live grant was executed."
       };
       result.timings = timer.finish();
-      appendAdminAudit("give_item_dry_run", { ...auditBase, result: { ok: result.ok, status: result.status }, timings: result.timings });
+      appendAdminAudit("give_item_dry_run", { ...auditBase, durability, result: { ok: result.ok, status: result.status }, timings: result.timings });
       return result;
     }
     if (payload?.confirmed !== true && payload?.confirmed !== "true") {
@@ -12519,33 +16387,34 @@ async function adminGiveItem(payload) {
       appendAdminAudit("give_item_live_blocked", { ...auditBase, reason: error.message });
       throw error;
     }
-    appendAdminAudit("give_item_live_started", { ...auditBase, transport: transport.mode });
+    appendAdminAudit("give_item_live_started", { ...auditBase, durability, transport: transport.mode });
     const live = await timer.step("send_live_give_item", () => sendLiveGiveItem(command, transport));
+    live.durability = durability;
     if (live.status === "live-unavailable") {
       const result = { ...live, ok: false, dryRun: false, stdout: "", stderr: live.error || "Live Give unavailable." };
       result.timings = timer.finish();
-      appendAdminAudit("give_item_live_unavailable", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv || [], error: result.error || result.stderr }, timings: result.timings });
+      appendAdminAudit("give_item_live_unavailable", { ...auditBase, durability, result: { ok: result.ok, status: result.status, transport: result.transport, missingEnv: result.missingEnv || [], error: result.error || result.stderr }, timings: result.timings });
       return result;
     }
     if (!live.ok || live.dryRun) {
       const result = { ...live, ok: false, dryRun: false, status: "live-execution-failed", stdout: "", stderr: live.error || "Live execution failed." };
       result.timings = timer.finish();
-      appendAdminAudit("give_item_live_failed", { ...auditBase, result: { ok: result.ok, status: result.status, error: result.error || result.stderr }, timings: result.timings });
+      appendAdminAudit("give_item_live_failed", { ...auditBase, durability, result: { ok: result.ok, status: result.status, error: result.error || result.stderr }, timings: result.timings });
       return result;
     }
     if (live.status === "live-verified") {
       const result = { ...live, dryRun: false, status: "live-verified", stderr: "" };
       result.timings = timer.finish();
-      appendAdminAudit("give_item_live_verified", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null }, timings: result.timings });
+      appendAdminAudit("give_item_live_verified", { ...auditBase, durability, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null }, timings: result.timings });
       return result;
     }
     const result = { ...live, dryRun: false, status: "live-published", stderr: "" };
     result.timings = timer.finish();
-    appendAdminAudit("give_item_live_published", { ...auditBase, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null }, timings: result.timings });
+    appendAdminAudit("give_item_live_published", { ...auditBase, durability, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null }, timings: result.timings });
     return result;
   } catch (error) {
     error.timings = timer.finish();
-    appendAdminAudit("give_item_live_failed", { ...auditBase, error: error.message, timings: error.timings });
+    appendAdminAudit("give_item_live_failed", { ...auditBase, durability: durabilityAudit, error: error.message, timings: error.timings });
     throw error;
   }
 }
@@ -12683,6 +16552,7 @@ async function cleanupExpiredMarketListings(options = {}) {
 let marketExpiredCleanupRunning = false;
 
 async function runMarketExpiredCleanupBackground(source = "timer") {
+  if (SERVER_MIGRATION_ENABLED && migrationMaintenance.status().active) return { ok: true, skipped: true, source, reason: MIGRATION_MAINTENANCE_BANNER };
   if (marketExpiredCleanupRunning) return { ok: false, skipped: true, reason: "cleanup already running" };
   marketExpiredCleanupRunning = true;
   try {
@@ -13630,6 +17500,7 @@ async function adminGiveQueue(payload) {
       confirmed
     };
     if (Object.prototype.hasOwnProperty.call(item, "quality")) itemPayload.quality = item.quality;
+    itemPayload.setDurabilityTo200 = requestedDurability(item.setDurabilityTo200);
     const startedAt = new Date().toISOString();
     try {
       const result = await queueTimer.step(`item_${index + 1}`, () => adminGiveItem(itemPayload));
@@ -13724,6 +17595,7 @@ function normalizeGiveQueuePresetItems(items) {
       if (!Number.isInteger(quality) || quality < 0 || quality > 5) throw new Error(`Preset item ${index + 1} grade must be a whole number between 0 and 5.`);
       normalized.quality = quality;
     }
+    normalized.setDurabilityTo200 = requestedDurability(item?.setDurabilityTo200);
     return normalized;
   });
 }
@@ -14493,6 +18365,12 @@ function logLiveGiveStartupValidation() {
 }
 
 function attemptConfiguredServerStart(source = "startup") {
+  try {
+    assertWorkloadStartAllowed("start the battlegroup");
+  } catch (error) {
+    appendAdminAudit("server_start_suppressed", { source, reason: error.code || "migration_maintenance", maintenance: migrationMaintenance.status() });
+    return;
+  }
   const readiness = serverControlConfigured();
   if (runtimeGiveTransport.serverOnline) return;
   if (!readiness.configured) {
@@ -14507,7 +18385,11 @@ function attemptConfiguredServerStart(source = "startup") {
     source,
     config: readiness.summary
   });
-  battlegroup("start").then((result) => {
+  battlegroup("start", {
+    operationId: `startup-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`,
+    reason: `Startup ensure-server-running hook (${source})`,
+    callSite: "server.js:attemptConfiguredServerStart"
+  }).then((result) => {
     appendAdminAudit(result.ok ? "server_start_request_completed" : "server_start_request_failed", {
       source,
       ok: Boolean(result.ok),
@@ -14805,6 +18687,10 @@ async function adminGiveItemToStorage(payload = {}) {
   if (!playerId) throw new Error("Choose the player associated with this storage deposit.");
   if (!isValidTemplateId(template)) throw new Error("Choose a valid exact item template identifier.");
   if (!dryRun && payload.confirmed !== true) throw new Error("Confirm the storage deposit before writing to the database.");
+  const catalogItem = giveItemCatalogItem(template);
+  const durability = durabilityExpectation(catalogItem, payload.setDurabilityTo200);
+  const durabilityEvidence = await investigateGiveItemDurability(template);
+  assertAuthoritativeDurabilityEvidence(durability, durabilityEvidence);
   const playerPredicate = [
     `ps.account_id::text = ${sqlString(playerId)}`,
     `ps.player_controller_id::text = ${sqlString(playerId)}`,
@@ -14873,8 +18759,8 @@ async function adminGiveItemToStorage(payload = {}) {
   const typeName = storageDisplayName(precheck.actorClass);
   const customName = String(precheck.customName || "").trim();
   const storage = { actorId: String(actorId), inventoryId: String(inventoryId), name: customName || typeName, customName, typeName, actorClass: precheck.actorClass, map: precheck.map, partitionId: precheck.partitionId, dimensionIndex: Number(precheck.dimensionIndex || 0), itemCount: Number(precheck.itemCount || 0), maxItemCount: Number(precheck.maxItemCount || 0), usedVolume: Math.round(usedVolume * 100) / 100, maxItemVolume, volumeVerified };
-  if (dryRun) return { ok: true, dryRun: true, status: "dry-run-passed", transport: "database", player: { accountId: precheck.accountId, characterName: precheck.characterName, onlineStatus: precheck.onlineStatus }, storage, item: { id: template, name: giveItemDisplayName(template), qty, grade, stackCount, stackMax: metadata.stackMax, volume: itemVolume }, note: "Player is offline. Storage target, identity, and free slots were validated. No database write was performed." };
-  const statsJson = JSON.stringify({ FCustomizationStats: [[], {}], FItemStackAndDurabilityStats: [[], {}] });
+  if (dryRun) return { ok: true, dryRun: true, status: "dry-run-passed", transport: "database", player: { accountId: precheck.accountId, characterName: precheck.characterName, onlineStatus: precheck.onlineStatus }, storage, item: { id: template, name: giveItemDisplayName(template), qty, grade, stackCount, stackMax: metadata.stackMax, volume: itemVolume, durability }, durability, durabilityEvidence, note: `Player is offline. Storage target, identity, capacity, free slots, and durability applicability were validated. No database write was performed. ${durability.applicable ? durability.reason : "Durability not applicable; no durability data will be written."}` };
+  const statsJson = itemStatsJsonForGrant(durability);
   const insertSql = `
     begin;
     set local search_path=dune,public;
@@ -14927,6 +18813,9 @@ async function adminGiveItemToStorage(payload = {}) {
                        and count(distinct i.position_index)=count(*)
                        and bool_and(i.position_index>=0 and (t.max_item_count<=0 or i.position_index<t.max_item_count))
                        and bool_and((select count(*) from dune.items occupied where occupied.inventory_id=i.inventory_id and occupied.position_index=i.position_index)=1)
+                       and bool_and(${durability.applied
+                         ? `jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE}`
+                         : `i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is null`})
                 from storage_grant_prepared p
                 join dune.items i on i.id=p.item_id and i.inventory_id=p.inventory_id and i.template_id=${sqlString(template)}
                 cross join storage_grant_target t
@@ -14941,18 +18830,24 @@ async function adminGiveItemToStorage(payload = {}) {
                      then 'inserted' else 'verification_failed' end,
            count(*)::text, coalesce(sum(i.stack_size),0)::text,
            coalesce(string_agg(i.id::text,',' order by i.id),''),
-           coalesce(string_agg(i.position_index::text,',' order by i.id),'')
+           coalesce(string_agg(i.position_index::text,',' order by i.id),''),
+           count(*) filter(where i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is not null)::text,
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number')::text,
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text
       from storage_grant_prepared p
       join dune.items i on i.id=p.item_id and i.inventory_id=p.inventory_id and i.template_id=${sqlString(template)}
       cross join storage_grant_target t
       group by t.max_item_count;
     commit;
   `;
-  const resultRows = parseDbRows(await dbQuery(insertSql, 30000), ["status", "stackCount", "quantity", "itemIds", "positions"]);
+  const resultRows = parseDbRows(await dbQuery(insertSql, 30000), ["status", "stackCount", "quantity", "itemIds", "positions", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks"]);
   const inserted = [...resultRows].reverse().find((row) => row.status === "inserted" || row.status === "verification_failed") || {};
   if (inserted.status !== "inserted") throw new Error("Storage deposit did not pass post-write verification; inspect the database before retrying.");
   const itemIds = String(inserted.itemIds || "").split(",").filter(Boolean);
   const positions = String(inserted.positions || "").split(",").filter(Boolean).map(Number);
+  const durabilityReadBack = { foundStacks: Number(inserted.stackCount || 0), durabilityPresentStacks: Number(inserted.durabilityPresentStacks || 0), numericDurabilityStacks: Number(inserted.numericDurabilityStacks || 0), exactDurabilityStacks: Number(inserted.exactDurabilityStacks || 0) };
+  const durabilityVerification = classifyDurabilityReadBack(durability, durabilityReadBack);
+  if (!durabilityVerification.ok) throw new Error(durabilityVerification.message);
   const receiptId = `storage-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   const receipt = {
     receiptId,
@@ -14964,15 +18859,84 @@ async function adminGiveItemToStorage(payload = {}) {
     checkCount: 0,
     player: { accountId: precheck.accountId, characterName: precheck.characterName },
     storage,
-    item: { id: template, name: giveItemDisplayName(template), quantity: Number(inserted.quantity || qty), grade, stackCount: Number(inserted.stackCount || stackCount), itemIds, positions },
+    item: { id: template, name: giveItemDisplayName(template), quantity: Number(inserted.quantity || qty), grade, stackCount: Number(inserted.stackCount || stackCount), itemIds, positions, durability },
+    durability,
+    durabilityEvidence,
+    verification: { durability: durabilityReadBack },
     preFingerprint: crypto.createHash("sha256").update(String(precheck.itemStacks || "{}")).digest("hex")
   };
   let receiptWarning = "";
   try { storageDepositStore.add(receipt); }
   catch (error) { receiptWarning = ` The database write succeeded, but the receipt could not be persisted to disk: ${error.message}`; }
-  const result = { ok: true, dryRun: false, status: "storage-inserted", transport: "database", verified: true, player: { accountId: precheck.accountId, characterName: precheck.characterName, onlineStatus: precheck.onlineStatus }, storage, item: { id: template, name: giveItemDisplayName(template), qty: Number(inserted.quantity || qty), grade, stackCount: Number(inserted.stackCount || stackCount), stackMax: metadata.stackMax, volume: itemVolume, itemIds, positions }, receipt, note: "Database write and slot integrity passed. Reopen the container to check game visibility; the Suite will continue checking that the rows remain stable." + receiptWarning };
-  appendAdminAudit("storage_item_deposited", { receiptId, playerId, actorId, inventoryId, template, qty, grade, itemIds, positions });
+  const result = { ok: true, dryRun: false, status: "storage-inserted", transport: "database", verified: true, player: { accountId: precheck.accountId, characterName: precheck.characterName, onlineStatus: precheck.onlineStatus }, storage, item: { id: template, name: giveItemDisplayName(template), qty: Number(inserted.quantity || qty), grade, stackCount: Number(inserted.stackCount || stackCount), stackMax: metadata.stackMax, volume: itemVolume, itemIds, positions, durability }, durability, durabilityEvidence, durabilityVerification, receipt, note: `Database write, destination read-back, slot integrity, and durability verification passed. ${durability.display}. Reopen the container to check game visibility; the Suite will continue checking that the rows remain stable.` + receiptWarning };
+  appendAdminAudit("storage_item_deposited", { receiptId, playerId, actorId, inventoryId, template, qty, grade, itemIds, positions, durability, durabilityEvidence, durabilityVerification });
   return result;
+}
+
+function giveItemReceipt(receiptId) {
+  const receipt = giveItemReceiptStore.get(String(receiptId || "").trim());
+  if (!receipt) throw new Error("Give Item receipt was not found.");
+  return receipt;
+}
+
+async function verifyGiveItemReceipt(receiptId) {
+  const receipt = giveItemReceipt(receiptId);
+  const inventoryId = String(receipt.inventory?.id || "");
+  const template = String(receipt.item?.id || "");
+  const grade = requireInteger(receipt.item?.grade ?? 0, "receipt grade", 0, 5);
+  const itemIds = Array.isArray(receipt.item?.itemIds) ? receipt.item.itemIds.map(String) : [];
+  const positions = Array.isArray(receipt.item?.positions) ? receipt.item.positions.map(String) : [];
+  if (!/^\d+$/.test(inventoryId) || !itemIds.length || itemIds.some((value) => !/^\d+$/.test(value))) throw new Error("Give Item receipt contains invalid database identifiers.");
+  const expectedValues = itemIds.map((itemId, index) => `(${itemId}::bigint,${/^\d+$/.test(positions[index] || "") ? positions[index] : "-1"}::bigint)`).join(",");
+  const sql = `
+    with expected(item_id,expected_position) as (values ${expectedValues}),
+    observed as (
+      select e.item_id,e.expected_position,i.inventory_id,i.stack_size,i.position_index,i.template_id,i.quality_level,i.stats
+      from expected e left join dune.items i on i.id=e.item_id
+    )
+    select (select count(*)::text from expected),
+           count(o.inventory_id)::text,
+           count(*) filter(where o.inventory_id=${inventoryId} and o.template_id=${sqlString(template)}
+                                  and o.quality_level=${grade} and o.position_index=o.expected_position)::text,
+           coalesce(sum(o.stack_size) filter(where o.inventory_id=${inventoryId} and o.template_id=${sqlString(template)}),0)::text,
+           count(*) filter(where o.inventory_id is not null and o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is not null)::text,
+           count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number')::text,
+           count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number'
+                                  and (o.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text,
+           coalesce(jsonb_agg(jsonb_build_object('itemId',o.item_id::text,'inventoryId',coalesce(o.inventory_id::text,''),
+             'stackSize',coalesce(o.stack_size,0),'position',o.position_index,'expectedPosition',o.expected_position,
+             'template',coalesce(o.template_id,''),'grade',o.quality_level,
+             'currentDurability',o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}') order by o.item_id),'[]'::jsonb)::text
+      from observed o
+  `;
+  const row = parseDbRows(await dbQuery(sql, 15000), ["expectedStacks", "foundStacks", "matchingStacks", "foundQuantity", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks", "rows"])[0] || {};
+  let rows = [];
+  try { rows = JSON.parse(row.rows || "[]"); } catch {}
+  const observed = {
+    expectedStacks: Number(row.expectedStacks || 0),
+    foundStacks: Number(row.foundStacks || 0),
+    matchingStacks: Number(row.matchingStacks || 0),
+    foundQuantity: Number(row.foundQuantity || 0),
+    durabilityPresentStacks: Number(row.durabilityPresentStacks || 0),
+    numericDurabilityStacks: Number(row.numericDurabilityStacks || 0),
+    exactDurabilityStacks: Number(row.exactDurabilityStacks || 0),
+    rows
+  };
+  let classification;
+  if (observed.foundStacks < observed.expectedStacks) classification = { ok: false, status: "runtime-overwrite", message: "One or more granted player-inventory rows disappeared after the verified transaction." };
+  else if (observed.matchingStacks !== observed.expectedStacks || observed.foundQuantity !== Number(receipt.item?.quantity || 0)) classification = { ok: false, status: "read-back-mismatch", message: "The granted rows remain, but destination, template, grade, position, or quantity no longer matches the receipt." };
+  else classification = classifyDurabilityReadBack(receipt.durability || receipt.item?.durability, observed);
+  const checkedAt = new Date().toISOString();
+  const check = { checkedAt, ...classification, ...observed };
+  const updated = giveItemReceiptStore.update(receipt.receiptId, {
+    status: classification.status,
+    lastCheckedAt: checkedAt,
+    checkCount: Number(receipt.checkCount || 0) + 1,
+    checks: [...(Array.isArray(receipt.checks) ? receipt.checks : []), check].slice(-12),
+    verification: observed
+  });
+  appendAdminAudit("give_item_receipt_rechecked", { receiptId: receipt.receiptId, status: classification.status, durability: receipt.durability || receipt.item?.durability, ...observed });
+  return { ok: classification.ok, receipt: updated, verification: observed, message: classification.message };
 }
 
 function storageDepositReceipt(receiptId) {
@@ -14992,7 +18956,7 @@ async function verifyStorageDepositReceipt(receiptId) {
   const sql = `
     with expected(item_id, expected_position) as (values ${expectedValues}),
     observed as (
-      select e.item_id, e.expected_position, i.inventory_id, i.stack_size, i.position_index, i.template_id
+      select e.item_id, e.expected_position, i.inventory_id, i.stack_size, i.position_index, i.template_id, i.stats
       from expected e left join dune.items i on i.id=e.item_id
     )
     select
@@ -15008,13 +18972,17 @@ async function verifyStorageDepositReceipt(receiptId) {
       (select count(*)::text from dune.items i cross join dune.inventories inv
         where inv.id=${inventoryId} and i.inventory_id=inv.id
           and (i.position_index<0 or (coalesce(inv.max_item_count,0)>0 and i.position_index>=inv.max_item_count))),
+      count(*) filter(where o.inventory_id is not null and o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is not null)::text,
+      count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number')::text,
+      count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (o.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text,
       coalesce(jsonb_agg(jsonb_build_object(
         'itemId',o.item_id::text,'inventoryId',coalesce(o.inventory_id::text,''),'stackSize',coalesce(o.stack_size,0),
-        'position',o.position_index,'expectedPosition',o.expected_position,'template',coalesce(o.template_id,'')
+        'position',o.position_index,'expectedPosition',o.expected_position,'template',coalesce(o.template_id,''),
+        'currentDurability',o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}'
       ) order by o.item_id),'[]'::jsonb)::text
     from observed o
   `;
-  const row = parseDbRows(await dbQuery(sql, 15000), ["expectedStacks", "foundStacks", "matchingStacks", "foundQuantity", "duplicateSlots", "invalidPositions", "rows"])[0] || {};
+  const row = parseDbRows(await dbQuery(sql, 15000), ["expectedStacks", "foundStacks", "matchingStacks", "foundQuantity", "duplicateSlots", "invalidPositions", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks", "rows"])[0] || {};
   let observedRows = [];
   try { observedRows = JSON.parse(row.rows || "[]"); } catch {}
   const observed = {
@@ -15024,9 +18992,14 @@ async function verifyStorageDepositReceipt(receiptId) {
     foundQuantity: Number(row.foundQuantity || 0),
     duplicateSlots: Number(row.duplicateSlots || 0),
     invalidPositions: Number(row.invalidPositions || 0),
+    durabilityPresentStacks: Number(row.durabilityPresentStacks || 0),
+    numericDurabilityStacks: Number(row.numericDurabilityStacks || 0),
+    exactDurabilityStacks: Number(row.exactDurabilityStacks || 0),
     rows: observedRows
   };
-  const classification = classifyStorageVerification({ stackCount: receipt.item.stackCount, quantity: receipt.item.quantity }, observed);
+  const storageClassification = classifyStorageVerification({ stackCount: receipt.item.stackCount, quantity: receipt.item.quantity }, observed);
+  const durabilityClassification = classifyDurabilityReadBack(receipt.durability || receipt.item?.durability, observed);
+  const classification = storageClassification.ok ? durabilityClassification : storageClassification;
   const checkedAt = new Date().toISOString();
   const check = { checkedAt, ...classification, ...observed };
   const checks = [...(Array.isArray(receipt.checks) ? receipt.checks : []), check].slice(-12);
@@ -15038,7 +19011,7 @@ async function verifyStorageDepositReceipt(receiptId) {
     checks,
     verification: observed
   });
-  appendAdminAudit("storage_deposit_rechecked", { receiptId: receipt.receiptId, status: classification.status, ...observed });
+  appendAdminAudit("storage_deposit_rechecked", { receiptId: receipt.receiptId, status: classification.status, durability: receipt.durability || receipt.item?.durability, durabilityVerification: durabilityClassification, ...observed });
   return { ok: classification.ok, receipt: updated, verification: observed, message: classification.message };
 }
 
@@ -15239,7 +19212,7 @@ function sendManagerUnavailable(res, reason, status = 503) {
 }
 
 function startManagerService() {
-  if (process.env.ALPHANINE_SKIP_MANAGER === "1") return;
+  if (!SUITE_STARTUP_POLICY.allowManager) return false;
   if (managerProcess) return;
   if (managerStartError) return;
   const resolved = findPython();
@@ -15250,6 +19223,7 @@ function startManagerService() {
     return;
   }
   spawnManagerProcess(resolved, isWindowsAppsAlias(resolved.command), isWindowsAppsAlias(resolved.command) ? "WindowsApps alias requires shell fallback" : "direct spawn");
+  return true;
 }
 
 function spawnManagerProcess(resolved, useShell, reason) {
@@ -15336,7 +19310,10 @@ async function waitForManagerReady(timeoutMs = Math.min(envNumber("ALPHANINE_MAN
 }
 
 async function proxyToManager(req, res, pathname) {
-  startManagerService();
+  if (startManagerService() === false) {
+    await json(res, { ok: false, code: "startup_suppressed", error: "Server Manager is disabled by the centralized startup-suppression policy." }, 409);
+    return;
+  }
   const managerPath = pathname.replace(/^\/manager-api/, "");
   const suiteConnection = syncManagerConnectionFromSuite();
   if (managerPath === "/api/server/suite-connection" && req.method === "GET") {
@@ -15537,6 +19514,8 @@ function appPage() {
     .title h2 { margin:0; font-size:24px; letter-spacing:.12em; text-transform:uppercase; color:var(--gold-bright); }
     .title p { margin:5px 0 0; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-size:12px; }
     .status-strip { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+    .migration-maintenance-banner { position:sticky; top:0; z-index:1200; display:flex; align-items:center; justify-content:space-between; gap:16px; margin:-1px 0 16px; padding:14px 18px; border:1px solid #ffcf66; background:linear-gradient(90deg,rgba(107,56,5,.98),rgba(50,25,3,.98)); color:#fff1c8; box-shadow:0 10px 34px rgba(0,0,0,.42); font-weight:900; letter-spacing:.035em; }
+    .migration-maintenance-banner.hidden { display:none; }
     .badge { display:inline-flex; min-height:31px; align-items:center; gap:7px; border:1px solid rgba(224,173,99,.32); border-radius:999px; padding:6px 11px; background:rgba(246,202,135,.1); color:var(--gold-bright); font-size:11.5px; line-height:1.15; white-space:normal; text-transform:uppercase; letter-spacing:.055em; clip-path:none; }
     .badge::before { content:""; width:7px; height:7px; border-radius:999px; background:currentColor; box-shadow:0 0 10px currentColor; }
     .badge.ok { color:var(--good); border-color:rgba(86,214,143,.35); }
@@ -17785,6 +21764,7 @@ function appPage() {
             <label>Quantity<input id="adminQty" type="number" min="1" max="50000" value="1" oninput="updateGiveTargetSummary()"></label>
             <label id="adminQualityWrap">Grade<input id="adminQuality" type="number" min="0" max="5" value="0" oninput="syncQualityWarning()"></label>
             <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute" selected>Live Give</option></select></label>
+            <label id="giveDurabilityWrap" style="grid-column:1/-1"><span><input id="adminSetDurability200" type="checkbox" onchange="syncGiveDurabilityOption()"> Set Durability to 200</span><span id="giveDurabilityStatus" class="subtle">Select an item to check durability applicability.</span></label>
             <div id="giveStorageFields" class="hidden" style="grid-column:1/-1">
               <div class="field-grid">
                 <label>Storage Search<input id="giveStorageSearch" placeholder="Type, actor, map, or inventory" oninput="renderGiveStorageTargets()"></label>
@@ -17804,6 +21784,8 @@ function appPage() {
               <button id="adminGiveButton" class="primary" onclick="giveAdminItem()">Give Item</button>
               <button id="addGiveQueueButton" onclick="addSelectedItemToGiveQueue()">Add to Queue</button>
             </div>
+            <div id="giveItemReceiptStatus" class="empty" style="grid-column:1/-1">No player-inventory Give Item receipt loaded.</div>
+            <div class="action-row" style="grid-column:1/-1"><button id="giveItemReceiptRecheckButton" type="button" onclick="recheckGiveItemReceipt()" disabled>Recheck Player Inventory</button></div>
           </div>
           <details class="advanced-only give-diagnostics">
             <summary>Troubleshooting and Status</summary>
@@ -19245,6 +23227,7 @@ const viewCopy={
   admin:["Admin Tools","Diagnostics, tuned channels, and backend probe state."],
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
   database:["Database","Battlegroup backup, import, and backup location management."],
+  "server-migration":["Server Migration","Empty the Exchange safely, then export and exact-import portable dune world state with verified rollback."],
   "database-explorer":["Database Explorer","Local-only, read-only browsing for the selected battlegroup PostgreSQL database."],
   cleanup:["Server Cleanup","Dry-run first cleanup tools for orphaned bases, fiefs, and future stale server data."],
   landsraad:["Landsraad","View and safely change live Landsraad reward tier thresholds."],
@@ -19261,10 +23244,52 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market")refreshMarketBot();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin"||name==="server-migration")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market")refreshMarketBot();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+let migrationPreflightState=null,migrationExportPolling="";
+let migrationMaintenanceState=null;
+function renderMigrationMaintenance(state={}){migrationMaintenanceState=state;const active=state.active===true;const banner=document.getElementById("migrationMaintenanceBanner");if(banner)banner.classList.toggle("hidden",!active);tone("migrationMaintenanceBadge",active?(state.failClosed?"Recovery Hold":"Active"):"Inactive");const detail=document.getElementById("migrationMaintenanceDetail");if(detail){detail.className=(state.failClosed?"warning":"subtle")+" mt";detail.textContent=active?((state.banner||"Migration Maintenance Mode — Game Server Held Offline")+" · Generation "+(state.generation||"unknown")+(state.error?" · "+state.error:"")):"Inactive. Normal controls are available; exiting maintenance never starts the server.";}const enter=document.getElementById("migrationMaintenanceEnterButton"),exit=document.getElementById("migrationMaintenanceExitButton");if(enter)enter.disabled=active;if(exit)exit.disabled=!active||state.sideEffectFree===true;}
+async function refreshMigrationMaintenance(){try{const state=await getJson("/api/migration-maintenance",{timeoutMs:10000});renderMigrationMaintenance(state);return state;}catch(error){renderMigrationMaintenance({active:true,failClosed:true,generation:"unknown",error:betterError(error),banner:"Migration Maintenance Mode — Game Server Held Offline"});return null;}}
+async function changeMigrationMaintenance(entering){const required=entering?"ENTER MIGRATION MAINTENANCE":"EXIT MIGRATION MAINTENANCE";const typed=window.prompt("Type "+required+" exactly.\n\nExiting restores controls but never starts the game server.")||"";if(typed!==required){showToast("Maintenance confirmation did not match.","warning");return;}try{const result=await getJson("/api/migration-maintenance/"+(entering?"enter":"exit"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmText:typed}),timeoutMs:180000});renderMigrationMaintenance(result);resetMigrationPreflight();showToast(entering?"Migration Maintenance Mode entered.":"Migration Maintenance Mode exited. The server remains unchanged.","success");}catch(error){showToast(betterError(error),"error");await refreshMigrationMaintenance();}}
+let migrationOfflineState=null,migrationImportPreflightState=null,migrationImportPolling="",migrationActiveJobType="",migrationActiveJobId="",migrationStartPending=false,migrationImmediateTimer=null;
+function migrationOperationBusy(){return Boolean(migrationStartPending||migrationExportPolling||migrationImportPolling||migrationActiveJobId);}
+function migrationDuration(ms){const seconds=Math.max(0,Math.floor(Number(ms||0)/1000)),minutes=Math.floor(seconds/60);return String(minutes).padStart(2,"0")+":"+String(seconds%60).padStart(2,"0");}
+const migrationButtonLabels={migrationPreflightButton:"Run Export Preflight",migrationExportButton:"Create Verified Export",migrationImportPreflightButton:"Run Import Preflight",migrationImportButton:"Backup Destination + Import"};
+function finishMigrationImmediateFeedback(buttonId){if(migrationImmediateTimer){clearInterval(migrationImmediateTimer);migrationImmediateTimer=null;}const button=document.getElementById(buttonId);if(button)button.textContent=migrationButtonLabels[buttonId]||button.textContent;migrationStartPending=false;}
+function beginMigrationImmediateFeedback(buttonId,statusId,progressId,label){migrationStartPending=true;setMigrationControlsBusy(true);const button=document.getElementById(buttonId),progress=document.getElementById(progressId),status=document.getElementById(statusId),started=Date.now();if(button)button.textContent="Starting "+label+"…";if(progress)progress.removeAttribute("value");const render=()=>{if(status)status.textContent="Working · Request sent\nStarting "+label+"… ("+migrationDuration(Date.now()-started)+" elapsed)\nLast heartbeat: request sent at "+new Date(started).toISOString()+"\nDo not close the Suite or power off either server.";};render();if(migrationImmediateTimer)clearInterval(migrationImmediateTimer);migrationImmediateTimer=setInterval(render,250);}
+async function refreshMigrationRuntimeIdentity(){const target=document.getElementById("migrationRuntimeIdentityDetail");try{const value=await getJson("/api/migration-runtime-identity",{timeoutMs:10000});if(target){target.className="empty mt";target.textContent="Verified runtime · Source/build "+value.sourceBuildFingerprint+" · Package format "+value.packageFormatVersion+" · Export transport "+value.exportTransportVersion+" · Destination worker "+value.migrationWorkerTransportVersion+" · Progress API "+value.progressApiVersion;}}catch(error){if(target){target.className="warning mt";target.textContent="Migration runtime identity unavailable or mismatched. "+betterError(error);}setMigrationControlsBusy(true);}}
+async function refreshMigrationSelectedProfile(){const target=document.getElementById("migrationSelectedProfileDetail");try{const value=await getJson("/api/server-migration/profile",{timeoutMs:10000}),selected=value.selectedProfile;if(!selected)throw new Error("This runtime was not started with an explicit migration profile binding.");target.className="empty mt";target.textContent="Selected profile: "+selected.profileName+" · VM: "+selected.vmName+" · Identity: "+selected.digest;}catch(error){if(target){target.className="warning mt";target.textContent="Migration profile binding unavailable. "+betterError(error);}setMigrationControlsBusy(true);}}
+function setMigrationControlsBusy(busy){["migrationExportChooseButton","migrationPreflightButton","migrationExportButton","migrationImportChooseButton","migrationImportPreflightButton","migrationImportButton","migrationOfflineEnterButton","migrationOfflineExitButton"].forEach(id=>{const element=document.getElementById(id);if(element)element.disabled=Boolean(busy);});if(!busy&&migrationOfflineState)renderMigrationOffline(migrationOfflineState);}
+function migrationLiveText(job){const live=job.live||{},activity=live.activity||{},label=live.state==="verified"?"Verified":(live.state==="failed"?"Failed":(live.state==="stale"?"No recent activity":"Working"));let text=label+" · "+String(job.stage||"Working")+"\n"+String(activity.substep||job.stage||"Working")+(live.state==="working"?" — still working":"")+" ("+migrationDuration(live.elapsedMs)+" elapsed)\nLast activity: "+String(live.lastActivityAt||"not recorded");if(activity.mode==="bytes"&&activity.totalBytes){text+="\n"+migrationByteLabel(activity.bytes)+" of "+migrationByteLabel(activity.totalBytes)+" · "+Number(activity.percent||0).toFixed(2)+"%";}if(live.state==="stale")text+="\nNo recent heartbeat was received. The Suite has not cancelled, retried, or started another operation.";return text;}
+function migrationFailureText(job){const failure=job?.failure;if(!failure)return job?.error||"";const attempts=Array.isArray(failure.attempts)?failure.attempts:[];return ["Failed gate: "+String(failure.gate||job.stage||"Unknown"),"Command purpose: "+String(failure.commandPurpose||"Preflight gate evaluation"),"SSH exit code: "+(failure.exitCode===null||failure.exitCode===undefined?"not available":String(failure.exitCode)),"Timed out: "+(failure.timedOut===true?"yes":"no"),"Failure category: "+String(failure.category||"unclassified"),"Sanitized stderr: "+String(failure.stderr||"No diagnostic was captured."),...(attempts.length?["SSH attempts: "+attempts.map((attempt)=>String(attempt.attempt)+"="+String(attempt.category)+"/exit "+String(attempt.exitCode??"unknown")+"/"+String(attempt.stderr||"no diagnostic")).join("; ")]:[])].join("\n");}
+function renderMigrationProgressElement(id,job){const progress=document.getElementById(id),live=job.live||{},activity=live.activity||{};if(!progress)return;if(live.state==="verified"){progress.value=100;return;}if(activity.mode==="bytes"&&activity.totalBytes){progress.value=Math.max(0,Math.min(100,Number(activity.percent||0)));}else{progress.removeAttribute("value");}}
+const migrationUiSafety=(${installMigrationUiSafety.toString()})({ids:{deleteBot:"migrationDeleteBotListings",deletePlayer:"migrationDeletePlayerListings",deleteLegacyNpc:"migrationDeleteLegacyNpcListings",acknowledgement:"migrationEmptyMarketAcknowledge",confirmation:"migrationEmptyMarketConfirm",cleanup:"migrationEmptyMarketButton",preview:"migrationEmptyMarketPreviewButton",enterOffline:"migrationOfflineEnterButton",exitOffline:"migrationOfflineExitButton",exportPreflight:"migrationPreflightButton",importPreflight:"migrationImportPreflightButton"},enableWhenHealthy:["preview"],disableUnlessHealthy:["exportPreflight","importPreflight"],onPreviewInvalidated:()=>setText("migrationEmptyMarketStatus","Selection changed. Run a fresh exact preview before cleanup.")});
+function renderMigrationOffline(state={}){migrationOfflineState=state;const active=state.active===true,healthy=active&&state.failClosed!==true,busy=migrationOperationBusy();const banner=document.getElementById("migrationOfflineBanner");if(banner)banner.classList.toggle("hidden",!active);tone("migrationOfflineBadge",active?(state.failClosed?"Recovery Hold":"Active") : "Inactive");const detail=document.getElementById("migrationOfflineDetail");if(detail){detail.className=(state.failClosed?"warning":"subtle")+" mt";detail.textContent=active?((state.banner||"Migration Offline Mode — Automatic Startup and Writers Disabled")+" · Generation "+(state.generation||"unknown")+(state.error?" · "+state.error:"")):"Inactive. Enter locally before export or import; the administrator must pause Market Bot and stop the battlegroup manually.";}const enter=document.getElementById("migrationOfflineEnterButton"),exit=document.getElementById("migrationOfflineExitButton"),preflight=document.getElementById("migrationPreflightButton"),importPreflight=document.getElementById("migrationImportPreflightButton");if(enter)enter.disabled=busy||active;if(exit)exit.disabled=busy||!active||state.failClosed===true;if(preflight)preflight.disabled=busy||!healthy;if(importPreflight)importPreflight.disabled=busy||!healthy;if(!healthy||busy){const exportButton=document.getElementById("migrationExportButton"),importButton=document.getElementById("migrationImportButton");if(exportButton)exportButton.disabled=true;if(importButton)importButton.disabled=true;}}
+async function refreshMigrationOffline(){return migrationUiSafety.reloadOffline();}
+async function changeMigrationOffline(entering){const required=entering?"ENTER MIGRATION OFFLINE MODE":"EXIT MIGRATION OFFLINE MODE";const typed=window.prompt("Type "+required+" exactly.\n\nOffline Mode never pauses or stops the server for you. Exiting never starts it.")||"";if(typed!==required){showToast("Offline Mode confirmation did not match.","warning");return;}try{const result=await getJson("/api/migration-offline/"+(entering?"enter":"exit"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmText:typed})});migrationUiSafety.setOfflineState(result);renderMigrationOffline(result);resetMigrationPreflight();migrationImportPreflightState=null;showToast(entering?"Migration Offline Mode entered.":"Migration Offline Mode exited; the server remains stopped.","success");}catch(error){showToast(betterError(error),"error");await refreshMigrationOffline();}}
+async function chooseMigrationImportFile(){try{if(migrationOperationBusy())throw new Error("A Server Migration operation is already active.");if(!window.alphaNineSuite?.chooseServerMigrationImportFile)throw new Error("Migration package picker is unavailable.");const result=await window.alphaNineSuite.chooseServerMigrationImportFile();if(result?.canceled)return;setValue("migrationImportFile",result.filePath||"");migrationImportPreflightState=null;document.getElementById("migrationImportButton").disabled=true;setText("migrationImportStatus","Package selected. Run exact-compatible destination preflight.");}catch(error){setText("migrationImportStatus",betterError(error));}}
+function renderMigrationImportPreflightJob(job){renderMigrationProgressElement("migrationImportProgress",job);setText("migrationImportStatus",migrationLiveText(job)+(job.error?"\n\n"+job.error:""));migrationActiveJobType="import-preflight";migrationActiveJobId=["success","failed"].includes(job.status)?"":job.jobId;migrationImportPolling=migrationActiveJobId;setMigrationControlsBusy(Boolean(migrationActiveJobId));if(["success","failed"].includes(job.status)&&job.result){const data=job.result;migrationImportPreflightState=data;document.getElementById("migrationImportButton").disabled=data.ready!==true;setText("migrationImportStatus",(data.ready?"Verified · Import preflight passed. Destination rollback backup will be created before restore.":"Failed · Import preflight blocked.")+"\n"+(data.conditions||[]).map(row=>(row.ok?"PASS":"FAIL")+" · "+row.message).join("\n"));}}
+async function runMigrationImportPreflight(){let started=false;try{if(migrationOperationBusy())throw new Error("A Server Migration operation is already active.");const packagePath=getValue("migrationImportFile");if(!packagePath)throw new Error("Choose a migration package first.");beginMigrationImmediateFeedback("migrationImportPreflightButton","migrationImportStatus","migrationImportProgress","import preflight");started=true;const job=await getJson("/api/server-migration/import-preflight",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({packagePath}),timeoutMs:30000});finishMigrationImmediateFeedback("migrationImportPreflightButton");renderMigrationImportPreflightJob(job);const terminal=await pollMigrationJob("import-preflight",job.jobId);return terminal?.result||null;}catch(error){if(started)finishMigrationImmediateFeedback("migrationImportPreflightButton");migrationImportPreflightState=null;document.getElementById("migrationImportButton").disabled=true;setText("migrationImportStatus","Failed · Import preflight request was not accepted or could not be monitored.\n"+betterError(error));setMigrationControlsBusy(false);return null;}}
+function renderMigrationImportJob(job){renderMigrationProgressElement("migrationImportProgress",job);const live=job.live||{};setText("migrationImportStatus",migrationLiveText(job)+(job.error?"\n\n"+job.error:"")+(job.result?"\n\nVerification result:\n"+JSON.stringify(job.result,null,2):""));migrationActiveJobType="import";migrationActiveJobId=["success","failed","rolled-back"].includes(job.status)?"":job.jobId;migrationImportPolling=migrationActiveJobId;setMigrationControlsBusy(Boolean(migrationActiveJobId));}
+async function startMigrationImport(){let started=false;try{if(migrationOperationBusy())throw new Error("A Server Migration operation is already active.");const required="IMPORT SERVER MIGRATION PACKAGE";if(getValue("migrationImportConfirm")!==required)throw new Error("Type "+required+" exactly.");if(!migrationImportPreflightState?.ready){const checked=await runMigrationImportPreflight();if(!checked?.ready)return;}beginMigrationImmediateFeedback("migrationImportButton","migrationImportStatus","migrationImportProgress","import");started=true;const job=await getJson("/api/server-migration/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({packagePath:getValue("migrationImportFile"),confirmText:required,preflightApprovalDigest:migrationImportPreflightState.approvalDigest}),timeoutMs:30000});finishMigrationImmediateFeedback("migrationImportButton");renderMigrationImportJob(job);await pollMigrationJob("import",job.jobId);}catch(error){if(started)finishMigrationImmediateFeedback("migrationImportButton");setText("migrationImportStatus","Failed · Import request was not accepted or could not be monitored.\n"+betterError(error));setMigrationControlsBusy(false);}}
+function migrationEmptyMarketSelection(){return{deleteBotListings:document.getElementById("migrationDeleteBotListings")?.checked===true,deletePlayerListings:document.getElementById("migrationDeletePlayerListings")?.checked===true,deleteLegacyNpcListings:document.getElementById("migrationDeleteLegacyNpcListings")?.checked===true};}
+function renderMigrationEmptyMarketPreview(data){const counts=data?.counts||{},diagnostics=data?.diagnostics||{},nonzero=Object.entries(diagnostics).filter(([key,value])=>key!=="totalInvalid"&&String(value)!=="0").map(([key,value])=>key+": "+String(value));setText("migrationMarketBotCount",String(counts.botListings??"--"));setText("migrationPlayerListingCount",String(counts.playerListings??"--"));setText("migrationLegacyNpcListingCount",String(counts.legacyNpcListings??"--"));setText("migrationUnknownNpcListingCount",String(counts.unknownNpcListings??"--"));setText("migrationPendingSettlementCount",String(counts.pendingSettlements??"--"));setText("migrationEmptyMarketStatus","Exact read-only preview loaded. Completed/fulfilled history: "+String(counts.completedHistory??"--")+". Invalid relationships: "+String(counts.invalidRelationships??"--")+"."+(nonzero.length?" Sanitized aggregate reasons: "+nonzero.join(", ")+".":""));return data;}
+async function previewMigrationEmptyMarket(){const selection=migrationEmptyMarketSelection();migrationUiSafety.invalidatePreview();try{if(migrationUiSafety.snapshot().offlineHealthy!==true)throw new Error("Healthy authoritative Migration Offline Mode must be loaded before preview.");setText("migrationEmptyMarketStatus","Reading and hashing exact Exchange boundaries...");const data=renderMigrationEmptyMarketPreview(await getJson("/api/server-migration/empty-market-preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(selection),timeoutMs:300000}));migrationUiSafety.markPreviewSucceeded(selection);return data;}catch(error){migrationUiSafety.invalidatePreview();setText("migrationEmptyMarketStatus",betterError(error));return null;}}
+async function emptyMigrationMarket(){try{const selection=migrationEmptyMarketSelection(),required="EMPTY MARKET FOR MIGRATION";if(!migrationUiSafety.canCleanup())throw new Error("Run a fresh successful Empty Market preview for the current selection first.");if(!selection.deleteBotListings&&!selection.deletePlayerListings&&!selection.deleteLegacyNpcListings)throw new Error("Select at least one Empty Market deletion boundary.");if(document.getElementById("migrationEmptyMarketAcknowledge")?.checked!==true)throw new Error("Acknowledge the destructive cleanup warning first.");if(getValue("migrationEmptyMarketConfirm")!==required)throw new Error("Type "+required+" exactly.");const approved=await appConfirm("Empty Market for Migration","The Suite will stop Market Bot, create and verify a fresh rollback backup, permanently delete only the selected proven Exchange listings/items, verify the entire portable market is empty, then remove the non-portable Market Bot VM service and runtime. Player items are not returned to inventory; completed/fulfilled payment history is preserved.","Stop Bot + Backup + Delete","Cancel");if(!approved)return;migrationUiSafety.invalidatePreview();setText("migrationEmptyMarketStatus","Protected Empty Market workflow is running. Do not close the Suite.");const result=await getJson("/api/server-migration/empty-market",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...selection,acknowledged:true,confirmText:required}),timeoutMs:7200000});migrationUiSafety.resetDestructive();const by=result.removedByCategory||{};setText("migrationEmptyMarketStatus","Completed. Removed Market Bot "+String(by.botListings||"0")+", player "+String(by.playerListings||"0")+", and Legacy/Suite NPC "+String(by.legacyNpcListings||"0")+" listings; Market Bot VM infrastructure removed: "+(result.marketBotInfrastructureRemoved===true?"yes":"no")+". Rollback backup SHA-256: "+String(result.backup?.sha256||"verified")+".");resetMigrationPreflight();}catch(error){migrationUiSafety.invalidatePreview();setText("migrationEmptyMarketStatus",betterError(error));}}
+function migrationPayload(){return{outputPath:document.getElementById("migrationOutputFile")?.value||"",acknowledgeUnsafeLocation:document.getElementById("migrationUnsafeAcknowledge")?.checked===true};}
+function resetMigrationPreflight(){migrationPreflightState=null;const button=document.getElementById("migrationExportButton");if(button)button.disabled=true;setText("migrationPreflightSummary","Run preflight again after changing the destination or acknowledgement.");}
+async function chooseMigrationExportFile(){try{if(migrationOperationBusy())throw new Error("A Server Migration operation is already active.");if(!window.alphaNineSuite?.chooseServerMigrationExportFile)throw new Error("The migration save dialog is available only in the desktop Suite.");const result=await window.alphaNineSuite.chooseServerMigrationExportFile();if(result?.canceled)return;setValue("migrationOutputFile",result.filePath||"");const ack=document.getElementById("migrationUnsafeAcknowledge");if(ack)ack.checked=false;resetMigrationPreflight();await runMigrationPreflight();}catch(error){setText("migrationPreflightSummary",betterError(error));}}
+function migrationByteLabel(value){try{let bytes=BigInt(String(value||"0"));const units=["B","KiB","MiB","GiB","TiB"];let unit=0,scaled=bytes;while(scaled>=1024n&&unit<units.length-1){scaled/=1024n;unit++;}return scaled.toString()+" "+units[unit]+" ("+bytes.toString()+" bytes)";}catch{return String(value||"0")+" bytes";}}
+function renderMigrationPreflight(data){migrationPreflightState=data;const conditions=document.getElementById("migrationPreflightConditions");if(conditions)conditions.innerHTML=(data.conditions||[]).map(row=>'<div class="detail-row"><span class="subtle">'+esc(row.message)+'</span><strong class="badge '+(row.ok?'ok':'bad')+'">'+(row.ok?'Pass':'Blocked')+'</strong></div>').join("");const summary=document.getElementById("migrationPreflightSummary");if(summary){summary.className=(data.ready?'empty':'warning')+" mt";summary.textContent=data.ready?"Preflight passed. The source matches the exact supported profile and is ready to export.":"Preflight is blocked. Resolve every failed condition before exporting.";}const unsafe=document.getElementById("migrationUnsafeAcknowledgeRow");if(unsafe)unsafe.hidden=!data.unsafeLocation;const warning=document.getElementById("migrationLocationWarning");if(warning){warning.className=(data.unsafeLocation?'warning':'empty')+" mt";warning.textContent=data.unsafeLocation?(data.warnings?.[0]||"Unsafe location warning must be acknowledged."):"Selected location is outside known server and temporary directories. Keep another verified copy off this computer.";}const button=document.getElementById("migrationExportButton");if(button)button.disabled=migrationOperationBusy()||!data.ready;}
+function renderMigrationPreflightJob(job){renderMigrationProgressElement("migrationExportProgress",job);const failure=migrationFailureText(job);setText("migrationPreflightSummary",migrationLiveText(job)+(failure?"\n\n"+failure:""));migrationActiveJobType="preflight";migrationActiveJobId=["success","failed"].includes(job.status)?"":job.jobId;migrationExportPolling=migrationActiveJobId;setMigrationControlsBusy(Boolean(migrationActiveJobId));if(["success","failed"].includes(job.status)&&job.result)renderMigrationPreflight(job.result);}
+async function runMigrationPreflight(){let started=false;try{if(migrationOperationBusy())throw new Error("A Server Migration operation is already active.");if(migrationUiSafety.snapshot().offlineHealthy!==true)throw new Error("Healthy authoritative Migration Offline Mode must be loaded before preflight.");if(!migrationPayload().outputPath)throw new Error("Choose a .a9migration package filename first.");beginMigrationImmediateFeedback("migrationPreflightButton","migrationPreflightSummary","migrationExportProgress","preflight");started=true;const job=await getJson("/api/server-migration/preflight",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(migrationPayload()),timeoutMs:30000});finishMigrationImmediateFeedback("migrationPreflightButton");renderMigrationPreflightJob(job);const terminal=await pollMigrationJob("preflight",job.jobId);return terminal?.result||null;}catch(error){if(started)finishMigrationImmediateFeedback("migrationPreflightButton");migrationPreflightState=null;setText("migrationPreflightSummary","Failed · Preflight request was not accepted or could not be monitored.\n"+betterError(error));const exportButton=document.getElementById("migrationExportButton");if(exportButton)exportButton.disabled=true;setMigrationControlsBusy(false);return null;}}
+function renderMigrationExportJob(job){renderMigrationProgressElement("migrationExportProgress",job);const failure=migrationFailureText(job);setText("migrationExportStage",migrationLiveText(job)+(failure?"\n\n"+failure:""));const live=job.live||{},badge=document.getElementById("migrationExportBadge");if(badge){badge.textContent=live.state==="verified"?"Verified":(live.state==="failed"?"Failed":(live.state==="stale"?"No recent activity":"Working"));badge.className="badge "+(live.state==="verified"?'ok':(live.state==="failed"?'bad':'warn'));}const timeline=document.getElementById("migrationExportTimeline");if(timeline)timeline.innerHTML=(job.timeline||[]).map(stage=>'<div class="detail-row"><span class="subtle">'+esc(stage)+'</span><strong>'+esc(stage===job.stage?"Current":((job.timeline||[]).indexOf(stage)<=(job.timeline||[]).indexOf(job.stage)?"Done":"Waiting"))+'</strong></div>').join("");if(job.status==="success"&&job.result){const result=document.getElementById("migrationExportResult");if(result){result.className="empty mt";result.innerHTML='<strong>Verified — Keep This File Safe</strong><div class="detail-list mt"><div class="detail-row"><span class="subtle">Package</span><strong>'+esc(job.result.fileName)+'</strong></div><div class="detail-row"><span class="subtle">Exact size</span><strong>'+esc(migrationByteLabel(job.result.size))+'</strong></div><div class="detail-row"><span class="subtle">Source build</span><strong>'+esc(job.result.sourceBuild)+'</strong></div><div class="detail-row"><span class="subtle">Important entity counts</span><strong>'+esc(Object.entries(job.result.entityCounts||{}).slice(0,8).map(row=>row[0]+": "+row[1]).join(" / "))+'</strong></div></div><div class="warning mt">'+esc(job.result.locationWarning)+'</div>';}}else if(job.status==="failed"){const result=document.getElementById("migrationExportResult");if(result){result.className="warning mt";result.textContent=failure||"Export failed. No final package was published.";}}migrationActiveJobType="export";migrationActiveJobId=["success","failed"].includes(job.status)?"":job.jobId;migrationExportPolling=migrationActiveJobId;setMigrationControlsBusy(Boolean(migrationActiveJobId));}
+function renderAnyMigrationJob(type,job){if(type==="export")renderMigrationExportJob(job);else if(type==="import")renderMigrationImportJob(job);else if(type==="preflight")renderMigrationPreflightJob(job);else if(type==="import-preflight")renderMigrationImportPreflightJob(job);}
+async function pollMigrationJob(type,jobId){if(!jobId)return null;migrationActiveJobType=type;migrationActiveJobId=jobId;if(type==="export"||type==="preflight")migrationExportPolling=jobId;else migrationImportPolling=jobId;setMigrationControlsBusy(true);let lastJob=null;for(let attempt=0;attempt<4800&&migrationActiveJobId===jobId;attempt++){try{lastJob=await getJson("/api/server-migration/"+type+"-status/"+encodeURIComponent(jobId),{timeoutMs:10000});renderAnyMigrationJob(type,lastJob);if(["success","failed","rolled-back"].includes(lastJob.status))break;}catch(error){const target=(type==="export"?"migrationExportStage":(type==="preflight"?"migrationPreflightSummary":"migrationImportStatus"));setText(target,"No recent activity · status request failed\n"+betterError(error)+"\nThe Suite has not cancelled, retried, or started another operation.");}await new Promise(resolve=>setTimeout(resolve,1500));}if(migrationActiveJobId===jobId)migrationActiveJobId="";if(type==="export"||type==="preflight")migrationExportPolling="";else migrationImportPolling="";setMigrationControlsBusy(false);return lastJob;}
+async function reconnectMigrationJob(){try{const active=await getJson("/api/server-migration/active-job",{timeoutMs:10000});if(!active.job){setMigrationControlsBusy(false);return;}renderAnyMigrationJob(active.type,active.job);if(active.active)pollMigrationJob(active.type,active.job.jobId);}catch(error){setText("migrationExportStage","No recent activity · unable to reconnect to migration job status\n"+betterError(error));setText("migrationImportStatus","No recent activity · unable to reconnect to migration job status\n"+betterError(error));setMigrationControlsBusy(true);}}
+async function startMigrationExport(){let started=false;try{if(migrationOperationBusy())throw new Error("A Server Migration operation is already active.");if(!migrationPreflightState?.ready){const checked=await runMigrationPreflight();if(!checked?.ready)return;}beginMigrationImmediateFeedback("migrationExportButton","migrationExportStage","migrationExportProgress","export");started=true;const job=await getJson("/api/server-migration/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(migrationPayload()),timeoutMs:30000});finishMigrationImmediateFeedback("migrationExportButton");renderMigrationExportJob(job);await pollMigrationJob("export",job.jobId);}catch(error){if(started)finishMigrationImmediateFeedback("migrationExportButton");renderMigrationExportJob({status:"failed",stage:"Export failed",error:"Export request was not accepted or could not be monitored. "+betterError(error),timeline:[],live:{state:"failed",elapsedMs:0,lastActivityAt:new Date().toISOString(),activity:{mode:"indeterminate",substep:"Export failed"}}});setMigrationControlsBusy(false);}}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],latestStorageDepositReceipt=null,storageDepositPollGeneration=0,playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],setDurabilityTo200:true,durabilityValue:200,notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],latestStorageDepositReceipt=null,storageDepositPollGeneration=0,latestGiveItemReceipt=null,giveItemReceiptPollGeneration=0,playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let operationsState={active:[],operations:[]};
 let databaseExplorerState={schemas:[],tables:[],metadata:null,rows:[],selectedTable:"",selectedRow:-1,offset:0,pageSize:50,hasMore:false,loading:false};
 let serverUpdateOperationId="",serverUpdateCheckState=null,serverUpdatePollTimer=null;
@@ -19367,7 +23392,7 @@ function clearActionCenterSoon(delay=4000){const card=document.getElementById("s
 function showToast(message,kind="success"){const toast=document.getElementById("suiteToast");if(!toast)return;const normalized=normalizeActionKind(kind);window.clearTimeout(suiteToastTimer);toast.textContent=String(message||"");toast.className="suite-toast "+normalized;setActionCenter(normalized==="error"?"Action needs attention":normalized==="working"?"Working":"Action complete",String(message||""),normalized);suiteToastTimer=window.setTimeout(()=>toast.classList.add("hidden"),4000);}
 function buttonActionLabel(button){if(!button)return"";const explicit=button.getAttribute("aria-label")||button.getAttribute("title")||button.dataset.actionLabel;if(explicit)return explicit.trim();const open=button.dataset.open;if(open)return"Open "+open.replace(/-/g," ");const text=(button.textContent||"").replace(/\s+/g," ").trim();return text.slice(0,90);}
 let suiteTooltipEl=null,suiteTooltipTarget=null;
-const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","server-health":"Run bounded read-only checks for the VM, Kubernetes workloads, storage, and Suite services.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.","database-explorer":"Browse the selected battlegroup database locally with enforced read-only queries.",management:"Open the embedded server manager console.","web-portal":"Open or copy the local and LAN Suite portal URLs.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run Setup Doctor for guided checks, safe defaults, paths, and service fixes."};
+const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","server-health":"Run bounded read-only checks for the VM, Kubernetes workloads, storage, and Suite services.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.","server-migration":"Create and verify a portable export of the complete authoritative dune schema.","database-explorer":"Browse the selected battlegroup database locally with enforced read-only queries.",management:"Open the embedded server manager console.","web-portal":"Open or copy the local and LAN Suite portal URLs.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run Setup Doctor for guided checks, safe defaults, paths, and service fixes."};
 const SUITE_ONCLICK_TOOLTIPS=[[/refreshAll\(/,"Refresh the dashboard, VM monitor, maps, players, receiver status, and admin data."],[/refreshLiveMap\(/,"Reload live map actors and location overlays from the server database."],[/executeLiveTeleport\(/,"Teleport the selected player to the prepared live map coordinates."],[/refreshAdmin\(/,"Refresh players, item catalog state, receiver readiness, and live give capability."],[/giveAdminItem\(/,"Send the selected item to the selected player using the active give transport."],[/giveQueuedItems\(/,"Send every item currently staged in the give queue."],[/refreshProgressionInspector\(/,"Scan progression tables, functions, and support metadata again."],[/lookupProgressionPlayer\(/,"Find a player in progression data using the current search value."],[/previewProgressionApply\(/,"Create a backup and preview the progression change before any live write."],[/applyProgressionLive\(/,"Apply the prepared progression change to the live database."],[/refresh\(/,"Refresh server status, players, resources, and recent activity."],[/act\('start'\)/,"Start the battlegroup server after checking VM and map readiness."],[/act\('restart'\)/,"Restart the battlegroup server."],[/act\('stop'\)/,"Stop the battlegroup server."],[/act\('backup'\)/,"Run the configured server backup action."],[/act\('update'\)/,"Run the configured server update action."],[/openDirector\(/,"Open the battlegroup director interface or management endpoint."],[/refreshVmStatus\(/,"Refresh VM power state, IP, uptime, ping, ports, and services."],[/runVmAction\('start'\)/,"Start the configured Hyper-V virtual machine."],[/runVmAction\('stop'\)/,"Stop the configured Hyper-V virtual machine."],[/deployMap\(/,"Read the selected map partitions, set replicas, and apply the requested memory limit."],[/stopSelectedMap\(/,"Scale the selected map down so it stops running."],[/refreshMaps\(/,"Reload map deployment status, available maps, memory limits, and partition readiness."],[/startDatabaseTunnel\(/,"Start or retry the SSH tunnel that exposes Postgres locally."],[/createDatabaseBackup\(/,"Create a database backup using the configured backup location."],[/restoreDatabaseBackup\(/,"Import the selected battlegroup backup into the database."],[/reloadManagerFrame\(/,"Reload the embedded server manager console."],[/refreshItemDatabase\(/,"Reload the bundled item database and filters."],[/refreshDiagnostics\(/,"Run Setup Doctor and refresh setup checks, fixes, logs, and runtime details."],[/openSetupWizard\(/,"Open the setup wizard to review or change core Suite configuration."],[/refreshBattlegroups\(/,"Reload battlegroups and selected battlegroup metadata."],[/useSelectedBattlegroup\(/,"Make the selected battlegroup the active target for Suite actions."],[/saveBattlegroupTitle\(/,"Save a friendly title for the selected battlegroup."],[/refreshReceiverStatus\(/,"Refresh receiver service status and reachability."],[/receiverAction\('start'\)/,"Start the live give receiver service."],[/receiverAction\('stop'\)/,"Stop the live give receiver service."],[/receiverAction\('restart'\)/,"Restart the live give receiver service."],[/saveSettings\(/,"Save the current Suite settings to config.json."],[/checkUpdates\(/,"Check the configured update source for a newer Suite release."],[/exportSettings\(/,"Export Suite settings to a file."],[/importSettings\(/,"Import Suite settings from a file."],[/openAboutDialog\(/,"Show Suite version, build, links, and project information."]];
 function suitePanelContext(button){const panel=button.closest(".panel,.map-deployment-panel,.setup-card,.suite-modal-card,.about-card");const label=panel?.querySelector(".label,h2,h3,strong")?.textContent;return label?String(label).replace(/\s+/g," ").trim():"";}
 function suiteDescriptiveTooltip(button){if(!button||button.dataset.tooltip==="false")return"";if(button.dataset.tooltip)return button.dataset.tooltip;if(button.classList.contains("tab"))return SUITE_VIEW_TOOLTIPS[button.dataset.view]||("Open the "+buttonActionLabel(button)+" workspace.");if(button.dataset.open)return SUITE_VIEW_TOOLTIPS[button.dataset.open]||("Open the "+button.dataset.open.replace(/-/g," ")+" panel.");const onclick=String(button.getAttribute("onclick")||"");for(const [pattern,text] of SUITE_ONCLICK_TOOLTIPS){if(pattern.test(onclick))return text;}if(button.classList.contains("player-card"))return"Select this player for details, item grants, permission tools, and related actions.";if(button.classList.contains("admin-item"))return"Select this item template for live giving or queue staging.";if(button.classList.contains("item-db-card"))return"Open this item record in the item database details panel.";const text=buttonActionLabel(button);const context=suitePanelContext(button);if(context&&text)return context+": "+text+". Click to run this action.";return text?("Click to run: "+text+"."):"";}
@@ -19386,7 +23411,7 @@ function portalUrlText(urls=WEB_PORTAL_URLS){return (urls&&urls.length?urls:WEB_
 function renderWebPortalUrls(urls=WEB_PORTAL_URLS){const resolved=urls&&urls.length?urls:WEB_PORTAL_URLS;setText("diagPortal",portalUrlText(resolved));setText("settingsWebPortalUrl",portalUrlText(resolved));setText("webPortalPrimaryUrl",resolved[0]||"");setText("webPortalAllUrls",portalUrlText(resolved));}
 function openWebPortal(){const url=(WEB_PORTAL_URLS&&WEB_PORTAL_URLS[0])||location.origin;window.open(url,"_blank","noopener");setText("webPortalStatus","Opened "+url);playUiSound("click");}
 async function copyWebPortalUrl(){const text=portalUrlText(WEB_PORTAL_URLS);try{await navigator.clipboard.writeText(text);setText("webPortalStatus","Web portal URL copied.");showToast("Web Portal URL copied","success");playUiSound("success");}catch(error){setText("webPortalStatus",betterError(error));playUiSound("warning");}}
-async function applyRemoteRoleUi(){if(location.protocol!=="https:")return;try{const session=await getJson("/api/auth/session");const allowed={viewer:new Set(["dashboard","players","live-map","progression","landsraad","item-database"]),operator:new Set(["dashboard","players","live-map","progression","landsraad","item-database","server","scheduler"]),owner:null}[session.role]||new Set(["dashboard"]);document.body.dataset.remoteRole=session.role||"viewer";const localViews=new Set(["web-portal","settings","env","logs","diagnostics","management","operations","database-explorer"]);tabs.forEach(tab=>{const localOnly=localViews.has(tab.dataset.view);tab.style.display=(localOnly||(allowed&&!allowed.has(tab.dataset.view)))?"none":"";});const requested=location.hash.slice(1);if(localViews.has(requested)||(allowed&&!allowed.has(requested)))setView("dashboard");setText("remoteAccessConfigured","Authenticated as "+session.role);setText("remoteAccessStatus",session.role==="viewer"?"Remote Viewer mode is read-only.":session.role==="operator"?"Remote Operator mode allows limited server controls.":"Remote Owner mode; sensitive writes require password confirmation every five minutes.");}catch(error){setText("remoteAccessStatus",betterError(error));}}
+async function applyRemoteRoleUi(){if(location.protocol!=="https:")return;try{const session=await getJson("/api/auth/session");const allowed={viewer:new Set(["dashboard","players","live-map","progression","landsraad","item-database"]),operator:new Set(["dashboard","players","live-map","progression","landsraad","item-database","server","scheduler"]),owner:null}[session.role]||new Set(["dashboard"]);document.body.dataset.remoteRole=session.role||"viewer";const localViews=new Set(["web-portal","settings","env","logs","diagnostics","management","operations","database-explorer","server-migration"]);tabs.forEach(tab=>{const localOnly=localViews.has(tab.dataset.view);tab.style.display=(localOnly||(allowed&&!allowed.has(tab.dataset.view)))?"none":"";});const requested=location.hash.slice(1);if(localViews.has(requested)||(allowed&&!allowed.has(requested)))setView("dashboard");setText("remoteAccessConfigured","Authenticated as "+session.role);setText("remoteAccessStatus",session.role==="viewer"?"Remote Viewer mode is read-only.":session.role==="operator"?"Remote Operator mode allows limited server controls.":"Remote Owner mode; sensitive writes require password confirmation every five minutes.");}catch(error){setText("remoteAccessStatus",betterError(error));}}
 async function refreshRemoteAccessStatus(){if(location.protocol==="https:"){REMOTE_PORTAL_URLS=[location.origin];setText("remoteAccessUrls",location.origin);setText("remoteAccessFingerprint","View on the server computer");const logout=document.getElementById("remoteAccessLogout");if(logout)logout.style.display="";await applyRemoteRoleUi();return;}try{const data=await getJson("/api/remote-access/status");REMOTE_PORTAL_URLS=data.urls||[];setText("remoteAccessConfigured",data.configured?("Password configured · "+data.role+(data.totpEnabled?" · 2FA on":" · 2FA off")):"Password setup required");setText("remoteLanAccessStatus",data.lanWebPortalEnabled?"Enabled — Private networks only":"Local only — no firewall permission needed");setText("remoteLanAccessGuidance",data.firewallGuidance||(data.lanWebPortalEnabled?"Allow Private networks only if Windows asks.":"Local-only mode is active."));setText("remoteAccessUrls",portalUrlText(REMOTE_PORTAL_URLS));setText("remoteAccessFingerprint",data.certificateFingerprint||"Certificate is starting");const role=document.getElementById("remoteAccessRole");if(role)role.value=data.role||"viewer";}catch(error){setText("remoteAccessStatus",betterError(error));}}
 async function setRemoteAccessPassword(){const username=document.getElementById("remoteAccessUsername")?.value||"admin";const role=document.getElementById("remoteAccessRole")?.value||"viewer";const password=document.getElementById("remoteAccessPassword")?.value||"";const confirm=document.getElementById("remoteAccessPasswordConfirm")?.value||"";if(password!==confirm){setText("remoteAccessStatus","Passwords do not match.");return;}try{await getJson("/api/remote-access/password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password,role})});document.getElementById("remoteAccessPassword").value="";document.getElementById("remoteAccessPasswordConfirm").value="";setText("remoteAccessStatus","Remote credentials and "+role+" permission saved. Existing remote sessions were signed out.");showToast("Remote access security saved","success");await refreshRemoteAccessStatus();}catch(error){setText("remoteAccessStatus",betterError(error));}}
 async function setLanWebPortal(enabled){try{if(enabled){const confirmed=await appConfirm("Enable Private LAN Access","Allow phones and other computers on your private network to open the authenticated HTTPS portal?\n\nWindows may show a firewall prompt. Select Private networks only and leave Public networks unchecked.","Enable LAN Access","Cancel");if(!confirmed)return;}const data=await getJson("/api/remote-access/lan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled})});REMOTE_PORTAL_URLS=data.urls||REMOTE_PORTAL_URLS;setText("remoteLanAccessStatus",enabled?"Enabled — Private networks only":"Local only — no firewall permission needed");setText("remoteLanAccessGuidance",data.firewallGuidance||"");setText("remoteAccessUrls",portalUrlText(REMOTE_PORTAL_URLS));setText("remoteAccessStatus",enabled?"LAN portal enabled. If Windows asks, allow Private networks only.":"Private LAN access disabled. Internet Access is unchanged.");showToast(enabled?"Private LAN access enabled":"Private LAN access disabled","success");}catch(error){setText("remoteAccessStatus",betterError(error));showToast(betterError(error),"error");}}
@@ -19742,7 +23767,7 @@ function marketBotDate(value){if(!value)return"--";const date=new Date(value);re
 function marketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"0";}
 function marketBotStatusClass(value){const status=String(value||"").toLowerCase();return status==="running"?"ok":status==="error"?"bad":"warn";}
 function fillMarketBotListingCategories(local={}){const select=document.getElementById("marketBotListingCategory");if(!select)return;const categories=Array.isArray(local.availableCategories)?local.availableCategories:[];select.innerHTML='<option value="">All categories</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");select.value=categories.includes(local.listingCategory)?local.listingCategory:"";}
-function renderMarketBotStatus(data={}){marketBotStateData=data;const local=data.localConfig||data.config||{},cycle=data.lastCycle||{},totals=cycle.totals||{};const status=data.status||(!data.installed?"Not Installed":local.paused?"Paused":"Running");tone("marketBotState",status);setText("marketBotMessage",data.message||(!data.installed?"Enable Market Bot to install it in the VM.":"Persistent VM runtime reachable."));setText("marketBotLastRun",marketBotDate(data.lastRunAt));setText("marketBotLastResult",cycle.message||"No completed cycle loaded.");setText("marketBotCycleResult",marketBotNumber(cycle.created??totals.created??totals.createNow)+" / "+marketBotNumber(cycle.removedExpired)+" / "+(status==="Error"?"1":"0"));setText("marketBotCycleDetail","Created / expired bot-owned removed / errors");setText("marketBotNextRun",marketBotDate(data.nextRunAt));setText("marketBotVersion",(data.installedVersion||"Not installed")+" / expected "+(data.expectedVersion||"--")+(data.updateRequired?" / update required":""));setValue("marketBotEconomyStyle",local.economyStyle||"Expensive");fillMarketBotListingCategories(local);setText("marketBotPauseButton",local.paused?"Resume Bot":"Pause Bot");const active=local.activated===true;const pauseButton=document.getElementById("marketBotPauseButton"),restockButton=document.getElementById("marketBotRestockButton"),cleanButton=document.getElementById("marketBotCleanButton");if(pauseButton)pauseButton.disabled=!active;if(restockButton)restockButton.disabled=!active||local.paused===true;if(cleanButton)cleanButton.disabled=!active;setText("marketBotEnableButton",active?"Market Bot Enabled":"Enable Market Bot");const enableButton=document.getElementById("marketBotEnableButton");if(enableButton)enableButton.disabled=active;const migration=local.legacyMigration||{};setText("marketBotMigration",migration.detected?("Legacy configuration preserved. Converted "+(migration.convertedAt||"--")+". "+(migration.legacyDisabledAt?"Legacy engine disabled "+migration.legacyDisabledAt+".":"Activation has not disabled the legacy engine yet.")):"No Legacy Market Automator configuration was detected.");}
+function renderMarketBotStatus(data={}){marketBotStateData=data;const local=data.localConfig||data.config||{},cycle=data.lastCycle||{},totals=cycle.totals||{};const status=data.status||(!data.installed?"Not Installed":"Unknown");tone("marketBotState",status);setText("marketBotMessage",data.message||(!data.installed?"Enable Market Bot to install it in the VM.":"Persistent VM runtime reachable."));setText("marketBotLastRun",marketBotDate(data.lastRunAt));setText("marketBotLastResult",cycle.message||"No completed cycle loaded.");setText("marketBotCycleResult",marketBotNumber(cycle.created??totals.created??totals.createNow)+" / "+marketBotNumber(cycle.removedExpired)+" / "+(status==="Error"?"1":"0"));setText("marketBotCycleDetail","Created / expired bot-owned removed / errors");setText("marketBotNextRun",marketBotDate(data.nextRunAt));setText("marketBotVersion",(data.installedVersion||"Not installed")+" / expected "+(data.expectedVersion||"--")+(data.updateRequired?" / update required":""));setValue("marketBotEconomyStyle",local.economyStyle||"Expensive");fillMarketBotListingCategories(local);setText("marketBotPauseButton",local.paused?"Resume Bot":"Pause Bot");const active=local.activated===true,quiescent=data.quiescent===true;const pauseButton=document.getElementById("marketBotPauseButton"),restockButton=document.getElementById("marketBotRestockButton"),cleanButton=document.getElementById("marketBotCleanButton");if(pauseButton)pauseButton.disabled=!active||(local.paused===true&&!quiescent);if(restockButton)restockButton.disabled=!active||local.paused===true||!data.generationMatch;if(cleanButton)cleanButton.disabled=!active||!quiescent;setText("marketBotEnableButton",active?"Market Bot Enabled":"Enable Market Bot");const enableButton=document.getElementById("marketBotEnableButton");if(enableButton)enableButton.disabled=active;const migration=local.legacyMigration||{};setText("marketBotMigration",migration.detected?("Legacy configuration preserved. Converted "+(migration.convertedAt||"--")+". "+(migration.legacyDisabledAt?"Legacy engine disabled "+migration.legacyDisabledAt+".":"Activation has not disabled the legacy engine yet.")):"No Legacy Market Automator configuration was detected.");}
 async function refreshMarketBot(){try{const data=await getJson("/api/market-bot",{timeoutMs:50000});renderMarketBotStatus(data);return data;}catch(error){renderMarketBotStatus({status:"Error",message:betterError(error),localConfig:marketBotStateData?.localConfig||{}});return null;}}
 function marketBotPreviewRows(){const rows=marketBotPreviewData?.items||[],query=(getValue("marketBotPreviewSearch")||"").trim().toLowerCase(),category=getValue("marketBotPreviewCategory"),tier=getValue("marketBotPreviewTier");return rows.filter(row=>(!query||[row.id,row.name,row.category].some(value=>String(value||"").toLowerCase().includes(query)))&&(!category||row.category===category)&&(!tier||String(row.tier||"")===tier));}
 function fillMarketBotPreviewFilters(){const rows=marketBotPreviewData?.items||[];for(const [id,key,label] of [["marketBotPreviewCategory","category","All categories"],["marketBotPreviewTier","tier","All tiers"]]){const select=document.getElementById(id);if(!select)continue;const current=select.value;const values=[...new Set(rows.map(row=>String(row[key]||"").trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">'+label+'</option>'+values.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");select.value=values.includes(current)?current:"";}}
@@ -19999,14 +24024,21 @@ function giveStorageLabel(row){const type=row.typeName||row.name||"Storage";cons
 function renderGiveStorageTargets(){const select=document.getElementById("giveStorageTarget");if(!select)return;const current=select.value;const q=String(document.getElementById("giveStorageSearch")?.value||"").trim().toLowerCase();const rows=q?giveStorageTargets.filter(row=>[row.name,row.customName,row.typeName,row.kind,row.actorId,row.inventoryId,row.map,row.partitionId].join(" ").toLowerCase().includes(q)):giveStorageTargets;select.innerHTML=rows.length?rows.map(row=>'<option value="'+esc(row.inventoryId)+'">'+esc(giveStorageLabel(row))+'</option>').join(""):'<option value="">No storage found</option>';if(rows.some(row=>String(row.inventoryId)===String(current)))select.value=current;renderGiveStorageDetails();}
 function renderGiveStorageDetails(){const el=document.getElementById("giveStorageDetails");if(!el)return;const row=selectedGiveStorage();if(!row){el.textContent="Choose a detected storage container.";return;}const pos=row.position||{};const volume=row.maxItemVolume>0?(row.usedVolume+" / "+row.maxItemVolume+(row.volumeVerified?"":" estimated")):"Not limited";const target=row.customName?(row.customName+" / "+(row.typeName||row.kind)):(row.name||row.kind);const contents=(row.contents||[]).map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.count)+' × '+esc(item.template)+'</span><strong>'+esc(item.name||item.template)+'</strong></div>').join("")||'<div class="subtle">Storage is empty.</div>';el.innerHTML='<div class="detail-row"><span class="subtle">Target</span><strong>'+esc(target)+" / "+esc(row.kind)+'</strong></div><div class="detail-row"><span class="subtle">Identity</span><strong>Actor '+esc(row.actorId)+' / Inventory '+esc(row.inventoryId)+'</strong></div><div class="detail-row"><span class="subtle">Location</span><strong>'+esc(row.map||"Unknown")+' / P'+esc(row.partitionId||"-")+' / D'+esc(row.dimensionIndex)+' / '+esc(Math.round(pos.x||0))+', '+esc(Math.round(pos.y||0))+', '+esc(Math.round(pos.z||0))+'</strong></div><div class="detail-row"><span class="subtle">Capacity</span><strong>'+esc(row.itemCount)+' / '+esc(row.maxItemCount)+' slots / Volume '+esc(volume)+'</strong></div><div class="label mt">Contents</div>'+contents;}
 async function refreshGiveStorageTargets(){const el=document.getElementById("giveStorageDetails");try{if(el)el.textContent="Loading storage containers...";const data=await getJson("/api/admin/storage-targets",{timeoutMs:20000});giveStorageTargets=data.storages||[];renderGiveStorageTargets();updateGiveTargetSummary();return data;}catch(e){giveStorageTargets=[];renderGiveStorageTargets();if(el){el.className="warning mt";el.textContent=betterError(e);}return null;}}
-function renderStorageDepositReceipt(receipt=latestStorageDepositReceipt){latestStorageDepositReceipt=receipt||null;const status=document.getElementById("storageDepositStatus");const recheck=document.getElementById("storageDepositRecheckButton");const confirm=document.getElementById("storageDepositConfirmButton");const restart=document.getElementById("storageDepositRestartButton");if(recheck)recheck.disabled=!receipt;if(confirm)confirm.disabled=!receipt||receipt.status!=="database-verified"||receipt.confirmedVisible===true;if(restart)restart.disabled=!receipt||receipt.confirmedVisible===true;if(!status)return;if(!receipt){status.className="empty mt";status.textContent="No storage deposit receipt loaded.";return;}const item=receipt.item||{},storage=receipt.storage||{},integrity=receipt.status==="database-verified";const visibility=receipt.confirmedVisible?"Confirmed visible in game":"In-game visibility not yet confirmed";const check=receipt.checks?.[receipt.checks.length-1];status.className=(integrity?"empty":"warning")+" mt";status.innerHTML='<strong>'+esc(integrity?"Database verified":"Storage needs attention")+' · '+esc(visibility)+'</strong><div class="subtle mt">'+esc((item.quantity||0)+" × "+(item.name||item.id||"Item")+" / "+(storage.name||"Storage")+" / Inventory "+(storage.inventoryId||"-")+" / Receipt "+receipt.receiptId)+'</div><div class="subtle mt">'+esc(check?.message||("Status: "+(receipt.status||"unknown")+". Reopen the container, then confirm visibility. Automatic checks do not repeat the grant."))+'</div>';}
+function receiptDurabilityLabel(receipt){const durability=receipt?.durability||receipt?.item?.durability;return durability?.applied?"Durability: exactly 200 current":"Durability not applicable / not written";}
+function renderGiveItemReceipt(receipt=latestGiveItemReceipt){latestGiveItemReceipt=receipt||null;const status=document.getElementById("giveItemReceiptStatus");const button=document.getElementById("giveItemReceiptRecheckButton");if(button)button.disabled=!receipt;if(!status)return;if(!receipt){status.className="empty";status.textContent="No player-inventory Give Item receipt loaded.";return;}const item=receipt.item||{},integrity=receipt.status==="database-verified",check=receipt.checks?.[receipt.checks.length-1];status.className=integrity?"empty":"warning";status.innerHTML='<strong>'+esc(integrity?"Player inventory database verified":"Player inventory needs attention")+'</strong><div class="subtle mt">'+esc((item.quantity||0)+" × "+(item.name||item.id||"Item")+" / Inventory "+(receipt.inventory?.id||"-")+" / "+receiptDurabilityLabel(receipt)+" / Receipt "+receipt.receiptId)+'</div><div class="subtle mt">'+esc(check?.message||"The transaction read-back matched. Delayed checks never repeat the grant.")+'</div>';}
+async function loadLatestGiveItemReceipt(){try{const data=await getJson("/api/admin/give-item-receipts?limit=1",{timeoutMs:15000});renderGiveItemReceipt(data.receipts?.[0]||null);return data;}catch(e){const status=document.getElementById("giveItemReceiptStatus");if(status){status.className="warning";status.textContent="Give Item receipt history unavailable: "+betterError(e);}return null;}}
+async function recheckGiveItemReceipt(options={}){const receipt=latestGiveItemReceipt;if(!receipt)return null;const button=document.getElementById("giveItemReceiptRecheckButton");try{if(button)button.disabled=true;const data=await getJson("/api/admin/give-item-receipts/recheck",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({receiptId:receipt.receiptId}),timeoutMs:20000});renderGiveItemReceipt(data.receipt);if(!data.ok&&!options.quiet)showToast(data.message||"Give Item read-back mismatch","error");return data;}catch(e){if(!options.quiet)showToast(betterError(e),"error");return null;}finally{if(button)button.disabled=!latestGiveItemReceipt;}}
+async function pollGiveItemReceipt(receiptId){const generation=++giveItemReceiptPollGeneration;const delays=[2000,3000,10000,15000];for(const delay of delays){await new Promise(resolve=>setTimeout(resolve,delay));if(generation!==giveItemReceiptPollGeneration||latestGiveItemReceipt?.receiptId!==receiptId)return;const result=await recheckGiveItemReceipt({quiet:true});if(!result||!result.ok)return;}}
+function renderStorageDepositReceipt(receipt=latestStorageDepositReceipt){latestStorageDepositReceipt=receipt||null;const status=document.getElementById("storageDepositStatus");const recheck=document.getElementById("storageDepositRecheckButton");const confirm=document.getElementById("storageDepositConfirmButton");const restart=document.getElementById("storageDepositRestartButton");if(recheck)recheck.disabled=!receipt;if(confirm)confirm.disabled=!receipt||receipt.status!=="database-verified"||receipt.confirmedVisible===true;if(restart)restart.disabled=!receipt||receipt.confirmedVisible===true;if(!status)return;if(!receipt){status.className="empty mt";status.textContent="No storage deposit receipt loaded.";return;}const item=receipt.item||{},storage=receipt.storage||{},integrity=receipt.status==="database-verified";const visibility=receipt.confirmedVisible?"Confirmed visible in game":"In-game visibility not yet confirmed";const check=receipt.checks?.[receipt.checks.length-1];status.className=(integrity?"empty":"warning")+" mt";status.innerHTML='<strong>'+esc(integrity?"Database verified":"Storage needs attention")+' · '+esc(visibility)+'</strong><div class="subtle mt">'+esc((item.quantity||0)+" × "+(item.name||item.id||"Item")+" / "+(storage.name||"Storage")+" / Inventory "+(storage.inventoryId||"-")+" / "+receiptDurabilityLabel(receipt)+" / Receipt "+receipt.receiptId)+'</div><div class="subtle mt">'+esc(check?.message||("Status: "+(receipt.status||"unknown")+". Reopen the container, then confirm visibility. Automatic checks do not repeat the grant."))+'</div>';}
 async function loadLatestStorageDepositReceipt(){try{const data=await getJson("/api/admin/storage-deposits?limit=1",{timeoutMs:15000});renderStorageDepositReceipt(data.receipts?.[0]||null);return data;}catch(e){const el=document.getElementById("storageDepositStatus");if(el){el.className="warning mt";el.textContent="Storage receipt history unavailable: "+betterError(e);}return null;}}
 async function recheckStorageDeposit(options={}){const receipt=latestStorageDepositReceipt;if(!receipt)return null;const button=document.getElementById("storageDepositRecheckButton");const status=document.getElementById("storageDepositStatus");try{if(button)button.disabled=true;if(status){status.className="warning mt";status.textContent="Rechecking deposited item rows and storage slot integrity...";}const data=await getJson("/api/admin/storage-deposits/recheck",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({receiptId:receipt.receiptId}),timeoutMs:20000});renderStorageDepositReceipt(data.receipt);if(!data.ok&&!options.quiet)showToast(data.message||"Storage integrity warning","error");return data;}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}if(!options.quiet)showToast(betterError(e),"error");return null;}finally{if(button)button.disabled=!latestStorageDepositReceipt;}}
 async function pollStorageDeposit(receiptId){const generation=++storageDepositPollGeneration;const delays=[2000,3000,10000,15000];for(const delay of delays){await new Promise(resolve=>setTimeout(resolve,delay));if(generation!==storageDepositPollGeneration||latestStorageDepositReceipt?.receiptId!==receiptId)return;const result=await recheckStorageDeposit({quiet:true});if(!result||!result.ok)return;}}
 async function confirmStorageDepositVisibility(){const receipt=latestStorageDepositReceipt;if(!receipt)return;try{if(!(await appConfirm("Confirm Storage Visibility","Confirm that you reopened the selected container and can see the deposited item in game. This does not perform another grant.","Confirm Visible","Cancel")))return;const data=await getJson("/api/admin/storage-deposits/confirm-visible",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({receiptId:receipt.receiptId}),timeoutMs:15000});storageDepositPollGeneration+=1;renderStorageDepositReceipt(data.receipt);showToast(data.message||"Storage visibility confirmed.","success");}catch(e){showToast(betterError(e),"error");}}
 async function protectedStorageBattlegroupRefresh(){const receipt=latestStorageDepositReceipt;if(!receipt)return;await refreshScheduler();if(!schedulerState?.installed){await appAlert("Protected refresh unavailable","Install and verify the Backup & Restart Scheduler first. The Suite will not use a raw pod deletion or restart the VM.");return;}const status=document.getElementById("storageDepositStatus");if(status){status.className="warning mt";status.textContent="The protected workflow will block on online players, verify a recent backup, restart only the selected battlegroup, and wait for health checks.";}await runSchedulerAction("restart-now");}
 function syncGiveDestination(){const storage=document.getElementById("giveDestination")?.value==="storage";document.getElementById("giveStorageFields")?.classList.toggle("hidden",!storage);if(storage&&!giveStorageTargets.length)refreshGiveStorageTargets();syncQualityWarning();syncGiveItemControls();updateGiveTargetSummary();}
-function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+'</span>';}
+function selectedGiveDurability(){const applicable=Boolean(selectedAdminItem?.durability?.applicable);const checked=Boolean(document.getElementById("adminSetDurability200")?.checked);return{applicable,checked,applied:applicable&&checked,display:applicable?(checked?"200 current durability":"Eligible; option not selected"):"Durability not applicable",reason:selectedAdminItem?.durability?.reason||"The exact template is not proven to support durability."};}
+function syncGiveDurabilityOption(){const input=document.getElementById("adminSetDurability200");const status=document.getElementById("giveDurabilityStatus");const wrap=document.getElementById("giveDurabilityWrap");const applicable=Boolean(selectedAdminItem?.durability?.applicable);if(input){input.disabled=!applicable;if(!applicable)input.checked=false;}const durability=selectedGiveDurability();if(status)status.textContent=durability.display+". "+durability.reason;if(wrap)wrap.classList.toggle("unsupported-control",!applicable);updateGiveTargetSummary();syncGiveItemControls();}
+function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));const durability=selectedGiveDurability();el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+' / '+esc(durability.display)+'</span>';}
 function progressionPlayerLookupValue(p){if(p?.player_controller_id)return"controller:"+p.player_controller_id;if(p?.player_state_row_id)return"row:"+p.player_state_row_id;if(p?.account_id||p?.id)return"account:"+(p.account_id||p.id);return String(p?.character_id||p?.player_pawn_id||p?.character_name||p?.name||"").trim();}
 function renderProgressionPlayerSelect(){const select=document.getElementById("progressionPlayerSelect");if(!select)return;const current=select.value;const options=adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);const meta=[p.player_controller_id&&("controller "+p.player_controller_id),p.character_id&&("character "+p.character_id),p.online_status||p.status].filter(Boolean).join(" / ");return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+(meta?" / "+meta:""))+'</option>':"";}).filter(Boolean).join("");select.innerHTML='<option value="">Choose detected player...</option>'+(options||'<option value="" disabled>No detected players</option>');if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
 function repairPlayerLookupValue(p){if(p?.player_state_row_id)return"row:"+p.player_state_row_id;if(p?.player_controller_id)return"controller:"+p.player_controller_id;if(p?.account_id||p?.id)return"account:"+(p.account_id||p.id);return progressionPlayerLookupValue(p);}
@@ -20258,8 +24290,8 @@ function templateIsSchematic(template){const item=catalogItemByTemplate(template
 function renderSelectedGiveItem(){const selected=document.getElementById("selectedGiveItem");if(!selected)return;if(!selectedAdminItem){selected.className="empty";selected.textContent="Select a catalog item or enter an exact template ID.";return;}const kind=giveItemGrantKind(selectedAdminItem);const notice=giveItemSchematicNotice(selectedAdminItem);selected.className=notice?"warning":"detail-row";selected.innerHTML='<span class="subtle">'+esc(kind)+(selectedAdminItem.source?" / "+esc(selectedAdminItem.source):"")+'</span><strong>'+esc(selectedAdminItem.name||selectedAdminItem.id)+'</strong>'+(notice?'<div class="subtle mt">'+esc(notice)+'</div>':'');}
 function readableRawTemplateName(value){return String(value||"").replace(/^.*[\/:]/,"").replace(/[_.+\-]+/g," ").replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/([A-Za-z])([0-9])/g,"$1 $2").replace(/\s+/g," ").trim().replace(/\b\w/g,letter=>letter.toUpperCase())||String(value||"");}
 function rawGiveItem(value){const id=String(value||"").trim();if(!/^[A-Za-z0-9_:.()+\/-]{2,240}$/.test(id))return null;return adminItems.find(item=>item.id===id)||{id,name:readableRawTemplateName(id),category:"Raw identifier",type:"Raw identifier",subtype:"Manual exact ID",grade:"Unknown",tier:"",source:"raw-id",icon:"/gear-codex/assets/item-icons/generic-other.svg",spawnable:true,hasDisplayName:true};}
-function selectRawGiveItem(showError=true){const input=document.getElementById("adminRawTemplate");const raw=String(input?.value||"").trim();if(!raw){if(selectedAdminItem?.source==="raw-id")selectedAdminItem=null;renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();return null;}const item=rawGiveItem(raw);if(!item){if(showError)showToast("Enter a valid exact template identifier.","error");return null;}selectedAdminItem=item;renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();return item;}
-function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;const raw=document.getElementById("adminRawTemplate");if(raw)raw.value="";renderAdminItems();renderSelectedGiveItem();updateGiveTargetSummary();syncGiveItemControls();}
+function selectRawGiveItem(showError=true){const input=document.getElementById("adminRawTemplate");const raw=String(input?.value||"").trim();if(!raw){if(selectedAdminItem?.source==="raw-id")selectedAdminItem=null;renderSelectedGiveItem();syncGiveDurabilityOption();syncGiveItemControls();return null;}const item=rawGiveItem(raw);if(!item){if(showError)showToast("Enter a valid exact template identifier.","error");return null;}selectedAdminItem=item;renderSelectedGiveItem();syncGiveDurabilityOption();syncGiveItemControls();return item;}
+function selectAdminItem(id){selectedAdminItem=adminItems.find(item=>item.id===id)||null;const raw=document.getElementById("adminRawTemplate");if(raw)raw.value="";renderAdminItems();renderSelectedGiveItem();syncGiveDurabilityOption();syncGiveItemControls();}
 function marketPostableItem(item){return item&&!isTechKnowledgeItem(item)&&!isRecipeSchematicItem(item);}
 function renderMarketItemFilters(){const cat=document.getElementById("marketCategory");if(cat){const current=normalizeUiItemCategory(cat.value);const categories=[...new Set(adminItems.map(item=>normalizeUiItemCategory(item.category)).filter(Boolean).filter(category=>String(category).toLowerCase()!=="schematics"))].sort((a,b)=>a.localeCompare(b));cat.innerHTML='<option value="">All marketable items</option><option value="__schematics">Schematics and fragments</option><option value="__unknown">Unknown / unclassified</option>'+categories.map(category=>'<option value="'+esc(category)+'">'+esc(category)+'</option>').join("");cat.value=[...categories,"","__unknown","__schematics"].includes(current)?current:"";}const tier=document.getElementById("marketTier");if(tier){const current=tier.value;const tiers=[...new Set(adminItems.map(item=>item.tier).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));tier.innerHTML='<option value="all">All tiers</option>'+tiers.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");tier.value=tiers.includes(current)?current:"all";}}
 function renderMarketItems(){const wrap=document.getElementById("marketItems");if(!wrap)return;const q=(document.getElementById("marketSearch")?.value||"").trim().toLowerCase();const category=normalizeUiItemCategory(document.getElementById("marketCategory")?.value||"");const grade=document.getElementById("marketGradeFilter")?.value||"all";const tier=document.getElementById("marketTier")?.value||"all";const rows=adminItems.filter(item=>{if(!marketPostableItem(item))return false;const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemTier=item.tier||"Unknown";if(category==="__unknown"){if(itemCategory&&item.hasDisplayName)return false;}else if(category==="__schematics"){if(!isSchematicItem(item))return false;}else if(String(category).toLowerCase()==="items"){if(isSchematicItem(item)||itemCategory!==category)return false;}else if(category&&itemCategory!==category)return false;if(grade&&grade!=="all"&&itemGrade!==grade)return false;if(tier&&tier!=="all"&&itemTier!==tier)return false;if(q){const text=[item.name,item.id,itemCategory,item.type,item.subtype,item.detail,itemGrade,itemTier,itemDisplayDisambiguator(item)].join(" ").toLowerCase();if(!text.includes(q))return false;}return true;});const duplicateNames=duplicatedItemNameSet(rows);wrap.innerHTML=rows.slice(0,140).map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const icon=item.icon?'<span class="gear-icon"><img loading="lazy" src="'+esc(item.icon)+'" alt="" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;grid&quot;"><span class="avatar" style="display:none">MK</span></span>':'<div class="avatar">MK</div>';return '<button type="button" class="admin-item '+(selectedMarketItem&&selectedMarketItem.id===item.id?'active':'')+'" data-market-item-id="'+esc(item.id)+'">'+icon+'<div><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span>'+esc(item.id)+' / '+esc(itemCategory||"Unknown")+' '+esc(item.tier||"")+'</span><span class="item-grade-badge">'+esc(itemGrade)+'</span></div></button>';}).join("")||'<div class="empty">No marketable items match the current filters.</div>';wrap.querySelectorAll("[data-market-item-id]").forEach(el=>el.addEventListener("click",()=>selectMarketItem(el.dataset.marketItemId)));}
@@ -20286,12 +24318,12 @@ async function postMarketListing(){const log=document.getElementById("marketLog"
 let gradeRelogChoiceNoticeShown=false;
 function syncQualityWarning(){const warning=document.getElementById("qualityWarning");const wrap=document.getElementById("adminQualityWrap");const input=document.getElementById("adminQuality");const supported=Boolean(giveItemCapabilities?.qualitySupported);if(wrap)wrap.classList.toggle("unsupported-control",!supported);if(input){input.disabled=!supported;input.min=0;input.max=5;if(!supported)input.value=0;else{const grade=Number(input.value||0);if(Number.isFinite(grade)&&grade<0)input.value=0;if(Number.isFinite(grade)&&grade>5)input.value=5;if(usesRelogGrade(input.value)&&!gradeRelogChoiceNoticeShown){gradeRelogChoiceNoticeShown=true;setTimeout(()=>showGradeRelogPopup("items"),0);}}}if(warning){warning.classList.toggle("hidden",false);warning.textContent=supported?"Grade 1-5 uses a database-backed grant and may require relog or inventory refresh. Grade 0 uses the live receiver.":"Grade giving is not supported by the current receiver method.";}syncGiveItemControls();}
 function usesRelogGrade(value){const grade=Number(value||0);return Number.isFinite(grade)&&grade>=1&&grade<=5;}
-async function showGradeRelogPopup(context="item"){await appAlert("Player relog required","Grade 1-5 "+context+" are written directly to the database. The player must relog before the item appears in their inventory.","I Understand");}
-function adminGivePayload(){const raw=String(document.getElementById("adminRawTemplate")?.value||"").trim();const item=raw?selectRawGiveItem(false):selectedAdminItem;if(!item)throw new Error(raw?"Enter a valid exact template identifier.":"Choose an item first.");const destination=document.getElementById("giveDestination")?.value||"player";const payload={playerId:document.getElementById("adminPlayer").value,template:item.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(item),destination};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");if(destination==="storage"){const storage=selectedGiveStorage();if(!storage)throw new Error("Choose a storage container first.");payload.actorId=storage.actorId;payload.inventoryId=storage.inventoryId;}return payload;}
+async function showGradeRelogPopup(context="item"){await appAlert("Player relog required","Verified database "+context+" (grade 1-5 or durability 200) may require the player to relog before the item appears in inventory.","I Understand");}
+function adminGivePayload(){const raw=String(document.getElementById("adminRawTemplate")?.value||"").trim();const item=raw?selectRawGiveItem(false):selectedAdminItem;if(!item)throw new Error(raw?"Enter a valid exact template identifier.":"Choose an item first.");const destination=document.getElementById("giveDestination")?.value||"player";const payload={playerId:document.getElementById("adminPlayer").value,template:item.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(item),destination,setDurabilityTo200:selectedGiveDurability().applied};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");if(destination==="storage"){const storage=selectedGiveStorage();if(!storage)throw new Error("Choose a storage container first.");payload.actorId=storage.actorId;payload.inventoryId=storage.inventoryId;}return payload;}
 function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Grade "+row.quality:"")+(row.grantKind?" / "+row.grantKind:"");}
 function updateGiveQueueSummary(processed=0,total=giveQueue.length,succeeded=0,failed=0){const el=document.getElementById("giveQueueSummary");if(el)el.textContent="Progress: "+processed+" / "+total+" · Succeeded: "+succeeded+" · Failed: "+failed;const retry=document.getElementById("retryGiveQueueButton");if(retry)retry.disabled=!lastGiveQueueFailedItems.length||liveGiveBusy;syncGiveItemControls();}
-function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span>'+(row.grantKind?'<br><span class="subtle">'+esc(row.grantKind)+'</span>':'')+'</span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
-function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality,grantKind:payload.grantKind});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const note=/^tech:/i.test(payload.template)?"\\nNote: this research blueprint will unlock the Research tree, not character inventory.":(templateIsSchematic(payload.template)?"\\nNote: this recipe schematic will unlock crafting recipes, not character inventory.":"");document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1])+note;addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
+function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span>'+(row.grantKind?'<br><span class="subtle">'+esc(row.grantKind)+'</span>':'')+'<br><span class="subtle">'+esc(row.setDurabilityTo200?"Durability: 200 current":"Durability not applicable / not selected")+'</span></span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
+function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality,grantKind:payload.grantKind,setDurabilityTo200:payload.setDurabilityTo200});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const note=/^tech:/i.test(payload.template)?"\\nNote: this research blueprint will unlock the Research tree, not character inventory.":(templateIsSchematic(payload.template)?"\\nNote: this recipe schematic will unlock crafting recipes, not character inventory.":(payload.setDurabilityTo200?"\\nDurability: exactly 200 current.":"\\nDurability not applicable / not selected."));document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1])+note;addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
 function removeGiveQueueItem(index){giveQueue.splice(index,1);renderGiveQueue();updateGiveQueueSummary();}
 function clearGiveQueue(){giveQueue=[];lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const log=document.getElementById("giveQueueLog");if(log)log.value="Give Queue cleared.";}
 function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];if(data.timings)lines.push("Queue timings: "+JSON.stringify(data.timings));(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(/^tech:/i.test(row.itemId))lines.push("  Note: research blueprint unlocks the Research tree; check the player's Research screen, not inventory.");else if(templateIsSchematic(row.itemId))lines.push("  Note: recipe schematic unlocks crafting recipes; check the player's crafting recipes, not inventory.");if(row.result?.timings)lines.push("  Timings: "+JSON.stringify(row.result.timings));if(row.result?.response?.timings)lines.push("  Receiver timings: "+JSON.stringify(row.result.response.timings));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
@@ -20305,7 +24337,7 @@ function giveQueuePresetInputName(){return String(document.getElementById("giveQ
 function setGiveQueuePresetValidation(message){const el=document.getElementById("giveQueuePresetValidation");if(el)el.textContent=message||"";}
 function setGiveQueuePresetName(name){const input=document.getElementById("giveQueuePresetName");if(input)input.value=name||"";}
 function giveQueuePresetExists(name){const target=String(name||"").toLowerCase();return giveQueuePresets.some(p=>String(p.name||"").toLowerCase()===target);}
-function normalizeClientPresetItems(items){if(!Array.isArray(items)||!items.length)throw new Error("Preset JSON must contain an items array.");return items.map((item,index)=>{const template=String(item?.template||item?.itemId||item?.id||"").trim();const qty=Number(item?.qty??item?.quantity??1);if(!template)throw new Error("Imported preset item "+(index+1)+" is missing a template.");if(!Number.isInteger(qty)||qty<1||qty>50000)throw new Error("Imported preset item "+(index+1)+" has an invalid quantity.");const row={template,name:String(item?.name||template),qty};if(item&&Object.prototype.hasOwnProperty.call(item,"quality")&&item.quality!==""&&item.quality!==null&&item.quality!==undefined){const quality=Number(item.quality);if(!Number.isInteger(quality)||quality<0||quality>5)throw new Error("Imported preset item "+(index+1)+" has an invalid grade.");row.quality=quality;}return row;});}
+function normalizeClientPresetItems(items){if(!Array.isArray(items)||!items.length)throw new Error("Preset JSON must contain an items array.");return items.map((item,index)=>{const template=String(item?.template||item?.itemId||item?.id||"").trim();const qty=Number(item?.qty??item?.quantity??1);if(!template)throw new Error("Imported preset item "+(index+1)+" is missing a template.");if(!Number.isInteger(qty)||qty<1||qty>50000)throw new Error("Imported preset item "+(index+1)+" has an invalid quantity.");const row={template,name:String(item?.name||template),qty,setDurabilityTo200:item?.setDurabilityTo200===true};if(item&&Object.prototype.hasOwnProperty.call(item,"quality")&&item.quality!==""&&item.quality!==null&&item.quality!==undefined){const quality=Number(item.quality);if(!Number.isInteger(quality)||quality<0||quality>5)throw new Error("Imported preset item "+(index+1)+" has an invalid grade.");row.quality=quality;}return row;});}
 async function saveGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{setGiveQueuePresetValidation("");if(!giveQueue.length)throw new Error("Queue is empty.");const name=giveQueuePresetInputName();if(!name){setGiveQueuePresetValidation("Enter a preset name.");document.getElementById("giveQueuePresetName")?.focus();playUiSound("warning");return;}if(giveQueuePresetExists(name)&&!(await appConfirm("Overwrite preset","A preset named '"+name+"' already exists. Overwrite it?","Overwrite","Cancel")))return;const data=await getJson("/api/live-give/queue-presets/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,items:giveQueue})});if(log)log.value="Saved Give Queue preset: "+data.preset.name+"\\nItems: "+data.preset.items.length;await refreshGiveQueuePresets();const select=document.getElementById("giveQueuePresetSelect");if(select)select.value=data.preset.name;setGiveQueuePresetName(data.preset.name);playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
 async function loadGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{const name=selectedGiveQueuePresetName();if(!name)throw new Error("Choose a preset first.");const data=await getJson("/api/live-give/queue-presets/get?name="+encodeURIComponent(name));const items=normalizeClientPresetItems(data.preset?.items||[]);const mode=document.getElementById("giveQueuePresetLoadMode")?.value||"replace";giveQueue=mode==="append"?giveQueue.concat(items):items;lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();setGiveQueuePresetName(data.preset.name);setGiveQueuePresetValidation("");if(log)log.value=(mode==="append"?"Appended":"Loaded")+" preset: "+data.preset.name+"\\nItems: "+items.length;playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
 async function deleteGiveQueuePreset(){const log=document.getElementById("giveQueueLog");try{const name=selectedGiveQueuePresetName();if(!name)throw new Error("Choose a preset first.");if(!(await appConfirm("Delete preset","Delete Give Queue preset '"+name+"'?","Delete","Cancel")))return;await getJson("/api/live-give/queue-presets?name="+encodeURIComponent(name),{method:"DELETE"});if(log)log.value="Deleted preset: "+name;if(giveQueuePresetInputName().toLowerCase()===name.toLowerCase())setGiveQueuePresetName("");setGiveQueuePresetValidation("");await refreshGiveQueuePresets();playUiSound("success");}catch(e){if(log)log.value=betterError(e);playUiSound("warning");}}
@@ -20316,12 +24348,12 @@ function syncLiveGiveMode(){const mode=document.getElementById("liveGiveMode")?.
 function syncGiveItemResultFromLog(){if(!document.getElementById("give")?.classList.contains("active"))return;const source=document.getElementById("adminLog");const result=document.getElementById("giveItemResult");const detail=document.getElementById("giveItemResultDetail");const message=String(source?.textContent||"").trim();if(detail)detail.textContent=message||"No Give Item request has run.";if(result){const summary=message.split(/\r?\n/).find(Boolean)||"Ready to give an item.";result.className=(/failed|error|unavailable|offline|blocked/i.test(summary)?"warning":"empty")+" give-result";result.textContent=summary;}}
 function wireGiveItemResult(){const source=document.getElementById("adminLog");if(!source||source.dataset.giveResultWired)return;source.dataset.giveResultWired="true";new MutationObserver(syncGiveItemResultFromLog).observe(source,{childList:true,characterData:true,subtree:true});syncGiveItemResultFromLog();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
-function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const usesDirectDbUnlock=isTechKnowledgeItem(selectedAdminItem)||isRecipeSchematicItem(selectedAdminItem);const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(!storageMode&&mode==="execute"&&!usesDbGrade&&!usesDirectDbUnlock&&!adminLiveGiveAvailable);if(give)give.disabled=blocked||(storageMode&&!selectedGiveStorage());if(add){add.disabled=storageMode||liveGiveBusy||!selectedAdminItem;add.title=storageMode?"Give Queue currently targets player inventory only.":"Add selected item to Give Queue";}if(queue)queue.disabled=storageMode||blocked||!giveQueue.length;if(retry)retry.disabled=storageMode||blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
+function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const usesDbDurability=selectedGiveDurability().applied;const usesDirectDbUnlock=isTechKnowledgeItem(selectedAdminItem)||isRecipeSchematicItem(selectedAdminItem);const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(!storageMode&&mode==="execute"&&!usesDbGrade&&!usesDbDurability&&!usesDirectDbUnlock&&!adminLiveGiveAvailable);if(give)give.disabled=blocked||(storageMode&&!selectedGiveStorage());if(add){add.disabled=storageMode||liveGiveBusy||!selectedAdminItem;add.title=storageMode?"Give Queue currently targets player inventory only.":"Add selected item to Give Queue";}if(queue)queue.disabled=storageMode||blocked||!giveQueue.length;if(retry)retry.disabled=storageMode||blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
 async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const receiver=await getJson("/api/receiver/status",{timeoutMs:5000});liveGiveServerOnline=Boolean(receiver.ok);adminLiveGiveAvailable=Boolean(receiver.ok);liveGiveTransport={mode:"http-json",configured:Boolean(receiver.ok),reachable:Boolean(receiver.ok),target:receiver.giveUrl||"",reason:receiver.ok?"":(receiver.reason||receiver.error||"Receiver is offline.")};liveGiveUnavailableMessage=receiver.ok?"":liveGiveTransportMessage(liveGiveTransport);setGiveServerStatus(receiver.ok?"Server Status: Online. Give Item receiver is available.":"Server Status: Offline. "+(receiver.reason||receiver.error||"Receiver is offline."),receiver.ok?"ok":"warn");syncLiveGiveTransportStatus();return receiver;}catch(receiverError){try{const env=await getJson("/api/live-give/env",{timeoutMs:8000});adminLiveGiveAvailable=Boolean(env.liveGiveAvailable);liveGiveTransport=env.giveTransport||liveGiveTransport;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(env.message||liveGiveTransportMessage(liveGiveTransport||env));liveGiveServerOnline=adminLiveGiveAvailable||Boolean(env.giveTransport?.reachable);setGiveServerStatus(liveGiveServerOnline?(adminLiveGiveAvailable?"Server Status: Online. Give Item is available.":"Server Status: Receiver online. Live Give transport is limited."):"Server Status: Offline. "+(liveGiveUnavailableMessage||env.error||"Start the server before using Give Item."),liveGiveServerOnline?"ok":"warn");syncLiveGiveTransportStatus();return env;}catch(envError){liveGiveServerOnline=false;adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(receiverError)+" / "+betterError(envError);setGiveServerStatus("Server Status: Offline. "+liveGiveUnavailableMessage,"warn");syncLiveGiveTransportStatus();return null;}}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
-async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="execute";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncGiveDestination();updateGiveTargetSummary();syncGiveItemControls();await Promise.all([refreshGivePlayersFast(),refreshGiveItemsFast(),checkGiveItemServerStatus(),loadLatestStorageDepositReceipt()]);syncLiveGiveMode();}
+async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="execute";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncGiveDestination();syncGiveDurabilityOption();syncGiveItemControls();await Promise.all([refreshGivePlayersFast(),refreshGiveItemsFast(),checkGiveItemServerStatus(),loadLatestStorageDepositReceipt(),loadLatestGiveItemReceipt()]);syncGiveDurabilityOption();syncLiveGiveMode();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST",timeoutMs:${SERVER_MANAGEMENT_UI_TIMEOUTS.start}});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 function giveItemExecutionStatus(data,usesDbGrade=false){
-  if(data?.status==="db-inserted")return"Database grade grant inserted.";
+  if(data?.status==="db-inserted")return"Database item grant inserted.";
   if(data?.status==="live-verified")return"Live Give verified.";
   if(data?.status==="live-published")return"Live Give published / queued.";
   if(data?.status==="recipe-unlocked")return"Crafting recipe unlocked.";
@@ -20341,14 +24373,15 @@ async function giveAdminItem(){
     const payload=adminGivePayload();
     const mode=document.getElementById("liveGiveMode")?.value||"dry-run";
     const usesDbGrade=usesRelogGrade(payload.quality);
+    const usesDbDurability=payload.setDurabilityTo200===true;
     const directGrantKind=giveItemGrantKind(selectedAdminItem);
     const usesDirectDbUnlock=directGrantKind==="Research Blueprint Unlock"||directGrantKind==="Crafting Recipe Unlock";
-    const usesDatabase=usesDbGrade||usesDirectDbUnlock;
+    const usesDatabase=usesDbGrade||usesDbDurability||usesDirectDbUnlock;
     if(!usesDatabase){
       log.textContent="Checking receiver transport...";
       await refreshLiveGiveEnv();
-    }else if(usesDbGrade){
-      log.textContent=mode==="execute"?"Preparing database grade grant...":"Running database grade dry-run...";
+    }else if(usesDbGrade||usesDbDurability){
+      log.textContent=mode==="execute"?"Preparing verified database item grant...":"Running database item dry-run...";
     }else{
       log.textContent=mode==="execute"?"Preparing "+directGrantKind.toLowerCase()+"...":"Testing "+directGrantKind.toLowerCase()+"...";
     }
@@ -20359,22 +24392,23 @@ async function giveAdminItem(){
         playUiSound("warning");
         return;
       }
-      if(usesDbGrade)await showGradeRelogPopup("items");
-      const action=usesDbGrade?"Database grade grant":(usesDirectDbUnlock?directGrantKind:"Publishing Live Give");
-      log.textContent=usesDbGrade?"Writing grade item to player inventory...":(usesDirectDbUnlock?"Applying "+directGrantKind.toLowerCase()+"...":"Publishing Live Give...");
-      addActivity("grant",action,payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));
+      if(usesDbGrade||usesDbDurability)await showGradeRelogPopup("items");
+      const action=(usesDbGrade||usesDbDurability)?"Database item grant":(usesDirectDbUnlock?directGrantKind:"Publishing Live Give");
+      log.textContent=(usesDbGrade||usesDbDurability)?"Writing and verifying item in player inventory...":(usesDirectDbUnlock?"Applying "+directGrantKind.toLowerCase()+"...":"Publishing Live Give...");
+      addActivity("grant",action,payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:"")+(usesDbDurability?" / durability 200":""));
       const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});
       const status=giveItemExecutionStatus(data,usesDbGrade);
       const output=[data.stdout,data.stderr,data.error].filter(Boolean).join("\\n");
-      log.textContent=status+"\\n"+output+"\\n\\n"+JSON.stringify({status:data.status,grantKind:data.grantKind||null,transport:data.transport,verified:Boolean(data.verified),player:data.player||null,inventory:data.inventory||null,item:data.item||null,timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);
+      log.textContent=status+"\\n"+output+"\\n\\n"+JSON.stringify({status:data.status,grantKind:data.grantKind||null,transport:data.transport,verified:Boolean(data.verified),durability:data.durability||null,durabilityEvidence:data.durabilityEvidence||null,durabilityVerification:data.durabilityVerification||null,receipt:data.receipt||null,player:data.player||null,inventory:data.inventory||null,item:data.item||null,timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);
+      if(data.receipt){renderGiveItemReceipt(data.receipt);pollGiveItemReceipt(data.receipt.receiptId);}
       addActivity("grant",status,payload.template+" -> "+payload.playerId);
       playUiSound(data.ok===false||data.status==="live-unavailable"?"warning":"success");
       return;
     }
-    log.textContent=usesDbGrade?"Running database grade Dry-Run...":"Running Dry-Run...";
-    addActivity("grant","Dry-run running",payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:""));
+    log.textContent=(usesDbGrade||usesDbDurability)?"Running database item Dry-Run...":"Running Dry-Run...";
+    addActivity("grant","Dry-run running",payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:"")+(usesDbDurability?" / durability 200":""));
     const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"dry-run"})});
-    log.textContent="Dry-run completed. No live grant executed.\\n"+[data.stdout,data.stderr,data.error].filter(Boolean).join("\\n")+"\\n\\n"+JSON.stringify({status:data.status,grantKind:data.grantKind||null,transport:data.transport,player:data.player||null,inventory:data.inventory||null,item:data.item||null,command:data.command||payload,timings:data.timings||{}},null,2);
+    log.textContent="Dry-run completed. No live grant executed.\\n"+[data.stdout,data.stderr,data.error].filter(Boolean).join("\\n")+"\\n\\n"+JSON.stringify({status:data.status,grantKind:data.grantKind||null,transport:data.transport,durability:data.durability||null,durabilityEvidence:data.durabilityEvidence||null,player:data.player||null,inventory:data.inventory||null,item:data.item||null,command:data.command||payload,timings:data.timings||{}},null,2);
     addActivity("grant","Dry-run completed",payload.template+" -> "+payload.playerId);
     playUiSound("success");
   }catch(e){
@@ -20399,11 +24433,11 @@ giveAdminItem=async function(){
     const storage=selectedGiveStorage();
     const player=selectedPlayer();
     if(!storage)throw new Error("Choose a storage container first.");
-    if(mode==="execute"&&!(await appConfirm("Deposit item into storage","Deposit "+payload.qty+" x "+(selectedAdminItem?.name||payload.template)+" into "+storage.name+"?\n\nActor "+storage.actorId+" / Inventory "+storage.inventoryId+"\nPlayer: "+playerLabel(player||{})+" must be offline and should remain offline until the item appears.","Deposit Item","Cancel")))return;
+    if(mode==="execute"&&!(await appConfirm("Deposit item into storage","Deposit "+payload.qty+" x "+(selectedAdminItem?.name||payload.template)+" into "+storage.name+"?\n\n"+selectedGiveDurability().display+"\nActor "+storage.actorId+" / Inventory "+storage.inventoryId+"\nPlayer: "+playerLabel(player||{})+" must be offline and should remain offline until the item appears.","Deposit Item","Cancel")))return;
     log.textContent=mode==="execute"?"Validating offline player and depositing into storage...":"Testing storage target and capacity...";
     const data=await getJson("/api/admin/give-storage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode,confirmed:mode==="execute"}),timeoutMs:60000});
     const status=mode==="execute"?"Storage deposit verified.":"Storage dry-run passed.";
-    log.textContent=status+"\n"+(data.note||"")+"\n\n"+JSON.stringify({status:data.status,verified:Boolean(data.verified),player:data.player,storage:data.storage,item:data.item},null,2);
+    log.textContent=status+"\n"+(data.note||"")+"\n\n"+JSON.stringify({status:data.status,verified:Boolean(data.verified),durability:data.durability||null,durabilityEvidence:data.durabilityEvidence||null,durabilityVerification:data.durabilityVerification||null,player:data.player,storage:data.storage,item:data.item,receipt:data.receipt||null},null,2);
     if(data.receipt){renderStorageDepositReceipt(data.receipt);pollStorageDeposit(data.receipt.receiptId);}
     addActivity("grant",status,(selectedAdminItem?.name||payload.template)+" -> Actor "+storage.actorId);
     showToast(status,"success");
@@ -20413,7 +24447,7 @@ giveAdminItem=async function(){
   finally{liveGiveBusy=false;syncGiveItemControls();}
 };
 const giveAdminItemWithoutSentToast=giveAdminItem;
-giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");const notice=selectedAdminItem?giveItemSchematicNotice(selectedAdminItem):"";if(log&&notice&&text&&!text.includes(notice))log.textContent=text+"\\n\\nNote: "+notice;const summary=text.split(/\r?\n/).find(Boolean)||"";if(/^(Live Give (verified|published)|Database grade grant inserted|Crafting recipe unlocked|Research blueprint unlocked|.+ already unlocked)/i.test(summary))showToast(summary,"success");};
+giveAdminItem=async function(){await giveAdminItemWithoutSentToast();const log=document.getElementById("adminLog");const text=String(log?.textContent||"");const notice=selectedAdminItem?giveItemSchematicNotice(selectedAdminItem):"";if(log&&notice&&text&&!text.includes(notice))log.textContent=text+"\\n\\nNote: "+notice;const summary=text.split(/\r?\n/).find(Boolean)||"";if(/^(Live Give (verified|published)|Database item grant inserted|Crafting recipe unlocked|Research blueprint unlocked|.+ already unlocked)/i.test(summary))showToast(summary,"success");};
 function showToolFrame(src){if(src==="/gear-codex/")setView("codex");else setView("management");}
 let startupProgressState=null;
 const STARTUP_TASKS=[
@@ -20465,7 +24499,7 @@ const REMOTE_LOCAL_ONLY_PREFIXES = [
   "/api/config", "/api/setup/", "/api/test/", "/api/settings/", "/api/ssh-key/", "/api/server-install-path/",
   "/api/live-give/env", "/api/blueprints", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/", "/api/live-map/resource-areas/generate", "/api/live-map/resource-areas/game-folder",
   "/api/admin/probe", "/api/admin/tuned-channels", "/api/admin/permissions", "/api/gear/discovery", "/api/discovery",
-  "/api/market-automator/logs", "/api/director", "/api/database-browser/", "/manager-api/"
+  "/api/market-automator/logs", "/api/director", "/api/database-browser/", "/api/server-migration/", "/api/migration-maintenance", "/api/migration-offline", "/manager-api/"
 ];
 const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/status", "/api/vm-monitor", "/api/server-update/check", "/api/scheduler", "/api/receiver/status",
@@ -20583,8 +24617,342 @@ async function handleRequest(req, res) {
   return route(req, res);
 }
 
+function maintenanceBootstrapHtml() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Migration Maintenance Bootstrap</title><style>
+  :root{color-scheme:dark;font-family:Inter,Segoe UI,system-ui,sans-serif;background:#080705;color:#f4e2bd}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at top,#32200b,#080705 58%)}main{width:min(820px,100%);border:1px solid #b98235;border-radius:18px;padding:28px;background:rgba(15,12,8,.97);box-shadow:0 28px 90px #000}h1{margin:0;color:#ffd486;font-size:25px}p{color:#c9b995;line-height:1.55}.hold{padding:13px;border:1px solid #a16d28;background:#271805;color:#ffd486;font-weight:800}input,button{font:inherit}input{width:100%;margin-top:10px;padding:12px;border:1px solid #71552e;border-radius:8px;background:#080705;color:#fff}button{margin-top:10px;padding:11px 15px;border:1px solid #c18a3c;border-radius:8px;background:#b97821;color:#160d03;font-weight:850;cursor:pointer}button.secondary{background:#17120b;color:#f4e2bd}.row{display:flex;gap:10px;flex-wrap:wrap}.status{margin-top:18px;padding:14px;border:1px solid #4e402c;border-radius:10px;background:#0b0a08;white-space:pre-wrap;overflow-wrap:anywhere}.stage{padding:7px 0;border-bottom:1px solid #30271b}.failed{color:#ffad9e}.passed{color:#8be0a4}</style></head><body><main>
+  <h1>Preparing Migration Maintenance Mode — Automatic server startup is disabled.</h1>
+  <p>This localhost-only runner performs read-only offline and quiescence checks before creating a durable hold. It cannot run ordinary Suite mutations.</p>
+  <div class="hold">The battlegroup must already be stopped manually. Bootstrap will never stop or start it.</div>
+  <section><p>If preflight reports only legacy local Market Bot evidence, provide the accepted rollback-backup proof, confirm the exact existing remote catalog count to pin as local policy, and type <strong>${MARKET_BOT_RECONCILIATION_CONFIRMATION}</strong> exactly to run the protected Pause-only reconciliation:</p><input id="reconcile-backup-size" inputmode="numeric" placeholder="Accepted backup byte size" autocomplete="off" spellcheck="false"><input id="reconcile-backup-sha" placeholder="Accepted backup SHA-256" autocomplete="off" spellcheck="false"><input id="reconcile-catalog-count" inputmode="numeric" placeholder="Existing remote catalog item count" autocomplete="off" spellcheck="false"><input id="reconcile-confirm" autocomplete="off" spellcheck="false"><button id="reconcile" class="secondary">Reconcile Paused Market Bot State</button></section>
+  <label><p>Type <strong>${MIGRATION_MAINTENANCE_ENTER_CONFIRMATION}</strong> exactly:</p><input id="confirm" autocomplete="off" spellcheck="false"></label>
+  <div class="row"><button id="preflight">Run Read-only Preflight</button><button id="enter">Enter Maintenance Mode</button><button id="shutdown" class="secondary">Shut Down Bootstrap</button></div>
+  <div id="status" class="status">Bootstrap ready. No startup hooks were loaded.</div>
+  <div id="stages"></div>
+  <script>
+  const status=document.getElementById('status'),stages=document.getElementById('stages');
+  function safe(value){return String(value||'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
+  function render(data){const label=data.status||(data.ok?'ready':'failed');status.textContent=(data.message||'')+'\nStatus: '+label+'\nStage: '+(data.stage||'');const rows=data.history||[];stages.innerHTML=rows.map(row=>'<div class="stage '+safe(row.status)+'"><strong>'+safe(String(row.status||'').toUpperCase())+'</strong> — '+safe(row.stage)+(row.detail?' · '+safe(row.detail):'')+'</div>').join('');}
+  async function call(path,body={}){status.textContent='Working...';const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();render(data.bootstrap||data);if(!response.ok)throw new Error(data.error||'Bootstrap request failed.');return data;}
+  document.getElementById('preflight').onclick=()=>call('/api/maintenance-bootstrap/preflight').catch(error=>status.textContent=error.message);
+  document.getElementById('reconcile').onclick=()=>call('/api/maintenance-bootstrap/reconcile-market-bot-pause',{confirmText:document.getElementById('reconcile-confirm').value,acceptedBackup:{size:document.getElementById('reconcile-backup-size').value,sha256:document.getElementById('reconcile-backup-sha').value},catalogPolicy:{mode:'preserve-remote',expectedItemCount:document.getElementById('reconcile-catalog-count').value}}).catch(error=>status.textContent=error.message);
+  document.getElementById('enter').onclick=()=>call('/api/maintenance-bootstrap/enter',{confirmText:document.getElementById('confirm').value}).catch(error=>status.textContent=error.message);
+  document.getElementById('shutdown').onclick=()=>call('/api/maintenance-bootstrap/shutdown').catch(error=>status.textContent=error.message);
+  fetch('/api/maintenance-bootstrap').then(response=>response.json()).then(render);
+  </script></main></body></html>`;
+}
+
+function migrationStartupSuppressedHtml() {
+  return String.raw`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Server Migration Offline Entry</title><style>
+  :root{color-scheme:dark;font-family:Inter,Segoe UI,system-ui,sans-serif;background:#07090c;color:#f5e7c5}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}main{width:min(780px,100%);border:1px solid #a97a32;border-radius:16px;padding:26px;background:#0c0d0f}h1{margin:0;color:#ffd486;font-size:24px}p{line-height:1.5;color:#c8b890}.hold{padding:13px;border:1px solid #8d6429;background:#241805;color:#ffd486;font-weight:750}input,button{font:inherit}input{width:100%;margin-top:10px;padding:11px;border:1px solid #70552d;border-radius:7px;background:#08090b;color:#fff}button{margin:10px 8px 0 0;padding:10px 14px;border:1px solid #c18a3c;border-radius:7px;background:#b97821;color:#160d03;font-weight:800}.status{margin-top:16px;padding:12px;border:1px solid #40382a;white-space:pre-wrap;overflow-wrap:anywhere}</style></head><body><main>
+  <h1>Migration Startup-Suppressed Mode</h1><p>Only this loopback backend is active. Manager, Receiver, portals, tunnels, schedulers, updater actions, Market Bot automation, VM synchronization, and automatic server startup are disabled.</p>
+  <div class="hold">Enter durable Migration Offline Mode before running preflight or export.</div>
+  <div id="selected-profile" class="status">Loading explicitly selected Suite profile and VM identity...</div>
+  <div id="offline-status" class="status">Loading authoritative Migration Offline Mode status...</div>
+  <div id="runtime-identity" class="status">Loading verified migration runtime identity...</div>
+  <div class="hold">If Hyper-V reports a DHCP address change, migration SSH remains blocked until the exact VM identity, MAC, TCP 22, and existing pinned ED25519 key are verified and the local administrator confirms the rebind.</div>
+  <div id="vm-ip-status" class="status">Checking authoritative Hyper-V and pinned SSH identity...</div><input id="vm-ip-confirm" placeholder="Type ${MIGRATION_VM_IP_REBIND_CONFIRMATION}" autocomplete="off" spellcheck="false"><button id="vm-ip-rebind" disabled>Rebind Verified VM Address</button>
+  <input id="confirm" placeholder="Type ${MIGRATION_OFFLINE_ENTER_CONFIRMATION}" autocomplete="off" spellcheck="false"><button id="enter" disabled>Enter Migration Offline Mode</button>
+  <div class="hold">If preflight reports only stale local Market Bot evidence, run the read-only reconciliation preflight, then type the exact local-only confirmation. This never contacts a remote mutation endpoint.</div>
+  <button id="evidence-preflight" disabled>Check Local Market Bot Evidence Repair</button><input id="evidence-confirm" placeholder="Type ${OFFLINE_MARKET_BOT_RECONCILIATION_CONFIRMATION}" autocomplete="off" spellcheck="false"><button id="evidence-reconcile" disabled>Reconcile Local Market Bot Evidence</button>
+  <div class="hold">Migration v1 export is read-only. Active Exchange records remain in the source package; verified import removes structurally valid active listings only on the stopped destination.</div>
+  <input id="destination" placeholder="Migration package destination (.a9migration)" autocomplete="off" spellcheck="false"><button id="preflight" disabled>Run Export Preflight</button><button id="export" disabled>Create Verified Export</button>
+  <div class="hold">Destination import requires a fresh verified package preflight, exact compatibility, a stopped and writer-free destination, and a verified rollback backup before restore.</div>
+  <input id="import-package" placeholder="Select or enter the verified .a9migration package path" autocomplete="off" spellcheck="false"><button id="import-choose" disabled>Choose Import Package</button><button id="import-preflight" disabled>Run Import Preflight</button>
+  <input id="import-confirm" placeholder="Type ${MIGRATION_IMPORT_CONFIRMATION}" autocomplete="off" spellcheck="false"><button id="import" disabled>Backup Destination + Import</button>
+  <progress id="progress" value="0" max="100" style="width:100%;margin-top:16px"></progress><div class="hold">Do not close the Suite or power off either server.</div>
+  <div id="status" class="status">Startup suppression is active.</div><script>
+  const status=document.getElementById('status'),offlineStatus=document.getElementById('offline-status');async function call(path,body={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();status.textContent=JSON.stringify(data,null,2);if(!response.ok)throw new Error(data.error||'Request failed');return data;}
+  const migrationUiSafety=(${installMigrationUiSafety.toString()})({ids:{enterOffline:'enter',exportPreflight:'preflight',export:'export',importPreflight:'import-preflight',evidencePreflight:'evidence-preflight',evidenceReconcile:'evidence-reconcile'},enableWhenHealthy:['exportPreflight','export','importPreflight','evidencePreflight','evidenceReconcile']});
+  let offlineState=null,importPreflightReady=false,importPreflightApprovalDigest='',vmIpState=null,selectedProfileState=null;
+  function renderOfflineState(data={}){offlineState=data;offlineStatus.textContent=data.active===true?((data.banner||'Migration Offline Mode active')+' · Generation '+String(data.generation||'unknown')+(data.failClosed?' · Recovery hold':' · Healthy')):'Migration Offline Mode is inactive.';updateControls();}
+  async function loadOfflineState(){const response=await fetch('/api/migration-offline',{method:'GET',cache:'no-store'});const data=await response.json();if(!response.ok)throw new Error(data.error||'Offline Mode status request failed');return data;}
+  async function loadRuntimeIdentity(){const target=document.getElementById('runtime-identity'),response=await fetch('/api/migration-runtime-identity',{method:'GET',cache:'no-store'}),data=await response.json();if(!response.ok||data.verified!==true){target.textContent='Migration runtime identity mismatch. Startup-suppressed migration actions are blocked.';busy(true);return;}target.textContent='Verified runtime · Source/build '+data.sourceBuildFingerprint+' · Package format '+data.packageFormatVersion+' · Export transport '+data.exportTransportVersion+' · Destination worker '+data.migrationWorkerTransportVersion+' · Progress API '+data.progressApiVersion;}
+  async function loadSelectedProfile(){const target=document.getElementById('selected-profile'),response=await fetch('/api/server-migration/profile',{method:'GET',cache:'no-store'}),data=await response.json(),selected=data.selectedProfile;if(!response.ok||!selected||selected.source!=='command-line'||!selected.profileName||!selected.vmName||!/^[a-f0-9]{64}$/.test(String(selected.digest||''))){selectedProfileState=null;target.textContent='Explicit migration profile binding is missing or invalid. Migration controls remain blocked.';updateControls();throw new Error(data.error||'Explicit migration profile binding is unavailable.');}selectedProfileState=selected;target.textContent='Selected profile: '+selected.profileName+' · VM: '+selected.vmName+' · Identity: '+selected.digest;updateControls();return selected;}
+  async function loadVmIpState(){const target=document.getElementById('vm-ip-status'),response=await fetch('/api/server-migration/vm-ip-reconciliation',{method:'GET',cache:'no-store'}),data=await response.json();if(!response.ok||data.ok!==true){vmIpState=null;target.textContent='VM address safety check failed closed. '+String(data.error||'Authoritative VM identity or pinned SSH proof is unavailable.');updateControls();return null;}vmIpState=data;target.textContent=data.changed?'Verified DHCP address change detected. TCP 22 and the existing pinned ED25519 key match the exact Hyper-V VM. Type ${MIGRATION_VM_IP_REBIND_CONFIRMATION} to rebind safely.':'VM address is current. Exact Hyper-V identity and pinned ED25519 SSH authentication are verified.';updateControls();return data;}
+  document.getElementById('enter').onclick=()=>call('/api/migration-offline/enter',{confirmText:document.getElementById('confirm').value}).then(data=>{migrationUiSafety.setOfflineState(data);renderOfflineState(data);}).catch(error=>status.textContent=error.message);
+  document.getElementById('evidence-preflight').onclick=()=>call('/api/migration-offline/market-bot-evidence-preflight').catch(error=>status.textContent=error.message);
+  document.getElementById('evidence-reconcile').onclick=()=>call('/api/migration-offline/reconcile-market-bot-evidence',{confirmText:document.getElementById('evidence-confirm').value}).catch(error=>status.textContent=error.message);
+  let activeJobId='',requestPending=false,immediateTimer=null,currentJobType='';
+  function updateControls(forceBusy=requestPending||Boolean(activeJobId)){const offlineHealthy=offlineState?.active===true&&offlineState?.failClosed!==true,profileReady=selectedProfileState?.source==='command-line'&&Boolean(selectedProfileState?.vmName),vmReady=vmIpState?.ok===true&&vmIpState?.changed!==true,healthy=offlineHealthy&&profileReady&&vmReady,packageSelected=Boolean(document.getElementById('import-package').value.trim()),confirmationMatches=document.getElementById('import-confirm').value==='${MIGRATION_IMPORT_CONFIRMATION}',rebindMatches=document.getElementById('vm-ip-confirm').value==='${MIGRATION_VM_IP_REBIND_CONFIRMATION}';document.getElementById('enter').disabled=forceBusy||offlineState?.active===true||!profileReady;document.getElementById('vm-ip-confirm').disabled=forceBusy||!offlineHealthy||!profileReady||vmIpState?.changed!==true;document.getElementById('vm-ip-rebind').disabled=forceBusy||!offlineHealthy||!profileReady||vmIpState?.changed!==true||!rebindMatches;for(const id of ['destination','preflight','export','evidence-preflight','evidence-reconcile','evidence-confirm'])document.getElementById(id).disabled=forceBusy||!healthy;document.getElementById('import-package').disabled=forceBusy||!healthy;document.getElementById('import-choose').disabled=forceBusy||!healthy;document.getElementById('import-preflight').disabled=forceBusy||!healthy||!packageSelected;document.getElementById('import-confirm').disabled=forceBusy||!healthy||!importPreflightReady;document.getElementById('import').disabled=forceBusy||!healthy||!packageSelected||!importPreflightReady||!confirmationMatches;}
+  function busy(value){updateControls(Boolean(value));}
+  function invalidateImportPreflight(){importPreflightReady=false;importPreflightApprovalDigest='';document.getElementById('import-confirm').value='';updateControls();}
+  function duration(ms){const seconds=Math.max(0,Math.floor(Number(ms||0)/1000));return String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');}
+  function immediate(buttonId,label){if(requestPending||activeJobId)return false;requestPending=true;busy(true);const button=document.getElementById(buttonId),progress=document.getElementById('progress'),started=Date.now();button.textContent='Starting '+label+'…';progress.removeAttribute('value');const paint=()=>status.textContent='Working · Request sent\nStarting '+label+'… ('+duration(Date.now()-started)+' elapsed)\nLast heartbeat: request sent at '+new Date(started).toISOString()+'\nDo not close the Suite or power off either server.';paint();immediateTimer=setInterval(paint,250);return true;}
+  function finishImmediate(buttonId,label){if(immediateTimer){clearInterval(immediateTimer);immediateTimer=null;}requestPending=false;document.getElementById(buttonId).textContent=label;}
+  async function postJob(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),data=await response.json();if(!response.ok)throw new Error(data.error||('Server rejected request ('+response.status+').'));return data;}
+  function failureText(job){const failure=job&&job.failure;if(!failure)return job&&job.error||'';const attempts=Array.isArray(failure.attempts)?failure.attempts:[];return ['Failed gate: '+String(failure.gate||job.stage||'Unknown'),'Command purpose: '+String(failure.commandPurpose||'Preflight gate evaluation'),'SSH exit code: '+(failure.exitCode===null||failure.exitCode===undefined?'not available':String(failure.exitCode)),'Timed out: '+(failure.timedOut===true?'yes':'no'),'Failure category: '+String(failure.category||'unclassified'),'Sanitized stderr: '+String(failure.stderr||'No diagnostic was captured.'),...(attempts.length?['SSH attempts: '+attempts.map((attempt)=>String(attempt.attempt)+'='+String(attempt.category)+'/exit '+String(attempt.exitCode??'unknown')+'/'+String(attempt.stderr||'no diagnostic')).join('; ')]:[])].join('\n');}
+  function renderJob(job,type=currentJobType){currentJobType=type||currentJobType;const live=job.live||{},activity=live.activity||{},progress=document.getElementById('progress'),label=live.state==='verified'?'Verified':(live.state==='failed'?'Failed':(live.state==='stale'?'No recent activity':'Working')),failure=failureText(job);if(live.state==='verified')progress.value=100;else if(activity.mode==='bytes'&&activity.totalBytes)progress.value=Number(activity.percent||0);else progress.removeAttribute('value');status.textContent=label+' · '+String(job.stage||'Working')+'\n'+String(activity.substep||job.stage||'Working')+(live.state==='working'?' — still working':'')+' ('+duration(live.elapsedMs)+' elapsed)\nLast activity: '+String(live.lastActivityAt||'not recorded')+(activity.mode==='bytes'?'\n'+String(activity.bytes)+' of '+String(activity.totalBytes)+' bytes · '+Number(activity.percent||0).toFixed(2)+'%':'')+(live.state==='stale'?'\nNo operation was cancelled, retried, or restarted.':'')+(failure?'\n\n'+failure:'')+(job.result?'\n\nVerification result:\n'+JSON.stringify(job.result,null,2):'');if(currentJobType==='import-preflight'&&['success','failed'].includes(job.status)){importPreflightReady=job.status==='success'&&job.result?.ready===true;importPreflightApprovalDigest=importPreflightReady?String(job.result?.approvalDigest||''):'';if(!importPreflightReady)document.getElementById('import-confirm').value='';}if(currentJobType==='import'&&['success','failed','rolled-back'].includes(job.status)){importPreflightReady=false;importPreflightApprovalDigest='';}activeJobId=['success','failed','rolled-back'].includes(job.status)?'':job.jobId;busy(Boolean(activeJobId));}
+  async function pollJob(type,jobId){currentJobType=type;activeJobId=jobId;busy(true);let terminal=null;for(let attempt=0;attempt<4800&&activeJobId===jobId;attempt++){try{const response=await fetch('/api/server-migration/'+type+'-status/'+encodeURIComponent(jobId),{cache:'no-store'}),job=await response.json();if(!response.ok)throw new Error(job.error||'Status request failed');renderJob(job,type);terminal=job;if(['success','failed','rolled-back'].includes(job.status))break;}catch(error){status.textContent='No recent activity · status request failed\n'+error.message+'\nNo operation was cancelled, retried, or restarted.';}await new Promise(resolve=>setTimeout(resolve,1500));}if(activeJobId===jobId)activeJobId='';busy(false);try{const offline=await loadOfflineState();migrationUiSafety.setOfflineState(offline);renderOfflineState(offline);}catch{busy(true);}return terminal;}
+  document.getElementById('preflight').onclick=async()=>{if(!immediate('preflight','preflight'))return;try{const job=await postJob('/api/server-migration/preflight',{outputPath:document.getElementById('destination').value});finishImmediate('preflight','Run Export Preflight');renderJob(job,'preflight');await pollJob('preflight',job.jobId);}catch(error){finishImmediate('preflight','Run Export Preflight');status.textContent='Failed · Preflight request was not accepted or could not be monitored.\n'+error.message;busy(false);}};
+  document.getElementById('export').onclick=async()=>{if(!immediate('export','export'))return;try{const job=await postJob('/api/server-migration/export',{outputPath:document.getElementById('destination').value});finishImmediate('export','Create Verified Export');renderJob(job,'export');await pollJob('export',job.jobId);}catch(error){finishImmediate('export','Create Verified Export');status.textContent='Failed · Export request was not accepted or could not be monitored.\n'+error.message;busy(false);}};
+  document.getElementById('import-package').addEventListener('input',invalidateImportPreflight);document.getElementById('import-confirm').addEventListener('input',updateControls);
+  document.getElementById('vm-ip-confirm').addEventListener('input',updateControls);document.getElementById('vm-ip-rebind').onclick=async()=>{try{if(!vmIpState?.approvalDigest)throw new Error('Refresh the verified VM address evidence first.');const data=await call('/api/server-migration/vm-ip-reconciliation',{confirmText:document.getElementById('vm-ip-confirm').value,approvalDigest:vmIpState.approvalDigest});document.getElementById('vm-ip-confirm').value='';await loadVmIpState();status.textContent=data.ok?'Verified VM address rebind completed. Migration SSH is pinned to the existing ED25519 identity.':'VM address rebind failed closed.';}catch(error){status.textContent='VM address rebind failed closed. '+error.message;vmIpState=null;updateControls();}};
+  document.getElementById('import-choose').onclick=async()=>{try{if(!window.alphaNineSuite?.chooseServerMigrationImportFile){status.textContent='Enter the verified local .a9migration package path, then run import preflight.';document.getElementById('import-package').focus();return;}const selected=await window.alphaNineSuite.chooseServerMigrationImportFile();if(selected?.canceled)return;document.getElementById('import-package').value=String(selected?.filePath||'');invalidateImportPreflight();}catch(error){status.textContent='Failed · Package selection failed.\n'+error.message;}};
+  document.getElementById('import-preflight').onclick=async()=>{if(!immediate('import-preflight','import preflight'))return;try{invalidateImportPreflight();const job=await postJob('/api/server-migration/import-preflight',{packagePath:document.getElementById('import-package').value});finishImmediate('import-preflight','Run Import Preflight');renderJob(job,'import-preflight');await pollJob('import-preflight',job.jobId);}catch(error){finishImmediate('import-preflight','Run Import Preflight');invalidateImportPreflight();status.textContent='Failed · Import preflight request was not accepted or could not be monitored.\n'+error.message;busy(false);}};
+  document.getElementById('import').onclick=async()=>{if(!importPreflightReady||!/^[a-f0-9]{64}$/.test(importPreflightApprovalDigest)){status.textContent='Run and pass a fresh import preflight before starting import.';return;}if(document.getElementById('import-confirm').value!=='${MIGRATION_IMPORT_CONFIRMATION}'){status.textContent='Type ${MIGRATION_IMPORT_CONFIRMATION} exactly.';return;}if(!immediate('import','import'))return;try{const job=await postJob('/api/server-migration/import',{packagePath:document.getElementById('import-package').value,confirmText:'${MIGRATION_IMPORT_CONFIRMATION}',preflightApprovalDigest:importPreflightApprovalDigest});finishImmediate('import','Backup Destination + Import');renderJob(job,'import');await pollJob('import',job.jobId);}catch(error){finishImmediate('import','Backup Destination + Import');status.textContent='Failed · Import request was not accepted or could not be monitored.\n'+error.message;busy(false);}};
+  async function reconnect(){try{const response=await fetch('/api/server-migration/active-job',{cache:'no-store'}),data=await response.json();if(response.ok&&data.job&&['preflight','export','import-preflight','import'].includes(data.type)){renderJob(data.job,data.type);if(data.active)pollJob(data.type,data.job.jobId);}}catch(error){status.textContent='No recent activity · unable to reconnect\n'+error.message;busy(true);}}
+  migrationUiSafety.start(loadOfflineState,renderOfflineState).then(loadSelectedProfile).then(loadVmIpState).catch(error=>{document.getElementById('vm-ip-status').textContent=error.message;busy(true);});loadRuntimeIdentity().catch(error=>{document.getElementById('runtime-identity').textContent=error.message;busy(true);});setTimeout(reconnect,250);
+  </script></main></body></html>`;
+}
+
+function assertMigrationRenderedPagesCompile() {
+  return {
+    startupSuppressedScripts: assertRenderedInlineJavaScript("migration-startup-suppressed", migrationStartupSuppressedHtml()),
+    fullPageScripts: assertRenderedInlineJavaScript("migration-full-page", appPage())
+  };
+}
+
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  const removedServerMigrationRoute = url.pathname === "/api/migration-runtime-identity"
+    || url.pathname === "/api/migration-startup-suppressed"
+    || url.pathname.startsWith("/api/server-migration/")
+    || url.pathname.startsWith("/api/migration-offline")
+    || url.pathname.startsWith("/api/migration-maintenance")
+    || url.pathname.startsWith("/api/maintenance-bootstrap/");
+  if (!SERVER_MIGRATION_ENABLED && removedServerMigrationRoute) {
+    await json(res, { ok: false, code: "feature_not_in_build", error: "Server Migration is not included in this build." }, 404);
+    return;
+  }
+  if (url.pathname === "/" || url.pathname === "/api/migration-startup-suppressed" || url.pathname.startsWith("/api/server-migration/") || url.pathname.startsWith("/api/migration-offline") || url.pathname === "/api/migration-runtime-identity") {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.setHeader("Pragma", "no-cache");
+  }
+  const method = String(req.method || "GET").toUpperCase();
+  const mutating = !["GET", "HEAD", "OPTIONS"].includes(method);
+  const maintenanceState = migrationMaintenance.status();
+  const offlineModeState = migrationOfflineMode.status();
+  if (MIGRATION_STARTUP_SUPPRESSED_RUNNER) {
+    const offlineReconciliation = offlineMarketBotReconciliationState.status();
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, code: "migration_startup_suppressed", error: "The migration startup-suppressed runner is localhost-only." }, 403);
+      return;
+    }
+    const routeDecision = startupSuppressedRouteDecision({ pathname: url.pathname, method, offlineMode: offlineModeState });
+    if (!routeDecision.allowed) {
+      await json(res, { ok: false, code: routeDecision.code, error: routeDecision.error }, routeDecision.status);
+      return;
+    }
+    if (offlineReconciliation.active && mutating && !new Set(["/api/migration-offline/market-bot-evidence-preflight", "/api/migration-offline/reconcile-market-bot-evidence"]).has(url.pathname)) {
+      await json(res, { ok: false, code: "offline_market_bot_reconciliation_recovery", error: "Local Market Bot evidence reconciliation is incomplete; startup-suppressed mode remains fail closed." }, 409);
+      return;
+    }
+    if (url.pathname === "/" && method === "GET") {
+      send(res, 200, "text/html; charset=utf-8", migrationStartupSuppressedHtml());
+      return;
+    }
+    if (url.pathname === "/api/migration-startup-suppressed" && method === "GET") {
+      await json(res, { ok: true, mode: SUITE_STARTUP_POLICY.mode, localhostOnly: true, allowedListeners: SUITE_STARTUP_POLICY.allowedListeners, offlineMode: offlineModeState, marketBotEvidenceReconciliation: offlineReconciliation });
+      return;
+    }
+    if (url.pathname === "/api/server-migration/vm-ip-reconciliation" && method === "GET") {
+      try {
+        const result = await migrationVmIpReconciliationStatus();
+        const { _private, ...publicResult } = result;
+        await json(res, publicResult, result.ok ? 200 : 409);
+      } catch (error) {
+        await json(res, { ok: false, code: "migration_vm_ip_evidence", error: migrationPublicError(error.message) }, 409);
+      }
+      return;
+    }
+    if (url.pathname === "/api/server-migration/vm-ip-reconciliation" && method === "POST") {
+      try {
+        const body = await readJsonRequest(req, 1024 * 8);
+        await json(res, await reconcileMigrationVmIp(body));
+      } catch (error) {
+        await json(res, { ok: false, code: error.code || "migration_vm_ip_reconciliation", error: migrationPublicError(error.message) }, 409);
+      }
+      return;
+    }
+    if (url.pathname === "/api/migration-offline/market-bot-reconciliation" && method === "GET") {
+      await json(res, { ok: true, available: offlineModeState.active === true && offlineModeState.failClosed !== true, confirmation: OFFLINE_MARKET_BOT_RECONCILIATION_CONFIRMATION, state: offlineReconciliation });
+      return;
+    }
+    if (url.pathname === "/api/migration-offline/market-bot-evidence-preflight" && method === "POST") {
+      try {
+        const result = await migrationOfflineMarketBotReconciliationPreflight();
+        await json(res, result, result.ok ? 200 : 409);
+      } catch (error) {
+        await json(res, { ok: false, code: error.code || "offline_market_bot_reconciliation_preflight", error: migrationPublicError(error.message), reconciliation: offlineMarketBotReconciliationState.status() }, 409);
+      }
+      return;
+    }
+    if (url.pathname === "/api/migration-offline/reconcile-market-bot-evidence" && method === "POST") {
+      try {
+        const body = await readJsonRequest(req, 1024 * 8);
+        await json(res, await reconcileLocalMarketBotEvidenceInOfflineMode(body));
+      } catch (error) {
+        await json(res, { ok: false, code: error.code || "offline_market_bot_reconciliation", error: migrationPublicError(error.message), reconciliation: offlineMarketBotReconciliationState.status() }, 409);
+      }
+      return;
+    }
+  }
+  if (MAINTENANCE_BOOTSTRAP_RUNNER) {
+    const allowedGet = new Set(["/", "/api/maintenance-bootstrap", "/api/migration-maintenance", "/api/status", "/api/market-bot"]);
+    const allowedPost = new Set(["/api/maintenance-bootstrap/preflight", "/api/maintenance-bootstrap/market-bot-pause-preflight", "/api/maintenance-bootstrap/reconcile-market-bot-pause", "/api/maintenance-bootstrap/enter", "/api/maintenance-bootstrap/shutdown"]);
+    const reconciliationRunning = operationRegistry.snapshot().active.some((operation) => operation.key === "market-bot:pause-reconcile");
+    if (reconciliationRunning && mutating && url.pathname !== "/api/maintenance-bootstrap/reconcile-market-bot-pause") {
+      await json(res, { ok: false, code: "maintenance_bootstrap", error: "Market Bot pause reconciliation is in progress; every other bootstrap mutation is blocked." }, 409);
+      return;
+    }
+    if (mutating && !allowedPost.has(url.pathname)) {
+      await json(res, { ok: false, code: "maintenance_bootstrap", error: "Maintenance Bootstrap Mode blocks ordinary Suite mutations." }, 409);
+      return;
+    }
+    if (!mutating && !allowedGet.has(url.pathname)) {
+      await json(res, { ok: false, code: "maintenance_bootstrap", error: "This endpoint is outside the Maintenance Bootstrap surface." }, 403);
+      return;
+    }
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, code: "maintenance_bootstrap", error: "Maintenance Bootstrap Mode is available only through localhost." }, 403);
+      return;
+    }
+    if (url.pathname === "/" && method === "GET") {
+      send(res, 200, "text/html; charset=utf-8", maintenanceBootstrapHtml());
+      return;
+    }
+    if (url.pathname === "/api/maintenance-bootstrap" && method === "GET") {
+      await json(res, maintenanceBootstrapPublicState());
+      return;
+    }
+    if (url.pathname === "/api/maintenance-bootstrap/preflight" && method === "POST") {
+      try {
+        const result = await maintenanceBootstrapPreflight();
+        maintenanceBootstrapRuntime.status = result.ok ? "preflight-passed" : "preflight-failed";
+        maintenanceBootstrapRuntime.stage = result.ok ? "Read-only preflight passed" : "Read-only preflight failed closed";
+        maintenanceBootstrapRuntime.result = { evidenceDigest: result.evidenceDigest, conditions: result.conditions };
+        await json(res, { ...maintenanceBootstrapPublicState(), preflight: result }, result.ok ? 200 : 409);
+      } catch (error) {
+        maintenanceBootstrapRuntime.status = "preflight-failed";
+        maintenanceBootstrapRuntime.stage = "Read-only preflight failed closed";
+        await json(res, { ...maintenanceBootstrapPublicState(), ok: false, code: "maintenance_bootstrap", error: migrationPublicError(error.message) }, 409);
+      }
+      return;
+    }
+    if (url.pathname === "/api/maintenance-bootstrap/market-bot-pause-preflight" && method === "POST") {
+      try {
+        const body = await readJsonRequest(req, 1024 * 8);
+        const result = await maintenanceBootstrapPauseReconciliationPreflight({
+          acceptedBackup: body.acceptedBackup,
+          catalogSelection: String(body.catalogPolicy?.mode || ""),
+          expectedRemoteCatalogCount: String(body.catalogPolicy?.expectedItemCount || ""),
+          allowCurrent: true
+        });
+        await json(res, result, result.ok ? 200 : 409);
+      } catch (error) {
+        await json(res, { ok: false, code: "maintenance_bootstrap", error: migrationPublicError(error.message) }, 409);
+      }
+      return;
+    }
+    if (url.pathname === "/api/maintenance-bootstrap/reconcile-market-bot-pause" && method === "POST") {
+      try {
+        const body = await readJsonRequest(req, 1024 * 8);
+        await json(res, await reconcilePausedMarketBotFromBootstrap(body));
+      } catch (error) {
+        await json(res, { ok: false, code: error.code || "maintenance_bootstrap", error: migrationPublicError(error.message), reconciliation: marketBotReconciliationState.status() }, 409);
+      }
+      return;
+    }
+    if (url.pathname === "/api/maintenance-bootstrap/enter" && method === "POST") {
+      try {
+        const body = await readJsonRequest(req, 1024 * 8);
+        const result = await enterMigrationMaintenanceFromBootstrap(body);
+        await json(res, result);
+        setTimeout(() => requestMaintenanceBootstrapShutdown("entry-complete"), 250).unref?.();
+      } catch (error) {
+        await json(res, { ok: false, code: "maintenance_bootstrap", error: migrationPublicError(error.message), bootstrap: error.bootstrap || maintenanceBootstrapPublicState() }, 409);
+      }
+      return;
+    }
+    if (url.pathname === "/api/maintenance-bootstrap/shutdown" && method === "POST") {
+      maintenanceBootstrapRuntime.shutdownRequested = true;
+      await json(res, { ...maintenanceBootstrapPublicState(), status: "shutdown-requested", stage: "Bootstrap shutdown requested" });
+      setTimeout(() => requestMaintenanceBootstrapShutdown("administrator-request"), 250).unref?.();
+      return;
+    }
+  }
+  if (mutating && maintenanceState.sideEffectFree) {
+    await json(res, { ok: false, code: "side_effect_free", error: "Side-effect-free Suite runner blocks every mutating endpoint." }, 409);
+    return;
+  }
+  if (SERVER_MIGRATION_ENABLED && mutating && offlineModeState.active) {
+    const allowedOffline = new Set([
+      "/api/migration-offline/enter", "/api/migration-offline/exit",
+      "/api/server-migration/vm-ip-reconciliation",
+      "/api/server-migration/empty-market-preview", "/api/server-migration/empty-market", "/api/server-migration/preflight", "/api/server-migration/export", "/api/server-migration/import-preflight", "/api/server-migration/import", "/api/server-migration/inspect",
+      "/api/database/backup", "/api/database/safety-backup", "/api/database/tunnel/start",
+      "/api/market-bot/pause", "/api/market-bot/deploy-paused-runtime", "/api/receiver/stop", "/api/action/stop", "/api/operations/completed",
+      "/api/database-browser/rows", "/api/action/logs-export", "/api/action/operator-logs-export"
+    ]);
+    if (!allowedOffline.has(url.pathname)) {
+      await json(res, { ok: false, code: "migration_offline_active", error: `${MIGRATION_OFFLINE_BANNER}. Exit Offline Mode locally before using this action.` }, 409);
+      return;
+    }
+  }
+  if (SERVER_MIGRATION_ENABLED && mutating && maintenanceState.active) {
+    const allowed = new Set([
+      "/api/migration-maintenance/enter", "/api/migration-maintenance/exit",
+      "/api/server-migration/empty-market-preview", "/api/server-migration/empty-market", "/api/server-migration/preflight", "/api/server-migration/export", "/api/server-migration/import-preflight", "/api/server-migration/import",
+      "/api/server-migration/inspect", "/api/database-browser/rows",
+      "/api/database/backup", "/api/database/safety-backup", "/api/database/import-readiness", "/api/database/import", "/api/database/restore",
+      "/api/database/tunnel/start", "/api/market-bot/pause", "/api/market-bot/clean",
+      "/api/scheduler/action", "/api/receiver/stop", "/api/action/stop",
+      "/api/operations/completed",
+      "/api/action/logs-export", "/api/action/operator-logs-export"
+    ]);
+    if (!allowed.has(url.pathname)) {
+      await json(res, { ok: false, code: "maintenance_active", error: `${MIGRATION_MAINTENANCE_BANNER}. Exit maintenance mode locally before using this action.` }, 409);
+      return;
+    }
+  }
+  if (url.pathname === "/api/migration-maintenance" && req.method === "GET") {
+    await json(res, { ok: true, ...maintenanceState });
+    return;
+  }
+  if (url.pathname === "/api/migration-offline" && req.method === "GET") {
+    await json(res, { ok: true, ...offlineModeState });
+    return;
+  }
+  if (url.pathname === "/api/migration-runtime-identity" && req.method === "GET") {
+    await json(res, { ok: MIGRATION_RUNTIME_IDENTITY.verified === true, ...MIGRATION_RUNTIME_IDENTITY }, MIGRATION_RUNTIME_IDENTITY.verified === true ? 200 : 503);
+    return;
+  }
+  if ((url.pathname === "/api/migration-offline/enter" || url.pathname === "/api/migration-offline/exit") && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, code: "local_only", error: "Migration Offline Mode can be changed only from the local Suite." }, 403);
+      return;
+    }
+    try {
+      const body = await readJsonRequest(req, 1024 * 8);
+      const entering = url.pathname.endsWith("/enter");
+      const result = entering
+        ? migrationOfflineMode.enter(body.confirmText, true)
+        : migrationOfflineMode.exit(body.confirmText, { localRequest: true, activeWorkflow: activeMaintenanceWorkflow() });
+      appendAdminAudit(entering ? "migration_offline_entered" : "migration_offline_exited", { generation: result.generation });
+      await json(res, { ok: true, ...result });
+    } catch (error) {
+      await json(res, { ok: false, code: error.code || "migration_offline_failed", error: migrationPublicError(error.message) }, 409);
+    }
+    return;
+  }
+  if ((url.pathname === "/api/migration-maintenance/enter" || url.pathname === "/api/migration-maintenance/exit") && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Migration Maintenance Mode can be changed only from the local Suite." }, 403);
+      return;
+    }
+    try {
+      const body = await readJsonRequest(req, 1024 * 8);
+      const action = url.pathname.endsWith("/enter") ? "enter" : "exit";
+      const result = await runTrackedOperation("maintenance:mode", `${action === "enter" ? "Enter" : "Exit"} Migration Maintenance Mode`, async () => (
+        action === "enter" ? enterMigrationMaintenanceMode(body) : exitMigrationMaintenanceMode(body)
+      ), { category: "migration", detail: "Local administrator maintenance control" });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode === 500 ? 409 : failure.statusCode);
+    }
+    return;
+  }
   if (url.pathname === "/api/internet-access/status" && req.method === "GET") {
     if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
       await json(res, { ok: false, error: "Internet access setup is available only on the local Suite." }, 403);
@@ -20956,6 +25324,82 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/database/status" && req.method === "GET") {
     await json(res, await databaseStatus());
+    return;
+  }
+  if (url.pathname.startsWith("/api/server-migration/")) {
+    if (MIGRATION_RUNTIME_IDENTITY.verified !== true) {
+      await json(res, { ok: false, code: "migration_runtime_identity", error: "Server Migration is blocked because the running source/build identity is missing or mismatched." }, 503);
+      return;
+    }
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Server Migration is available only from the local Suite." }, 403);
+      return;
+    }
+    if (MIGRATION_STARTUP_SUPPRESSED_RUNNER) {
+      try { currentSelectedProfileBinding(); }
+      catch (error) {
+        await json(res, { ok: false, code: "migration_profile_binding", error: migrationPublicError(error) }, 409);
+        return;
+      }
+    }
+    try {
+      if (url.pathname === "/api/server-migration/active-job" && req.method === "GET") {
+        await json(res, activeMigrationJob());
+      } else if (url.pathname === "/api/server-migration/profile" && req.method === "GET") {
+        await json(res, {
+          ok: true,
+          selectedProfile: MIGRATION_STARTUP_SUPPRESSED_RUNNER ? currentSelectedProfileBinding() : null,
+          exportOnly: false,
+          formatVersion: MIGRATION_PACKAGE_FORMAT_VERSION,
+          profileId: MIGRATION_SUPPORTED_PROFILE.id,
+          gameBuild: MIGRATION_SUPPORTED_PROFILE.gameBuild,
+          dumpScope: "complete dune schema excluding only positively-proven dune.da_codex_backup artifacts; no public AlphaNine tables",
+          dumpFlags: MIGRATION_DUMP_FLAGS,
+          requiredExtensions: MIGRATION_REQUIRED_EXTENSIONS
+        });
+      } else if (["/api/server-migration/empty-market-preview", "/api/server-migration/empty-market"].includes(url.pathname)) {
+        await json(res, { ok: false, code: "migration_source_cleanup_removed", error: "Migration v1 never cleans the source market. Active listings are handled only on the verified destination during import." }, 410);
+      } else if (url.pathname === "/api/server-migration/preflight" && req.method === "POST") {
+        rejectConcurrentMigrationUiAction();
+        const payload = await readJsonRequest(req, 1024 * 32);
+        await json(res, startMigrationPreflightJob(payload, "preflight"), 202);
+      } else if (url.pathname.startsWith("/api/server-migration/preflight-status/") && req.method === "GET") {
+        const jobId = decodeURIComponent(url.pathname.slice("/api/server-migration/preflight-status/".length));
+        const job = migrationPreflightJobs.get(jobId);
+        if (!job) await json(res, { ok: false, error: "Migration export preflight job was not found." }, 404);
+        else await json(res, migrationPreflightJobPublic(job));
+      } else if (url.pathname === "/api/server-migration/export" && req.method === "POST") {
+        const payload = await readJsonRequest(req, 1024 * 32);
+        await json(res, startMigrationExport(payload), 202);
+      } else if (url.pathname.startsWith("/api/server-migration/export-status/") && req.method === "GET") {
+        const jobId = decodeURIComponent(url.pathname.slice("/api/server-migration/export-status/".length));
+        const job = migrationExportJobs.get(jobId);
+        if (!job) await json(res, { ok: false, error: "Migration export job was not found. An interrupted job remains recorded in Operations." }, 404);
+        else await json(res, publicMigrationExportJob(job));
+      } else if (url.pathname === "/api/server-migration/import-preflight" && req.method === "POST") {
+        rejectConcurrentMigrationUiAction();
+        const payload = await readJsonRequest(req, 1024 * 32);
+        await json(res, startMigrationPreflightJob(payload, "import-preflight"), 202);
+      } else if (url.pathname.startsWith("/api/server-migration/import-preflight-status/") && req.method === "GET") {
+        const jobId = decodeURIComponent(url.pathname.slice("/api/server-migration/import-preflight-status/".length));
+        const job = migrationImportPreflightJobs.get(jobId);
+        if (!job) await json(res, { ok: false, error: "Migration import preflight job was not found." }, 404);
+        else await json(res, migrationPreflightJobPublic(job));
+      } else if (url.pathname === "/api/server-migration/import" && req.method === "POST") {
+        const payload = await readJsonRequest(req, 1024 * 32);
+        await json(res, startMigrationImport(payload), 202);
+      } else if (url.pathname.startsWith("/api/server-migration/import-status/") && req.method === "GET") {
+        const jobId = decodeURIComponent(url.pathname.slice("/api/server-migration/import-status/".length));
+        const job = migrationImportJobs.get(jobId);
+        if (!job) await json(res, { ok: false, error: "Migration import job was not found. Review the durable import journal and Operations history." }, 404);
+        else await json(res, publicMigrationImportJob(job));
+      } else {
+        await json(res, { ok: false, error: "Server Migration endpoint not found." }, 404);
+      }
+    } catch (error) {
+      const response = operationErrorResponse(error);
+      await json(res, { ...response.payload, error: migrationPublicError(response.payload.error) }, response.statusCode === 500 ? 400 : response.statusCode);
+    }
     return;
   }
   if (url.pathname.startsWith("/api/database-browser/")) {
@@ -21629,6 +26073,20 @@ async function route(req, res) {
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
     return;
   }
+  if (url.pathname === "/api/admin/give-item-receipts" && req.method === "GET") {
+    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit")) || 20));
+    await json(res, { ok: true, receipts: giveItemReceiptStore.list(limit) });
+    return;
+  }
+  if (url.pathname === "/api/admin/give-item-receipts/recheck" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      await json(res, await verifyGiveItemReceipt(body.receiptId));
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, /not found/i.test(error.message) ? 404 : 400);
+    }
+    return;
+  }
   if (url.pathname === "/api/admin/storage-deposits" && req.method === "GET") {
     const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit")) || 20));
     await json(res, { ok: true, receipts: storageDepositStore.list(limit) });
@@ -21663,9 +26121,12 @@ async function route(req, res) {
         }, { category: "players", detail: `${body.template || "Item"} -> storage ${body.inventoryId || "unknown"}` });
         await json(res, result);
       } else {
-        await json(res, await adminGiveItemToStorage(body));
+        const result = await adminGiveItemToStorage(body);
+        appendAdminAudit("storage_item_deposit_dry_run", { playerId: body.playerId, actorId: body.actorId, inventoryId: body.inventoryId, template: body.template, qty: body.qty, grade: body.quality, durability: result.durability, durabilityEvidence: result.durabilityEvidence });
+        await json(res, result);
       }
     } catch (error) {
+      appendAdminAudit("storage_item_deposit_failed", { error: error.message });
       const failure = operationErrorResponse(error);
       await json(res, failure.payload, error instanceof OperationBusyError ? failure.statusCode : 400);
     }
@@ -21730,6 +26191,22 @@ async function route(req, res) {
   if (url.pathname === "/api/market-bot/preview" && req.method === "POST") {
     try { await json(res, await previewMarketBot(await readJsonRequest(req))); }
     catch (error) { await json(res, { ok: false, status: "Error", error: error.message, preview: { items: [] } }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/deploy-paused-runtime" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req);
+      const result = await runTrackedOperation("market-bot:install", "Deploy Paused Market Bot Runtime", async ({ update, operation }) => {
+        update("Publishing paused generation", "Installing only the corrected Market Bot runtime and its idempotent state migration.");
+        const deployed = await deployPausedMarketBotRuntime({ ...body, ignoreOperationId: operation.id });
+        update("Market Bot Quiescent", "The matching remote pause generation is authoritative and no cycle may start.");
+        return deployed;
+      }, { category: "market", detail: "Controlled paused runtime deployment" });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
     return;
   }
   if (url.pathname === "/api/market-bot/pause" && req.method === "POST") {
@@ -21925,9 +26402,13 @@ async function route(req, res) {
       return;
     }
     try {
-      const result = await runTrackedOperation("battlegroup:control", `Battlegroup ${action}`, async ({ update }) => {
+      const result = await runTrackedOperation("battlegroup:control", `Battlegroup ${action}`, async ({ operation, update }) => {
         update(`Running Battlegroup ${action}`, "Waiting for the server management command to finish.");
-        const response = await battlegroup(action);
+        const response = await battlegroup(action, {
+          operationId: operation.id,
+          reason: `Explicit administrator ${action} operation`,
+          callSite: "server.js:/api/action/:action"
+        });
         if (action === "start") {
           update("Starting database tunnel", "Battlegroup start completed; checking database access.");
           response.dbTunnel = await startDatabaseTunnel().catch((error) => ({ ok: false, error: error.message }));
@@ -22027,7 +26508,16 @@ async function route(req, res) {
   send(res, 404, "text/plain", "Not found");
 }
 
-startManagerService();
+if (SUITE_STARTUP_POLICY.allowManager && migrationMaintenance.startupPolicy().allowBackgroundWriters && migrationOfflineMode.startupPolicy().allowBackgroundWriters) startManagerService();
+
+if (MIGRATION_STARTUP_SUPPRESSED_RUNNER) {
+  try { assertMigrationRenderedPagesCompile(); }
+  catch (error) {
+    console.error(`Migration runtime refused to bind: ${error.message}`);
+    process.exitCode = 1;
+    throw error;
+  }
+}
 
 const server = http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
@@ -22038,11 +26528,13 @@ const internetOriginServer = http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
 });
 internetOriginServer.on("error", (error) => console.error(`AlphaNine internet tunnel origin failed: ${error.message}`));
-internetOriginServer.listen(INTERNET_ORIGIN_PORT, LOCAL_HOST, () => {
-  console.log(`AlphaNine protected tunnel origin: http://${LOCAL_HOST}:${INTERNET_ORIGIN_PORT}`);
-});
+if (SUITE_STARTUP_POLICY.allowAuxiliaryListeners) {
+  internetOriginServer.listen(INTERNET_ORIGIN_PORT, LOCAL_HOST, () => {
+    console.log(`AlphaNine protected tunnel origin: http://${LOCAL_HOST}:${INTERNET_ORIGIN_PORT}`);
+  });
+}
 process.once("exit", () => internetTunnel.stop());
-setInterval(() => internetTunnel.enforceIdleTimeout(), 60000).unref();
+if (SUITE_STARTUP_POLICY.allowInternetTunnelTimer) setInterval(() => internetTunnel.enforceIdleTimeout(), 60000).unref();
 
 let httpsServer = null;
 let httpsListenHost = "";
@@ -22104,7 +26596,7 @@ function httpsPortalRuntimeStatus(configValue = loadConfig()) {
   };
 }
 
-try {
+if (SUITE_STARTUP_POLICY.allowAuxiliaryListeners) try {
   const tls = remoteAccess.ensureCertificate(localIps());
   httpsServer = https.createServer({ key: tls.key, cert: tls.cert, minVersion: "TLSv1.2" }, (req, res) => {
     handleRequest(req, res).catch((error) => json(res, { ok: false, error: error.message }, 500));
@@ -22119,11 +26611,44 @@ try {
   console.error(`AlphaNine HTTPS portal could not start: ${error.message}`);
 }
 
+function requestMaintenanceBootstrapShutdown(reason = "requested") {
+  if (!MAINTENANCE_BOOTSTRAP_RUNNER) return;
+  maintenanceBootstrapRuntime.shutdownRequested = true;
+  maintenanceBootstrapRuntime.status = "shutdown";
+  maintenanceBootstrapRuntime.stage = `Bootstrap shutdown: ${reason}`;
+  const finish = () => {
+    if (process.env.ALPHANINE_BOOTSTRAP_TEST_NO_EXIT !== "1") process.exit(0);
+  };
+  if (server.listening) server.close(() => finish());
+  else finish();
+  setTimeout(finish, 3000).unref?.();
+}
+
 server.listen(PORT, LOCAL_HOST, async () => {
   console.log(`AlphaNine Dune Suite desktop: http://127.0.0.1:${PORT}`);
   console.log(`AlphaNine Dune Suite local portal: ${webPortalUrls().join(" ")}`);
   console.log(`Expected server install: ${DEFAULT_SERVER_ROOT}`);
-  if (process.env.ALPHANINE_SKIP_STARTUP_SERVICES === "1") {
+  if (MAINTENANCE_BOOTSTRAP_RUNNER) {
+    console.log("Migration Maintenance bootstrap: localhost only; all normal startup automation is disabled.");
+    return;
+  }
+  if (!SUITE_STARTUP_POLICY.allowStartupAutomation) {
+    console.log(`Suite startup policy ${SUITE_STARTUP_POLICY.mode}: only the loopback backend is active; optional services, auxiliary listeners, timers, and startup automation are disabled.`);
+    if (MIGRATION_STARTUP_SUPPRESSED_RUNNER) resumeDurableMigrationWorkerFromPointer();
+    return;
+  }
+  const maintenanceAtStartup = migrationMaintenance.startupState;
+  const maintenancePolicy = migrationMaintenance.startupPolicy();
+  const offlineAtStartup = migrationOfflineMode.startupState;
+  const offlinePolicy = migrationOfflineMode.startupPolicy();
+  const startupPolicy = SERVER_MIGRATION_ENABLED ? {
+    allowServerStartHook: maintenancePolicy.allowServerStartHook && offlinePolicy.allowServerStartHook,
+    allowBackgroundWriters: maintenancePolicy.allowBackgroundWriters && offlinePolicy.allowBackgroundWriters
+  } : {
+    allowServerStartHook: true,
+    allowBackgroundWriters: true
+  };
+  if (maintenanceAtStartup.sideEffectFree) {
     console.log("Startup services skipped for isolated Suite validation.");
     return;
   }
@@ -22147,8 +26672,17 @@ server.listen(PORT, LOCAL_HOST, async () => {
     runtimeGiveTransport.initialized = true;
     appendAdminAudit("startup_transport_dry_run", { source: "startup", transport: "dry-run", serverOnline: false, reason: runtimeGiveTransport.reason });
   }
-  setTimeout(() => attemptConfiguredServerStart("startup"), 1000);
-  setTimeout(() => {
+  if (!startupPolicy.allowServerStartHook) {
+    if (maintenanceAtStartup.active) {
+      appendAdminAudit("migration_maintenance_recovered", { generation: maintenanceAtStartup.generation, failClosed: maintenanceAtStartup.failClosed, source: maintenanceAtStartup.source });
+      setTimeout(() => startupVmSync.then(() => setRemoteMigrationMaintenanceHold(true, migrationMaintenance.status())).catch((error) => appendAdminAudit("migration_maintenance_remote_hold_failed", { error: error.message })), 600);
+    } else {
+      appendAdminAudit("migration_offline_mode_loaded", { generation: offlineAtStartup.generation, failClosed: offlineAtStartup.failClosed, source: offlineAtStartup.source });
+    }
+  } else {
+    setTimeout(() => attemptConfiguredServerStart("startup"), 1000);
+  }
+  if (startupPolicy.allowBackgroundWriters) setTimeout(() => {
     startupVmSync.then(() => startManagedReceiver()).then((result) => {
       appendAdminAudit(result?.ok ? "receiver_startup_ready" : "receiver_startup_degraded", {
         message: result?.message || "",
@@ -22159,12 +26693,14 @@ server.listen(PORT, LOCAL_HOST, async () => {
     });
   }, 1200);
   logLiveGiveStartupValidation();
-  setTimeout(() => runMarketExpiredCleanupBackground("startup"), 30000);
-  setInterval(() => runMarketExpiredCleanupBackground("timer"), 10 * 60 * 1000);
-  setTimeout(() => ensureMarketBotInstalled().catch((error) => appendAdminAudit("market_bot_auto_update_failed", { error: error.message })), 45000);
-  setTimeout(() => processRepairQueue().catch((error) => appendAdminAudit("durability_repair_queue_processor_error", { error: error.message })), 3000);
-  const repairQueueInterval = setInterval(() => processRepairQueue().catch((error) => appendAdminAudit("durability_repair_queue_processor_error", { error: error.message })), 20000);
-  repairQueueInterval.unref?.();
+  if (startupPolicy.allowBackgroundWriters) {
+    setTimeout(() => runMarketExpiredCleanupBackground("startup"), 30000);
+    setInterval(() => runMarketExpiredCleanupBackground("timer"), 10 * 60 * 1000);
+    setTimeout(() => ensureMarketBotInstalled().catch((error) => appendAdminAudit("market_bot_auto_update_failed", { error: error.message })), 45000);
+    setTimeout(() => processRepairQueue().catch((error) => appendAdminAudit("durability_repair_queue_processor_error", { error: error.message })), 3000);
+    const repairQueueInterval = setInterval(() => processRepairQueue().catch((error) => appendAdminAudit("durability_repair_queue_processor_error", { error: error.message })), 20000);
+    repairQueueInterval.unref?.();
+  }
 });
 
 process.on("exit", () => {

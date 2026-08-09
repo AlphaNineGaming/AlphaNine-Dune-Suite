@@ -67,6 +67,8 @@ function extractFunction(source, name) {
 (async () => {
   try {
     const html = await waitForUi();
+    assert(!html.includes('data-view="server-migration"') && !html.includes('id="server-migration"'), "Rendered Suite still exposes Server Migration.");
+    assert(!html.includes('id="migrationMaintenanceBanner"') && !html.includes('id="migrationOfflineBanner"'), "Rendered Suite still exposes migration startup-hold banners.");
     assert(html.includes('id="repair"'), "Rendered Repair Inspector is missing.");
     assert(html.includes('id="landsraad"'), "Rendered Landsraad tier editor is missing.");
     assert(html.includes("Exactly five distinct thresholds"), "Rendered Landsraad policy is missing the exact-five requirement.");
@@ -112,6 +114,9 @@ function extractFunction(source, name) {
     assert(!/blueprintViewer|BABYLON|blueprintProcedural|blueprint-piece-catalog|blueprint-viewer-transform/.test(html), "Blueprint visualization code remains in the rendered UI.");
     assert(!html.includes('data-blueprint-action="view"') && !html.includes(">View</button>"), "Blueprint View controls remain in the rendered UI.");
     assert(html.includes('id="adminRawTemplate"'), "Give Item raw template-ID input is missing.");
+    assert(html.includes('id="adminSetDurability200"'), "Shared desktop/web Give Item UI is missing Set Durability to 200.");
+    assert(html.includes('id="giveDurabilityStatus"'), "Shared desktop/web Give Item UI is missing durability applicability preview.");
+    assert(html.includes('id="giveItemReceiptStatus"'), "Shared desktop/web Give Item UI is missing player-inventory receipt evidence.");
     assert(html.includes("admin-item-selected-mark"), "Give Item selected-item marker is missing.");
     assert(html.includes(`aria-pressed="'+(active?'true':'false')+'"`), "Give Item selection does not expose its pressed state.");
     assert(html.includes("#adminItems .admin-item.active"), "Give Item selected-row highlight styling is missing.");

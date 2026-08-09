@@ -716,15 +716,12 @@ def apply_to_self_hosted_server(profile):
     if install.returncode != 0:
         raise RuntimeError(install.stderr.strip() or install.stdout.strip() or "Failed to apply UserSettings")
 
-    restart = run_ssh("/home/dune/.dune/bin/battlegroup restart", timeout=120)
-    if restart.returncode != 0:
-        raise RuntimeError(restart.stderr.strip() or restart.stdout.strip() or "Settings applied, but battlegroup restart failed")
-
     return {
         "userGameFile": str(APPLIED_USERGAME),
         "userEngineFile": str(APPLIED_USERENGINE),
         "applyOutput": install.stdout.strip(),
-        "restartOutput": restart.stdout.strip(),
+        "restartRequired": True,
+        "restartOutput": "Restart must be requested through the Suite's attributed battlegroup control endpoint.",
     }
 
 
@@ -864,7 +861,7 @@ class ManagerHandler(SimpleHTTPRequestHandler):
 
         response = {
             "ok": True,
-            "message": "Settings applied to self-hosted Dune server UserSettings and battlegroup restarted",
+            "message": "Settings applied. Restart is required through the Suite's attributed battlegroup control endpoint.",
             "profileFile": str(APPLIED_PROFILE),
             "settingsFile": str(APPLIED_SETTINGS),
             **real_apply,

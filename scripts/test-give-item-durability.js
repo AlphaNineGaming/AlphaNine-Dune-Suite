@@ -1,0 +1,78 @@
+"use strict";
+
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const {
+  SET_DURABILITY_VALUE,
+  durabilityEligibility,
+  durabilityExpectation,
+  itemStatsForGrant,
+  classifyDurabilityReadBack,
+  buildDurabilityInvestigationSql
+} = require("../lib/give-item-durability");
+
+const weapon = { id: "LongRifle_Unique_Poison_06", category: "Weapons", type: "Spitdart" };
+const armor = { id: "Combat_Heavy_Unique_Reinforced_Boots_06", category: "Garment", type: "Feet" };
+const tool = { id: "DewReaper_1h_Tier6", category: "Utility", type: "Watertools" };
+const equipment = { id: "OrnithopterMediumEngine_6", category: "Vehicles", type: "Engine" };
+const resource = { id: "Silicone", category: "Misc", type: "Refinedresources" };
+const consumable = { id: "healthpack_channeled", category: "Utility", type: "Healkit" };
+const schematic = { id: "Schematic_UniquePincushionHands", category: "Schematics", type: "Contract" };
+
+for (const [item, kind] of [[weapon, "weapon"], [armor, "armor"], [tool, "tool"], [equipment, "equipment"]]) {
+  const eligible = durabilityEligibility(item);
+  assert.equal(eligible.applicable, true, `${item.id} must be eligible`);
+  assert.equal(eligible.kind, kind);
+  const expectation = durabilityExpectation(item, true);
+  assert.equal(expectation.currentDurability, SET_DURABILITY_VALUE);
+  const stats = itemStatsForGrant(expectation);
+  assert.equal(stats.FItemStackAndDurabilityStats[1].CurrentDurability, 200);
+  assert.equal(typeof stats.FItemStackAndDurabilityStats[1].CurrentDurability, "number");
+  assert.equal(Object.hasOwn(stats.FItemStackAndDurabilityStats[1], "MaxDurability"), false);
+  assert.equal(Object.hasOwn(stats.FItemStackAndDurabilityStats[1], "DecayedMaxDurability"), false);
+}
+
+for (const item of [resource, consumable, schematic, null]) {
+  const expectation = durabilityExpectation(item, true);
+  assert.equal(expectation.applicable, false);
+  assert.equal(expectation.display, "Durability not applicable");
+  assert.deepEqual(itemStatsForGrant(expectation).FItemStackAndDurabilityStats[1], {}, "non-durable items must not receive fabricated durability data");
+}
+
+// Production-shaped rows establish the authoritative leaf and JSON-number encoding.
+const productionWeaponStats = JSON.parse('{"FWeaponItemStats":[[],{"CurrentAmmo":2}],"FCustomizationStats":[[],{}],"FItemStackAndDurabilityStats":[[],{"CurrentDurability":92.913726}]}');
+const productionResourceStats = JSON.parse('{"FItemStackAndDurabilityStats":[[],{"DecayedMaxDurability":0.0}]}');
+assert.equal(typeof productionWeaponStats.FItemStackAndDurabilityStats[1].CurrentDurability, "number");
+assert.equal(Object.hasOwn(productionResourceStats.FItemStackAndDurabilityStats[1], "CurrentDurability"), false, "the shared wrapper is not durability eligibility evidence");
+
+const investigationSql = buildDurabilityInvestigationSql("'LongRifle_Unique_Poison_06'");
+assert.match(investigationSql, /information_schema\.columns/);
+assert.match(investigationSql, /t\.typname='inventoryitem'/);
+assert.match(investigationSql, /FItemStackAndDurabilityStats,1,CurrentDurability/);
+assert.match(investigationSql, /jsonb_typeof[\s\S]*='number'/);
+
+const expected = durabilityExpectation(weapon, true);
+assert.equal(classifyDurabilityReadBack(expected, { foundStacks: 2, durabilityPresentStacks: 2, numericDurabilityStacks: 2, exactDurabilityStacks: 2 }).ok, true);
+assert.equal(classifyDurabilityReadBack(expected, { foundStacks: 2, durabilityPresentStacks: 2, numericDurabilityStacks: 2, exactDurabilityStacks: 1 }).status, "durability-mismatch");
+assert.equal(classifyDurabilityReadBack(expected, { foundStacks: 0 }).status, "runtime-overwrite");
+assert.equal(classifyDurabilityReadBack(durabilityExpectation(resource, true), { foundStacks: 1, durabilityPresentStacks: 1 }).status, "fabricated-durability");
+
+const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const playerGrant = server.slice(server.indexOf("async function adminGiveDbItemToPlayer"), server.indexOf("async function adminGiveItem(payload)"));
+const storageGrant = server.slice(server.indexOf("async function adminGiveItemToStorage"), server.indexOf("function giveItemReceipt"));
+assert.match(playerGrant, /begin;[\s\S]*player_grant_slots[\s\S]*GIVE_ITEM_DURABILITY_SQL_PATH[\s\S]*raise exception 'Player item grant failed transactional identity, quantity, slot, grade, or durability verification'[\s\S]*commit;/);
+assert.match(storageGrant, /storage_grant_slots[\s\S]*GIVE_ITEM_DURABILITY_SQL_PATH[\s\S]*Storage deposit failed transactional slot and quantity verification[\s\S]*commit;/);
+assert.match(playerGrant, /i\.stats #> '\$\{GIVE_ITEM_DURABILITY_SQL_PATH\}' is null/, "non-durable player transaction verification must require an absent durability leaf");
+assert.match(storageGrant, /i\.stats #> '\$\{GIVE_ITEM_DURABILITY_SQL_PATH\}' is null/, "non-durable storage transaction verification must require an absent durability leaf");
+assert.match(server, /function verifyGiveItemReceipt[\s\S]*read-back-mismatch/);
+assert.match(server, /function verifyStorageDepositReceipt[\s\S]*classifyDurabilityReadBack/);
+assert.match(server, /pollGiveItemReceipt[\s\S]*delays=\[2000,3000,10000,15000\]/);
+assert.match(server, /pollStorageDeposit[\s\S]*delays=\[2000,3000,10000,15000\]/);
+assert.match(server, /id="adminSetDurability200"[\s\S]*Set Durability to 200/);
+assert.match(server, /Durability not applicable/);
+assert.match(server, /\/api\/admin\/give-item-receipts\/recheck/);
+assert.match(server, /storage_item_deposited[\s\S]*durabilityEvidence[\s\S]*durabilityVerification/);
+assert.match(server, /give_item_db_grade_inserted[\s\S]*durabilityEvidence[\s\S]*receiptId/);
+
+console.log("Give Item Set Durability to 200 schema, eligibility, transaction rollback, destination, receipt, read-back, and delayed verification tests passed.");

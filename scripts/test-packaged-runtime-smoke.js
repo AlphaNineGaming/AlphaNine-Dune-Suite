@@ -22,12 +22,21 @@ const httpsPort = port + 500;
 if (!fs.existsSync(archive)) throw new Error(`Packaged archive was not found: ${archive}`);
 asar.extractAll(archive, extracted);
 const packagedServerSource = fs.readFileSync(path.join(extracted, "server.js"), "utf8");
+const packagedMarketBotMigrationSafetySource = fs.readFileSync(path.join(extracted, "lib", "market-bot-migration-safety.js"), "utf8");
+const packagedMigrationUiSafetySource = fs.readFileSync(path.join(extracted, "lib", "migration-ui-safety.js"), "utf8");
 const packagedDesktopSource = fs.readFileSync(path.join(extracted, "electron", "main.js"), "utf8");
 const packagedCleanerTestPath = path.join(extracted, "scripts", "test-base-cleanup-override.js");
 const packagedLandsraadTestPath = path.join(extracted, "scripts", "test-landsraad-tiers.js");
 const packagedServerUpdateTestPath = path.join(extracted, "scripts", "test-server-update-monitor.js");
 const packagedServerHealthTestPath = path.join(extracted, "scripts", "test-server-health.js");
+const packagedBattlegroupControlTestPath = path.join(extracted, "scripts", "test-battlegroup-control.js");
 const packagedStorageDepositTestPath = path.join(extracted, "scripts", "test-storage-deposits.js");
+const packagedGiveItemDurabilityTestPath = path.join(extracted, "scripts", "test-give-item-durability.js");
+const packagedMarketBotVerificationTestPath = path.join(extracted, "scripts", "test-market-bot-verification.js");
+const packagedMarketBotAuthoritativeEvidenceTestPath = path.join(extracted, "scripts", "test-market-bot-authoritative-evidence.js");
+const packagedMarketBotReconciliationTestPath = path.join(extracted, "scripts", "test-market-bot-reconciliation.js");
+const packagedOfflineMarketBotReconciliationTestPath = path.join(extracted, "scripts", "test-market-bot-offline-reconciliation.js");
+const packagedSqlStdinTestPath = path.join(extracted, "scripts", "test-ssh-sql-stdin.js");
 const packagedRemoteAccessTestPath = path.join(extracted, "scripts", "test-remote-access.js");
 const packagedUpdateIntegrityTestPath = path.join(extracted, "scripts", "test-update-integrity.js");
 const packagedLiveMapResourcesTestPath = path.join(extracted, "scripts", "test-live-map-resources.js");
@@ -41,7 +50,14 @@ assert(fs.existsSync(packagedCleanerTestPath), "Packaged app is missing the Serv
 assert(fs.existsSync(packagedLandsraadTestPath), "Packaged app is missing the Landsraad exact-five regression test.");
 assert(fs.existsSync(packagedServerUpdateTestPath), "Packaged app is missing the Server Updater regression test.");
 assert(fs.existsSync(packagedServerHealthTestPath), "Packaged app is missing the Server Health regression test.");
+assert(fs.existsSync(packagedBattlegroupControlTestPath), "Packaged app is missing the battlegroup generation/attribution regression test.");
 assert(fs.existsSync(packagedStorageDepositTestPath), "Packaged app is missing the storage-deposit reliability regression test.");
+assert(fs.existsSync(packagedGiveItemDurabilityTestPath), "Packaged app is missing the Give Item durability regression test.");
+assert(fs.existsSync(packagedMarketBotVerificationTestPath), "Packaged app is missing the Market Bot pause/drain regression test.");
+assert(fs.existsSync(packagedMarketBotAuthoritativeEvidenceTestPath), "Packaged app is missing the authoritative Market Bot evidence regression test.");
+assert(fs.existsSync(packagedMarketBotReconciliationTestPath), "Packaged app is missing the Market Bot pause reconciliation regression test.");
+assert(fs.existsSync(packagedOfflineMarketBotReconciliationTestPath), "Packaged app is missing the Offline Mode Market Bot evidence reconciliation regression test.");
+assert(fs.existsSync(packagedSqlStdinTestPath), "Packaged app is missing the diagnostic SSH-stdin SQL regression test.");
 assert(fs.existsSync(packagedRemoteAccessTestPath), "Packaged app is missing the remote-access regression test.");
 assert(fs.existsSync(packagedUpdateIntegrityTestPath), "Packaged app is missing the self-update integrity regression test.");
 assert(fs.existsSync(packagedLiveMapResourcesTestPath), "Packaged app is missing the Live Map resource regression test.");
@@ -86,6 +102,38 @@ assert.equal(
   0,
   `Packaged Landsraad regression failed.\n${packagedLandsraadTest.stdout || ""}\n${packagedLandsraadTest.stderr || ""}`
 );
+const packagedMarketBotReconciliationTest = spawnSync(process.execPath, [packagedMarketBotReconciliationTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedMarketBotReconciliationTest.status,
+  0,
+  `Packaged Market Bot Pause Reconciliation regression failed.\n${packagedMarketBotReconciliationTest.stdout || ""}\n${packagedMarketBotReconciliationTest.stderr || ""}`
+);
+const packagedMarketBotAuthoritativeEvidenceTest = spawnSync(process.execPath, [packagedMarketBotAuthoritativeEvidenceTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedMarketBotAuthoritativeEvidenceTest.status,
+  0,
+  `Packaged authoritative Market Bot evidence regression failed.\n${packagedMarketBotAuthoritativeEvidenceTest.stdout || ""}\n${packagedMarketBotAuthoritativeEvidenceTest.stderr || ""}`
+);
+const packagedOfflineMarketBotReconciliationTest = spawnSync(process.execPath, [packagedOfflineMarketBotReconciliationTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedOfflineMarketBotReconciliationTest.status,
+  0,
+  `Packaged Offline Mode Market Bot evidence reconciliation regression failed.\n${packagedOfflineMarketBotReconciliationTest.stdout || ""}\n${packagedOfflineMarketBotReconciliationTest.stderr || ""}`
+);
+const packagedSqlStdinTest = spawnSync(process.execPath, [packagedSqlStdinTestPath], { cwd: extracted, encoding: "utf8", windowsHide: true });
+assert.equal(packagedSqlStdinTest.status, 0, `Packaged diagnostic SSH-stdin SQL regression failed.\n${packagedSqlStdinTest.stdout || ""}\n${packagedSqlStdinTest.stderr || ""}`);
 const packagedServerUpdateTest = spawnSync(process.execPath, [packagedServerUpdateTestPath], {
   cwd: extracted,
   encoding: "utf8",
@@ -106,6 +154,10 @@ assert.equal(
   0,
   `Packaged Server Health regression failed.\n${packagedServerHealthTest.stdout || ""}\n${packagedServerHealthTest.stderr || ""}`
 );
+for (const testPath of [packagedBattlegroupControlTestPath]) {
+  const result = spawnSync(process.execPath, [testPath], { cwd: extracted, encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, `Packaged battlegroup control regression failed.\n${result.stdout || ""}\n${result.stderr || ""}`);
+}
 const packagedStorageDepositTest = spawnSync(process.execPath, [packagedStorageDepositTestPath], {
   cwd: extracted,
   encoding: "utf8",
@@ -115,6 +167,16 @@ assert.equal(
   packagedStorageDepositTest.status,
   0,
   `Packaged storage-deposit regression failed.\n${packagedStorageDepositTest.stdout || ""}\n${packagedStorageDepositTest.stderr || ""}`
+);
+const packagedGiveItemDurabilityTest = spawnSync(process.execPath, [packagedGiveItemDurabilityTestPath], {
+  cwd: extracted,
+  encoding: "utf8",
+  windowsHide: true
+});
+assert.equal(
+  packagedGiveItemDurabilityTest.status,
+  0,
+  `Packaged Give Item durability regression failed.\n${packagedGiveItemDurabilityTest.stdout || ""}\n${packagedGiveItemDurabilityTest.stderr || ""}`
 );
 const packagedRemoteAccessTest = spawnSync(process.execPath, [packagedRemoteAccessTestPath], {
   cwd: extracted,
@@ -171,6 +233,7 @@ assert(!/https?:\/\//i.test(packagedExperimentalResourcesModule), "Packaged Expe
 assert(packagedExperimentalResourcesModule.includes("app.asar.unpacked"), "Packaged Resource Areas generator cannot locate its extraction helper outside app.asar.");
 const packagedEntries = asar.listPackage(archive).map((entry) => entry.replaceAll("\\", "/").replace(/^\//, ""));
 for (const entry of packagedEntries) {
+  assert(!/^(?:assets\/migration-worker|migration-worker|scripts\/.*migration.*\.js|scripts\/test-maintenance.*\.js|scripts\/test-battlegroup-control-paths\.js)(?:\/|$)/i.test(entry), `Packaged app still contains a removed Server Migration artifact: ${entry}`);
   assert(!/experimental-resource-areas\/|\.source-top-(?:max|min)-y\.png$/i.test(entry), `Packaged app contains a generated resource-area cache artifact: ${entry}`);
   assert(!/\.(?:pak|uasset|uexp)$/i.test(entry), `Packaged app contains a raw Funcom package asset: ${entry}`);
 }
@@ -187,6 +250,35 @@ assert(
   "Packaged blueprint imports are not using streamed SQL."
 );
 const packagedVmScheduler = require(path.join(extracted, "lib", "vm-scheduler.js"));
+const packagedSchedulerStatus = packagedVmScheduler.buildStatusCommand();
+assert(packagedSchedulerStatus.includes("elif sudo -n test ! -e '/etc/crontabs/dune'"), "Packaged scheduler status does not distinguish a positively absent cron file.");
+assert(packagedSchedulerStatus.includes("then begin_count=0; end_count=0; path_refs=0"), "Packaged scheduler status does not assign exact zero counts for an absent cron file.");
+assert(!packagedSchedulerStatus.includes("grep -Fxc '# BEGIN ALPHANINE DUNE SCHEDULER' '/etc/crontabs/dune' 2>/dev/null || true"), "Packaged scheduler status still erases cron inspection failures.");
+assert(packagedSchedulerStatus.includes("kubectl get cronjobs -A -o json") && packagedSchedulerStatus.includes("rc-update show -v") && packagedSchedulerStatus.includes("/etc/cron.d /etc/periodic"), "Packaged scheduler status is missing alternate restart-surface checks.");
+assert(packagedSchedulerStatus.includes("sudo -n kubectl get cronjobs") && !packagedSchedulerStatus.includes("command -v kubectl"), "Packaged scheduler status does not use the privileged Kubernetes evidence path independently of the SSH user's PATH.");
+assert(packagedSchedulerStatus.includes("ps -eo pid=,comm=,args=") && packagedSchedulerStatus.includes("$field == scheduler") && !packagedSchedulerStatus.includes("for (index="), "Packaged scheduler status does not use BusyBox-compatible exact process-argument boundaries.");
+assert.equal(packagedVmScheduler.countSchedulerProcessArguments([{ argv: ["bash", "-c", packagedSchedulerStatus] }]), "0", "Packaged scheduler status counts its own shell transport as a helper process.");
+assert.equal(packagedVmScheduler.classifyStatusInventory({
+  evidenceValid: true,
+  filesystemEvidenceValid: true,
+  cronEvidenceValid: true,
+  alternateCronEvidenceValid: true,
+  kubernetesEvidenceValid: true,
+  processEvidenceValid: true,
+  openRcEvidenceValid: true,
+  cronFileState: "absent",
+  directoryExists: false,
+  scriptExists: false,
+  configExists: false,
+  beginCount: "0",
+  endCount: "0",
+  pathRefs: "0",
+  alternateCronRefs: "0",
+  kubernetesCronJobRefs: "0",
+  helperProcessRefs: "0",
+  openRcRestartRefs: "0",
+  genericCrondRunning: true
+}).schedulerMode, "absent", "Packaged scheduler status incorrectly treats generic crond as an AlphaNine schedule.");
 const packagedSchedulerInstall = packagedVmScheduler.buildInstallCommand({
   config: packagedVmScheduler.defaultSchedulerConfig("abc"),
   scriptSource: "#!/bin/bash\r\nlog_line() {\r\n  printf ok\r\n}\r\n",
@@ -197,12 +289,25 @@ assert(packagedSchedulerPayload, "Packaged scheduler installer payload was not f
 const packagedSchedulerRuntime = zlib.gunzipSync(Buffer.from(packagedSchedulerPayload, "base64")).toString("utf8");
 assert.equal(packagedSchedulerRuntime.includes("\r"), false, "Packaged scheduler payload still contains Windows CRLF line endings.");
 const packagedMarketBot = require(path.join(extracted, "lib", "market-bot.js"));
+const packagedMarketBotVerification = require(path.join(extracted, "lib", "market-bot-verification.js"));
+const packagedMarketBotMigrationSafety = require(path.join(extracted, "lib", "market-bot-migration-safety.js"));
 const packagedMarketBotBinaryPath = path.join(extracted, "assets", "market-bot", "linux-amd64", "alphanine-market-bot");
 assert(fs.existsSync(packagedMarketBotBinaryPath), "Packaged Linux/amd64 Market Bot binary is missing.");
 const packagedMarketBotBinary = fs.readFileSync(packagedMarketBotBinaryPath);
+const packagedExpected = require(path.join(extracted, "lib", "market-bot-offline-reconciliation.js")).EXPECTED;
+assert.equal(crypto.createHash("sha256").update(packagedMarketBotBinary).digest("hex"), packagedExpected.runtimeBinarySha256, "Packaged optional Market Bot runtime does not match its bundled asset identity.");
 assert.equal(packagedMarketBotBinary.subarray(0, 4).toString("hex"), "7f454c46", "Packaged Market Bot is not an ELF binary.");
 assert.equal(packagedMarketBotBinary[4], 2, "Packaged Market Bot is not ELF64.");
 assert.equal(packagedMarketBotBinary.readUInt16LE(18), 62, "Packaged Market Bot is not amd64.");
+assert.equal(typeof packagedMarketBotVerification.evaluateAuthoritativeQuiescence, "function", "Packaged Market Bot quiescence verifier is missing.");
+assert.equal(typeof packagedMarketBotMigrationSafety.validateStoppedServices, "function", "Packaged Market Bot stopped-or-absent infrastructure verifier is missing.");
+const packagedExportJob = packagedServerSource.slice(packagedServerSource.indexOf("async function runMigrationExportJob"), packagedServerSource.indexOf("function startMigrationExport"));
+assert(!/collectMigrationMarketBotSafety|revalidateMigrationMarketBotSafety|migrationSafety|historicalIncompleteMarker|catalogFingerprint|runtimeBinarySha256|Quiescent/.test(packagedExportJob) && packagedExportJob.includes("sourceMarket: after.sourceMarket"), "Packaged source export is not read-only or still depends on non-portable Market Bot infrastructure.");
+assert(packagedServerSource.includes("const SERVER_MIGRATION_ENABLED = false;"), "Packaged server does not disable Server Migration.");
+assert(!/data-view=\"server-migration\"|<section id=\"server-migration\"|id=\"migrationMaintenanceBanner\"|id=\"migrationOfflineBanner\"/.test(packagedServerSource), "Packaged server still renders a Server Migration UI surface.");
+assert(!packagedDesktopSource.includes('ipcMain.handle("choose-server-migration-') && !packagedDesktopSource.includes("offlineStartup.active"), "Packaged desktop still exposes Server Migration dialogs or startup holds.");
+assert(packagedServerSource.includes("buildDestinationMarketCleanupSql") && packagedServerSource.includes("cleanupDestinationMarket"), "Packaged import is missing transactional destination market cleanup.");
+assert(!/supportedExportMarketBotExpected|marketBotExpected/.test(packagedServerSource.slice(packagedServerSource.indexOf("async function migrationExportPreflight"), packagedServerSource.indexOf("async function migrationDumpToFile"))), "Packaged export preflight still reconstructs Market Bot generation, catalog, or runtime policy.");
 const packagedMarketBotInstall = packagedMarketBot.buildInstallCommand({
   config: {
     schemaVersion: 1,
@@ -226,8 +331,11 @@ assert(
   "Packaged Market Bot tracked-only cleanup safety warning is missing."
 );
 assert(
-  /loadEnvironment\(\);\s*await startReceiverIfNeeded\(\);\s*await startServer\(\);/.test(packagedDesktopSource),
-  "Packaged desktop boot does not start the receiver before the Suite backend."
+  packagedDesktopSource.includes("DESKTOP_STARTUP_POLICY.allowDesktopEnvironmentMutation") &&
+    packagedDesktopSource.includes("DESKTOP_STARTUP_POLICY.allowDesktopReceiver") &&
+    packagedDesktopSource.includes("await startReceiverIfNeeded()") &&
+    packagedDesktopSource.includes("await startServer()"),
+  "Packaged desktop boot must preserve normal Receiver and Suite startup."
 );
 assert(
   packagedServerSource.includes("dune.adjust_player_virtual_currency_balance(${controllerId}::bigint, ${HOUSE_SCRIP_CURRENCY_ID}::smallint, ${amount}::bigint)"),
@@ -251,7 +359,7 @@ for (const relative of [
   assert(!fs.existsSync(path.join(extracted, relative)), `Packaged app still contains removed blueprint visualization content: ${relative}`);
 }
 
-const child = spawn(process.execPath, [path.join(extracted, "server.js")], {
+const child = spawn(process.execPath, [path.join(extracted, "server.js"), "--side-effect-free"], {
   cwd: extracted,
   env: {
     ...process.env,
@@ -259,8 +367,7 @@ const child = spawn(process.execPath, [path.join(extracted, "server.js")], {
     ALPHANINE_HTTPS_PORT: String(httpsPort),
     ALPHANINE_DATA_DIR: dataDir,
     ALPHANINE_DUNE_PAKS_DIR: path.join(scratch, "missing-paks"),
-    ALPHANINE_SKIP_MANAGER: "1",
-    ALPHANINE_SKIP_STARTUP_SERVICES: "1"
+    ALPHANINE_SKIP_MANAGER: "1"
   },
   stdio: ["ignore", "pipe", "pipe"],
   windowsHide: true
@@ -286,6 +393,18 @@ async function waitForUi() {
 (async () => {
   try {
     const html = await waitForUi();
+    assert(!html.includes('data-view="server-migration"') && !html.includes('id="server-migration"'), "Packaged UI still exposes Server Migration.");
+    assert(!html.includes('id="migrationMaintenanceBanner"') && !html.includes('id="migrationOfflineBanner"'), "Packaged UI still renders migration startup-hold banners.");
+    for (const [migrationPath, method] of [["/api/server-migration/profile", "GET"], ["/api/migration-offline/enter", "POST"], ["/api/migration-maintenance/enter", "POST"]]) {
+      const response = await fetch(`http://127.0.0.1:${port}${migrationPath}`, { method });
+      const body = await response.json();
+      assert.equal(response.status, 404, `Removed Server Migration route remains reachable: ${migrationPath}`);
+      assert.equal(body.code, "feature_not_in_build", `Removed Server Migration route returned an unexpected response: ${migrationPath}`);
+    }
+    const blockedStartResponse = await fetch(`http://127.0.0.1:${port}/api/action/start`, { method: "POST" });
+    const blockedStart = await blockedStartResponse.json();
+    assert.equal(blockedStartResponse.status, 409, "Side-effect-free packaged runner must block manual server start.");
+    assert.equal(blockedStart.code, "side_effect_free", "Side-effect-free runner must return its fail-closed reason.");
     const resourceAreaStatusResponse = await fetch(`http://127.0.0.1:${port}/api/live-map/resource-areas/status`);
     const resourceAreaStatus = await resourceAreaStatusResponse.json();
     assert.equal(resourceAreaStatusResponse.status, 200, "Missing Tools.pak must not crash the packaged status API.");
@@ -314,8 +433,12 @@ async function waitForUi() {
     assert(html.includes("No resource types selected."), "Packaged UI is missing the empty selection state for Resource Areas.");
     assert(html.includes("Select Game Folder"), "Packaged UI is missing the Resource Areas game-folder recovery action.");
     assert(html.includes("Protected Battlegroup Refresh"), "Packaged Give Item UI is missing protected storage refresh.");
+    assert(html.includes("Set Durability to 200"), "Packaged desktop/web Give Item UI is missing Set Durability to 200.");
+    assert(html.includes("Durability not applicable"), "Packaged desktop/web Give Item UI is missing the non-durable state.");
+    assert(html.includes('getJson("/api/admin/give-item-receipts/recheck"'), "Packaged UI is missing player-inventory delayed durability rechecks.");
     assert(html.includes('getJson("/api/admin/storage-deposits/recheck"'), "Packaged UI is missing storage receipt rechecks.");
     assert(packagedServerSource.includes("Storage deposit failed transactional slot and quantity verification"), "Packaged backend is missing transactional storage verification.");
+    assert(packagedServerSource.includes("Player item grant failed transactional identity, quantity, slot, grade, or durability verification"), "Packaged backend is missing transactional player-inventory durability rollback.");
     console.log(`Packaged Suite smoke test passed on isolated port ${port}; version ${packagedVersion}.`);
   } finally {
     if (child.exitCode === null) child.kill();

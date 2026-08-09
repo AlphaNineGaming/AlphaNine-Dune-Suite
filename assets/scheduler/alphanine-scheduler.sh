@@ -19,6 +19,7 @@ HISTORY_FILE="$ROOT_DIR/history.jsonl"
 LAST_STATUS_FILE="$ROOT_DIR/last-status.json"
 LOG_FILE="$ROOT_DIR/scheduler.log"
 LOCK_FILE="$ROOT_DIR/scheduler.lock"
+MAINTENANCE_HOLD_FILE="${ALPHANINE_MAINTENANCE_HOLD_FILE:-/home/dune/.dune/alphanine-migration-maintenance.json}"
 FUNCOM_PREFIX="funcom-seabass-"
 
 mkdir -p "$ROOT_DIR"
@@ -27,6 +28,11 @@ touch "$HISTORY_FILE" "$LOG_FILE"
 log_line() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG_FILE"
   tail -n 1000 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv "$LOG_FILE.tmp" "$LOG_FILE"
+}
+
+maintenance_active() {
+  # Presence is authoritative and fail-closed, including malformed content.
+  [ -e "$MAINTENANCE_HOLD_FILE" ]
 }
 
 require_config() {
@@ -118,6 +124,35 @@ load_runtime_config() {
 
 kubectl_safe() {
   sudo -n kubectl "$@"
+}
+
+control_snapshot() {
+  local data
+  data=$(kubectl_safe get battlegroup "$BATTLEGROUP" -n "$NAMESPACE" -o json 2>/dev/null) || return 1
+  printf '%s' "$data" | jq -ce '{resourceVersion:(.metadata.resourceVersion|tostring),generation:(.metadata.annotations["control.alphanine.io/generation"] // "0"),stop:.spec.stop}'
+}
+
+guarded_control_patch() {
+  local desired_stop="$1" expected_generation="$2" operation_id="$3" reason="$4"
+  local before current_generation resource_version timestamp profile_identity battlegroup_identity patch after
+  before=$(control_snapshot) || return 1
+  current_generation=$(printf '%s' "$before" | jq -r '.generation')
+  resource_version=$(printf '%s' "$before" | jq -r '.resourceVersion')
+  if [ "$current_generation" != "$expected_generation" ]; then
+    record_event "restart" "rejected-stale" "A newer explicit battlegroup control generation superseded this scheduler intent." "$(jq -cn --arg expected "$expected_generation" --arg current "$current_generation" --arg operationId "$operation_id" '{expectedGeneration:$expected,currentGeneration:$current,operationId:$operationId}')"
+    return 1
+  fi
+  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  profile_identity=$(sha256sum "$CONFIG_FILE" | awk '{print $1}') || return 1
+  battlegroup_identity=$(printf '%s' "$NAMESPACE/$BATTLEGROUP" | sha256sum | awk '{print $1}') || return 1
+  patch=$(jq -cn --arg rv "$resource_version" --arg generation "$expected_generation" --arg operation "$operation_id" --arg reason "$reason" --arg timestamp "$timestamp" --arg process "scheduler:$$" --arg profile "$profile_identity" --arg battlegroup "$battlegroup_identity" --argjson stop "$desired_stop" '{metadata:{resourceVersion:$rv,annotations:{"control.alphanine.io/generation":$generation,"control.alphanine.io/operation-id":$operation,"control.alphanine.io/reason":$reason,"control.alphanine.io/call-site":"assets/scheduler/alphanine-scheduler.sh:run_restart","control.alphanine.io/process":$process,"control.alphanine.io/timestamp":$timestamp,"control.alphanine.io/profile":$profile,"control.alphanine.io/battlegroup":$battlegroup}},spec:{stop:$stop}}') || return 1
+  kubectl_safe patch battlegroup "$BATTLEGROUP" -n "$NAMESPACE" --type=merge -p "$patch" >> "$LOG_FILE" 2>&1 || return 1
+  after=$(control_snapshot) || return 1
+  if [ "$(printf '%s' "$after" | jq -r '.generation')" != "$expected_generation" ] || [ "$(printf '%s' "$after" | jq -r '.stop')" != "$desired_stop" ]; then
+    record_event "restart" "failed" "Scheduler control attribution did not survive the Kubernetes mutation." "$(jq -cn --arg operationId "$operation_id" '{operationId:$operationId}')"
+    return 1
+  fi
+  record_event "control" "applied" "Attributed scheduler battlegroup mutation completed." "$(jq -cn --arg timestamp "$timestamp" --arg operationId "$operation_id" --arg reason "$reason" --arg process "scheduler:$$" --arg oldResourceVersion "$(printf '%s' "$before" | jq -r '.resourceVersion')" --arg newResourceVersion "$(printf '%s' "$after" | jq -r '.resourceVersion')" --arg oldStop "$(printf '%s' "$before" | jq -r '.stop')" --arg newStop "$(printf '%s' "$after" | jq -r '.stop')" --arg generation "$expected_generation" --arg profile "$profile_identity" --arg battlegroup "$battlegroup_identity" '{timestamp:$timestamp,operationId:$operationId,reason:$reason,processIdentity:$process,oldResourceVersion:$oldResourceVersion,newResourceVersion:$newResourceVersion,oldStop:$oldStop,newStop:$newStop,generation:$generation,profileIdentity:$profile,battlegroupIdentity:$battlegroup}')"
 }
 
 target_exists() {
@@ -334,6 +369,14 @@ run_restart() {
   local reason="${1:-manual}"
   local bypass_players="${2:-false}"
   local conflict
+  local control_before control_generation control_operation_id
+  control_before=$(control_snapshot) || { record_event "restart" "blocked" "Battlegroup control generation could not be captured." '{}'; return 1; }
+  control_generation=$(printf '%s' "$control_before" | jq -r '.generation')
+  control_operation_id="scheduler-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  if maintenance_active; then
+    record_event "restart" "blocked" "Migration Maintenance Mode holds the game server offline." '{}'
+    return 1
+  fi
   conflict=$(operation_conflict_reason)
   if [ -n "$conflict" ]; then
     record_event "restart" "blocked" "$conflict" "$(jq -cn --arg reason "$reason" '{reason:$reason}')"
@@ -383,23 +426,39 @@ run_restart() {
     return 1
   fi
 
+  if maintenance_active; then
+    record_event "restart" "blocked" "Migration Maintenance Mode became active before shutdown." '{}'
+    return 1
+  fi
   record_event "restart" "running" "Stopping the configured battlegroup." "$(jq -cn --argjson players "$players" --arg reason "$reason" '{players:$players,reason:$reason}')"
-  if ! kubectl_safe patch battlegroup "$BATTLEGROUP" -n "$NAMESPACE" --type=merge -p '{"spec":{"stop":true}}' >> "$LOG_FILE" 2>&1; then
+  if ! guarded_control_patch true "$control_generation" "$control_operation_id" "Protected scheduler restart stop phase: $reason"; then
     record_event "restart" "failed" "The battlegroup stop request failed." '{}'
     return 1
   fi
   local stopped_phase
   if ! stopped_phase=$(wait_for_stopped 180); then
-    kubectl_safe patch battlegroup "$BATTLEGROUP" -n "$NAMESPACE" --type=merge -p '{"spec":{"stop":false}}' >> "$LOG_FILE" 2>&1 || true
-    record_event "restart" "failed" "The battlegroup did not stop within 180 seconds; a recovery start was requested." "$(jq -cn --arg phase "$stopped_phase" '{phase:$phase}')"
+    if ! maintenance_active; then
+      guarded_control_patch false "$control_generation" "$control_operation_id" "Protected scheduler recovery start after stop timeout" || true
+      record_event "restart" "failed" "The battlegroup did not stop within 180 seconds; a recovery start was requested." "$(jq -cn --arg phase "$stopped_phase" '{phase:$phase}')"
+    else
+      record_event "restart" "blocked" "Migration Maintenance Mode appeared while shutdown was pending; no recovery start was requested." "$(jq -cn --arg phase "$stopped_phase" '{phase:$phase}')"
+    fi
     return 1
   fi
 
   sleep 5
+  if maintenance_active; then
+    record_event "restart" "blocked" "Migration Maintenance Mode appeared after shutdown; the battlegroup remains stopped." '{}'
+    return 1
+  fi
   record_event "restart" "running" "Starting the configured battlegroup and waiting for health checks." '{}'
-  if ! kubectl_safe patch battlegroup "$BATTLEGROUP" -n "$NAMESPACE" --type=merge -p '{"spec":{"stop":false}}' >> "$LOG_FILE" 2>&1; then
+  if ! guarded_control_patch false "$control_generation" "$control_operation_id" "Protected scheduler restart start phase: $reason"; then
     sleep 5
-    if ! kubectl_safe patch battlegroup "$BATTLEGROUP" -n "$NAMESPACE" --type=merge -p '{"spec":{"stop":false}}' >> "$LOG_FILE" 2>&1; then
+    if maintenance_active; then
+      record_event "restart" "blocked" "Migration Maintenance Mode appeared after the first start request; no retry was made." '{}'
+      return 1
+    fi
+    if ! guarded_control_patch false "$control_generation" "$control_operation_id" "Protected scheduler restart start retry: $reason"; then
       record_event "restart" "failed" "The battlegroup start request failed twice after shutdown; manual recovery is required." '{}'
       return 1
     fi
@@ -529,7 +588,7 @@ self_test() {
     fi
   }
   local command
-  for command in bash jq sudo kubectl flock timeout; do
+  for command in bash jq sudo kubectl flock timeout crond; do
     if command -v "$command" >/dev/null 2>&1; then add_check "$command" true "available"; else add_check "$command" false "missing"; fi
   done
   if [ -e "/usr/share/zoneinfo/$TIMEZONE" ]; then add_check "timezone" true "$TIMEZONE"; else add_check "timezone" false "$TIMEZONE missing"; fi
@@ -539,6 +598,7 @@ self_test() {
   if health=$(health_snapshot 2>/dev/null); then add_check "health-query" true "$(printf '%s' "$health" | jq -c .)"; else add_check "health-query" false "query failed"; fi
   if sudo -n grep -q '^# BEGIN ALPHANINE DUNE SCHEDULER$' /etc/crontabs/dune 2>/dev/null; then cron_ok=true; else cron_ok=false; fi
   add_check "cron-registration" "$cron_ok" "/etc/crontabs/dune"
+  if sudo -n ps -eo comm= 2>/dev/null | grep -Eq '^crond$'; then add_check "cron-runtime" true "BusyBox crond is running"; else add_check "cron-runtime" false "BusyBox crond is not running"; fi
   local ok
   if [ "$(printf '%s' "$failures" | jq 'length')" -eq 0 ]; then ok=true; else ok=false; fi
   local result
@@ -573,7 +633,7 @@ show_status() {
     --arg schedulerVersion "$SCHEDULER_VERSION" \
     --arg vmNow "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg localNow "$(date +%Y-%m-%dT%H:%M:%S%z)" \
-    '{ok:true,installed:true,schedulerVersion:$schedulerVersion,cronRegistered:$cronRegistered,config:$config,state:$state,lastStatus:$last,history:$history,health:$health,players:$players,vmNow:$vmNow,localNow:$localNow}'
+    '{ok:true,installed:true,schedulerMode:"installed",ambiguousRegistration:false,schedulerVersion:$schedulerVersion,cronRegistered:$cronRegistered,config:$config,state:$state,lastStatus:$last,history:$history,health:$health,players:$players,vmNow:$vmNow,localNow:$localNow}'
 }
 
 main() {

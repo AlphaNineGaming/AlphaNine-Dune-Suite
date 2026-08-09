@@ -110,6 +110,8 @@ async function post(baseUrl, body) {
       PORT: String(port),
       APPDATA: path.join(testRoot, "AppData"),
       ALPHANINE_CONFIG_PATH: configPath,
+      ALPHANINE_SKIP_MANAGER: "1",
+      ALPHANINE_SKIP_STARTUP_SERVICES: "1",
       DUNE_DATABASE_PASSWORD: CORRECT_PASSWORD
     },
     stdio: "ignore"

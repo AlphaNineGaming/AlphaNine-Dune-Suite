@@ -1,20 +1,31 @@
 "use strict";
 
 const assert = require("assert");
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
+const { EXPECTED: OFFLINE_RECONCILIATION_EXPECTED } = require("../lib/market-bot-offline-reconciliation");
 const {
   defaultMarketBotConfig,
   normalizeConfig,
   legacyMigration,
   createMarketBotStore,
   buildItemPolicies,
+  pinnedCatalogPolicy,
+  catalogPolicyFingerprint,
   marketCategoryMaskSeed,
   runtimeConfig,
   activationFingerprint,
   buildInstallCommand,
+  buildPausedRuntimeDeploymentCommand,
+  buildPausedRuntimeRollbackCleanupCommand,
+  buildPausedRuntimeRollbackRestoreCommand,
+  buildPausedConfigPublishCommand,
+  buildMigrationStoppedEvidenceCommand,
+  buildMigrationStopCommand,
+  buildMigrationUninstallCommand,
   buildActionCommand,
   parseJsonOutput,
   csvForPreview,
@@ -23,6 +34,12 @@ const {
 
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const goSource = fs.readFileSync(path.join(__dirname, "..", "market-bot", "main.go"), "utf8");
+const runtimeBinary = fs.readFileSync(path.join(__dirname, "..", "assets", "market-bot", "linux-amd64", "alphanine-market-bot"));
+assert.equal(
+  crypto.createHash("sha256").update(runtimeBinary).digest("hex"),
+  OFFLINE_RECONCILIATION_EXPECTED.runtimeBinarySha256,
+  "bundled optional Market Bot runtime does not match its deliberate asset identity"
+);
 
 const catalog = [
   { id: "Item_A", name: "Basic Material", category: "Items", tier: "T1", maxStack: 20 },
@@ -38,6 +55,10 @@ const testCategorySeed = {
   const config = defaultMarketBotConfig();
   assert.equal(config.enabled, false);
   assert.equal(config.paused, true);
+  assert.equal(config.pauseState, "Unknown");
+  assert.equal(config.configGeneration, "0");
+  assert.equal(config.pauseGeneration, "0");
+  assert.equal(config.runtimeFingerprint, "");
   assert.equal(config.activated, false);
   assert.equal(config.economyStyle, "Expensive");
   assert.equal(config.listingCategory, "");
@@ -127,7 +148,62 @@ const testCategorySeed = {
   assert.equal(item.stackSize, 7);
   assert.equal(item.targetListings, 3);
   assert.equal(runtime.items.length, catalog.length, "runtime plan must never truncate the catalog");
+  assert.match(runtime.configFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(activationFingerprint(runtime), activationFingerprint({ ...runtime, generatedAt: "later" }), "fingerprint must ignore volatile timestamps");
+}
+
+{
+  const command = buildMigrationStoppedEvidenceCommand();
+  assert(command.includes("rc-service alphanine-market-bot status"), "migration stopped-service evidence must inspect the real OpenRC service");
+  assert(command.includes("/proc/[0-9]*") && command.includes('readlink -f "$process_dir/exe"') && command.includes("matching_process_count"), "migration stopped-service evidence must detect hidden matching processes independently of the PID file");
+  assert(command.includes("supervise-daemon") && command.includes("restart_path_active"), "migration stopped-service evidence must detect supervisors and active restart paths");
+  assert(command.includes('"version":3') && command.includes("service_installed") && command.includes("runtime_installed"), "migration infrastructure evidence must classify stopped and absent installations without policy metadata");
+  assert(command.includes("/etc/runlevels/default/alphanine-market-bot") && command.includes("default_runlevel_registered"), "migration infrastructure evidence must reject a default-runlevel restart path");
+  assert(!/pause_marker|cycle_lease|boot_identity|generation|fingerprint|catalog/i.test(command), "migration infrastructure evidence must not require Market Bot runtime policy");
+  assert(!/rc-service alphanine-market-bot (?:start|stop|restart)|rc-update|kill|pkill/.test(command), "migration stopped-service evidence must remain read-only and never control the service");
+  const stop = buildMigrationStopCommand();
+  assert(stop.includes("rc-service alphanine-market-bot stop") && !/kill|pkill/.test(stop), "migration stop must use the normal OpenRC operation without force killing");
+  const uninstall = buildMigrationUninstallCommand({ token: "1234567890abcdef1234567890abcdef" });
+  assert(uninstall.includes("rc-update del alphanine-market-bot default"), "migration removal must unregister the OpenRC service");
+  assert(uninstall.indexOf("rc-service alphanine-market-bot status") < uninstall.indexOf("rc-update del"), "service stopped proof must precede removal");
+  assert(uninstall.includes("migration-remove-1234567890abcdef1234567890abcdef") && uninstall.includes("restore_market_bot"), "migration removal must stage restrictive rollback paths and restore them on failure");
+}
+
+{
+  const binary = Buffer.alloc(20000, 9);
+  const deploy = buildPausedRuntimeDeploymentCommand({
+    binary,
+    expectedPreviousSha256: "a".repeat(64),
+    expectedPreviousSize: "19000",
+    rollbackToken: "12345678-1234-1234-1234-123456789abc"
+  });
+  assert(deploy.includes("cleanup_paused_deploy") && deploy.includes("rollback-12345678"), "paused deployment must retain and automatically restore a restrictive rollback binary");
+  assert(deploy.includes('mv -f "$next" "$binary"'), "paused deployment must publish atomically");
+  assert(deploy.includes("sha256sum") && deploy.includes("wc -c"), "paused deployment must verify old, staged, and installed identities");
+  assert(deploy.indexOf('install -o dune -g dune -m 0700 "$binary" "$rollback"') < deploy.indexOf('mv -f "$next" "$binary"'), "rollback must exist before publication");
+  assert(deploy.includes("test -f '/home/dune/.dune/alphanine-market-bot/pause-requested'") && deploy.includes("test ! -e '/home/dune/.dune/alphanine-market-bot/cycle-running'"), "paused deployment must enforce pause and lease boundaries");
+  const cleanup = buildPausedRuntimeRollbackCleanupCommand({ rollbackToken: "12345678-1234-1234-1234-123456789abc", expectedPreviousSha256: "a".repeat(64), expectedPreviousSize: "19000", expectedCurrentSha256: "b".repeat(64), expectedCurrentSize: "20000" });
+  assert(cleanup.indexOf("sha256sum") < cleanup.indexOf("rm -f"), "rollback cleanup must verify both binaries before removal");
+  const restore = buildPausedRuntimeRollbackRestoreCommand({ rollbackToken: "12345678-1234-1234-1234-123456789abc", expectedPreviousSha256: "a".repeat(64), expectedPreviousSize: "19000", expectedCurrentSha256: "b".repeat(64), expectedCurrentSize: "20000" });
+  assert(restore.includes("rc-service alphanine-market-bot stop") && restore.includes("rc-service alphanine-market-bot start"), "rollback restore must bound service replacement");
+  assert(restore.indexOf("sha256sum") < restore.indexOf("mv -f"), "rollback restore must verify exact identities before publication");
+}
+
+{
+  const source = buildItemPolicies(catalog, normalizeConfig({ economyStyle: "Expensive" }), testCategorySeed)
+    .map(({ sources, ...item }) => item);
+  const policy = pinnedCatalogPolicy(source);
+  assert.equal(policy.mode, "pinned");
+  assert.equal(policy.itemCount, "3");
+  assert.equal(policy.fingerprint, catalogPolicyFingerprint(source));
+  const normalized = normalizeConfig({ catalogPolicy: policy });
+  const target = { name: "abc", namespace: "funcom-seabass-abc", dbPod: "db-0", dbSvc: "db" };
+  const runtime = runtimeConfig(normalized, target, [{ id: "new-local-item", name: "New", category: "Items" }], "1.2.3");
+  assert.deepEqual(runtime.items, source, "a pinned remote policy must remain independent of the changing local catalog");
+  assert.throws(() => normalizeConfig({ catalogPolicy: { ...policy, itemCount: "4" } }), /count or fingerprint/);
+  assert.throws(() => pinnedCatalogPolicy([...source, { ...source[0] }]), /duplicate/);
+  assert.throws(() => pinnedCatalogPolicy([{ ...source[0], unknown: true }]), /unknown fields/);
+  assert.throws(() => pinnedCatalogPolicy([{ ...source[0], unitPrice: Number.MAX_SAFE_INTEGER + 1 }]), /exact integer/);
 }
 
 {
@@ -158,10 +234,34 @@ const testCategorySeed = {
 }
 
 {
+  const policy = pinnedCatalogPolicy(buildItemPolicies(catalog, normalizeConfig({}), testCategorySeed).map(({ sources, ...item }) => item));
+  const target = { name: "abc", namespace: "funcom-seabass-abc", dbPod: "db-0", dbSvc: "db" };
+  const config = runtimeConfig(normalizeConfig({
+    schemaVersion: 2,
+    enabled: true,
+    activated: true,
+    paused: true,
+    pauseState: "Pause requested",
+    configGeneration: "9007199254740994",
+    pauseGeneration: "9007199254740994",
+    catalogPolicy: policy
+  }), target, [], "1.2.3");
+  const command = buildPausedConfigPublishCommand({ config, expectedCurrentSha256: "a".repeat(64) });
+  assert(command.includes("pause-requested") && command.includes("cycle-running"), "policy publication must require the durable pause boundary");
+  assert(command.includes("sha256sum") && command.includes("remote_next=") && command.includes('mv -f "$remote_next"'), "policy publication must bind the old identity and publish atomically");
+  assert(command.includes("ALPHANINE_MARKET_BOT_DIR=\"$staging_dir\""), "staged policy must pass the matching runtime self-test");
+  assert(!command.includes("rc-service") && !/alphanine-market-bot' (?:migrate|resume|clean)(?:\s|$)/.test(command), "policy publication must not control services or data");
+  assert.throws(() => buildPausedConfigPublishCommand({ config: { ...config, paused: false }, expectedCurrentSha256: "a".repeat(64) }), /Only a schema-current/);
+  assert.throws(() => buildPausedConfigPublishCommand({ config, expectedCurrentSha256: "bad" }), /exact current remote/);
+}
+
+{
   const action = buildActionCommand("preview", { cycleId: "preview-123" });
   assert(action.includes("preview"));
   assert(action.includes("preview-123"));
   assert(buildActionCommand("clean").includes("'clean'"));
+  assert(buildActionCommand("pause", { generation: "900719925474099312345" }).includes("900719925474099312345"));
+  assert.throws(() => buildActionCommand("pause"), /generation/);
   assert.throws(() => buildActionCommand("remove-player-listing"));
   assert.deepEqual(parseJsonOutput("diagnostic\n{\"ok\":true}\n"), { ok: true });
 }
@@ -189,6 +289,11 @@ const testCategorySeed = {
   assert(serverSource.includes('id="market" class="view"') && serverSource.includes("Persistent Market Bot"), "primary Market Bot UI is missing");
   assert(serverSource.includes("Category-verified catalog items") && serverSource.includes("Skipped (category metadata unavailable)"), "Market Bot UI must distinguish visible from skipped catalog items");
   assert(serverSource.includes('id="marketBotListingCategory"') && serverSource.includes('"/api/market-bot/category"'), "persistent listing category control is missing");
+  assert(serverSource.includes('catalogSelection !== "preserve-remote"') && serverSource.includes("buildPinnedMarketBotCatalogPolicy(runtimeEvidence.config.items)"), "bootstrap reconciliation must require explicit remote-catalog preservation");
+  assert(serverSource.includes("publishPinnedPausedMarketBotPolicy(before") && serverSource.includes("BigInt(generation) - 1n"), "bootstrap reconciliation must atomically publish a staged paused policy before the final Pause generation");
+  assert(serverSource.includes('sshCommand("bash -s", 45000') && serverSource.includes("inputPath: publisherPath"), "large pinned policies must be streamed over SSH stdin rather than placed on the process command line");
+  assert(serverSource.includes("configSha256Before") && serverSource.includes("configSha256After") && serverSource.includes("configBase64"), "remote policy evidence must bind one binary-safe capture between stable file hashes");
+  assert(serverSource.includes("const firstWriterText = await migrationSql(target, ACTIVE_WRITERS_SQL);\n  const firstSampleResult = await migrationSql"), "writer sampling must finish before the Suite opens its own semantic evidence session");
   assert(serverSource.includes("Clean Bot Market") && serverSource.includes('"/api/market-bot/clean"'), "tracked-only Market Bot cleanup control is missing");
   assert(serverSource.includes('id="legacy-market" class="view hidden"'), "legacy market UI is not isolated");
   assert(goSource.includes("pg_try_advisory_xact_lock"), "database lock is missing");

@@ -9,6 +9,7 @@ const {
   sanitizeBlueprintName
 } = require("../lib/blueprints");
 const { createZipArchive } = require("../lib/zip-archive");
+const { installMigrationUiSafety } = require("../lib/migration-ui-safety");
 
 function testNormalization() {
   assert.equal(sanitizeBlueprintName(" My_Base.v2 "), "My Base v2");
@@ -111,7 +112,8 @@ function testInlineUiSyntax() {
     .replaceAll("${SERVER_UPDATE_TIMEOUTS.uiCheckMs}", "120000")
     .replaceAll("${APP_VERSION}", "1.0.83")
     .replace("${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)}", "{}")
-    .replaceAll("${SERVER_MANAGEMENT_UI_TIMEOUTS.start}", "960000");
+    .replaceAll("${SERVER_MANAGEMENT_UI_TIMEOUTS.start}", "960000")
+    .replace("${installMigrationUiSafety.toString()}", installMigrationUiSafety.toString());
   assert.doesNotThrow(() => new Function(script));
   assert.match(script, /function openBlueprints\(/);
   assert.match(script, /function importBlueprintFiles\(/);

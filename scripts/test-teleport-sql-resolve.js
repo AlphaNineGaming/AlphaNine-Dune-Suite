@@ -108,7 +108,14 @@ async function post(baseUrl, route, body) {
   const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
     cwd: ROOT,
     windowsHide: true,
-    env: { ...process.env, PORT: String(port), APPDATA: path.join(testRoot, "AppData"), ALPHANINE_CONFIG_PATH: configPath },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      APPDATA: path.join(testRoot, "AppData"),
+      ALPHANINE_CONFIG_PATH: configPath,
+      ALPHANINE_SKIP_MANAGER: "1",
+      ALPHANINE_SKIP_STARTUP_SERVICES: "1"
+    },
     stdio: "ignore"
   });
   const baseUrl = `http://127.0.0.1:${port}`;

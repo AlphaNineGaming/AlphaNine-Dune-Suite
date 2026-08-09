@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,6 +19,8 @@ import (
 )
 
 var runtimeVersion = "development"
+
+const quiescenceProofFreshness = 45 * time.Second
 
 type SafetyConfig struct {
 	MaxCreatesPerCycle int   `json:"maxCreatesPerCycle"`
@@ -37,32 +41,46 @@ type ItemPolicy struct {
 }
 
 type Config struct {
-	SchemaVersion   int          `json:"schemaVersion"`
-	RuntimeVersion  string       `json:"runtimeVersion"`
-	Enabled         bool         `json:"enabled"`
-	Paused          bool         `json:"paused"`
-	Activated       bool         `json:"activated"`
-	Battlegroup     string       `json:"battlegroup"`
-	Namespace       string       `json:"namespace"`
-	DBPod           string       `json:"dbPod"`
-	DBService       string       `json:"dbService"`
-	ExchangeName    string       `json:"exchangeName"`
-	EconomyStyle    string       `json:"economyStyle"`
-	ListingCategory string       `json:"listingCategory"`
-	IntervalMinutes int          `json:"intervalMinutes"`
-	ExpiryDays      int          `json:"expiryDays"`
-	Safety          SafetyConfig `json:"safety"`
-	Items           []ItemPolicy `json:"items"`
+	SchemaVersion     int          `json:"schemaVersion"`
+	RuntimeVersion    string       `json:"runtimeVersion"`
+	Enabled           bool         `json:"enabled"`
+	Paused            bool         `json:"paused"`
+	PauseState        string       `json:"pauseState"`
+	ConfigGeneration  string       `json:"configGeneration"`
+	PauseGeneration   string       `json:"pauseGeneration"`
+	ConfigFingerprint string       `json:"configFingerprint"`
+	Activated         bool         `json:"activated"`
+	Battlegroup       string       `json:"battlegroup"`
+	Namespace         string       `json:"namespace"`
+	DBPod             string       `json:"dbPod"`
+	DBService         string       `json:"dbService"`
+	ExchangeName      string       `json:"exchangeName"`
+	EconomyStyle      string       `json:"economyStyle"`
+	ListingCategory   string       `json:"listingCategory"`
+	IntervalMinutes   int          `json:"intervalMinutes"`
+	ExpiryDays        int          `json:"expiryDays"`
+	Safety            SafetyConfig `json:"safety"`
+	Items             []ItemPolicy `json:"items"`
 }
 
 type State struct {
-	InstalledVersion string      `json:"installedVersion"`
-	Status           string      `json:"status"`
-	Message          string      `json:"message"`
-	LastCycle        interface{} `json:"lastCycle,omitempty"`
-	LastRunAt        string      `json:"lastRunAt,omitempty"`
-	NextRunAt        string      `json:"nextRunAt,omitempty"`
-	UpdatedAt        string      `json:"updatedAt"`
+	InstalledVersion   string      `json:"installedVersion"`
+	RuntimeFingerprint string      `json:"runtimeFingerprint,omitempty"`
+	ConfigFingerprint  string      `json:"configFingerprint,omitempty"`
+	Status             string      `json:"status"`
+	PauseState         string      `json:"pauseState"`
+	ConfigGeneration   string      `json:"configGeneration"`
+	PauseGeneration    string      `json:"pauseGeneration"`
+	CycleQueued        bool        `json:"cycleQueued"`
+	CycleRunning       bool        `json:"cycleRunning"`
+	IncompleteCycle    bool        `json:"incompleteCycle"`
+	CycleID            string      `json:"cycleId,omitempty"`
+	Message            string      `json:"message"`
+	LastCycle          interface{} `json:"lastCycle,omitempty"`
+	LastRunAt          string      `json:"lastRunAt,omitempty"`
+	NextRunAt          string      `json:"nextRunAt,omitempty"`
+	ProofedAt          string      `json:"proofedAt,omitempty"`
+	UpdatedAt          string      `json:"updatedAt"`
 }
 
 type commandResult struct {
@@ -74,8 +92,10 @@ type commandResult struct {
 }
 
 type paths struct {
-	config string
-	state  string
+	config      string
+	state       string
+	pauseMarker string
+	cycleLease  string
 }
 
 func main() {
@@ -102,7 +122,15 @@ func run(args []string) error {
 			return err
 		}
 		if state.InstalledVersion == "" {
-			state = stateForConfig(cfg, "Paused", "Market Bot is installed and has not run yet.", nil)
+			state = stateForConfig(cfg, "Unknown", "Market Bot runtime state has not been established.", nil)
+		}
+		if state.ConfigGeneration != cfg.ConfigGeneration || state.PauseGeneration != cfg.PauseGeneration {
+			state.Status = "Unknown"
+			state.PauseState = "Unknown"
+			state.Message = "Market Bot runtime state is stale for the persisted configuration generation."
+			state.IncompleteCycle = true
+		} else {
+			state = statusStateForRead(p, cfg, state, time.Now().UTC())
 		}
 		writeJSON(map[string]interface{}{"ok": true, "installed": true, "version": runtimeVersion, "config": publicConfig(cfg), "state": state})
 		return nil
@@ -131,24 +159,55 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		writeJSON(commandResult{OK: true, Status: "Paused", Message: "Ownership metadata is ready; no listings were changed.", Result: raw})
+		writeJSON(commandResult{OK: true, Status: "Ready", Message: "Ownership metadata is ready; no listings were changed.", Result: raw})
 		return nil
 	case "pause", "resume":
 		cfg, err := readConfig(p.config)
 		if err != nil {
 			return err
 		}
+		generation := flagValue(args[1:], "--generation")
+		if !validGeneration(generation) || compareGeneration(generation, cfg.ConfigGeneration) <= 0 {
+			return errors.New("pause/config generation must be a decimal integer greater than the persisted generation")
+		}
+		if args[0] == "pause" {
+			if err := ensurePauseMarker(p.pauseMarker); err != nil {
+				return err
+			}
+		}
+		cfg.ConfigGeneration = generation
 		cfg.Paused = args[0] == "pause"
+		if cfg.Paused {
+			cfg.PauseGeneration = generation
+			cfg.PauseState = "Pause requested"
+		} else {
+			cfg.PauseState = "Running"
+		}
 		if err := writeAtomicJSON(p.config, cfg, 0640); err != nil {
 			return err
 		}
-		status := "Running"
-		message := "Market Bot resumed."
-		if cfg.Paused {
-			status = "Paused"
-			message = "Market Bot paused; active listings were left unchanged."
+		if args[0] == "resume" {
+			if err := clearPauseMarker(p.pauseMarker); err != nil {
+				return err
+			}
 		}
+		status := "Running"
+		message := "Market Bot resume configuration was persisted."
 		state := stateForConfig(cfg, status, message, nil)
+		if cfg.Paused {
+			previous, _ := readState(p.state)
+			status = "Pause requested"
+			message = "Pause was persisted; the runtime must drain and prove quiescence."
+			if previous.CycleQueued || previous.CycleRunning || previous.IncompleteCycle {
+				status = "Draining"
+				message = "Pause was persisted; an existing cycle is draining."
+			}
+			state = stateForConfig(cfg, status, message, nil)
+			state.CycleQueued = previous.CycleQueued
+			state.CycleRunning = previous.CycleRunning
+			state.IncompleteCycle = previous.IncompleteCycle
+			state.CycleID = previous.CycleID
+		}
 		_ = writeAtomicJSON(p.state, state, 0640)
 		writeJSON(commandResult{OK: true, Status: status, Message: message})
 		return nil
@@ -157,18 +216,20 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		cfg.Paused = true
-		if err := writeAtomicJSON(p.config, cfg, 0640); err != nil {
-			return err
+		state, stateErr := readState(p.state)
+		if stateErr != nil || !cfg.Paused || state.Status != "Quiescent" || state.PauseState != "Quiescent" ||
+			state.ConfigGeneration != cfg.ConfigGeneration || state.PauseGeneration != cfg.PauseGeneration ||
+			state.CycleQueued || state.CycleRunning || state.IncompleteCycle {
+			return errors.New("Market Bot cleanup requires an authoritative matching Quiescent pause generation")
 		}
 		raw, err := executeSQL(cfg, cleanupSQL(cfg))
 		if err != nil {
 			return err
 		}
 		message := resultMessage(raw)
-		state := stateForConfig(cfg, "Paused", message, raw)
+		state = stateForConfig(cfg, "Quiescent", message, raw)
 		_ = writeAtomicJSON(p.state, state, 0640)
-		writeJSON(commandResult{OK: true, Status: "Paused", Message: message, Result: raw})
+		writeJSON(commandResult{OK: true, Status: "Quiescent", Message: message, Result: raw})
 		return nil
 	case "preview", "restock":
 		cfg, err := readConfig(p.config)
@@ -185,13 +246,45 @@ func run(args []string) error {
 				cycleID = "preview-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 			}
 		}
+		if args[0] == "restock" {
+			if err := recordCycleEvidence(cfg, cycleID, "queued"); err != nil {
+				return err
+			}
+			latest, latestErr := readConfig(p.config)
+			if latestErr != nil || latest.Paused || latest.ConfigGeneration != cfg.ConfigGeneration {
+				_ = recordCycleEvidence(cfg, cycleID, "completed")
+				return errors.New("Market Bot pause/config generation changed before the queued cycle could start")
+			}
+			if err := acquireCycleLease(p); err != nil {
+				_ = recordCycleEvidence(cfg, cycleID, "completed")
+				return err
+			}
+			defer releaseCycleLease(p.cycleLease)
+			if err := recordCycleEvidence(cfg, cycleID, "started"); err != nil {
+				return err
+			}
+		}
 		result, status, err := reconcile(cfg, cycleID, args[0] == "restock")
 		if err != nil {
+			if args[0] == "restock" {
+				if evidenceErr := finishCycleEvidence(cfg, cycleID, "failed"); evidenceErr != nil {
+					state := stateForConfig(cfg, "Error", "Cycle rolled back, but durable failure evidence is incomplete.", nil)
+					state.IncompleteCycle = true
+					_ = writeAtomicJSON(p.state, state, 0640)
+					return evidenceErr
+				}
+			}
 			state := stateForConfig(cfg, status, redact(err.Error()), nil)
 			_ = writeAtomicJSON(p.state, state, 0640)
 			return err
 		}
 		if args[0] == "restock" {
+			if err := finishCycleEvidence(cfg, cycleID, "transaction_committed"); err != nil {
+				state := stateForConfig(cfg, "Error", "Cycle committed, but durable completion evidence is incomplete.", nil)
+				state.IncompleteCycle = true
+				_ = writeAtomicJSON(p.state, state, 0640)
+				return err
+			}
 			state := stateForConfig(cfg, status, resultMessage(result), result)
 			_ = writeAtomicJSON(p.state, state, 0640)
 		}
@@ -209,7 +302,59 @@ func runtimePaths() paths {
 	if root == "" {
 		root = "/home/dune/.dune/alphanine-market-bot"
 	}
-	return paths{config: filepath.Join(root, "config.json"), state: filepath.Join(root, "state.json")}
+	return paths{
+		config: filepath.Join(root, "config.json"), state: filepath.Join(root, "state.json"),
+		pauseMarker: filepath.Join(root, "pause-requested"), cycleLease: filepath.Join(root, "cycle-running"),
+	}
+}
+
+func ensurePauseMarker(file string) error {
+	handle, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY, 0640)
+	if err != nil {
+		return fmt.Errorf("persist Market Bot pause marker: %w", err)
+	}
+	return handle.Close()
+}
+
+func clearPauseMarker(file string) error {
+	err := os.Remove(file)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear Market Bot pause marker: %w", err)
+	}
+	return nil
+}
+
+func acquireCycleLease(p paths) error {
+	if _, err := os.Stat(p.pauseMarker); err == nil {
+		return errors.New("Market Bot pause was requested before the queued cycle could start")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("Market Bot pause marker is ambiguous")
+	}
+	handle, err := os.OpenFile(p.cycleLease, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0640)
+	if err != nil {
+		return errors.New("another Market Bot cycle is running or its prior lease is unresolved")
+	}
+	if _, err := handle.WriteString(strconv.Itoa(os.Getpid())); err != nil {
+		_ = handle.Close()
+		_ = os.Remove(p.cycleLease)
+		return errors.New("Market Bot cycle lease could not be persisted")
+	}
+	if err := handle.Close(); err != nil {
+		_ = os.Remove(p.cycleLease)
+		return errors.New("Market Bot cycle lease could not be closed")
+	}
+	if _, err := os.Stat(p.pauseMarker); err == nil {
+		_ = os.Remove(p.cycleLease)
+		return errors.New("Market Bot pause was requested before the queued cycle could start")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(p.cycleLease)
+		return errors.New("Market Bot pause marker is ambiguous")
+	}
+	return nil
+}
+
+func releaseCycleLease(file string) {
+	_ = os.Remove(file)
 }
 
 func readConfig(file string) (Config, error) {
@@ -225,8 +370,20 @@ func readConfig(file string) (Config, error) {
 }
 
 func validateConfig(cfg Config) error {
-	if cfg.SchemaVersion != 1 {
+	if cfg.SchemaVersion != 1 && cfg.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported config schema %d", cfg.SchemaVersion)
+	}
+	if cfg.SchemaVersion >= 2 && (!validGeneration(cfg.ConfigGeneration) || !validGeneration(cfg.PauseGeneration)) {
+		return errors.New("config and pause generations must be decimal strings")
+	}
+	if cfg.SchemaVersion >= 2 && (len(cfg.ConfigFingerprint) != 64 || strings.Trim(cfg.ConfigFingerprint, "0123456789abcdef") != "") {
+		return errors.New("config fingerprint must be a lowercase SHA-256 digest")
+	}
+	if cfg.SchemaVersion >= 2 {
+		fingerprint, err := canonicalConfigFingerprint(cfg)
+		if err != nil || fingerprint != cfg.ConfigFingerprint {
+			return errors.New("config fingerprint does not match the canonical Market Bot policy")
+		}
 	}
 	for label, value := range map[string]string{"battlegroup": cfg.Battlegroup, "namespace": cfg.Namespace, "database pod": cfg.DBPod, "database service": cfg.DBService} {
 		if value == "" || !safeKubeName(value) {
@@ -262,6 +419,70 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
+func canonicalConfigFingerprint(cfg Config) (string, error) {
+	stable := struct {
+		SchemaVersion   int          `json:"schemaVersion"`
+		Enabled         bool         `json:"enabled"`
+		Activated       bool         `json:"activated"`
+		Battlegroup     string       `json:"battlegroup"`
+		Namespace       string       `json:"namespace"`
+		DBPod           string       `json:"dbPod"`
+		DBService       string       `json:"dbService"`
+		EconomyStyle    string       `json:"economyStyle"`
+		ListingCategory string       `json:"listingCategory"`
+		IntervalMinutes int          `json:"intervalMinutes"`
+		ExpiryDays      int          `json:"expiryDays"`
+		Safety          SafetyConfig `json:"safety"`
+		Items           []ItemPolicy `json:"items"`
+	}{
+		cfg.SchemaVersion, cfg.Enabled, cfg.Activated, cfg.Battlegroup, cfg.Namespace,
+		cfg.DBPod, cfg.DBService, cfg.EconomyStyle, cfg.ListingCategory, cfg.IntervalMinutes,
+		cfg.ExpiryDays, cfg.Safety, cfg.Items,
+	}
+	body, err := json.Marshal(stable)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(body)
+	return fmt.Sprintf("%x", hash[:]), nil
+}
+
+func validGeneration(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func compareGeneration(left, right string) int {
+	if !validGeneration(left) {
+		return -1
+	}
+	if !validGeneration(right) {
+		right = "0"
+	}
+	left = strings.TrimLeft(left, "0")
+	right = strings.TrimLeft(right, "0")
+	if left == "" {
+		left = "0"
+	}
+	if right == "" {
+		right = "0"
+	}
+	if len(left) < len(right) {
+		return -1
+	}
+	if len(left) > len(right) {
+		return 1
+	}
+	return strings.Compare(left, right)
+}
+
 func safeKubeName(value string) bool {
 	if len(value) < 1 || len(value) > 253 {
 		return false
@@ -283,17 +504,105 @@ func daemon(p paths) error {
 	for {
 		cfg, err := readConfig(p.config)
 		if err != nil {
-			_ = writeAtomicJSON(p.state, State{InstalledVersion: runtimeVersion, Status: "Error", Message: redact(err.Error()), UpdatedAt: time.Now().UTC().Format(time.RFC3339)}, 0640)
+			_ = writeAtomicJSON(p.state, State{InstalledVersion: runtimeVersion, Status: "Unknown", PauseState: "Unknown", Message: redact(err.Error()), IncompleteCycle: true, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}, 0640)
 		} else if !cfg.Enabled || !cfg.Activated || cfg.Paused {
-			_ = writeAtomicJSON(p.state, stateForConfig(cfg, "Paused", "Market Bot is paused; active listings are unchanged.", nil), 0640)
+			previous, _ := readState(p.state)
+			markerErr := ensurePauseMarker(p.pauseMarker)
+			var evidence json.RawMessage
+			var proofErr error
+			if markerErr == nil {
+				evidence, proofErr = proveRuntimeQuiescence(p, cfg)
+			} else {
+				proofErr = markerErr
+			}
+			latest, latestErr := readConfig(p.config)
+			if latestErr != nil || !latest.Paused || latest.ConfigGeneration != cfg.ConfigGeneration || latest.PauseGeneration != cfg.PauseGeneration || latest.ConfigFingerprint != cfg.ConfigFingerprint {
+				proofErr = errors.New("Market Bot pause configuration changed during quiescence verification")
+				latest = cfg
+			}
+			runtimeFingerprint, fingerprintErr := currentRuntimeFingerprint()
+			if fingerprintErr != nil {
+				proofErr = errors.New("Market Bot runtime fingerprint could not be verified")
+			}
+			next := pausedVerificationPublication(previous, latest, runtimeFingerprint, evidence, proofErr, time.Now().UTC())
+			_ = writeAtomicJSON(p.state, next, 0640)
 		} else {
 			key := cycleKey(cfg.IntervalMinutes, time.Now().UTC())
 			if key != lastCycle {
+				queued := stateForConfig(cfg, "Running", "A scheduled Market Bot tick is queued.", nil)
+				queued.CycleQueued = true
+				queued.IncompleteCycle = true
+				queued.CycleID = key
+				_ = writeAtomicJSON(p.state, queued, 0640)
+				if evidenceErr := recordCycleEvidence(cfg, key, "queued"); evidenceErr != nil {
+					failed := stateForConfig(cfg, "Error", "Cycle was not started because queued evidence could not be persisted.", nil)
+					failed.IncompleteCycle = true
+					_ = writeAtomicJSON(p.state, failed, 0640)
+					if waitDaemonTick(signals, timer) {
+						return nil
+					}
+					continue
+				}
+				latest, latestErr := readConfig(p.config)
+				if latestErr != nil || latest.Paused || latest.ConfigGeneration != cfg.ConfigGeneration {
+					completionErr := recordCycleEvidence(cfg, key, "completed")
+					if latestErr != nil {
+						latest = cfg
+					}
+					draining := stateForConfig(latest, "Draining", "A queued tick was cancelled after the pause request.", nil)
+					draining.IncompleteCycle = completionErr != nil
+					_ = writeAtomicJSON(p.state, draining, 0640)
+					if waitDaemonTick(signals, timer) {
+						return nil
+					}
+					continue
+				}
+				if leaseErr := acquireCycleLease(p); leaseErr != nil {
+					_ = recordCycleEvidence(cfg, key, "completed")
+					blocked := stateForConfig(cfg, "Draining", "A queued tick was blocked by pause or an unresolved cycle lease.", nil)
+					blocked.IncompleteCycle = true
+					_ = writeAtomicJSON(p.state, blocked, 0640)
+					if waitDaemonTick(signals, timer) {
+						return nil
+					}
+					continue
+				}
+				running := stateForConfig(cfg, "Running", "A Market Bot cycle is running.", nil)
+				running.CycleRunning = true
+				running.IncompleteCycle = true
+				running.CycleID = key
+				_ = writeAtomicJSON(p.state, running, 0640)
+				if evidenceErr := recordCycleEvidence(cfg, key, "started"); evidenceErr != nil {
+					releaseCycleLease(p.cycleLease)
+					failed := stateForConfig(cfg, "Error", "Cycle was not started because start evidence could not be persisted.", nil)
+					failed.IncompleteCycle = true
+					_ = writeAtomicJSON(p.state, failed, 0640)
+					if waitDaemonTick(signals, timer) {
+						return nil
+					}
+					continue
+				}
 				result, status, cycleErr := reconcile(cfg, key, true)
+				var evidenceErr error
 				if cycleErr != nil {
+					evidenceErr = finishCycleEvidence(cfg, key, "failed")
+				} else {
+					evidenceErr = finishCycleEvidence(cfg, key, "transaction_committed")
+					if evidenceErr == nil {
+						lastCycle = key
+					}
+				}
+				releaseCycleLease(p.cycleLease)
+				latest, latestErr = readConfig(p.config)
+				if latestErr == nil && latest.Paused {
+					_ = writeAtomicJSON(p.state, stateForConfig(latest, "Draining", "The in-flight cycle finished; quiescence verification is pending.", result), 0640)
+				} else if evidenceErr != nil {
+					failed := stateForConfig(cfg, "Error", "Cycle outcome exists, but durable completion evidence is incomplete.", nil)
+					failed.IncompleteCycle = true
+					_ = writeAtomicJSON(p.state, failed, 0640)
+				} else if cycleErr != nil {
 					_ = writeAtomicJSON(p.state, stateForConfig(cfg, status, redact(cycleErr.Error()), nil), 0640)
 				} else {
-					lastCycle = key
 					_ = writeAtomicJSON(p.state, stateForConfig(cfg, status, resultMessage(result), result), 0640)
 				}
 			}
@@ -304,6 +613,149 @@ func daemon(p paths) error {
 		case <-timer.C:
 		}
 	}
+}
+
+func waitDaemonTick(signals <-chan os.Signal, timer *time.Ticker) bool {
+	select {
+	case <-signals:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func currentRuntimeFingerprint() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(executable)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func proofFresh(state State, now time.Time) bool {
+	proofedAt, err := time.Parse(time.RFC3339Nano, state.ProofedAt)
+	if err != nil || proofedAt.After(now.Add(time.Second)) {
+		return false
+	}
+	return now.Sub(proofedAt) <= quiescenceProofFreshness
+}
+
+func quiescentIdentityMatches(state State, cfg Config, runtimeFingerprint string) bool {
+	return cfg.RuntimeVersion == runtimeVersion && state.InstalledVersion == runtimeVersion && state.RuntimeFingerprint == runtimeFingerprint &&
+		state.ConfigFingerprint == cfg.ConfigFingerprint && state.ConfigGeneration == cfg.ConfigGeneration &&
+		state.PauseGeneration == cfg.PauseGeneration
+}
+
+func statusStateForRead(p paths, cfg Config, state State, now time.Time) State {
+	if state.Status != "Quiescent" || state.PauseState != "Quiescent" {
+		return state
+	}
+	runtimeFingerprint, err := currentRuntimeFingerprint()
+	if err != nil || !quiescentIdentityMatches(state, cfg, runtimeFingerprint) {
+		state.Status = "Unknown"
+		state.PauseState = "Unknown"
+		state.Message = "Market Bot runtime or configuration fingerprint changed after the last quiescence proof."
+		state.IncompleteCycle = true
+		return state
+	}
+	if !proofFresh(state, now) {
+		state.Status = "Unknown"
+		state.PauseState = "Unknown"
+		state.Message = "Market Bot quiescence proof exceeded its bounded freshness limit."
+		state.IncompleteCycle = true
+		return state
+	}
+	if _, err := os.Stat(p.pauseMarker); err != nil {
+		state.Status = "Unknown"
+		state.PauseState = "Unknown"
+		state.Message = "Market Bot pause marker is missing or ambiguous."
+		state.IncompleteCycle = true
+		return state
+	}
+	if _, err := os.Stat(p.cycleLease); err == nil || !errors.Is(err, os.ErrNotExist) {
+		state.Status = "Draining"
+		state.PauseState = "Draining"
+		state.Message = "Market Bot cycle lease appeared after the last quiescence proof."
+		state.IncompleteCycle = true
+	}
+	return state
+}
+
+func pausedVerificationPublication(previous State, cfg Config, runtimeFingerprint string, evidence json.RawMessage, proofErr error, now time.Time) State {
+	if cfg.RuntimeVersion != runtimeVersion {
+		proofErr = errors.New("Market Bot configured runtime version does not match the running binary")
+	}
+	if proofErr != nil {
+		draining := stateForConfigAt(cfg, "Draining", "Market Bot remains fail-closed until quiescence evidence is complete and stable.", nil, now)
+		draining.RuntimeFingerprint = runtimeFingerprint
+		draining.ConfigFingerprint = cfg.ConfigFingerprint
+		draining.IncompleteCycle = true
+		return draining
+	}
+	if previous.Status == "Quiescent" && previous.PauseState == "Quiescent" && !quiescentIdentityMatches(previous, cfg, runtimeFingerprint) {
+		draining := stateForConfigAt(cfg, "Draining", "Market Bot runtime, configuration, or pause generation changed; a fresh proof must be published fail-closed.", nil, now)
+		draining.RuntimeFingerprint = runtimeFingerprint
+		draining.ConfigFingerprint = cfg.ConfigFingerprint
+		draining.IncompleteCycle = true
+		return draining
+	}
+	quiescent := stateForConfigAt(cfg, "Quiescent", "Market Bot is quiescent for the requested pause generation.", evidence, now)
+	quiescent.RuntimeFingerprint = runtimeFingerprint
+	quiescent.ConfigFingerprint = cfg.ConfigFingerprint
+	quiescent.ProofedAt = now.Format(time.RFC3339Nano)
+	return quiescent
+}
+
+func proveRuntimeQuiescence(p paths, cfg Config) (json.RawMessage, error) {
+	if _, err := os.Stat(p.cycleLease); err == nil {
+		return nil, errors.New("Market Bot cycle lease is still present")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("Market Bot cycle lease state is ambiguous")
+	}
+	first, err := executeSQL(cfg, runtimeQuiescenceSQL())
+	if err != nil {
+		return nil, err
+	}
+	time.Sleep(500 * time.Millisecond)
+	second, err := executeSQL(cfg, runtimeQuiescenceSQL())
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(first, second) {
+		return nil, errors.New("Market Bot counts or digests changed between independent samples")
+	}
+	if _, err := os.Stat(p.cycleLease); err == nil {
+		return nil, errors.New("Market Bot cycle lease appeared during quiescence sampling")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("Market Bot cycle lease state became ambiguous")
+	}
+	if err := validateRuntimeQuiescenceSample(second); err != nil {
+		return nil, err
+	}
+	return second, nil
+}
+
+func validateRuntimeQuiescenceSample(raw json.RawMessage) error {
+	var sample map[string]interface{}
+	if err := json.Unmarshal(raw, &sample); err != nil {
+		return errors.New("Market Bot quiescence evidence was invalid")
+	}
+	for _, field := range []string{"advisoryLocks", "incompleteCycles", "unexpectedWriters", "openTransactions"} {
+		value, present := sample[field]
+		if !present || fmt.Sprint(value) != "0" {
+			return errors.New("Market Bot lock, cycle, writer, or transaction activity is still present")
+		}
+	}
+	return nil
 }
 
 func cycleKey(minutes int, now time.Time) string {
@@ -416,11 +868,24 @@ create table if not exists public.alphanine_market_bot_audit (
   event text not null,
   details jsonb not null default '{}'::jsonb
 );
+create table if not exists public.alphanine_market_bot_cycle_evidence (
+  cycle_id text primary key,
+  config_generation numeric not null,
+  state text not null check (state in ('queued','started','transaction_committed','failed','completed')),
+  queued_at timestamptz not null,
+  started_at timestamptz,
+  transaction_committed_at timestamptz,
+  failed_at timestamptz,
+  completed_at timestamptz,
+  failure_kind text,
+  updated_at timestamptz not null
+);
 grant usage on schema public to dune;
 grant select on table
   public.alphanine_market_bot_cycles,
   public.alphanine_market_bot_listings,
-  public.alphanine_market_bot_audit
+  public.alphanine_market_bot_audit,
+  public.alphanine_market_bot_cycle_evidence
 to dune;
 grant select on sequence public.alphanine_market_bot_audit_id_seq to dune;
 with selected_partition as (
@@ -450,6 +915,98 @@ where o.id=m.order_id and m.retired_at is null and o.owner_id in(select id from 
   and exists(select 1 from selected_duke);
 commit;
 select json_build_object('ok', true, 'status', 'ready', 'schemaVersion', 1)::text;`
+}
+
+func cycleEvidenceSQL(cfg Config, cycleID, event string) string {
+	generation := cfg.ConfigGeneration
+	if !validGeneration(generation) {
+		generation = "0"
+	}
+	switch event {
+	case "queued":
+		return fmt.Sprintf(`insert into public.alphanine_market_bot_cycle_evidence
+  (cycle_id,config_generation,state,queued_at,updated_at)
+values (%s,%s::numeric,'queued',clock_timestamp(),clock_timestamp())
+on conflict (cycle_id) do update set
+  config_generation=excluded.config_generation,state='queued',queued_at=clock_timestamp(),
+  started_at=null,transaction_committed_at=null,failed_at=null,completed_at=null,failure_kind=null,updated_at=clock_timestamp()
+where public.alphanine_market_bot_cycle_evidence.completed_at is null;
+select json_build_object('ok',true,'event','queued')::text;`, sqlText(cycleID), generation)
+	case "started":
+		return fmt.Sprintf(`update public.alphanine_market_bot_cycle_evidence
+set state='started',started_at=clock_timestamp(),updated_at=clock_timestamp()
+where cycle_id=%s and config_generation=%s::numeric and state='queued' and completed_at is null;
+select json_build_object('ok',true,'event','started')::text;`, sqlText(cycleID), generation)
+	case "transaction_committed":
+		return fmt.Sprintf(`update public.alphanine_market_bot_cycle_evidence
+set state='transaction_committed',transaction_committed_at=clock_timestamp(),updated_at=clock_timestamp()
+where cycle_id=%s and config_generation=%s::numeric and state='started' and completed_at is null;
+select json_build_object('ok',true,'event','transaction_committed')::text;`, sqlText(cycleID), generation)
+	case "failed":
+		return fmt.Sprintf(`update public.alphanine_market_bot_cycle_evidence
+set state='failed',failed_at=clock_timestamp(),failure_kind='rolled_back',updated_at=clock_timestamp()
+where cycle_id=%s and config_generation=%s::numeric and state='started' and completed_at is null;
+select json_build_object('ok',true,'event','failed')::text;`, sqlText(cycleID), generation)
+	case "completed":
+		return fmt.Sprintf(`update public.alphanine_market_bot_cycle_evidence
+set state='completed',completed_at=clock_timestamp(),updated_at=clock_timestamp()
+where cycle_id=%s and config_generation=%s::numeric and completed_at is null;
+select json_build_object('ok',true,'event','completed')::text;`, sqlText(cycleID), generation)
+	default:
+		return ""
+	}
+}
+
+func recordCycleEvidence(cfg Config, cycleID, event string) error {
+	sql := cycleEvidenceSQL(cfg, cycleID, event)
+	if sql == "" {
+		return errors.New("invalid cycle evidence event")
+	}
+	_, err := executeSQL(cfg, sql)
+	return err
+}
+
+func finishCycleEvidence(cfg Config, cycleID, outcome string) error {
+	if outcome != "transaction_committed" && outcome != "failed" {
+		return errors.New("invalid cycle outcome evidence")
+	}
+	if err := recordCycleEvidence(cfg, cycleID, outcome); err != nil {
+		return err
+	}
+	return recordCycleEvidence(cfg, cycleID, "completed")
+}
+
+func runtimeQuiescenceSQL() string {
+	return `
+with tracking as materialized (
+  select order_id,item_id,template_id,cycle_id,unit_price,stack_size,expiration_time,retired_at
+  from public.alphanine_market_bot_listings
+), protected as materialized (
+  select o.* from dune.dune_exchange_orders o
+  where not exists(select 1 from tracking t where t.order_id=o.id)
+)
+select json_build_object(
+  'advisoryLocks',(select count(*)::text from pg_locks where locktype='advisory' and granted),
+  'incompleteCycles',(
+    (select count(*) from public.alphanine_market_bot_cycles where completed_at is null)+
+    (select count(*) from public.alphanine_market_bot_cycle_evidence where completed_at is null or state in('queued','started','transaction_committed'))
+  )::text,
+  'unexpectedWriters',(
+    select count(*)::text from pg_stat_activity
+    where datname=current_database() and pid<>pg_backend_pid() and backend_type='client backend'
+      and (state='active' or state like 'idle in transaction%' or backend_xid is not null)
+  ),
+  'openTransactions',(
+    select count(*)::text from pg_stat_activity
+    where datname=current_database() and pid<>pg_backend_pid() and backend_type='client backend'
+      and (backend_xid is not null or state like 'idle in transaction%')
+  ),
+  'activeTracking',(select count(*)::text from tracking where retired_at is null),
+  'totalTracking',(select count(*)::text from tracking),
+  'trackingDigest',(select md5(coalesce(jsonb_agg(to_jsonb(t) order by order_id),'[]'::jsonb)::text) from tracking t),
+  'protectedOrders',(select count(*)::text from protected),
+  'protectedDigest',(select md5(coalesce(jsonb_agg(to_jsonb(p) order by id),'[]'::jsonb)::text) from protected p)
+)::text;`
 }
 
 func cleanupSQL(cfg Config) string {
@@ -1020,16 +1577,30 @@ func publicConfig(cfg Config) map[string]interface{} {
 	return map[string]interface{}{
 		"schemaVersion": cfg.SchemaVersion, "runtimeVersion": cfg.RuntimeVersion, "enabled": cfg.Enabled,
 		"paused": cfg.Paused, "activated": cfg.Activated, "battlegroup": cfg.Battlegroup,
-		"economyStyle": cfg.EconomyStyle, "intervalMinutes": cfg.IntervalMinutes, "expiryDays": cfg.ExpiryDays,
+		"pauseState": cfg.PauseState, "configGeneration": cfg.ConfigGeneration, "pauseGeneration": cfg.PauseGeneration,
+		"configFingerprint": cfg.ConfigFingerprint,
+		"economyStyle":      cfg.EconomyStyle, "intervalMinutes": cfg.IntervalMinutes, "expiryDays": cfg.ExpiryDays,
 		"listingCategory": cfg.ListingCategory,
 		"safety":          cfg.Safety, "itemCount": len(cfg.Items),
 	}
 }
 
 func stateForConfig(cfg Config, status, message string, last interface{}) State {
-	now := time.Now().UTC()
+	return stateForConfigAt(cfg, status, message, last, time.Now().UTC())
+}
+
+func stateForConfigAt(cfg Config, status, message string, last interface{}, now time.Time) State {
 	next := now.Add(time.Duration(cfg.IntervalMinutes) * time.Minute)
-	return State{InstalledVersion: runtimeVersion, Status: status, Message: message, LastCycle: last, LastRunAt: now.Format(time.RFC3339), NextRunAt: next.Format(time.RFC3339), UpdatedAt: now.Format(time.RFC3339)}
+	pauseState := status
+	if status != "Pause requested" && status != "Draining" && status != "Quiescent" && status != "Running" {
+		pauseState = "Unknown"
+	}
+	return State{
+		InstalledVersion: runtimeVersion, Status: status, PauseState: pauseState,
+		ConfigGeneration: cfg.ConfigGeneration, PauseGeneration: cfg.PauseGeneration,
+		Message: message, LastCycle: last, LastRunAt: now.Format(time.RFC3339Nano),
+		NextRunAt: next.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
+	}
 }
 
 func readState(file string) (State, error) {

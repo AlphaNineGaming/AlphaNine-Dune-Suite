@@ -7,12 +7,16 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { updateVerificationMetadata, verifyUpdateFile } = require("../lib/update-integrity");
+const { createStartupPolicy, MIGRATION_STARTUP_SUPPRESSED_FLAG } = require("../lib/startup-policy");
 
 const APP_PORT = Number(process.env.PORT || 8810);
 const RECEIVER_DEFAULT_HOST = "127.0.0.1";
 const RECEIVER_DEFAULT_PORT = 5055;
 const START_TIMEOUT_MS = 45000;
 const SUITE_ICON_PATH = path.join("assets", "alphanine-suite-icon-v2.png");
+const DESKTOP_STARTUP_POLICY = createStartupPolicy();
+const MAINTENANCE_BOOTSTRAP_RUNNER = DESKTOP_STARTUP_POLICY.maintenanceBootstrap;
+const MIGRATION_STARTUP_SUPPRESSED_RUNNER = DESKTOP_STARTUP_POLICY.migrationStartupSuppressed;
 
 app.setName("AlphaNine Dune Suite");
 app.setAppUserModelId("com.alphanine.dunesuite");
@@ -457,8 +461,8 @@ function childCwd() {
   return app.isPackaged ? path.dirname(process.execPath) : app.getAppPath();
 }
 
-function spawnDevelopmentNodeScript(scriptPath, label, extraEnv = {}) {
-  const child = spawn("node", [scriptPath], {
+function spawnDevelopmentNodeScript(scriptPath, label, extraEnv = {}, scriptArgs = []) {
+  const child = spawn("node", [scriptPath, ...scriptArgs], {
     cwd: childCwd(),
     env: childEnv(extraEnv),
     stdio: ["ignore", "pipe", "pipe"],
@@ -476,8 +480,8 @@ function spawnDevelopmentNodeScript(scriptPath, label, extraEnv = {}) {
   return child;
 }
 
-function forkPackagedNodeScript(scriptPath, label, extraEnv = {}) {
-  const child = spawn(process.execPath, [scriptPath], {
+function forkPackagedNodeScript(scriptPath, label, extraEnv = {}, scriptArgs = []) {
+  const child = spawn(process.execPath, [scriptPath, ...scriptArgs], {
     cwd: childCwd(),
     env: childEnv({ ELECTRON_RUN_AS_NODE: "1", ...extraEnv }),
     stdio: ["ignore", "pipe", "pipe"],
@@ -496,7 +500,7 @@ function forkPackagedNodeScript(scriptPath, label, extraEnv = {}) {
   return child;
 }
 
-function spawnNodeScript(scriptPath, label, extraEnv = {}) {
+function spawnNodeScript(scriptPath, label, extraEnv = {}, scriptArgs = []) {
   ensureDir(logDirPath());
   appendLog("desktop", `Starting ${label}: ${scriptPath}`);
   if (!fs.existsSync(scriptPath)) {
@@ -506,8 +510,8 @@ function spawnNodeScript(scriptPath, label, extraEnv = {}) {
     throw error;
   }
   const child = app.isPackaged
-    ? forkPackagedNodeScript(scriptPath, label, extraEnv)
-    : spawnDevelopmentNodeScript(scriptPath, label, extraEnv);
+    ? forkPackagedNodeScript(scriptPath, label, extraEnv, scriptArgs)
+    : spawnDevelopmentNodeScript(scriptPath, label, extraEnv, scriptArgs);
   child.on("exit", (code, signal) => {
     if (!shuttingDown && code !== 0) {
       const message = `${label} exited with code ${code || ""} ${signal || ""}`.trim();
@@ -595,7 +599,15 @@ async function startReceiverIfNeeded() {
 
 async function startServer() {
   const serverFile = appPath("server.js");
-  serverProcess = spawnNodeScript(serverFile, "suite");
+  const runnerArgs = MAINTENANCE_BOOTSTRAP_RUNNER
+    ? ["--maintenance-bootstrap"]
+    : MIGRATION_STARTUP_SUPPRESSED_RUNNER
+      ? [MIGRATION_STARTUP_SUPPRESSED_FLAG]
+      : [];
+  serverProcess = spawnNodeScript(serverFile, "suite", {}, runnerArgs);
+  if (MAINTENANCE_BOOTSTRAP_RUNNER) serverProcess.once("exit", () => {
+    if (!shuttingDown) app.quit();
+  });
   const ready = await waitForUrl(`http://127.0.0.1:${APP_PORT}/`, START_TIMEOUT_MS);
   if (!ready) {
     const reason = childErrors.get("suite") || "No child-process error was reported.";
@@ -730,6 +742,7 @@ ipcMain.handle("open-path", async (_event, targetPath) => {
 });
 
 ipcMain.handle("self-update-install", async (_event, update) => {
+  if (!DESKTOP_STARTUP_POLICY.allowDesktopUpdater) return { ok: false, code: "migration_startup_suppressed", error: "Updater actions are disabled in the startup-suppressed migration runner." };
   let destination = "";
   let verified = false;
   try {
@@ -805,9 +818,16 @@ function createWindow() {
 
 async function boot() {
   appendLog("desktop", `Booting AlphaNine Dune Suite. packaged=${app.isPackaged} appPath=${app.getAppPath()} resourcesPath=${process.resourcesPath || ""}`);
-  createFirstRunFiles();
-  loadEnvironment();
-  await startReceiverIfNeeded();
+  if (DESKTOP_STARTUP_POLICY.allowDesktopEnvironmentMutation) {
+    createFirstRunFiles();
+    loadEnvironment();
+  } else {
+    process.env.PORT = String(APP_PORT);
+    appendLog("desktop", "Migration startup-suppressed policy loaded before environment mutation, elevation probes, Receiver, updater, and backend initialization.");
+  }
+  if (MAINTENANCE_BOOTSTRAP_RUNNER) appendLog("desktop", "Maintenance Bootstrap Mode: Receiver and normal desktop startup automation are disabled.");
+  else if (MIGRATION_STARTUP_SUPPRESSED_RUNNER) appendLog("desktop", "Migration startup-suppressed mode: only the loopback Server Migration backend will be started.");
+  else if (DESKTOP_STARTUP_POLICY.allowDesktopReceiver) await startReceiverIfNeeded();
   await startServer();
   createWindow();
   createTray();
@@ -829,7 +849,7 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
-    if (!enforceAdministratorPrivileges()) return;
+    if (!MIGRATION_STARTUP_SUPPRESSED_RUNNER && !enforceAdministratorPrivileges()) return;
     boot().catch((error) => {
       appendLog("desktop", `Startup failed: ${error.stack || error.message}`);
       dialog.showErrorBox("AlphaNine Dune Suite failed to start", startupErrorMessage(error));

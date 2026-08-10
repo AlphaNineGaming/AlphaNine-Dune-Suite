@@ -293,7 +293,7 @@ const testCategorySeed = {
   assert(serverSource.includes("publishPinnedPausedMarketBotPolicy(before") && serverSource.includes("BigInt(generation) - 1n"), "bootstrap reconciliation must atomically publish a staged paused policy before the final Pause generation");
   assert(serverSource.includes('sshCommand("bash -s", 45000') && serverSource.includes("inputPath: publisherPath"), "large pinned policies must be streamed over SSH stdin rather than placed on the process command line");
   assert(serverSource.includes("configSha256Before") && serverSource.includes("configSha256After") && serverSource.includes("configBase64"), "remote policy evidence must bind one binary-safe capture between stable file hashes");
-  assert(serverSource.includes("const firstWriterText = await migrationSql(target, ACTIVE_WRITERS_SQL);\n  const firstSampleResult = await migrationSql"), "writer sampling must finish before the Suite opens its own semantic evidence session");
+  assert(/const firstWriterText = await migrationSql\(target, ACTIVE_WRITERS_SQL\);\r?\n\s*const firstSampleResult = await migrationSql/.test(serverSource), "writer sampling must finish before the Suite opens its own semantic evidence session");
   assert(serverSource.includes("Clean Bot Market") && serverSource.includes('"/api/market-bot/clean"'), "tracked-only Market Bot cleanup control is missing");
   assert(serverSource.includes('id="legacy-market" class="view hidden"'), "legacy market UI is not isolated");
   assert(goSource.includes("pg_try_advisory_xact_lock"), "database lock is missing");

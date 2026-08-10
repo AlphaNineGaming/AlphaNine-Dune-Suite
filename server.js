@@ -66,6 +66,7 @@ const { StorageDepositStore, classifyStorageVerification } = require("./lib/stor
 const {
   SET_DURABILITY_VALUE: GIVE_ITEM_DURABILITY_VALUE,
   DURABILITY_SQL_PATH: GIVE_ITEM_DURABILITY_SQL_PATH,
+  MAXIMUM_DURABILITY_SQL_PATH: GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH,
   durabilityExpectation,
   itemStatsJsonForGrant,
   classifyDurabilityReadBack,
@@ -13062,12 +13063,15 @@ function giveItemCapabilities() {
     acceptedQualityValues: [0, 1, 2, 3, 4, 5],
     setDurabilityTo200: true,
     durabilityValue: GIVE_ITEM_DURABILITY_VALUE,
-    durabilityField: "stats.FItemStackAndDurabilityStats[1].CurrentDurability",
+    durabilityFields: {
+      current: "stats.FItemStackAndDurabilityStats[1].CurrentDurability",
+      maximum: "stats.FItemStackAndDurabilityStats[1].DecayedMaxDurability"
+    },
     notes: [
       "Grade 0 uses the live receiver route with RabbitMQ AddItemToInventory.",
       "Grades 1-5 use a database-backed inventory grant and may require the player to relog or refresh inventory.",
       "Dry-run validates the player inventory and next item slot without inserting an item.",
-      "Set Durability to 200 writes CurrentDurability only for catalog-proven weapons, armor, tools, and equipment; all other item classes show Durability not applicable.",
+      "Set Durability to 200 writes exactly 200 current and 200 per-instance maximum durability for catalog-proven weapons, armor, tools, and equipment; all other item classes show Durability not applicable.",
       "Known item metadata fields inspected for display/filtering: quality, Quality, itemQuality, durability, rarity, tier, grade, roll, statRoll, itemLevel.",
       "No database writes are performed for capability detection."
     ]
@@ -15952,7 +15956,7 @@ function giveItemCatalogItem(template) {
 
 async function investigateGiveItemDurability(template) {
   const output = await dbQuery(buildDurabilityInvestigationSql(sqlString(template)), 15000);
-  const row = parseDbRows(output, ["dataType", "udtName", "compositeStatsType", "currentRows", "numericRows", "selectedCurrentRows", "selectedNumericRows"])[0] || {};
+  const row = parseDbRows(output, ["dataType", "udtName", "compositeStatsType", "currentRows", "numericRows", "maximumRows", "maximumNumericRows", "selectedCurrentRows", "selectedNumericRows", "selectedMaximumRows", "selectedMaximumNumericRows"])[0] || {};
   const evidence = {
     readOnly: true,
     table: "dune.items",
@@ -15960,19 +15964,27 @@ async function investigateGiveItemDurability(template) {
     dataType: String(row.dataType || ""),
     udtName: String(row.udtName || ""),
     saveItemCompositeStatsType: String(row.compositeStatsType || ""),
-    field: "stats.FItemStackAndDurabilityStats[1].CurrentDurability",
+    fields: {
+      current: "stats.FItemStackAndDurabilityStats[1].CurrentDurability",
+      maximum: "stats.FItemStackAndDurabilityStats[1].DecayedMaxDurability"
+    },
     encoding: "JSON number",
     observed: {
       currentDurabilityRows: Number(row.currentRows || 0),
       numericDurabilityRows: Number(row.numericRows || 0),
+      maximumDurabilityRows: Number(row.maximumRows || 0),
+      numericMaximumDurabilityRows: Number(row.maximumNumericRows || 0),
       selectedTemplateRows: Number(row.selectedCurrentRows || 0),
-      selectedTemplateNumericRows: Number(row.selectedNumericRows || 0)
+      selectedTemplateNumericRows: Number(row.selectedNumericRows || 0),
+      selectedTemplateMaximumRows: Number(row.selectedMaximumRows || 0),
+      selectedTemplateNumericMaximumRows: Number(row.selectedMaximumNumericRows || 0)
     }
   };
   evidence.authoritative = evidence.dataType === "jsonb"
     && evidence.udtName === "jsonb"
     && evidence.saveItemCompositeStatsType === "jsonb"
-    && evidence.observed.currentDurabilityRows === evidence.observed.numericDurabilityRows;
+    && evidence.observed.currentDurabilityRows === evidence.observed.numericDurabilityRows
+    && evidence.observed.maximumDurabilityRows === evidence.observed.numericMaximumDurabilityRows;
   return evidence;
 }
 
@@ -16185,8 +16197,8 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
                               and bool_and(i.template_id=${sqlString(template)})
                               and bool_and(i.quality_level=${grade})
                               and bool_and(${durability.applied
-                                ? `jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE}`
-                                : `i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is null`})
+                                ? `jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE} and jsonb_typeof(i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE}`
+                                : `i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is null and i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}' is null`})
                          from player_grant_inserted i),false) then
         raise exception 'Player item grant failed transactional identity, quantity, slot, grade, or durability verification';
       end if;
@@ -16196,12 +16208,15 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
            coalesce(string_agg(i.position_index::text,',' order by i.id),''),
            count(*) filter(where i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is not null)::text,
            count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number')::text,
-           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text,
+           count(*) filter(where i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}' is not null)::text,
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number')::text,
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text
       from player_grant_inserted i;
     commit;
   `;
   const insertOutput = await dbQuery(insertSql, 30000);
-  const insertedRows = parseDbRows(insertOutput, ["status", "stackCount", "quantity", "itemIds", "positions", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks"]);
+  const insertedRows = parseDbRows(insertOutput, ["status", "stackCount", "quantity", "itemIds", "positions", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks", "maximumDurabilityPresentStacks", "numericMaximumDurabilityStacks", "exactMaximumDurabilityStacks"]);
   const inserted = [...insertedRows].reverse().find((row) => row.status === "inserted") || {};
   if (inserted.status !== "inserted") throw new Error(`Database item grant failed: ${inserted.status || "unknown"}.`);
   const itemIds = String(inserted.itemIds || "").split(",").filter(Boolean);
@@ -16210,7 +16225,10 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
     foundStacks: Number(inserted.stackCount || 0),
     durabilityPresentStacks: Number(inserted.durabilityPresentStacks || 0),
     numericDurabilityStacks: Number(inserted.numericDurabilityStacks || 0),
-    exactDurabilityStacks: Number(inserted.exactDurabilityStacks || 0)
+    exactDurabilityStacks: Number(inserted.exactDurabilityStacks || 0),
+    maximumDurabilityPresentStacks: Number(inserted.maximumDurabilityPresentStacks || 0),
+    numericMaximumDurabilityStacks: Number(inserted.numericMaximumDurabilityStacks || 0),
+    exactMaximumDurabilityStacks: Number(inserted.exactMaximumDurabilityStacks || 0)
   };
   const durabilityVerification = classifyDurabilityReadBack(durability, durabilityReadBack);
   if (!durabilityVerification.ok) throw new Error(durabilityVerification.message);
@@ -18814,8 +18832,8 @@ async function adminGiveItemToStorage(payload = {}) {
                        and bool_and(i.position_index>=0 and (t.max_item_count<=0 or i.position_index<t.max_item_count))
                        and bool_and((select count(*) from dune.items occupied where occupied.inventory_id=i.inventory_id and occupied.position_index=i.position_index)=1)
                        and bool_and(${durability.applied
-                         ? `jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE}`
-                         : `i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is null`})
+                         ? `jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE} and jsonb_typeof(i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE}`
+                         : `i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is null and i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}' is null`})
                 from storage_grant_prepared p
                 join dune.items i on i.id=p.item_id and i.inventory_id=p.inventory_id and i.template_id=${sqlString(template)}
                 cross join storage_grant_target t
@@ -18833,19 +18851,22 @@ async function adminGiveItemToStorage(payload = {}) {
            coalesce(string_agg(i.position_index::text,',' order by i.id),''),
            count(*) filter(where i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is not null)::text,
            count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number')::text,
-           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text,
+           count(*) filter(where i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}' is not null)::text,
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number')::text,
+           count(*) filter(where jsonb_typeof(i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text
       from storage_grant_prepared p
       join dune.items i on i.id=p.item_id and i.inventory_id=p.inventory_id and i.template_id=${sqlString(template)}
       cross join storage_grant_target t
       group by t.max_item_count;
     commit;
   `;
-  const resultRows = parseDbRows(await dbQuery(insertSql, 30000), ["status", "stackCount", "quantity", "itemIds", "positions", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks"]);
+  const resultRows = parseDbRows(await dbQuery(insertSql, 30000), ["status", "stackCount", "quantity", "itemIds", "positions", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks", "maximumDurabilityPresentStacks", "numericMaximumDurabilityStacks", "exactMaximumDurabilityStacks"]);
   const inserted = [...resultRows].reverse().find((row) => row.status === "inserted" || row.status === "verification_failed") || {};
   if (inserted.status !== "inserted") throw new Error("Storage deposit did not pass post-write verification; inspect the database before retrying.");
   const itemIds = String(inserted.itemIds || "").split(",").filter(Boolean);
   const positions = String(inserted.positions || "").split(",").filter(Boolean).map(Number);
-  const durabilityReadBack = { foundStacks: Number(inserted.stackCount || 0), durabilityPresentStacks: Number(inserted.durabilityPresentStacks || 0), numericDurabilityStacks: Number(inserted.numericDurabilityStacks || 0), exactDurabilityStacks: Number(inserted.exactDurabilityStacks || 0) };
+  const durabilityReadBack = { foundStacks: Number(inserted.stackCount || 0), durabilityPresentStacks: Number(inserted.durabilityPresentStacks || 0), numericDurabilityStacks: Number(inserted.numericDurabilityStacks || 0), exactDurabilityStacks: Number(inserted.exactDurabilityStacks || 0), maximumDurabilityPresentStacks: Number(inserted.maximumDurabilityPresentStacks || 0), numericMaximumDurabilityStacks: Number(inserted.numericMaximumDurabilityStacks || 0), exactMaximumDurabilityStacks: Number(inserted.exactMaximumDurabilityStacks || 0) };
   const durabilityVerification = classifyDurabilityReadBack(durability, durabilityReadBack);
   if (!durabilityVerification.ok) throw new Error(durabilityVerification.message);
   const receiptId = `storage-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -18903,13 +18924,18 @@ async function verifyGiveItemReceipt(receiptId) {
            count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number')::text,
            count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number'
                                   and (o.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text,
+           count(*) filter(where o.inventory_id is not null and o.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}' is not null)::text,
+           count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number')::text,
+           count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number'
+                                  and (o.stats #>> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text,
            coalesce(jsonb_agg(jsonb_build_object('itemId',o.item_id::text,'inventoryId',coalesce(o.inventory_id::text,''),
              'stackSize',coalesce(o.stack_size,0),'position',o.position_index,'expectedPosition',o.expected_position,
              'template',coalesce(o.template_id,''),'grade',o.quality_level,
-             'currentDurability',o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}') order by o.item_id),'[]'::jsonb)::text
+             'currentDurability',o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}',
+             'maximumDurability',o.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}') order by o.item_id),'[]'::jsonb)::text
       from observed o
   `;
-  const row = parseDbRows(await dbQuery(sql, 15000), ["expectedStacks", "foundStacks", "matchingStacks", "foundQuantity", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks", "rows"])[0] || {};
+  const row = parseDbRows(await dbQuery(sql, 15000), ["expectedStacks", "foundStacks", "matchingStacks", "foundQuantity", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks", "maximumDurabilityPresentStacks", "numericMaximumDurabilityStacks", "exactMaximumDurabilityStacks", "rows"])[0] || {};
   let rows = [];
   try { rows = JSON.parse(row.rows || "[]"); } catch {}
   const observed = {
@@ -18920,6 +18946,9 @@ async function verifyGiveItemReceipt(receiptId) {
     durabilityPresentStacks: Number(row.durabilityPresentStacks || 0),
     numericDurabilityStacks: Number(row.numericDurabilityStacks || 0),
     exactDurabilityStacks: Number(row.exactDurabilityStacks || 0),
+    maximumDurabilityPresentStacks: Number(row.maximumDurabilityPresentStacks || 0),
+    numericMaximumDurabilityStacks: Number(row.numericMaximumDurabilityStacks || 0),
+    exactMaximumDurabilityStacks: Number(row.exactMaximumDurabilityStacks || 0),
     rows
   };
   let classification;
@@ -18975,14 +19004,18 @@ async function verifyStorageDepositReceipt(receiptId) {
       count(*) filter(where o.inventory_id is not null and o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is not null)::text,
       count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number')::text,
       count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (o.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text,
+      count(*) filter(where o.inventory_id is not null and o.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}' is not null)::text,
+      count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number')::text,
+      count(*) filter(where o.inventory_id is not null and jsonb_typeof(o.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number' and (o.stats #>> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE})::text,
       coalesce(jsonb_agg(jsonb_build_object(
         'itemId',o.item_id::text,'inventoryId',coalesce(o.inventory_id::text,''),'stackSize',coalesce(o.stack_size,0),
         'position',o.position_index,'expectedPosition',o.expected_position,'template',coalesce(o.template_id,''),
-        'currentDurability',o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}'
+        'currentDurability',o.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}',
+        'maximumDurability',o.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}'
       ) order by o.item_id),'[]'::jsonb)::text
     from observed o
   `;
-  const row = parseDbRows(await dbQuery(sql, 15000), ["expectedStacks", "foundStacks", "matchingStacks", "foundQuantity", "duplicateSlots", "invalidPositions", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks", "rows"])[0] || {};
+  const row = parseDbRows(await dbQuery(sql, 15000), ["expectedStacks", "foundStacks", "matchingStacks", "foundQuantity", "duplicateSlots", "invalidPositions", "durabilityPresentStacks", "numericDurabilityStacks", "exactDurabilityStacks", "maximumDurabilityPresentStacks", "numericMaximumDurabilityStacks", "exactMaximumDurabilityStacks", "rows"])[0] || {};
   let observedRows = [];
   try { observedRows = JSON.parse(row.rows || "[]"); } catch {}
   const observed = {
@@ -18995,6 +19028,9 @@ async function verifyStorageDepositReceipt(receiptId) {
     durabilityPresentStacks: Number(row.durabilityPresentStacks || 0),
     numericDurabilityStacks: Number(row.numericDurabilityStacks || 0),
     exactDurabilityStacks: Number(row.exactDurabilityStacks || 0),
+    maximumDurabilityPresentStacks: Number(row.maximumDurabilityPresentStacks || 0),
+    numericMaximumDurabilityStacks: Number(row.numericMaximumDurabilityStacks || 0),
+    exactMaximumDurabilityStacks: Number(row.exactMaximumDurabilityStacks || 0),
     rows: observedRows
   };
   const storageClassification = classifyStorageVerification({ stackCount: receipt.item.stackCount, quantity: receipt.item.quantity }, observed);
@@ -24024,7 +24060,7 @@ function giveStorageLabel(row){const type=row.typeName||row.name||"Storage";cons
 function renderGiveStorageTargets(){const select=document.getElementById("giveStorageTarget");if(!select)return;const current=select.value;const q=String(document.getElementById("giveStorageSearch")?.value||"").trim().toLowerCase();const rows=q?giveStorageTargets.filter(row=>[row.name,row.customName,row.typeName,row.kind,row.actorId,row.inventoryId,row.map,row.partitionId].join(" ").toLowerCase().includes(q)):giveStorageTargets;select.innerHTML=rows.length?rows.map(row=>'<option value="'+esc(row.inventoryId)+'">'+esc(giveStorageLabel(row))+'</option>').join(""):'<option value="">No storage found</option>';if(rows.some(row=>String(row.inventoryId)===String(current)))select.value=current;renderGiveStorageDetails();}
 function renderGiveStorageDetails(){const el=document.getElementById("giveStorageDetails");if(!el)return;const row=selectedGiveStorage();if(!row){el.textContent="Choose a detected storage container.";return;}const pos=row.position||{};const volume=row.maxItemVolume>0?(row.usedVolume+" / "+row.maxItemVolume+(row.volumeVerified?"":" estimated")):"Not limited";const target=row.customName?(row.customName+" / "+(row.typeName||row.kind)):(row.name||row.kind);const contents=(row.contents||[]).map(item=>'<div class="detail-row"><span class="subtle">'+esc(item.count)+' × '+esc(item.template)+'</span><strong>'+esc(item.name||item.template)+'</strong></div>').join("")||'<div class="subtle">Storage is empty.</div>';el.innerHTML='<div class="detail-row"><span class="subtle">Target</span><strong>'+esc(target)+" / "+esc(row.kind)+'</strong></div><div class="detail-row"><span class="subtle">Identity</span><strong>Actor '+esc(row.actorId)+' / Inventory '+esc(row.inventoryId)+'</strong></div><div class="detail-row"><span class="subtle">Location</span><strong>'+esc(row.map||"Unknown")+' / P'+esc(row.partitionId||"-")+' / D'+esc(row.dimensionIndex)+' / '+esc(Math.round(pos.x||0))+', '+esc(Math.round(pos.y||0))+', '+esc(Math.round(pos.z||0))+'</strong></div><div class="detail-row"><span class="subtle">Capacity</span><strong>'+esc(row.itemCount)+' / '+esc(row.maxItemCount)+' slots / Volume '+esc(volume)+'</strong></div><div class="label mt">Contents</div>'+contents;}
 async function refreshGiveStorageTargets(){const el=document.getElementById("giveStorageDetails");try{if(el)el.textContent="Loading storage containers...";const data=await getJson("/api/admin/storage-targets",{timeoutMs:20000});giveStorageTargets=data.storages||[];renderGiveStorageTargets();updateGiveTargetSummary();return data;}catch(e){giveStorageTargets=[];renderGiveStorageTargets();if(el){el.className="warning mt";el.textContent=betterError(e);}return null;}}
-function receiptDurabilityLabel(receipt){const durability=receipt?.durability||receipt?.item?.durability;return durability?.applied?"Durability: exactly 200 current":"Durability not applicable / not written";}
+function receiptDurabilityLabel(receipt){const durability=receipt?.durability||receipt?.item?.durability;return durability?.applied?"Durability: exactly 200 current / 200 maximum":"Durability not applicable / not written";}
 function renderGiveItemReceipt(receipt=latestGiveItemReceipt){latestGiveItemReceipt=receipt||null;const status=document.getElementById("giveItemReceiptStatus");const button=document.getElementById("giveItemReceiptRecheckButton");if(button)button.disabled=!receipt;if(!status)return;if(!receipt){status.className="empty";status.textContent="No player-inventory Give Item receipt loaded.";return;}const item=receipt.item||{},integrity=receipt.status==="database-verified",check=receipt.checks?.[receipt.checks.length-1];status.className=integrity?"empty":"warning";status.innerHTML='<strong>'+esc(integrity?"Player inventory database verified":"Player inventory needs attention")+'</strong><div class="subtle mt">'+esc((item.quantity||0)+" × "+(item.name||item.id||"Item")+" / Inventory "+(receipt.inventory?.id||"-")+" / "+receiptDurabilityLabel(receipt)+" / Receipt "+receipt.receiptId)+'</div><div class="subtle mt">'+esc(check?.message||"The transaction read-back matched. Delayed checks never repeat the grant.")+'</div>';}
 async function loadLatestGiveItemReceipt(){try{const data=await getJson("/api/admin/give-item-receipts?limit=1",{timeoutMs:15000});renderGiveItemReceipt(data.receipts?.[0]||null);return data;}catch(e){const status=document.getElementById("giveItemReceiptStatus");if(status){status.className="warning";status.textContent="Give Item receipt history unavailable: "+betterError(e);}return null;}}
 async function recheckGiveItemReceipt(options={}){const receipt=latestGiveItemReceipt;if(!receipt)return null;const button=document.getElementById("giveItemReceiptRecheckButton");try{if(button)button.disabled=true;const data=await getJson("/api/admin/give-item-receipts/recheck",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({receiptId:receipt.receiptId}),timeoutMs:20000});renderGiveItemReceipt(data.receipt);if(!data.ok&&!options.quiet)showToast(data.message||"Give Item read-back mismatch","error");return data;}catch(e){if(!options.quiet)showToast(betterError(e),"error");return null;}finally{if(button)button.disabled=!latestGiveItemReceipt;}}
@@ -24036,7 +24072,7 @@ async function pollStorageDeposit(receiptId){const generation=++storageDepositPo
 async function confirmStorageDepositVisibility(){const receipt=latestStorageDepositReceipt;if(!receipt)return;try{if(!(await appConfirm("Confirm Storage Visibility","Confirm that you reopened the selected container and can see the deposited item in game. This does not perform another grant.","Confirm Visible","Cancel")))return;const data=await getJson("/api/admin/storage-deposits/confirm-visible",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({receiptId:receipt.receiptId}),timeoutMs:15000});storageDepositPollGeneration+=1;renderStorageDepositReceipt(data.receipt);showToast(data.message||"Storage visibility confirmed.","success");}catch(e){showToast(betterError(e),"error");}}
 async function protectedStorageBattlegroupRefresh(){const receipt=latestStorageDepositReceipt;if(!receipt)return;await refreshScheduler();if(!schedulerState?.installed){await appAlert("Protected refresh unavailable","Install and verify the Backup & Restart Scheduler first. The Suite will not use a raw pod deletion or restart the VM.");return;}const status=document.getElementById("storageDepositStatus");if(status){status.className="warning mt";status.textContent="The protected workflow will block on online players, verify a recent backup, restart only the selected battlegroup, and wait for health checks.";}await runSchedulerAction("restart-now");}
 function syncGiveDestination(){const storage=document.getElementById("giveDestination")?.value==="storage";document.getElementById("giveStorageFields")?.classList.toggle("hidden",!storage);if(storage&&!giveStorageTargets.length)refreshGiveStorageTargets();syncQualityWarning();syncGiveItemControls();updateGiveTargetSummary();}
-function selectedGiveDurability(){const applicable=Boolean(selectedAdminItem?.durability?.applicable);const checked=Boolean(document.getElementById("adminSetDurability200")?.checked);return{applicable,checked,applied:applicable&&checked,display:applicable?(checked?"200 current durability":"Eligible; option not selected"):"Durability not applicable",reason:selectedAdminItem?.durability?.reason||"The exact template is not proven to support durability."};}
+function selectedGiveDurability(){const applicable=Boolean(selectedAdminItem?.durability?.applicable);const checked=Boolean(document.getElementById("adminSetDurability200")?.checked);return{applicable,checked,applied:applicable&&checked,display:applicable?(checked?"200 current / 200 maximum durability":"Eligible; option not selected"):"Durability not applicable",reason:selectedAdminItem?.durability?.reason||"The exact template is not proven to support durability."};}
 function syncGiveDurabilityOption(){const input=document.getElementById("adminSetDurability200");const status=document.getElementById("giveDurabilityStatus");const wrap=document.getElementById("giveDurabilityWrap");const applicable=Boolean(selectedAdminItem?.durability?.applicable);if(input){input.disabled=!applicable;if(!applicable)input.checked=false;}const durability=selectedGiveDurability();if(status)status.textContent=durability.display+". "+durability.reason;if(wrap)wrap.classList.toggle("unsupported-control",!applicable);updateGiveTargetSummary();syncGiveItemControls();}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));const durability=selectedGiveDurability();el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+' / '+esc(durability.display)+'</span>';}
 function progressionPlayerLookupValue(p){if(p?.player_controller_id)return"controller:"+p.player_controller_id;if(p?.player_state_row_id)return"row:"+p.player_state_row_id;if(p?.account_id||p?.id)return"account:"+(p.account_id||p.id);return String(p?.character_id||p?.player_pawn_id||p?.character_name||p?.name||"").trim();}
@@ -24322,8 +24358,8 @@ async function showGradeRelogPopup(context="item"){await appAlert("Player relog 
 function adminGivePayload(){const raw=String(document.getElementById("adminRawTemplate")?.value||"").trim();const item=raw?selectRawGiveItem(false):selectedAdminItem;if(!item)throw new Error(raw?"Enter a valid exact template identifier.":"Choose an item first.");const destination=document.getElementById("giveDestination")?.value||"player";const payload={playerId:document.getElementById("adminPlayer").value,template:item.id,qty:Number(document.getElementById("adminQty").value||1),grantKind:giveItemGrantKind(item),destination,setDurabilityTo200:selectedGiveDurability().applied};if(giveItemCapabilities?.qualitySupported){payload.quality=Number(document.getElementById("adminQuality")?.value||0);}if(!payload.playerId)throw new Error("Choose a player first.");if(!Number.isInteger(payload.qty)||payload.qty<1)throw new Error("Quantity must be greater than 0.");if(destination==="storage"){const storage=selectedGiveStorage();if(!storage)throw new Error("Choose a storage container first.");payload.actorId=storage.actorId;payload.inventoryId=storage.inventoryId;}return payload;}
 function giveQueueItemLabel(row){return (row.name||row.template)+" x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Grade "+row.quality:"")+(row.grantKind?" / "+row.grantKind:"");}
 function updateGiveQueueSummary(processed=0,total=giveQueue.length,succeeded=0,failed=0){const el=document.getElementById("giveQueueSummary");if(el)el.textContent="Progress: "+processed+" / "+total+" · Succeeded: "+succeeded+" · Failed: "+failed;const retry=document.getElementById("retryGiveQueueButton");if(retry)retry.disabled=!lastGiveQueueFailedItems.length||liveGiveBusy;syncGiveItemControls();}
-function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span>'+(row.grantKind?'<br><span class="subtle">'+esc(row.grantKind)+'</span>':'')+'<br><span class="subtle">'+esc(row.setDurabilityTo200?"Durability: 200 current":"Durability not applicable / not selected")+'</span></span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
-function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality,grantKind:payload.grantKind,setDurabilityTo200:payload.setDurabilityTo200});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const note=/^tech:/i.test(payload.template)?"\\nNote: this research blueprint will unlock the Research tree, not character inventory.":(templateIsSchematic(payload.template)?"\\nNote: this recipe schematic will unlock crafting recipes, not character inventory.":(payload.setDurabilityTo200?"\\nDurability: exactly 200 current.":"\\nDurability not applicable / not selected."));document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1])+note;addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
+function renderGiveQueue(){const list=document.getElementById("giveQueueList");if(list){list.innerHTML=giveQueue.length?giveQueue.map((row,index)=>'<div class="detail-row"><span><strong>'+esc(row.name||row.template)+'</strong><br><span class="subtle env-path-value">'+esc(row.template)+'</span>'+(row.grantKind?'<br><span class="subtle">'+esc(row.grantKind)+'</span>':'')+'<br><span class="subtle">'+esc(row.setDurabilityTo200?"Durability: 200 current / 200 maximum":"Durability not applicable / not selected")+'</span></span><strong>'+esc("x"+row.qty+(row.quality!==undefined&&row.quality!==null&&row.quality!==""?" / Q "+row.quality:""))+' <button type="button" onclick="removeGiveQueueItem('+index+')">Remove</button></strong></div>').join(""):'<div class="empty">Queue is empty.</div>';}}
+function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality,grantKind:payload.grantKind,setDurabilityTo200:payload.setDurabilityTo200});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const note=/^tech:/i.test(payload.template)?"\\nNote: this research blueprint will unlock the Research tree, not character inventory.":(templateIsSchematic(payload.template)?"\\nNote: this recipe schematic will unlock crafting recipes, not character inventory.":(payload.setDurabilityTo200?"\\nDurability: exactly 200 current / 200 maximum.":"\\nDurability not applicable / not selected."));document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1])+note;addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
 function removeGiveQueueItem(index){giveQueue.splice(index,1);renderGiveQueue();updateGiveQueueSummary();}
 function clearGiveQueue(){giveQueue=[];lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const log=document.getElementById("giveQueueLog");if(log)log.value="Give Queue cleared.";}
 function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];if(data.timings)lines.push("Queue timings: "+JSON.stringify(data.timings));(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(/^tech:/i.test(row.itemId))lines.push("  Note: research blueprint unlocks the Research tree; check the player's Research screen, not inventory.");else if(templateIsSchematic(row.itemId))lines.push("  Note: recipe schematic unlocks crafting recipes; check the player's crafting recipes, not inventory.");if(row.result?.timings)lines.push("  Timings: "+JSON.stringify(row.result.timings));if(row.result?.response?.timings)lines.push("  Receiver timings: "+JSON.stringify(row.result.response.timings));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}

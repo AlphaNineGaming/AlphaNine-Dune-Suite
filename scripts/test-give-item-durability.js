@@ -26,11 +26,13 @@ for (const [item, kind] of [[weapon, "weapon"], [armor, "armor"], [tool, "tool"]
   assert.equal(eligible.kind, kind);
   const expectation = durabilityExpectation(item, true);
   assert.equal(expectation.currentDurability, SET_DURABILITY_VALUE);
+  assert.equal(expectation.maximumDurability, SET_DURABILITY_VALUE);
   const stats = itemStatsForGrant(expectation);
   assert.equal(stats.FItemStackAndDurabilityStats[1].CurrentDurability, 200);
   assert.equal(typeof stats.FItemStackAndDurabilityStats[1].CurrentDurability, "number");
-  assert.equal(Object.hasOwn(stats.FItemStackAndDurabilityStats[1], "MaxDurability"), false);
-  assert.equal(Object.hasOwn(stats.FItemStackAndDurabilityStats[1], "DecayedMaxDurability"), false);
+  assert.equal(stats.FItemStackAndDurabilityStats[1].DecayedMaxDurability, 200);
+  assert.equal(typeof stats.FItemStackAndDurabilityStats[1].DecayedMaxDurability, "number");
+  assert.equal(Object.hasOwn(stats.FItemStackAndDurabilityStats[1], "MaxDurability"), false, "the authoritative per-instance maximum is DecayedMaxDurability");
 }
 
 for (const item of [resource, consumable, schematic, null]) {
@@ -41,22 +43,27 @@ for (const item of [resource, consumable, schematic, null]) {
 }
 
 // Production-shaped rows establish the authoritative leaf and JSON-number encoding.
-const productionWeaponStats = JSON.parse('{"FWeaponItemStats":[[],{"CurrentAmmo":2}],"FCustomizationStats":[[],{}],"FItemStackAndDurabilityStats":[[],{"CurrentDurability":92.913726}]}');
+const productionWeaponStats = JSON.parse('{"FWeaponItemStats":[[],{"CurrentAmmo":2}],"FCustomizationStats":[[],{}],"FItemStackAndDurabilityStats":[[],{"CurrentDurability":83.923133,"DecayedMaxDurability":96.473129}]}');
 const productionResourceStats = JSON.parse('{"FItemStackAndDurabilityStats":[[],{"DecayedMaxDurability":0.0}]}');
 assert.equal(typeof productionWeaponStats.FItemStackAndDurabilityStats[1].CurrentDurability, "number");
+assert.equal(typeof productionWeaponStats.FItemStackAndDurabilityStats[1].DecayedMaxDurability, "number");
 assert.equal(Object.hasOwn(productionResourceStats.FItemStackAndDurabilityStats[1], "CurrentDurability"), false, "the shared wrapper is not durability eligibility evidence");
 
 const investigationSql = buildDurabilityInvestigationSql("'LongRifle_Unique_Poison_06'");
 assert.match(investigationSql, /information_schema\.columns/);
 assert.match(investigationSql, /t\.typname='inventoryitem'/);
 assert.match(investigationSql, /FItemStackAndDurabilityStats,1,CurrentDurability/);
+assert.match(investigationSql, /FItemStackAndDurabilityStats,1,DecayedMaxDurability/);
 assert.match(investigationSql, /jsonb_typeof[\s\S]*='number'/);
 
 const expected = durabilityExpectation(weapon, true);
-assert.equal(classifyDurabilityReadBack(expected, { foundStacks: 2, durabilityPresentStacks: 2, numericDurabilityStacks: 2, exactDurabilityStacks: 2 }).ok, true);
-assert.equal(classifyDurabilityReadBack(expected, { foundStacks: 2, durabilityPresentStacks: 2, numericDurabilityStacks: 2, exactDurabilityStacks: 1 }).status, "durability-mismatch");
+const exact200 = { foundStacks: 2, durabilityPresentStacks: 2, numericDurabilityStacks: 2, exactDurabilityStacks: 2, maximumDurabilityPresentStacks: 2, numericMaximumDurabilityStacks: 2, exactMaximumDurabilityStacks: 2 };
+assert.equal(classifyDurabilityReadBack(expected, exact200).ok, true);
+assert.equal(classifyDurabilityReadBack(expected, { ...exact200, exactDurabilityStacks: 1 }).status, "durability-mismatch");
+assert.equal(classifyDurabilityReadBack(expected, { ...exact200, exactMaximumDurabilityStacks: 1 }).status, "durability-mismatch", "a maximum durability mismatch must fail verification");
 assert.equal(classifyDurabilityReadBack(expected, { foundStacks: 0 }).status, "runtime-overwrite");
 assert.equal(classifyDurabilityReadBack(durabilityExpectation(resource, true), { foundStacks: 1, durabilityPresentStacks: 1 }).status, "fabricated-durability");
+assert.equal(classifyDurabilityReadBack(durabilityExpectation(resource, true), { foundStacks: 1, maximumDurabilityPresentStacks: 1 }).status, "fabricated-durability");
 
 const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const playerGrant = server.slice(server.indexOf("async function adminGiveDbItemToPlayer"), server.indexOf("async function adminGiveItem(payload)"));
@@ -65,6 +72,8 @@ assert.match(playerGrant, /begin;[\s\S]*player_grant_slots[\s\S]*GIVE_ITEM_DURAB
 assert.match(storageGrant, /storage_grant_slots[\s\S]*GIVE_ITEM_DURABILITY_SQL_PATH[\s\S]*Storage deposit failed transactional slot and quantity verification[\s\S]*commit;/);
 assert.match(playerGrant, /i\.stats #> '\$\{GIVE_ITEM_DURABILITY_SQL_PATH\}' is null/, "non-durable player transaction verification must require an absent durability leaf");
 assert.match(storageGrant, /i\.stats #> '\$\{GIVE_ITEM_DURABILITY_SQL_PATH\}' is null/, "non-durable storage transaction verification must require an absent durability leaf");
+assert.match(playerGrant, /GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH/, "player transaction must verify the per-instance maximum");
+assert.match(storageGrant, /GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH/, "storage transaction must verify the per-instance maximum");
 assert.match(server, /function verifyGiveItemReceipt[\s\S]*read-back-mismatch/);
 assert.match(server, /function verifyStorageDepositReceipt[\s\S]*classifyDurabilityReadBack/);
 assert.match(server, /pollGiveItemReceipt[\s\S]*delays=\[2000,3000,10000,15000\]/);

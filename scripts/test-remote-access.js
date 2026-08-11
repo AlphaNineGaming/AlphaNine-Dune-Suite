@@ -4,6 +4,7 @@ const http = require("http");
 const https = require("https");
 const os = require("os");
 const path = require("path");
+const vm = require("vm");
 const { spawn } = require("child_process");
 const { totpCode } = require("../lib/remote-access");
 
@@ -139,6 +140,13 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
 
     const home = await request("https", "/", { headers: { Cookie: cookieHeader } });
     assert.strictEqual(home.status, 200);
+    const remoteMenuPolicy = home.text.match(/function remoteAllowedViews\(role\)\{[^\r\n]+\}/)?.[0];
+    assert.ok(remoteMenuPolicy, "Remote menu policy was not rendered.");
+    const allowedViews = (role) => vm.runInNewContext(`${remoteMenuPolicy};remoteAllowedViews(${JSON.stringify(role)})`);
+    assert.deepStrictEqual(Array.from(allowedViews("viewer")), ["dashboard", "players", "live-map", "progression", "landsraad", "item-database"]);
+    assert.deepStrictEqual(Array.from(allowedViews("operator")), ["dashboard", "players", "live-map", "progression", "landsraad", "item-database", "server", "scheduler"]);
+    assert.strictEqual(allowedViews("owner"), null, "Owner must have no remote menu allowlist restriction.");
+    assert.deepStrictEqual(Array.from(allowedViews("invalid-role")), ["dashboard"], "Unknown roles must fail closed to Dashboard only.");
     const remoteSession = await request("https", "/api/auth/session", { headers: { Cookie: cookieHeader } });
     assert.strictEqual(remoteSession.json.role, "viewer");
     const viewerStatus = await request("https", "/api/status", { headers: { Cookie: cookieHeader } });

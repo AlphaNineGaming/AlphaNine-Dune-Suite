@@ -10,4 +10,4 @@ Discord support link update.
 
 ## Notes
 
-- New Discord invite: `https://discord.gg/RQsVw2vyg`
+- New Discord invite: `https://discord.gg/HVKkwAYte`

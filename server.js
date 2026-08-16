@@ -3395,26 +3395,37 @@ async function vmConnectionMonitor() {
   };
 }
 
-async function sshCommand(command, timeout = 180000, options = {}) {
+async function standardVmSshConnection() {
   const sync = MAINTENANCE_BOOTSTRAP_RUNNER
     ? { config: loadConfig() }
     : await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
   const cfg = sync.config || loadConfig();
   const info = sync.vm || await vmInfo(cfg.vmName || configuredVmName());
   const ip = normalizeIpv4(info.ip) || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
-  if (!info.exists && !ip) return { ok: false, stdout: "", stderr: info.error || "VM not found.", error: "VM not found." };
-  if (info.exists && info.state !== "Running") return { ok: false, stdout: "", stderr: "VM is not running.", error: "VM is not running." };
-  if (!ip) return { ok: false, stdout: "", stderr: "VM IP address was not found.", error: "VM IP address was not found." };
+  if (!info.exists && !ip) throw new Error(info.error || "VM not found.");
+  if (info.exists && info.state !== "Running") throw new Error("VM is not running.");
+  if (!ip) throw new Error("VM IP address was not found.");
   const key = sshKeyStatus(cfg.sshKey || cfg.receiverSshKey || defaultSshKeyPath());
-  if (!key.exists) return { ok: false, stdout: "", stderr: key.message, error: key.message, sshKey: key };
+  if (!key.exists) throw new Error(key.message);
   const user = String(cfg.sshUser || cfg.receiverSshUser || "dune").trim();
-  const args = [
+  return {
+    args: [
     "-o", "StrictHostKeyChecking=no",
     "-o", "LogLevel=QUIET",
     "-i", key.path,
-    `${user}@${ip}`,
-    command
-  ];
+      `${user}@${ip}`
+    ],
+    host: ip,
+    user,
+    key: key.path
+  };
+}
+
+async function sshCommand(command, timeout = 180000, options = {}) {
+  let connection;
+  try { connection = await standardVmSshConnection(); }
+  catch (error) { return { ok: false, stdout: "", stderr: error.message, error: error.message }; }
+  const args = [...connection.args, command];
   if (options.inputPath) return runWithStdin("ssh", args, options.inputPath, { timeout, maxBuffer: options.maxBuffer });
   return run("ssh", args, { timeout, maxBuffer: options.maxBuffer });
 }
@@ -4773,6 +4784,10 @@ async function battlegroup(action, options = {}) {
     });
   }
   if (["start", "stop", "restart"].includes(action)) return runAttributedBattlegroupAction(action, options);
+  if (action === "backup") return createDatabaseBackup({
+    ...options.databaseBackupOptions,
+    onStatus: options.onStatus
+  });
   return sshCommand(`/home/dune/.dune/bin/battlegroup ${action}`, serverManagementTimeoutMs(action));
 }
 
@@ -4966,10 +4981,12 @@ async function detectSetupDatabaseCredentials(body = {}) {
 }
 
 async function battlegroupResource(options = {}) {
-  const result = await migrationReadOnlyEvidenceResult("sudo kubectl get igwbg -A -o json", 30000, {
-    ...options,
-    purpose: options.purpose || "Import preflight: battlegroup resource discovery"
-  });
+  const result = options.preflightReadOnlyRetry === true
+    ? await migrationReadOnlyEvidenceResult("sudo kubectl get igwbg -A -o json", 30000, {
+      ...options,
+      purpose: options.purpose || "Import preflight: battlegroup resource discovery"
+    })
+    : await sshCommand("sudo kubectl get igwbg -A -o json", 30000, { maxBuffer: 1024 * 1024 * 4 });
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Could not read battlegroup resource.");
   let data = null;
   try { data = JSON.parse(result.stdout || "{}"); }
@@ -7788,12 +7805,103 @@ function parseBattlegroupBackupOutput(output = "") {
   };
 }
 
+async function databaseBackupSshConnection() {
+  return standardVmSshConnection();
+}
+
+async function runDatabaseCredentialScript({ command, args, script, timeoutMs = 30000 }) {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-database-credential-"));
+  const inputPath = path.join(temporaryDirectory, "install-pgpass.sh");
+  try {
+    fs.writeFileSync(inputPath, String(script || ""), { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const result = await runWithStdin(command, args, inputPath, { timeout: timeoutMs, maxBuffer: 64 * 1024 });
+    return { ok: result.ok === true, code: result.code, inputComplete: result.inputComplete === true, stdout: String(result.stdout || ""), stderr: "", error: result.ok ? "" : "Database credential setup failed." };
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+async function databasePodArchiveTools(target) {
+  const connection = await databaseBackupSshConnection();
+  const resolve = async (name) => {
+    const located = await run("ssh", [...connection.args, ...podExecArgs(target, ["which", name])], { timeout: 30000, maxBuffer: 64 * 1024 });
+    const executable = String(located.stdout || "").trim();
+    if (!located.ok || !/^\/[A-Za-z0-9_./+-]+$/.test(executable) || executable.includes("/../")) throw new Error(`The matching-version ${name} executable could not be resolved exactly in the database pod.`);
+    const version = await run("ssh", [...connection.args, ...podExecArgs(target, [executable, "--version"])], { timeout: 30000, maxBuffer: 64 * 1024 });
+    if (!version.ok) throw new Error(`The resolved ${name} executable could not be started.`);
+    return { executable, version: String(version.stdout || "").trim() };
+  };
+  const [dump, restore, psql] = await Promise.all([resolve("pg_dump"), resolve("pg_restore"), resolve("psql")]);
+  return { dumpExecutable: dump.executable, restoreExecutable: restore.executable, psqlExecutable: psql.executable, dumpVersion: dump.version, restoreVersion: restore.version, psqlVersion: psql.version };
+}
+
+function parseDatabaseBackupJson(text, label) {
+  try {
+    const value = JSON.parse(String(text || ""));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("not an object");
+    return value;
+  } catch {
+    throw new Error(`${label} returned malformed JSON.`);
+  }
+}
+
+function classifyDatabaseBackupOfflineState(battlegroup, workloads, target) {
+  if (!battlegroup || typeof battlegroup !== "object" || !workloads || !Array.isArray(workloads.items)) throw new Error("Structured battlegroup offline evidence is missing or malformed.");
+  if (String(battlegroup.metadata?.namespace || "") !== target.namespace || String(battlegroup.metadata?.name || "") !== target.name) throw new Error("Structured battlegroup evidence does not match the selected backup target.");
+  const phase = String(battlegroup.status?.phase || "").trim().toLowerCase();
+  const componentStates = {
+    servergroup: String(battlegroup.status?.serverGroupPhase || "").trim().toLowerCase(),
+    gateway: String(battlegroup.status?.utilities?.serverGateway?.phase || "").trim().toLowerCase(),
+    director: String(battlegroup.status?.utilities?.director?.phase || "").trim().toLowerCase()
+  };
+  const offlineStates = new Set(["stopped", "offline", "suspended"]);
+  let runningGamePods = 0;
+  let desiredGameReplicas = 0;
+  for (const resource of workloads.items) {
+    const containers = resource?.kind === "Pod" ? resource?.spec?.containers : resource?.spec?.template?.spec?.containers;
+    if (!Array.isArray(containers) || !containers.some((container) => /(?:^|\/)seabass-server(?::|@)/i.test(String(container?.image || "")))) continue;
+    if (resource.kind === "Pod") {
+      const podPhase = String(resource.status?.phase || "unknown").toLowerCase();
+      if (["running", "pending", "unknown"].includes(podPhase)) runningGamePods += 1;
+    } else if (["Deployment", "StatefulSet", "ReplicaSet"].includes(resource.kind)) {
+      const replicas = Number(resource.spec?.replicas);
+      if (!Number.isSafeInteger(replicas) || replicas < 0) throw new Error("A game workload has an unknown desired replica count.");
+      desiredGameReplicas += replicas;
+    }
+  }
+  const componentsOffline = [phase, ...Object.values(componentStates)].every((value) => offlineStates.has(value));
+  return {
+    offline: componentsOffline && runningGamePods === 0 && desiredGameReplicas === 0,
+    battlegroupPhase: phase,
+    componentStates,
+    runningGamePods: String(runningGamePods),
+    desiredGameReplicas: String(desiredGameReplicas)
+  };
+}
+
+async function collectDatabaseBackupOfflineEvidence(target) {
+  const sample = async () => {
+    const [battlegroupResult, workloadsResult] = await Promise.all([
+      sshCommand(`sudo kubectl get igwbg -n ${shQuote(target.namespace)} ${shQuote(target.name)} -o json`, 30000, { maxBuffer: 1024 * 1024 * 8 }),
+      sshCommand(`sudo kubectl get pods,deployments,statefulsets,replicasets -n ${shQuote(target.namespace)} -o json`, 30000, { maxBuffer: 1024 * 1024 * 16 })
+    ]);
+    if (!battlegroupResult.ok || !workloadsResult.ok) throw new Error(battlegroupResult.stderr || workloadsResult.stderr || "Battlegroup offline evidence could not be read.");
+    return classifyDatabaseBackupOfflineState(
+      parseDatabaseBackupJson(battlegroupResult.stdout, "Battlegroup evidence"),
+      parseDatabaseBackupJson(workloadsResult.stdout, "Workload evidence"),
+      target
+    );
+  };
+  const first = await sample();
+  await sleepMs(750);
+  const second = await sample();
+  if (JSON.stringify(first) !== JSON.stringify(second)) throw new Error("Battlegroup offline evidence changed between independent samples.");
+  if (!second.offline) throw new Error("Safety Backup requires the selected battlegroup fully stopped with zero game workloads.");
+  return { ...second, samples: [first, second] };
+}
+
 async function runningDumpOperations(options = {}) {
-  const result = await migrationReadOnlyEvidenceResult("sudo kubectl get databaseoperations -A -o json", 15000, {
-    ...options,
-    maxBuffer: 1024 * 1024 * 4,
-    purpose: options.purpose || "Import preflight: vendor DatabaseOperation evidence"
-  });
+  const result = await sshCommand("sudo kubectl get databaseoperations -A -o json", 15000, { maxBuffer: options.maxBuffer || 1024 * 1024 * 4 });
   if (!result.ok) return { ok: false, running: [], error: result.error || result.stderr || "Could not inspect DatabaseOperation resources." };
   let data;
   try { data = JSON.parse(result.stdout || "{}"); }
@@ -7892,7 +8000,7 @@ async function remoteBackupSample(remotePath) {
 }
 
 async function fullBackupCatalogInventory(target, options = {}) {
-  const text = await migrationSql(target, FULL_BACKUP_DATA_INVENTORY_SQL, 120000);
+  const text = await dbQueryStreamed(FULL_BACKUP_DATA_INVENTORY_SQL, 120000, target);
   let inventory;
   try { inventory = JSON.parse(text); }
   catch { throw new Error("The expected dune object inventory could not be parsed."); }
@@ -7971,7 +8079,7 @@ async function copyVerifiedVendorBackupToLocal(vmBackup, verification, metadata 
       return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
     });
     if (unsafeDestination) throw new Error("The backup destination is inside a server, Suite, or temporary directory.");
-    const connection = await migrationSshConnection();
+    const connection = await databaseBackupSshConnection();
     const streamed = await streamCommandToFile({
       command: "ssh",
       args: [...connection.args, `cat -- ${shQuote(verifiedRemotePath)}`],
@@ -7985,6 +8093,10 @@ async function copyVerifiedVendorBackupToLocal(vmBackup, verification, metadata 
     validatePgDumpHeader(await readDatabaseBackupHeader(partialPath));
     await publishVerifiedPackage(partialPath, finalPath);
     published = true;
+    const publishedComponent = await hashDatabaseBackupFile(finalPath);
+    if (publishedComponent.size !== String(verification.size) || publishedComponent.sha256 !== String(verification.sha256).toLowerCase()) {
+      throw new Error("The published local backup file does not match the actual verified VM backup.");
+    }
     const localMetadata = {
       ...metadata,
       type: "verified-database-backup",
@@ -7992,8 +8104,8 @@ async function copyVerifiedVendorBackupToLocal(vmBackup, verification, metadata 
       sourceMethod: "battlegroup",
       localBackupPath: finalPath,
       fileName: path.basename(finalPath),
-      size: streamed.size,
-      sha256: streamed.sha256,
+      size: publishedComponent.size,
+      sha256: publishedComponent.sha256,
       storage: "vm+local",
       verified: true,
       usableForRestore: true
@@ -8026,24 +8138,21 @@ async function nativeSafetyBackupPreflight(options = {}) {
   const running = await runningDumpOperations();
   if (!running.ok || running.running.length) throw new Error("A vendor DatabaseOperation is active or could not be classified.");
   const target = await databaseRuntimeTarget();
-  const offline = buildMigrationRollbackOfflineCheckpoint(
-    await collectMigrationStructuredOfflineEvidence(target, options.structuredOfflineOptions || {}),
-    target
-  );
-  if (options.expectedStructuredOfflineCheckpoint) {
-    assertMigrationRollbackOfflineCheckpoint(options.expectedStructuredOfflineCheckpoint, offline);
-  }
-  const requireMarketBot = options.requireMarketBot !== false;
-  const evidence = await migrationEvidence(target, { includeMarketBot: false });
-  if (evidence.database.reachable !== true || String(evidence.database.database) !== "dune") throw new Error("PostgreSQL is not healthy.");
-  if (evidence.writers.unexpectedActiveClients !== "0" || evidence.writers.openTransactions !== "0") throw new Error("A persistent writer or open transaction is active.");
-  if (requireMarketBot) evidence.marketBotInfrastructure = await collectMigrationMarketBotSafety(target);
+  const offline = await collectDatabaseBackupOfflineEvidence(target);
+  const database = parseDatabaseBackupJson(await dbQueryStreamed(DATABASE_FACTS_SQL, 120000, target), "Database health evidence");
+  const firstWriters = parseDatabaseBackupJson(await dbQueryStreamed(ACTIVE_WRITERS_SQL, 120000, target), "Database writer evidence");
+  await sleepMs(750);
+  const secondWriters = parseDatabaseBackupJson(await dbQueryStreamed(ACTIVE_WRITERS_SQL, 120000, target), "Database writer evidence");
+  const writerSamples = [firstWriters, secondWriters];
+  if (database.reachable !== true || String(database.database) !== "dune") throw new Error("PostgreSQL is not healthy.");
+  if (writerSamples.some((sample) => sample.unexpectedActiveClients !== "0" || sample.openTransactions !== "0")) throw new Error("A persistent writer or open transaction is active.");
+  const evidence = { database, writers: secondWriters, writerSamples, podTools: await databasePodArchiveTools(target) };
   return { target, evidence, offline };
 }
 
 async function matchingPgRestore(localPath, target, args, timeout = 10 * 60 * 1000) {
-  const connection = await migrationSshConnection();
-  const tools = await migrationPodArchiveTools(target);
+  const connection = await databaseBackupSshConnection();
+  const tools = await databasePodArchiveTools(target);
   const component = await hashDatabaseBackupFile(localPath);
   const inspected = await inspectRecoveryArchive({
     filePath: localPath,
@@ -8060,7 +8169,7 @@ async function matchingPgRestore(localPath, target, args, timeout = 10 * 60 * 10
 }
 
 async function inspectSeekableArchive(localPath, target, options = {}) {
-  const connection = await migrationSshConnection();
+  const connection = await databaseBackupSshConnection();
   return inspectClosedArchive({
     filePath: localPath,
     scope: options.scope || "full-backup",
@@ -8093,18 +8202,18 @@ async function createExpectedBackupInventory(target, options = {}) {
   const temporaryDirectory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "alphanine-backup-schema-"));
   const schemaPath = path.join(temporaryDirectory, "schema-only.backup");
   try {
-    const connection = await migrationSshConnection();
-    const podTools = options.podTools || await migrationPodArchiveTools(target);
+    const connection = await databaseBackupSshConnection();
+    const podTools = options.podTools || await databasePodArchiveTools(target);
     const validationProfile = String(options.validationProfile || "");
     if (!Object.values(BACKUP_INVENTORY_PROFILES).includes(validationProfile)) throw new Error("An explicit backup inventory validation profile is required.");
     const dumpFlags = options.dumpFlags || ["--format=custom", "--no-owner", "--no-privileges"];
     const includedSchemas = dumpIncludedSchemas(dumpFlags);
-    if (validationProfile === BACKUP_INVENTORY_PROFILES.MIGRATION_PACKAGE && (includedSchemas.length !== 1 || includedSchemas[0] !== "dune")) throw new Error("The migration-package inventory profile requires an exact --schema=dune boundary.");
+    if (validationProfile !== BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK && (includedSchemas.length !== 1 || includedSchemas[0] !== "dune")) throw new Error("The schema-scoped archive inventory profile requires an exact --schema=dune boundary.");
     if (validationProfile === BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK && includedSchemas.length) throw new Error("The destination rollback inventory profile requires complete database scope without schema filters.");
     const catalog = await fullBackupCatalogInventory(target, { ...options, includedSchemas });
     const generated = await generateValidatedPodArchive({
       kind: "schemaInventory", target, dbSvc: target.dbSvc, sshArgs: connection.args, runCommand: run,
-      runCredentialScript: runMigrationCredentialScript,
+      runCredentialScript: runDatabaseCredentialScript,
       dumpExecutable: podTools.dumpExecutable, restoreExecutable: podTools.restoreExecutable,
       outputPath: schemaPath, dumpFlags: [...dumpFlags, "--schema-only"], timeoutMs: 10 * 60 * 1000,
       onHeartbeat: options.onHeartbeat,
@@ -8132,10 +8241,10 @@ async function inspectLocalBackupArchive(localPath, target, expectedInventory, o
 
 async function createNativeDatabaseBackup(options = {}) {
   const started = Date.now();
-  const offlineCheckpoint = options.offlineCheckpoint || null;
-  const databaseCheckpoint = offlineCheckpoint ? null : databaseTargetCheckpoint("Verified offline database backup", options.databaseCheckpoint || null);
-  const verifySafetyCheckpoint = async (stage) => offlineCheckpoint
-    ? migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, stage)
+  const externalCheckpointVerifier = typeof options.verifyCheckpoint === "function" ? options.verifyCheckpoint : null;
+  const databaseCheckpoint = externalCheckpointVerifier ? null : databaseTargetCheckpoint("Verified offline database backup", options.databaseCheckpoint || null);
+  const verifySafetyCheckpoint = async (stage) => externalCheckpointVerifier
+    ? externalCheckpointVerifier(stage)
     : verifyDatabaseOfflineCheckpoint(databaseCheckpoint, stage);
   const folder = ensureDatabaseBackupDir();
   const finalPath = path.join(folder, nativeDatabaseBackupFilename(options.prefix || "full-safety-backup"));
@@ -8146,11 +8255,7 @@ async function createNativeDatabaseBackup(options = {}) {
   try {
     await verifySafetyCheckpoint("before backup preflight");
     options.onStatus?.("Preflight", "Verifying paused/offline state, PostgreSQL health, and active writers.");
-    const preflight = await nativeSafetyBackupPreflight({
-      requireMarketBot: options.requireMarketBot !== false,
-      expectedStructuredOfflineCheckpoint: options.expectedStructuredOfflineCheckpoint,
-      structuredOfflineOptions: options.structuredOfflineOptions
-    });
+    const preflight = await nativeSafetyBackupPreflight();
     const unsafeRoots = [loadConfig().serverInstallPath, loadConfig().awakeningServerPath, __dirname, os.tmpdir()].filter(Boolean).map((value) => path.resolve(value));
     const unsafeDestination = unsafeRoots.some((root) => {
       const relative = path.relative(root, finalPath);
@@ -8166,14 +8271,14 @@ async function createNativeDatabaseBackup(options = {}) {
     if (available < required) throw new Error("The backup destination does not have enough free space.");
     options.onStatus?.("Inventory", "Building the expected catalog inventory from a temporary schema-only archive.");
     const expectedInventory = await createExpectedBackupInventory(preflight.target, { validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK });
-    const connection = await migrationSshConnection();
+    const connection = await databaseBackupSshConnection();
     const target = preflight.target;
-    const podTools = preflight.evidence.podTools || await migrationPodArchiveTools(target);
+    const podTools = preflight.evidence.podTools || await databasePodArchiveTools(target);
     await verifySafetyCheckpoint("before backup streaming");
     options.onStatus?.("Streaming", "Creating and fully validating the destination rollback archive inside the database pod before one outward stream.");
     const generated = await generateValidatedPodArchive({
       kind: "rollback", target, dbSvc: target.dbSvc, sshArgs: connection.args, runCommand: run,
-      runCredentialScript: runMigrationCredentialScript,
+      runCredentialScript: runDatabaseCredentialScript,
       dumpExecutable: podTools.dumpExecutable, restoreExecutable: podTools.restoreExecutable,
       outputPath: partialPath,
       dumpFlags: ["--format=custom", "--no-owner", "--no-privileges"],
@@ -8290,12 +8395,14 @@ async function createDatabaseBackup(options = {}) {
         reportedPhase: parsed.phase || "Unknown",
         reason: verificationError.message
       });
-      if (options.disableNativeFallback === true) throw verificationError;
-      options.onStatus?.("Vendor payload rejected", "The vendor artifact was not usable; starting one Suite-native verified full backup instead.");
-      return await createNativeDatabaseBackup({ ...options, prefix: options.prefix || "full-safety-backup" });
+      if (options.allowNativeFallback === true) {
+        options.onStatus?.("Vendor payload rejected", "The vendor artifact was not usable; starting one explicitly requested Suite-native verified full backup instead.");
+        return await createNativeDatabaseBackup({ ...options, prefix: options.prefix || "full-safety-backup" });
+      }
+      throw new Error(`The actual VM backup could not be copied locally: ${verificationError.message}`);
     }
-    if (options.onStatus) options.onStatus("Succeeded", "Backup payload independently verified successfully.");
-    const vmBackup = vmBackupParts(parsed.vmPath);
+    options.onStatus?.("Verified on VM", "The actual VM backup is verified. Copying that exact artifact to local storage next.");
+    const vmBackup = vmBackupParts(verification.identity.path, { vmBackupPath: verification.identity.path });
     const metadata = {
       ok: true,
       verified: true,
@@ -8307,7 +8414,9 @@ async function createDatabaseBackup(options = {}) {
       backupName: parsed.backupName,
       dumpOperationName: parsed.dumpOperationName,
       phase: "Succeeded",
-      vmPath: parsed.vmPath,
+      vmPath: vmBackup.vmBackupPath,
+      reportedVmPath: parsed.vmPath,
+      vmArtifactIdentitySource: verification.identity.source || "database-operation",
       battlegroupId: vmBackup.battlegroupId,
       vmBackupDir: vmBackup.vmBackupDir,
       vmBackupFilename: vmBackup.vmBackupFilename,
@@ -8330,6 +8439,8 @@ async function createDatabaseBackup(options = {}) {
       metadata,
       options.prefix || (options.safety ? "pre-import-safety" : "battlegroup-backup")
     );
+    verifyDatabaseTargetCheckpoint(databaseCheckpoint, "after local VM backup copy");
+    options.onStatus?.("Succeeded", `Actual VM backup copied and verified locally: ${local.localBackupPath}`);
     const payload = {
       ok: true,
       status: "verified",
@@ -8340,7 +8451,8 @@ async function createDatabaseBackup(options = {}) {
       backupName: parsed.backupName,
       dumpOperationName: parsed.dumpOperationName,
       phase: "Succeeded",
-      vmPath: parsed.vmPath,
+      vmPath: vmBackup.vmBackupPath,
+      reportedVmPath: parsed.vmPath,
       battlegroupId: vmBackup.battlegroupId,
       vmBackupDir: vmBackup.vmBackupDir,
       vmBackupFilename: vmBackup.vmBackupFilename,
@@ -9394,7 +9506,7 @@ async function executeMigrationEmptyMarket(body = {}, operation = null) {
     createBackup: async () => {
       const backup = await createNativeDatabaseBackup({
         prefix: "pre-empty-market-rollback",
-        offlineCheckpoint,
+        verifyCheckpoint: (stage) => migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, stage),
         requiredAlphaTables: [...MIGRATION_MARKET_BOT_TABLES],
         onStatus: (stage, detail) => operation?.update?.(`Backup: ${stage}`, detail)
       });
@@ -10583,10 +10695,9 @@ async function runMigrationImportJob(job, payload) {
       createRollbackBackup: async () => migrationJobLongStage(job, "creating-rollback-backup", "Creating and verifying destination rollback backup", async () => {
         const backup = await createNativeDatabaseBackup({
           prefix: "server-migration-destination-rollback",
-          offlineCheckpoint: job.offlineCheckpoint,
+          verifyCheckpoint: (stage) => migrationOfflineMode.verifyCheckpoint(job.offlineCheckpoint, stage),
           requiredAlphaTables: [],
-          requireMarketBot: false,
-          expectedStructuredOfflineCheckpoint: job.approvedCheckpoint.snapshot.destination.battlegroup
+          requireMarketBot: false
         });
         if (!backup.ok) throw new Error(backup.error || "Destination rollback backup failed.");
         return backup;
@@ -24055,7 +24166,7 @@ function betterError(e){const candidates=[e?.reason,e?.apiResponse?.reason,e?.er
 async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status",{timeoutMs:30000});renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
 async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!(await appConfirm("Confirm VM action","Are you sure you want to "+action+" the VM?","Run "+action,"Cancel")))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
-async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const actionTimeouts=${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)},data=await getJson("/api/action/"+action,{method:"POST",timeoutMs:actionTimeouts[action]||180000});let output=data.stdout||data.stderr||data.error||"Done.";if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
+async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const actionTimeouts=${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)},data=await getJson("/api/action/"+action,{method:"POST",timeoutMs:actionTimeouts[action]||180000});let output=data.stdout||data.stderr||data.error||"Done.";if(action==="backup"&&data.ok){output="Actual VM backup copied and verified locally.\\nVM source: "+(data.vmBackupPath||data.vmPath||"--")+"\\nLocal copy: "+(data.localBackupPath||data.filePath||"--")+"\\nSHA-256: "+(data.sha256||"--")+"\\nSize: "+(data.size||data.file?.size||"--")+" bytes\\nMetadata: "+(data.localMetadataPath||"--");}if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
 function updateMapMemoryInput(){const select=document.getElementById("mapSelect");const rows=window.mapDeploymentRows||[];const row=rows.find(m=>m.map===select?.value);tone("mapMemory",row?.memory||"Unset");}
 const MAP_MEMORY_LIMIT_PATTERN=/^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)(?:Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|k)?$/;
@@ -26523,7 +26634,8 @@ async function route(req, res) {
         const response = await battlegroup(action, {
           operationId: operation.id,
           reason: `Explicit administrator ${action} operation`,
-          callSite: "server.js:/api/action/:action"
+          callSite: "server.js:/api/action/:action",
+          onStatus: (stage, detail) => update(stage, detail)
         });
         if (action === "start") {
           update("Starting database tunnel", "Battlegroup start completed; checking database access.");

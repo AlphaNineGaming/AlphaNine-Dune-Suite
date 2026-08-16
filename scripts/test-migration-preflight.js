@@ -214,11 +214,10 @@ function testStructuredDestinationOfflineEvidence() {
   assert.doesNotMatch(exportPreflight, /battlegroup\("status"\)|parseStatus/);
   assert.match(importPreflight, /migrationStoppedEvidence/);
   assert.doesNotMatch(importPreflight, /battlegroup\("status"\)|parseStatus/);
-  assert.match(rollbackBackupPreflight, /collectMigrationStructuredOfflineEvidence/);
-  assert.match(rollbackBackupPreflight, /buildMigrationRollbackOfflineCheckpoint/);
-  assert.match(rollbackBackupPreflight, /assertMigrationRollbackOfflineCheckpoint/);
+  assert.match(rollbackBackupPreflight, /collectDatabaseBackupOfflineEvidence/);
+  assert.doesNotMatch(rollbackBackupPreflight, /Migration|migration/, "native rollback creation must use the standalone database backup preflight");
   assert.doesNotMatch(rollbackBackupPreflight, /battlegroup\("status"\)|parseStatus|classifyMigrationOfflineStatus/, "migration-triggered native rollback backup must not depend on formatted CLI output");
-  assert.match(serverSource, /expectedStructuredOfflineCheckpoint:\s*job\.approvedCheckpoint\.snapshot\.destination\.battlegroup/, "destination rollback backup must match the approved structured checkpoint");
+  assert.match(serverSource, /verifyCheckpoint:\s*\(stage\)\s*=>\s*migrationOfflineMode\.verifyCheckpoint\(job\.offlineCheckpoint, stage\)/, "the migration workflow must inject its checkpoint verifier without coupling backup internals to migration state");
 }
 
 testSuccessfulSanitizedSshShape();

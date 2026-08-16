@@ -106,6 +106,11 @@ async function main() {
   assert.throws(() => validateVendorTerminalOperation(operation(""), "operation-1"), /missing/);
   assert.throws(() => validateVendorTerminalOperation({ ...operation(), status: { phase: "Succeeded", conditions: [{ type: "Failed", status: "True" }] } }), /failing terminal condition/);
   assert.strictEqual(resolveVendorArtifactIdentity(operation(), "/safe/operation-1.backup").fileName, "operation-1.backup");
+  assert.deepStrictEqual(
+    resolveVendorArtifactIdentity(operation(), ""),
+    { path: "/safe/operation-1.backup", fileName: "operation-1.backup", operationReference: "/safe/operation-1.backup", source: "database-operation" }
+  );
+  assert.throws(() => resolveVendorArtifactIdentity({ ...operation(), spec: { backup: ["/safe/one.backup", "/safe/two.backup"] } }, ""), /unambiguous absolute backup artifact path/);
   assert.throws(() => resolveVendorArtifactIdentity(operation(), "/safe/stale.backup"), /could not be resolved unambiguously/);
 
   assert.deepStrictEqual(validateStableSamples([
@@ -271,11 +276,21 @@ async function main() {
   const vendorLocalCopy = server.slice(server.indexOf("async function copyVerifiedVendorBackupToLocal"), server.indexOf("function nativeDatabaseBackupFilename"));
   assert.match(vendorLocalCopy, /streamCommandToFile[\s\S]*expectedBytes:\s*verification\.size/, "manual vendor backups must stream the verified payload into the configured local folder");
   assert.match(vendorLocalCopy, /streamed\.size[^\n]+verification\.size[\s\S]*streamed\.sha256[^\n]+verification\.sha256/, "the local vendor copy must match the independently verified VM size and SHA-256");
+  assert.match(vendorLocalCopy, /hashDatabaseBackupFile\(finalPath\)[\s\S]*publishedComponent\.size[^\n]+verification\.size[\s\S]*publishedComponent\.sha256[^\n]+verification\.sha256/, "the atomically published local file must be independently re-hashed against the VM artifact");
   assert(vendorLocalCopy.indexOf("publishVerifiedPackage") < vendorLocalCopy.indexOf("writeDatabaseBackupJsonAtomic"), "manual vendor backup metadata must be published only after the local payload is atomically published");
   assert.match(vendorLocalCopy, /type:\s*"verified-database-backup"[\s\S]*localBackupPath:\s*finalPath[\s\S]*storage:\s*"vm\+local"/, "manual vendor backups must be listed and restorable as verified local payloads");
+  const standardConnection = server.slice(server.indexOf("async function standardVmSshConnection"), server.indexOf("async function serverHealthRemoteCheck"));
+  assert.doesNotMatch(standardConnection, /migration|known.?host|UserKnownHostsFile/i, "normal Suite SSH must not depend on migration-only pinned known-host files");
+  const completeBackupFeature = server.slice(server.indexOf("async function databaseBackupSshConnection"), server.indexOf("function listDatabaseBackups"));
+  assert.doesNotMatch(completeBackupFeature, /migrationSshConnection|migrationPodArchiveTools|runMigrationCredentialScript|migrationSql|migrationEvidence|collectMigration|migrationOfflineMode|known.?host|UserKnownHostsFile/i, "backup creation, verification, and local transport must have no migration runtime dependency");
+  assert.match(completeBackupFeature, /databaseBackupSshConnection[\s\S]*standardVmSshConnection/, "backup transport must use the Suite's normal VM connection");
+  assert.match(completeBackupFeature, /collectDatabaseBackupOfflineEvidence/, "Safety Backup must use dedicated database offline evidence");
   const manualBackup = server.slice(server.indexOf("async function createDatabaseBackup(options"), server.indexOf("function listDatabaseBackups"));
   assert.match(manualBackup, /copyVerifiedVendorBackupToLocal/, "successful manual vendor backups must be copied to local storage");
   assert.match(manualBackup, /localBackupPath:\s*local\.localBackupPath/, "manual backup responses must report the actual local payload path");
+  assert.match(manualBackup, /vmBackupParts\(verification\.identity\.path/, "the successful DatabaseOperation artifact path must drive the VM-to-local copy even when command output omits it");
+  assert(manualBackup.indexOf('options.onStatus?.("Succeeded"') > manualBackup.indexOf("copyVerifiedVendorBackupToLocal"), "backup success must be reported only after the actual VM artifact is copied locally");
+  assert.match(manualBackup, /allowNativeFallback\s*===\s*true/, "a routine vendor backup must fail if its actual VM artifact cannot be copied unless native fallback was explicitly requested");
   assert.doesNotMatch(manualBackup, /Migration Maintenance|maintenanceCheckpoint|verifyMaintenanceCheckpointRemote/, "routine backups must not depend on the removed Migration Maintenance workflow");
   assert.match(manualBackup, /verifyDatabaseTargetCheckpoint/, "routine backups must keep the exact selected battlegroup pinned throughout the operation");
   assert.match(nativeBackup, /verifyDatabaseOfflineCheckpoint/, "standalone safety backups must repeatedly verify that the selected battlegroup remains offline");
@@ -286,6 +301,7 @@ async function main() {
   assert.doesNotMatch(schedulerBackup, /migrationMaintenance|verifyMaintenanceCheckpointRemote/, "manual scheduler backups must not depend on the removed Migration Maintenance workflow");
   const battlegroupActions = server.slice(server.indexOf("async function battlegroup(action"), server.indexOf("function serverControlConfigured"));
   assert.doesNotMatch(battlegroupActions, /assertWorkflowActive\("Database backup"\)/, "the Server page backup action must not require Migration Maintenance Mode");
+  assert.match(battlegroupActions, /action\s*===\s*"backup"[\s\S]*createDatabaseBackup/, "the Server page Backup button must copy and verify the real VM artifact locally");
   assert(server.includes("createExpectedBackupInventory"));
   assert(server.includes("buildExpectedBackupInventory"));
   assert(server.includes("dumpIncludedSchemas(dumpFlags)"));

@@ -7667,11 +7667,6 @@ function ensureDatabaseBackupDir(folder = databaseBackupDir()) {
   return resolved;
 }
 
-function databaseBackupFilename(prefix = "battlegroup-backup") {
-  const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[:T]/g, "-").replace(/Z$/, "");
-  return `${prefix}-${stamp}-${APP_VERSION}.zip`;
-}
-
 function fileInfo(filePath) {
   const stat = fs.statSync(filePath);
   return {
@@ -7816,17 +7811,6 @@ function vmBackupParts(vmPath = "", metadata = {}) {
   return { battlegroupId, vmBackupDir: dir, vmBackupFilename: filename, vmBackupPath: fullPath, vmYamlPath: yamlPath };
 }
 
-function databaseBackupMetadataFilename(prefix = "battlegroup-backup") {
-  return databaseBackupFilename(prefix).replace(/\.zip$/i, ".json");
-}
-
-function writeBattlegroupBackupMetadata(payload, prefix = "battlegroup-backup") {
-  const folder = ensureDatabaseBackupDir();
-  const metadataPath = path.join(folder, databaseBackupMetadataFilename(prefix));
-  fs.writeFileSync(metadataPath, JSON.stringify(payload, null, 2), "utf8");
-  return fileInfo(metadataPath);
-}
-
 const FULL_BACKUP_DATA_INVENTORY_SQL = `
 select json_build_object(
   'dataEntries', coalesce(json_agg(json_build_object(
@@ -7936,6 +7920,79 @@ async function verifyVendorBackup(parsed, operation) {
   const expectedInventory = await createExpectedBackupInventory(target, { validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK });
   const toc = await inspectRemoteBackupArchive(identity.path, target, expectedInventory);
   return { identity, size: stable.size, sha256, toc, stableChecks: "2" };
+}
+
+async function copyVerifiedVendorBackupToLocal(vmBackup, verification, metadata = {}, prefix = "battlegroup-backup") {
+  const folder = ensureDatabaseBackupDir();
+  const finalPath = path.join(folder, nativeDatabaseBackupFilename(prefix));
+  const partialPath = `${finalPath}.partial-${crypto.randomUUID()}`;
+  const metadataPath = `${finalPath}.json`;
+  let published = false;
+  let completed = false;
+  try {
+    const verifiedRemotePath = String(verification.identity?.path || "");
+    if (!verifiedRemotePath || verifiedRemotePath !== String(vmBackup.vmBackupPath || "")) {
+      throw new Error("The verified VM backup path changed before the local copy started.");
+    }
+    const expectedSize = BigInt(String(verification.size || "0"));
+    if (expectedSize <= 0n || !/^[a-f0-9]{64}$/i.test(String(verification.sha256 || ""))) {
+      throw new Error("The verified VM backup is missing a valid size or SHA-256.");
+    }
+    const disk = fs.statfsSync(folder, { bigint: true });
+    const available = disk.bavail * disk.bsize;
+    if (available < expectedSize + 512n * 1024n * 1024n) {
+      throw new Error("The backup destination does not have enough free space for the verified VM backup.");
+    }
+    const unsafeRoots = [loadConfig().serverInstallPath, loadConfig().awakeningServerPath, __dirname, os.tmpdir()].filter(Boolean).map((value) => path.resolve(value));
+    const unsafeDestination = unsafeRoots.some((root) => {
+      const relative = path.relative(root, finalPath);
+      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+    });
+    if (unsafeDestination) throw new Error("The backup destination is inside a server, Suite, or temporary directory.");
+    const connection = await migrationSshConnection();
+    const streamed = await streamCommandToFile({
+      command: "ssh",
+      args: [...connection.args, `cat -- ${shQuote(verifiedRemotePath)}`],
+      outputPath: partialPath,
+      expectedBytes: verification.size,
+      timeoutMs: 60 * 60 * 1000
+    });
+    if (streamed.size !== String(verification.size) || streamed.sha256 !== String(verification.sha256).toLowerCase()) {
+      throw new Error("The local backup copy does not match the verified VM artifact size and SHA-256.");
+    }
+    validatePgDumpHeader(await readDatabaseBackupHeader(partialPath));
+    await publishVerifiedPackage(partialPath, finalPath);
+    published = true;
+    const localMetadata = {
+      ...metadata,
+      type: "verified-database-backup",
+      method: "battlegroup-local-copy",
+      sourceMethod: "battlegroup",
+      localBackupPath: finalPath,
+      fileName: path.basename(finalPath),
+      size: streamed.size,
+      sha256: streamed.sha256,
+      storage: "vm+local",
+      verified: true,
+      usableForRestore: true
+    };
+    await writeDatabaseBackupJsonAtomic(metadataPath, localMetadata);
+    completed = true;
+    return {
+      metadata: localMetadata,
+      file: fileInfo(finalPath),
+      metadataFile: fileInfo(metadataPath),
+      filePath: finalPath,
+      localBackupPath: finalPath,
+      localMetadataPath: metadataPath
+    };
+  } catch (error) {
+    if (published) await fs.promises.rm(finalPath, { force: true }).catch(() => {});
+    throw error;
+  } finally {
+    await fs.promises.rm(partialPath, { force: true }).catch(() => {});
+    if (!completed) await fs.promises.rm(metadataPath, { force: true }).catch(() => {});
+  }
 }
 
 function nativeDatabaseBackupFilename(prefix = "full-safety-backup") {
@@ -8221,7 +8278,7 @@ async function createDatabaseBackup(options = {}) {
       ok: true,
       verified: true,
       usableForRestore: true,
-      type: "battlegroup-backup",
+      type: "verified-database-backup",
       createdAt: new Date().toISOString(),
       version: APP_VERSION,
       backupId: parsed.backupId,
@@ -8238,13 +8295,19 @@ async function createDatabaseBackup(options = {}) {
       sha256: verification.sha256,
       stableSizeChecks: verification.stableChecks,
       toc: verification.toc,
-      storage: parsed.vmPath ? "vm+local-metadata" : "vm-output+local-metadata",
+      storage: "vm+local",
       output: result.stdout,
       stderr: result.stderr,
-      note: "Backup was created by the vendor workflow and independently verified by AlphaNine before this metadata was published."
+      note: "Backup was created by the vendor workflow, independently verified by AlphaNine, copied to the configured local backup folder, and verified again before publication."
     };
     await verifyMaintenanceCheckpointRemote(checkpoint, "before vendor backup metadata publication");
-    const info = writeBattlegroupBackupMetadata(metadata, options.prefix || (options.safety ? "pre-import-safety" : "battlegroup-backup"));
+    options.onStatus?.("Saving locally", "Copying the verified VM backup into the configured local backup folder.");
+    const local = await copyVerifiedVendorBackupToLocal(
+      vmBackup,
+      verification,
+      metadata,
+      options.prefix || (options.safety ? "pre-import-safety" : "battlegroup-backup")
+    );
     const payload = {
       ok: true,
       status: "verified",
@@ -8261,16 +8324,18 @@ async function createDatabaseBackup(options = {}) {
       vmBackupFilename: vmBackup.vmBackupFilename,
       vmBackupPath: vmBackup.vmBackupPath,
       vmYamlPath: vmBackup.vmYamlPath,
-      storage: metadata.storage,
+      storage: local.metadata.storage,
       size: verification.size,
       sha256: verification.sha256,
       toc: verification.toc,
       verified: true,
       output: result.stdout,
       stderr: result.stderr,
-      file: info,
-      filePath: info.path,
-      localMetadataPath: info.path
+      file: local.file,
+      filePath: local.filePath,
+      localBackupPath: local.localBackupPath,
+      localMetadataPath: local.localMetadataPath,
+      metadataFile: local.metadataFile
     };
     databaseBackupAudit(options.safety ? "battlegroup_safety_backup_created" : "battlegroup_backup_created", payload);
     return payload;
@@ -22782,7 +22847,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
       </div>
       <div class="layout-3 mt">
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Backup Location</div><div class="subtle">Choose where local Battlegroup backup metadata and supported copied files are saved.</div></div></div>
+          <div class="panel-head"><div><div class="label">Backup Location</div><div class="subtle">Choose where verified local Battlegroup backup files and their metadata are saved.</div></div></div>
           <div class="detail-list">
             <div class="detail-row"><span class="subtle">Current path</span><strong id="dbBackupPath" class="env-path-value">Loading...</strong></div>
             <div class="detail-row"><span class="subtle">Default path</span><strong id="dbBackupDefaultPath" class="env-path-value">Loading...</strong></div>
@@ -24011,7 +24076,7 @@ async function refreshDatabaseManagement(){await Promise.all([refreshDatabaseSta
 async function chooseDatabaseBackupFolder(){try{let folder="";if(window.alphaNineSuite?.chooseDatabaseBackupFolder){const result=await window.alphaNineSuite.chooseDatabaseBackupFolder();if(result?.canceled)return;folder=result.folderPath||"";}else{throw new Error("Folder picker is not available in this desktop build.");}if(!folder)return;const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({folder})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder saved: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
 async function openDatabaseBackupFolder(){try{const folder=document.getElementById("dbBackupPath")?.textContent||"";if(window.alphaNineSuite?.openPath)await window.alphaNineSuite.openPath(folder);else window.open("file:///"+folder.replace(/\\\\/g,"/"),"_blank");}catch(e){setText("dbLocationResult",betterError(e));}}
 async function resetDatabaseBackupFolder(){try{const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reset:true})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder reset: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
-async function createDatabaseBackup(){const el=document.getElementById("dbBackupResult");try{el.className="empty mt";el.textContent="Creating Battlegroup backup...";const data=await getJson("/api/database/backup",{method:"POST",timeoutMs:900000});if(!data.ok)throw new Error(data.error||"Backup failed.");el.className="empty mt";el.textContent="Battlegroup backup created.\\nBackup: "+(data.backupName||data.backupId||"--")+"\\nVM path: "+(data.vmPath||"Not reported by Battlegroup command")+"\\nLocal metadata: "+(data.localMetadataPath||data.filePath||"--")+"\\nStorage: "+(data.storage||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data))+"\\n\\nOutput:\\n"+(data.output||data.stderr||"--");addActivity("database","Battlegroup backup created",data.backupName||data.backupId||data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup backup failed",e.message);playUiSound("warning");}}
+async function createDatabaseBackup(){const el=document.getElementById("dbBackupResult");try{el.className="empty mt";el.textContent="Creating and saving Battlegroup backup locally...";const data=await getJson("/api/database/backup",{method:"POST",timeoutMs:900000});if(!data.ok)throw new Error(data.error||"Backup failed.");el.className="empty mt";el.textContent="Battlegroup backup created and saved locally.\\nBackup: "+(data.backupName||data.backupId||"--")+"\\nVM path: "+(data.vmPath||"Not reported by Battlegroup command")+"\\nLocal backup: "+(data.localBackupPath||data.filePath||"--")+"\\nLocal metadata: "+(data.localMetadataPath||"--")+"\\nStorage: "+(data.storage||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data))+"\\n\\nOutput:\\n"+(data.output||data.stderr||"--");addActivity("database","Battlegroup backup saved locally",data.localBackupPath||data.filePath||data.backupName||data.backupId);await refreshDatabaseBackups();playUiSound("success");}catch(e){el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup backup failed",e.message);playUiSound("warning");}}
 async function createSafetyBackupOnly(){const el=document.getElementById("dbBackupResult");let timer=null;const started=Date.now();try{el.className="warning mt";el.textContent="Safety backup: Starting";timer=setInterval(()=>{const seconds=Math.floor((Date.now()-started)/1000);el.textContent="Safety backup still running... "+Math.min(seconds,120)+"s / 120s";},1000);const data=await getJson("/api/database/safety-backup",{method:"POST",timeoutMs:130000});if(timer){clearInterval(timer);timer=null;}if(!data.ok)throw new Error(data.error||"Safety backup failed.");el.className="empty mt";el.textContent="Safety backup succeeded.\\nOperation: "+(data.dumpOperationName||"--")+"\\nPhase: "+(data.phase||"Succeeded")+"\\nVM path: "+(data.vmPath||"Not reported by Battlegroup command")+"\\nLocal metadata: "+(data.localMetadataPath||data.filePath||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data));addActivity("database","Safety backup succeeded",data.dumpOperationName||data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){if(timer)clearInterval(timer);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Safety backup failed",e.message);playUiSound("warning");}}
 async function chooseDatabaseRestoreFile(){try{let filePath="";if(window.alphaNineSuite?.chooseDatabaseBackupFile){const result=await window.alphaNineSuite.chooseDatabaseBackupFile();if(result?.canceled)return;filePath=result.filePath||"";}else{throw new Error("File picker is not available in this desktop build.");}if(filePath)document.getElementById("dbRestoreFile").value=filePath;await refreshDatabaseImportReadiness();}catch(e){setText("dbRestoreResult",betterError(e));}}
 function selectDatabaseRestoreBackup(index){const row=(window.databaseBackupRows||[])[index];if(!row)return;document.getElementById("dbRestoreFile").value=row.path;document.getElementById("dbRestoreConfirm").value="";const vmPath=row.vmBackupPath||row.vmPath;const detail=vmPath?("Selected metadata: "+row.path+"\\nResolved VM backup: "+vmPath+"\\nImport argument: "+(row.vmBackupFilename||vmPath.split('/').pop())):("Selected backup file: "+row.path);document.getElementById("dbRestoreResult").textContent=detail+"\\nStop the server and type IMPORT before importing.";refreshDatabaseImportReadiness();}

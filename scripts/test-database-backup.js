@@ -268,6 +268,14 @@ async function main() {
   assert.doesNotMatch(nativeBackup, /inspectLocalBackupArchive|kubectl exec -i|PGPASSWORD=|sh -c/, "destination rollback backup must not upload an archive back into the pod or embed credentials in shell text");
   assert(nativeBackup.indexOf("publishVerifiedPackage") < nativeBackup.indexOf("writeDatabaseBackupJsonAtomic"), "verified metadata must be published only after the payload is atomically published");
   assert.match(nativeBackup, /finally\s*\{[\s\S]*rm\(partialPath[\s\S]*rm\(metadataPath/, "backup partials and failed metadata must be removed unconditionally");
+  const vendorLocalCopy = server.slice(server.indexOf("async function copyVerifiedVendorBackupToLocal"), server.indexOf("function nativeDatabaseBackupFilename"));
+  assert.match(vendorLocalCopy, /streamCommandToFile[\s\S]*expectedBytes:\s*verification\.size/, "manual vendor backups must stream the verified payload into the configured local folder");
+  assert.match(vendorLocalCopy, /streamed\.size[^\n]+verification\.size[\s\S]*streamed\.sha256[^\n]+verification\.sha256/, "the local vendor copy must match the independently verified VM size and SHA-256");
+  assert(vendorLocalCopy.indexOf("publishVerifiedPackage") < vendorLocalCopy.indexOf("writeDatabaseBackupJsonAtomic"), "manual vendor backup metadata must be published only after the local payload is atomically published");
+  assert.match(vendorLocalCopy, /type:\s*"verified-database-backup"[\s\S]*localBackupPath:\s*finalPath[\s\S]*storage:\s*"vm\+local"/, "manual vendor backups must be listed and restorable as verified local payloads");
+  const manualBackup = server.slice(server.indexOf("async function createDatabaseBackup(options"), server.indexOf("function listDatabaseBackups"));
+  assert.match(manualBackup, /copyVerifiedVendorBackupToLocal/, "successful manual vendor backups must be copied to local storage");
+  assert.match(manualBackup, /localBackupPath:\s*local\.localBackupPath/, "manual backup responses must report the actual local payload path");
   assert(server.includes("createExpectedBackupInventory"));
   assert(server.includes("buildExpectedBackupInventory"));
   assert(server.includes("dumpIncludedSchemas(dumpFlags)"));

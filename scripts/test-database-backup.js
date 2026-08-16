@@ -276,6 +276,16 @@ async function main() {
   const manualBackup = server.slice(server.indexOf("async function createDatabaseBackup(options"), server.indexOf("function listDatabaseBackups"));
   assert.match(manualBackup, /copyVerifiedVendorBackupToLocal/, "successful manual vendor backups must be copied to local storage");
   assert.match(manualBackup, /localBackupPath:\s*local\.localBackupPath/, "manual backup responses must report the actual local payload path");
+  assert.doesNotMatch(manualBackup, /Migration Maintenance|maintenanceCheckpoint|verifyMaintenanceCheckpointRemote/, "routine backups must not depend on the removed Migration Maintenance workflow");
+  assert.match(manualBackup, /verifyDatabaseTargetCheckpoint/, "routine backups must keep the exact selected battlegroup pinned throughout the operation");
+  assert.match(nativeBackup, /verifyDatabaseOfflineCheckpoint/, "standalone safety backups must repeatedly verify that the selected battlegroup remains offline");
+  const restoreWorkflow = server.slice(server.indexOf("function startDatabaseRestoreJob"), server.indexOf("const migrationExportJobs"));
+  assert.doesNotMatch(restoreWorkflow, /Migration Maintenance|migrationMaintenance|maintenanceCheckpoint|verifyMaintenanceCheckpointRemote/, "database import and restore must not depend on the removed Migration Maintenance workflow");
+  assert.match(restoreWorkflow, /verifyDatabaseOfflineCheckpoint/, "database import must revalidate the stopped battlegroup before destructive stages");
+  const schedulerBackup = server.slice(server.indexOf("function startVmSchedulerAction"), server.indexOf("function marketBotCatalog"));
+  assert.doesNotMatch(schedulerBackup, /migrationMaintenance|verifyMaintenanceCheckpointRemote/, "manual scheduler backups must not depend on the removed Migration Maintenance workflow");
+  const battlegroupActions = server.slice(server.indexOf("async function battlegroup(action"), server.indexOf("function serverControlConfigured"));
+  assert.doesNotMatch(battlegroupActions, /assertWorkflowActive\("Database backup"\)/, "the Server page backup action must not require Migration Maintenance Mode");
   assert(server.includes("createExpectedBackupInventory"));
   assert(server.includes("buildExpectedBackupInventory"));
   assert(server.includes("dumpIncludedSchemas(dumpFlags)"));

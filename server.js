@@ -3894,7 +3894,6 @@ function startVmSchedulerAction(action) {
   const definition = allowed.get(action);
   if (!definition) throw new Error("Unknown scheduler action.");
   if (action === "restart-now") assertWorkloadStartAllowed("run a scheduled battlegroup restart");
-  const checkpoint = action === "backup-now" ? migrationMaintenance.captureCheckpoint("Scheduled database backup") : null;
   const operation = operationRegistry.begin(definition.key, definition.title, {
     category: "scheduler",
     stage: action === "self-test" ? "Checking scheduler" : "Starting VM scheduler action",
@@ -3904,11 +3903,9 @@ function startVmSchedulerAction(action) {
   setImmediate(async () => {
     try {
       appendAdminAudit("vm_scheduler_action_started", { action, operationId: operation.id });
-      if (checkpoint) await verifyMaintenanceCheckpointRemote(checkpoint, "before scheduled backup execution");
       operationRegistry.update(operation, action === "self-test" ? "Running non-destructive checks" : "VM scheduler is working", "The job continues inside the Funcom VM.", { progress: action === "self-test" ? 35 : 15 });
       const result = await sshCommand(buildVmSchedulerActionCommand(action), definition.timeout, { maxBuffer: 1024 * 1024 * 4 });
       if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || `${definition.title} failed.`);
-      if (checkpoint) await verifyMaintenanceCheckpointRemote(checkpoint, "after scheduled backup execution");
       const status = await vmSchedulerStatus();
       const last = status.lastStatus || null;
       operationRegistry.update(operation, last?.message || "Scheduler action completed", last?.status || "Verified on the VM.", { progress: 100, logLine: JSON.stringify(last || status.selfTest || {}) });
@@ -4760,7 +4757,6 @@ async function battlegroup(action, options = {}) {
   const allowed = new Set(["status", "start", "restart", "stop", "update", "backup", "logs-export", "operator-logs-export"]);
   if (!allowed.has(action)) return { ok: false, error: "Unsupported action." };
   if (["start", "restart", "update"].includes(action)) assertWorkloadStartAllowed(`${action} the battlegroup`);
-  if (action === "backup") migrationMaintenance.assertWorkflowActive("Database backup");
   if (action !== "status") {
     const readiness = serverControlConfigured();
     if (!readiness.configured) {
@@ -7618,8 +7614,34 @@ function finishRestoreJob(job, status, result = {}) {
   if (job.operation) operationRegistry.finish(job.operation, status === "failed" ? "failed" : "success", job.error || "");
 }
 
+function databaseTargetCheckpoint(workflow, existing = null) {
+  if (existing) return existing;
+  const selected = loadConfig().selectedBattlegroup || {};
+  const namespace = String(selected.namespace || "").trim();
+  const name = String(selected.name || "").trim();
+  if (!namespace || !name) throw new Error("Select an exact battlegroup before running this database operation.");
+  return { kind: "database-target", workflow: String(workflow || "Database operation"), namespace, name, capturedAt: new Date().toISOString() };
+}
+
+function verifyDatabaseTargetCheckpoint(checkpoint, stage) {
+  if (!checkpoint || checkpoint.kind !== "database-target") throw new Error("Database target checkpoint is missing or invalid.");
+  const selected = loadConfig().selectedBattlegroup || {};
+  const namespace = String(selected.namespace || "").trim();
+  const name = String(selected.name || "").trim();
+  if (namespace !== checkpoint.namespace || name !== checkpoint.name) {
+    throw new Error(`Selected battlegroup changed at ${stage}; the database operation was aborted.`);
+  }
+  return { namespace, name, stage };
+}
+
+async function verifyDatabaseOfflineCheckpoint(checkpoint, stage) {
+  const target = verifyDatabaseTargetCheckpoint(checkpoint, stage);
+  const offline = await ensureBattlegroupOfflineForImport();
+  return { target, offline };
+}
+
 function startDatabaseRestoreJob(payload = {}) {
-  const maintenanceCheckpoint = migrationMaintenance.captureCheckpoint("Database import or restore");
+  const databaseCheckpoint = databaseTargetCheckpoint("Database import or restore");
   const jobId = `import-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   const operation = operationRegistry.begin("database:import", "Database Import", {
     category: "database",
@@ -7636,7 +7658,7 @@ function startDatabaseRestoreJob(payload = {}) {
     error: "",
     result: null,
     payload: { filePath: String(payload.filePath || ""), confirmText: String(payload.confirmText || "") },
-    maintenanceCheckpoint,
+    databaseCheckpoint,
     history: [],
     timeline: RESTORE_TIMELINE_STEPS
   };
@@ -8111,10 +8133,10 @@ async function inspectLocalBackupArchive(localPath, target, expectedInventory, o
 async function createNativeDatabaseBackup(options = {}) {
   const started = Date.now();
   const offlineCheckpoint = options.offlineCheckpoint || null;
-  const checkpoint = offlineCheckpoint || maintenanceCheckpoint("Verified database backup", options.maintenanceCheckpoint || null);
+  const databaseCheckpoint = offlineCheckpoint ? null : databaseTargetCheckpoint("Verified offline database backup", options.databaseCheckpoint || null);
   const verifySafetyCheckpoint = async (stage) => offlineCheckpoint
     ? migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, stage)
-    : verifyMaintenanceCheckpointRemote(checkpoint, stage);
+    : verifyDatabaseOfflineCheckpoint(databaseCheckpoint, stage);
   const folder = ensureDatabaseBackupDir();
   const finalPath = path.join(folder, nativeDatabaseBackupFilename(options.prefix || "full-safety-backup"));
   const partialPath = `${finalPath}.partial-${crypto.randomUUID()}`;
@@ -8220,12 +8242,12 @@ async function createNativeDatabaseBackup(options = {}) {
 
 async function createDatabaseBackup(options = {}) {
   const started = Date.now();
-  const checkpoint = maintenanceCheckpoint("Verified database backup", options.maintenanceCheckpoint || null);
-  options = { ...options, maintenanceCheckpoint: checkpoint };
+  const databaseCheckpoint = databaseTargetCheckpoint("Verified database backup", options.databaseCheckpoint || null);
+  options = { ...options, databaseCheckpoint };
   const timeout = Number(options.timeout || (options.safety ? 120000 : 240000));
   const isSafety = Boolean(options.safety);
   try {
-    await verifyMaintenanceCheckpointRemote(checkpoint, "before backup operation");
+    verifyDatabaseTargetCheckpoint(databaseCheckpoint, "before backup operation");
     if (isSafety || options.method === "native") return await createNativeDatabaseBackup(options);
     if (options.onStatus) options.onStatus("Starting", "Starting Battlegroup backup.");
     if (isSafety) {
@@ -8238,7 +8260,7 @@ async function createDatabaseBackup(options = {}) {
     }
     if (options.onStatus) options.onStatus("Ongoing", `Safety backup still running... 0s / ${Math.round(timeout / 1000)}s`);
     const result = await sshCommand(`/home/dune/.dune/bin/battlegroup backup`, timeout, { maxBuffer: 1024 * 1024 * 32 });
-    await verifyMaintenanceCheckpointRemote(checkpoint, "after vendor backup operation");
+    verifyDatabaseTargetCheckpoint(databaseCheckpoint, "after vendor backup operation");
     const combinedOutput = `${result.stdout || ""}\n${result.stderr || ""}`;
     const parsed = parseBattlegroupBackupOutput(combinedOutput);
     if (parsed.dumpOperationName) databaseBackupAudit("database_safety_backup_dump_operation", { operationName: parsed.dumpOperationName, phase: parsed.phase || "Unknown" });
@@ -8260,7 +8282,7 @@ async function createDatabaseBackup(options = {}) {
     let verification;
     try {
       operation = await waitForSuccessfulDatabaseOperation(parsed.dumpOperationName);
-      await verifyMaintenanceCheckpointRemote(checkpoint, "before vendor backup payload verification");
+      verifyDatabaseTargetCheckpoint(databaseCheckpoint, "before vendor backup payload verification");
       verification = await verifyVendorBackup(parsed, operation);
     } catch (verificationError) {
       databaseBackupAudit("battlegroup_backup_payload_rejected", {
@@ -8300,7 +8322,7 @@ async function createDatabaseBackup(options = {}) {
       stderr: result.stderr,
       note: "Backup was created by the vendor workflow, independently verified by AlphaNine, copied to the configured local backup folder, and verified again before publication."
     };
-    await verifyMaintenanceCheckpointRemote(checkpoint, "before vendor backup metadata publication");
+    verifyDatabaseTargetCheckpoint(databaseCheckpoint, "before vendor backup metadata publication");
     options.onStatus?.("Saving locally", "Copying the verified VM backup into the configured local backup folder.");
     const local = await copyVerifiedVendorBackupToLocal(
       vmBackup,
@@ -8716,7 +8738,6 @@ async function databaseImportReadiness(payload = {}) {
   const filePath = String(payload.filePath || "").trim();
   const activeJob = activeDatabaseImportJob();
   const conditions = {
-    maintenanceActive: false,
     backupSelected: Boolean(filePath),
     backupValid: false,
     backupResolved: false,
@@ -8740,16 +8761,13 @@ async function databaseImportReadiness(payload = {}) {
   const finish = (reasonCode, message) => {
     response.reasonCode = reasonCode;
     response.message = message;
-    response.canTypeConfirmation = Boolean(conditions.maintenanceActive && conditions.backupSelected && conditions.backupValid && conditions.backupResolved && conditions.backupAvailable && conditions.serverOffline && conditions.noImportRunning && conditions.statusKnown);
+    response.canTypeConfirmation = Boolean(conditions.backupSelected && conditions.backupValid && conditions.backupResolved && conditions.backupAvailable && conditions.serverOffline && conditions.noImportRunning && conditions.statusKnown);
     response.canImport = response.canTypeConfirmation;
     response.ok = response.canImport;
     if (!response.canImport) databaseBackupAudit("database_import_readiness", { import_disabled_reason: reasonCode, message, conditions, activeJobId: response.activeJobId });
     else databaseBackupAudit("database_import_readiness", { import_enabled: true, conditions });
     return response;
   };
-  const maintenance = migrationMaintenance.status();
-  conditions.maintenanceActive = maintenance.active && !maintenance.failClosed && !maintenance.sideEffectFree;
-  if (!conditions.maintenanceActive) return finish("maintenance_required", "Enter a healthy Migration Maintenance Mode locally before import or restore.");
   if (!conditions.backupSelected) return finish("no_backup_selected", "No backup selected.");
   try {
     const source = await resolveBattlegroupImportSource(filePath);
@@ -8842,11 +8860,11 @@ async function runDatabaseRestoreJob(job) {
   let importArg = "";
   let uploaded = false;
   try {
-    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before import preparation");
+    verifyDatabaseTargetCheckpoint(job.databaseCheckpoint, "before import preparation");
     restoreJobStep(job, "Preparing import");
     importSource = await resolveBattlegroupImportSource(filePath);
     restoreJobStep(job, "Checking Battlegroup offline");
-    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before import offline verification");
+    verifyDatabaseTargetCheckpoint(job.databaseCheckpoint, "before import offline verification");
     const offline = await ensureBattlegroupOfflineForImport();
     restoreJobStep(job, "Preparing backup source", { filePath, size: importSource.size, sourceType: importSource.sourceType, battlegroupStatus: offline.summary });
     if (importSource.sourceType === "vm") {
@@ -8870,18 +8888,18 @@ async function runDatabaseRestoreJob(job) {
       const remoteDir = await selectedBattlegroupDumpDir();
       restoreJobStep(job, "Uploading backup if needed", { filePath, size: importSource.size, remoteDir });
       remotePath = await copyBattlegroupImportFileToVm(importSource.path, { remoteDir });
-      await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "after import payload transfer");
+      await verifyDatabaseOfflineCheckpoint(job.databaseCheckpoint, "after import payload transfer");
       importArg = path.posix.basename(remotePath);
       uploaded = true;
     }
     restoreJobStep(job, "Backup source ready", { remotePath, importArg, sourceType: importSource.sourceType });
     restoreJobStep(job, "Creating safety backup");
-    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before import safety backup");
+    await verifyDatabaseOfflineCheckpoint(job.databaseCheckpoint, "before import safety backup");
     const safety = await createDatabaseBackup({
       prefix: "pre-import-safety",
       safety: true,
       timeout: 120000,
-      maintenanceCheckpoint: job.maintenanceCheckpoint,
+      databaseCheckpoint: job.databaseCheckpoint,
       onStatus: (status, detail) => restoreJobStep(job, "Creating safety backup", {
         safetyBackupStatus: status,
         verificationSubstep: `Safety backup: ${status}`,
@@ -8893,14 +8911,14 @@ async function runDatabaseRestoreJob(job) {
     if (!safety.file?.path || !fs.existsSync(safety.file.path)) throw new Error("Pre-import safety backup metadata could not be verified on disk.");
     restoreJobStep(job, "Safety backup verified", { safetyBackup: safety.file.path });
     restoreJobStep(job, "Importing Battlegroup backup");
-    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before database import");
+    await verifyDatabaseOfflineCheckpoint(job.databaseCheckpoint, "before database import");
     const result = await battlegroupImport({ remotePath, importArg, sourceType: importSource.sourceType, vmBackupDir: importSource.vmBackupDir, vmBackupFilename: importSource.vmBackupFilename }, {
       operationId: job.jobId,
       reason: "Explicit administrator database import",
       callSite: "server.js:runDatabaseRestoreJob"
     });
     if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Battlegroup import failed.");
-    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "after database import");
+    await verifyDatabaseOfflineCheckpoint(job.databaseCheckpoint, "after database import");
     restoreJobStep(job, "Verifying imported database", {
       pendingCondition: "database_status_query",
       gameServerOnlineRequired: false,
@@ -8925,7 +8943,7 @@ async function runDatabaseRestoreJob(job) {
       currentSubstep: () => verificationSubstep,
       currentCommand: () => verificationCommand
     }, 30000);
-    await verifyMaintenanceCheckpointRemote(job.maintenanceCheckpoint, "before import verification publication");
+    await verifyDatabaseOfflineCheckpoint(job.databaseCheckpoint, "before import verification publication");
     databaseBackupAudit("battlegroup_import_verified", { jobId: job.jobId, verification });
     const response = { ok: true, status: "success", message: "Import completed successfully. You may now start the server.", durationMs: Date.now() - started, elapsed: readableDuration(Date.now() - started), importedFrom: filePath, remotePath, importArg, sourceType: importSource.sourceType, safetyBackup: safety.file, verification, stdout: result.stdout.slice(-4000), stderr: result.stderr.slice(-4000), logPath: ADMIN_AUDIT_LOG };
     finishRestoreJob(job, "success", response);
@@ -22822,7 +22840,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
       </div>
       <div class="layout-3 mt">
         <div class="panel pad">
-          <div class="panel-head"><div><div class="label">Backup Manager</div><div class="subtle">Create and manage safe Battlegroup backups before risky changes.</div></div></div>
+          <div class="panel-head"><div><div class="label">Backup Manager</div><div class="subtle">Create Backup works while the battlegroup is running. Safety Backup requires the battlegroup stopped while the VM remains running.</div></div></div>
           <div class="action-row mt">
             <button class="primary" onclick="createDatabaseBackup()">Create Backup</button>
             <button onclick="createSafetyBackupOnly()">Create Safety Backup Only</button>
@@ -24077,7 +24095,7 @@ async function chooseDatabaseBackupFolder(){try{let folder="";if(window.alphaNin
 async function openDatabaseBackupFolder(){try{const folder=document.getElementById("dbBackupPath")?.textContent||"";if(window.alphaNineSuite?.openPath)await window.alphaNineSuite.openPath(folder);else window.open("file:///"+folder.replace(/\\\\/g,"/"),"_blank");}catch(e){setText("dbLocationResult",betterError(e));}}
 async function resetDatabaseBackupFolder(){try{const data=await getJson("/api/database/backup-location",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reset:true})});renderDatabaseLocation(data);setText("dbLocationResult","Backup folder reset: "+data.folder);await refreshDatabaseBackups();playUiSound("success");}catch(e){setText("dbLocationResult",betterError(e));playUiSound("warning");}}
 async function createDatabaseBackup(){const el=document.getElementById("dbBackupResult");try{el.className="empty mt";el.textContent="Creating and saving Battlegroup backup locally...";const data=await getJson("/api/database/backup",{method:"POST",timeoutMs:900000});if(!data.ok)throw new Error(data.error||"Backup failed.");el.className="empty mt";el.textContent="Battlegroup backup created and saved locally.\\nBackup: "+(data.backupName||data.backupId||"--")+"\\nVM path: "+(data.vmPath||"Not reported by Battlegroup command")+"\\nLocal backup: "+(data.localBackupPath||data.filePath||"--")+"\\nLocal metadata: "+(data.localMetadataPath||"--")+"\\nStorage: "+(data.storage||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data))+"\\n\\nOutput:\\n"+(data.output||data.stderr||"--");addActivity("database","Battlegroup backup saved locally",data.localBackupPath||data.filePath||data.backupName||data.backupId);await refreshDatabaseBackups();playUiSound("success");}catch(e){el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup backup failed",e.message);playUiSound("warning");}}
-async function createSafetyBackupOnly(){const el=document.getElementById("dbBackupResult");let timer=null;const started=Date.now();try{el.className="warning mt";el.textContent="Safety backup: Starting";timer=setInterval(()=>{const seconds=Math.floor((Date.now()-started)/1000);el.textContent="Safety backup still running... "+Math.min(seconds,120)+"s / 120s";},1000);const data=await getJson("/api/database/safety-backup",{method:"POST",timeoutMs:130000});if(timer){clearInterval(timer);timer=null;}if(!data.ok)throw new Error(data.error||"Safety backup failed.");el.className="empty mt";el.textContent="Safety backup succeeded.\\nOperation: "+(data.dumpOperationName||"--")+"\\nPhase: "+(data.phase||"Succeeded")+"\\nVM path: "+(data.vmPath||"Not reported by Battlegroup command")+"\\nLocal metadata: "+(data.localMetadataPath||data.filePath||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data));addActivity("database","Safety backup succeeded",data.dumpOperationName||data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){if(timer)clearInterval(timer);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Safety backup failed",e.message);playUiSound("warning");}}
+async function createSafetyBackupOnly(){const el=document.getElementById("dbBackupResult");let timer=null;const started=Date.now();try{el.className="warning mt";el.textContent="Safety backup: verifying the battlegroup is stopped...";timer=setInterval(()=>{const seconds=Math.floor((Date.now()-started)/1000);el.textContent="Safety backup still running... "+Math.min(seconds,120)+"s / 120s";},1000);const data=await getJson("/api/database/safety-backup",{method:"POST",timeoutMs:130000});if(timer){clearInterval(timer);timer=null;}if(!data.ok)throw new Error(data.error||"Safety backup failed.");el.className="empty mt";el.textContent="Safety backup succeeded.\\nPhase: "+(data.phase||"Succeeded")+"\\nLocal backup: "+(data.filePath||"--")+"\\nLocal metadata: "+(data.localMetadataPath||"--")+"\\nElapsed: "+(data.elapsed||restoreElapsed(data));addActivity("database","Safety backup succeeded",data.filePath);await refreshDatabaseBackups();playUiSound("success");}catch(e){if(timer)clearInterval(timer);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Safety backup failed",e.message);playUiSound("warning");}}
 async function chooseDatabaseRestoreFile(){try{let filePath="";if(window.alphaNineSuite?.chooseDatabaseBackupFile){const result=await window.alphaNineSuite.chooseDatabaseBackupFile();if(result?.canceled)return;filePath=result.filePath||"";}else{throw new Error("File picker is not available in this desktop build.");}if(filePath)document.getElementById("dbRestoreFile").value=filePath;await refreshDatabaseImportReadiness();}catch(e){setText("dbRestoreResult",betterError(e));}}
 function selectDatabaseRestoreBackup(index){const row=(window.databaseBackupRows||[])[index];if(!row)return;document.getElementById("dbRestoreFile").value=row.path;document.getElementById("dbRestoreConfirm").value="";const vmPath=row.vmBackupPath||row.vmPath;const detail=vmPath?("Selected metadata: "+row.path+"\\nResolved VM backup: "+vmPath+"\\nImport argument: "+(row.vmBackupFilename||vmPath.split('/').pop())):("Selected backup file: "+row.path);document.getElementById("dbRestoreResult").textContent=detail+"\\nStop the server and type IMPORT before importing.";refreshDatabaseImportReadiness();}
 function copyDatabaseBackupPath(index){const row=(window.databaseBackupRows||[])[index];if(row)copyTextToClipboard(row.path);}

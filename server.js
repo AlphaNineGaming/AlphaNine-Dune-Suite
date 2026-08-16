@@ -8030,7 +8030,7 @@ async function inspectRemoteBackupArchive(remotePath, target, expectedInventory)
   ].join("; ");
   const result = await sshCommand(remote, 10 * 60 * 1000, { maxBuffer: 1024 * 1024 * 64 });
   if (!result.ok) throw new Error(`Matching-version pg_restore rejected or could not fully read the vendor archive: ${shortOutput(result.stderr || result.error || "archive inspection failed")}`);
-  return { ...validateFullBackupToc(result.stdout, expectedInventory), archiveReadVerified: true };
+  return { ...validateFullBackupToc(result.stdout, expectedInventory, { requiredAlphaTables: [] }), archiveReadVerified: true };
 }
 
 async function verifyVendorBackup(parsed, operation) {

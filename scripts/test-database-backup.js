@@ -153,6 +153,7 @@ async function main() {
   assert.deepStrictEqual(cleanParsed.filter((entry) => entry.descriptor === "EXTENSION").map((entry) => entry.fields[1]), ["pgcrypto", "pg_trgm"], "ownerless extension TOC entries must retain their semantic name");
   assert.deepStrictEqual(cleanParsed.filter((entry) => entry.descriptor === "COMMENT").map((entry) => entry.fields.at(-1)), ["pgcrypto", "pg_trgm"], "ownerless extension comments must retain their semantic target");
   const cleanFull = `${cleanDestinationSchema}\n${tocLine(710, "TABLE DATA", "dune bootstrap_marker")}`;
+  assert.strictEqual(validateFullBackupToc(cleanFull, cleanInventory).valid, true, "ordinary Funcom backups must not require optional AlphaNine Market Bot tables");
   assert.strictEqual(validateFullBackupToc(cleanFull, cleanInventory, { requiredAlphaTables: [] }).valid, true);
   assert.throws(() => validateSchemaOnlyBackupToc(cleanDestinationSchema, { validationProfile: BACKUP_INVENTORY_PROFILES.MIGRATION_PACKAGE }), /outside dune \(COMMENT=2, EXTENSION=2, SCHEMA=1\)/, "migration-package validation must reject the exact clean-destination outside-dune descriptors");
   assert.throws(() => buildExpectedBackupInventory(cleanDestinationSchema.replace(`${tocLine(704, "EXTENSION", "- pgcrypto", null)}\n`, ""), cleanCatalog, { validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK }), /missing required extension objects: pgcrypto/);
@@ -279,6 +280,8 @@ async function main() {
   assert.match(vendorLocalCopy, /hashDatabaseBackupFile\(finalPath\)[\s\S]*publishedComponent\.size[^\n]+verification\.size[\s\S]*publishedComponent\.sha256[^\n]+verification\.sha256/, "the atomically published local file must be independently re-hashed against the VM artifact");
   assert(vendorLocalCopy.indexOf("publishVerifiedPackage") < vendorLocalCopy.indexOf("writeDatabaseBackupJsonAtomic"), "manual vendor backup metadata must be published only after the local payload is atomically published");
   assert.match(vendorLocalCopy, /type:\s*"verified-database-backup"[\s\S]*localBackupPath:\s*finalPath[\s\S]*storage:\s*"vm\+local"/, "manual vendor backups must be listed and restorable as verified local payloads");
+  const remoteVendorInspection = server.slice(server.indexOf("async function inspectRemoteBackupArchive"), server.indexOf("async function verifyVendorBackup"));
+  assert.match(remoteVendorInspection, /requiredAlphaTables:\s*\[\]/, "real Funcom VM archives must be checked against their actual catalog without optional Suite-table requirements");
   const standardConnection = server.slice(server.indexOf("async function standardVmSshConnection"), server.indexOf("async function serverHealthRemoteCheck"));
   assert.doesNotMatch(standardConnection, /migration|known.?host|UserKnownHostsFile/i, "normal Suite SSH must not depend on migration-only pinned known-host files");
   const completeBackupFeature = server.slice(server.indexOf("async function databaseBackupSshConnection"), server.indexOf("function listDatabaseBackups"));

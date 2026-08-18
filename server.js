@@ -3997,12 +3997,28 @@ async function marketBotStatus(options = {}) {
   const localConfig = localMarketBotConfig();
   const result = await sshCommand(buildMarketBotStatusCommand(), 45000, { maxBuffer: 1024 * 1024 * 8 });
   if (!result.ok) {
+    let remoteFailure = null;
+    try { remoteFailure = parseMarketBotJson(result.stdout); } catch {}
+    if (remoteFailure?.ok === false && (remoteFailure.error || remoteFailure.message)) {
+      const message = String(remoteFailure.error || remoteFailure.message);
+      return {
+        ...remoteFailure,
+        ok: false,
+        installed: true,
+        reachable: true,
+        status: "Error",
+        message,
+        error: message,
+        localConfig: publicMarketBotLocal(localConfig),
+        expectedVersion: APP_VERSION
+      };
+    }
     return {
       ok: false,
       installed: false,
       reachable: false,
       status: "Waiting for Exchange",
-      message: result.error || result.stderr || "The Market Bot VM is unavailable.",
+      message: result.stderr || result.error || "The Market Bot VM is unavailable.",
       localConfig: publicMarketBotLocal(localConfig),
       expectedVersion: APP_VERSION
     };

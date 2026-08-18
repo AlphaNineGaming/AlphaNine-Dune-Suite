@@ -98,6 +98,42 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+func TestCanonicalConfigFingerprintMatchesSuiteGolden(t *testing.T) {
+	cfg := Config{
+		SchemaVersion:   2,
+		Battlegroup:     "abc",
+		Namespace:       "funcom-seabass-abc",
+		DBPod:           "db-0",
+		DBService:       "db",
+		EconomyStyle:    "Expensive",
+		IntervalMinutes: 30,
+		ExpiryDays:      3,
+		Safety: SafetyConfig{
+			MaxCreatesPerCycle: 25,
+			MaxMarketValue:     25000000,
+		},
+		Items: []ItemPolicy{{
+			ID:             "Item_1",
+			Name:           "Salt & Pepper <Special>",
+			Category:       "Items",
+			Tier:           "Tier 1",
+			Enabled:        true,
+			UnitPrice:      100,
+			StackSize:      1,
+			TargetListings: 1,
+			CategoryMask:   1,
+			CategoryDepth:  1,
+		}},
+	}
+	got, err := canonicalConfigFingerprint(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "266f2e49ca6f37c2a73594b75687e8f1f1b812956812a666219da385ddea23ee" {
+		t.Fatalf("Go fingerprint no longer matches the Suite golden: %s", got)
+	}
+}
+
 func TestPreviewUsesReadOnlyProductionPlanner(t *testing.T) {
 	sql := reconciliationSQL(testConfig(), "preview-test", false)
 	for _, expected := range []string{

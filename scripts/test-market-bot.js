@@ -33,6 +33,7 @@ const {
 } = require("../lib/market-bot");
 
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+assert.match(serverSource, /remoteFailure = parseMarketBotJson\(result\.stdout\)[\s\S]*remoteFailure\?\.ok === false/, "failed status probes must surface the bot's structured validation error instead of the raw SSH command");
 const goSource = fs.readFileSync(path.join(__dirname, "..", "market-bot", "main.go"), "utf8");
 const runtimeBinary = fs.readFileSync(path.join(__dirname, "..", "assets", "market-bot", "linux-amd64", "alphanine-market-bot"));
 assert.equal(
@@ -148,8 +149,44 @@ const testCategorySeed = {
   assert.equal(item.stackSize, 7);
   assert.equal(item.targetListings, 3);
   assert.equal(runtime.items.length, catalog.length, "runtime plan must never truncate the catalog");
+  assert(!runtime.items.some((row) => Object.prototype.hasOwnProperty.call(row, "sources")), "runtime policy must exclude Suite-only pricing provenance");
   assert.match(runtime.configFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(activationFingerprint(runtime), activationFingerprint({ ...runtime, generatedAt: "later" }), "fingerprint must ignore volatile timestamps");
+  assert.equal(
+    activationFingerprint(runtime),
+    activationFingerprint({ ...runtime, items: runtime.items.map((item) => ({ ...item, sources: { unitPrice: "Suite-only metadata" } })) }),
+    "fingerprint must include only fields decoded by the Go runtime"
+  );
+}
+
+{
+  const runtime = {
+    schemaVersion: 2,
+    enabled: false,
+    activated: false,
+    battlegroup: "abc",
+    namespace: "funcom-seabass-abc",
+    dbPod: "db-0",
+    dbService: "db",
+    economyStyle: "Expensive",
+    listingCategory: "",
+    intervalMinutes: 30,
+    expiryDays: 3,
+    safety: { maxCreatesPerCycle: 25, maxMarketValuePerCycle: 25000000 },
+    items: [{
+      id: "Item_1",
+      name: "Salt & Pepper <Special>",
+      category: "Items",
+      tier: "Tier 1",
+      enabled: true,
+      unitPrice: 100,
+      stackSize: 1,
+      targetListings: 1,
+      categoryMask: 1,
+      categoryDepth: 1
+    }]
+  };
+  assert.equal(activationFingerprint(runtime), "266f2e49ca6f37c2a73594b75687e8f1f1b812956812a666219da385ddea23ee", "Suite fingerprint serialization must match Go encoding/json");
 }
 
 {

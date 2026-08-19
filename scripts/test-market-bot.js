@@ -75,6 +75,8 @@ const testCategorySeed = {
   assert.equal(config.activated, false);
   assert.equal(config.economyStyle, "Expensive");
   assert.equal(config.listingCategory, "");
+  assert.equal(config.playerBuying.enabled, false, "player buying must be opt-in");
+  assert.equal(config.playerBuying.chancePercent, 10);
   const policies = buildItemPolicies(catalog, config, testCategorySeed);
   assert.equal(policies.length, 3);
   assert.equal(policies[0].targetListings, 1);
@@ -173,7 +175,7 @@ const testCategorySeed = {
 
 {
   const runtime = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     enabled: false,
     activated: false,
     battlegroup: "abc",
@@ -185,6 +187,7 @@ const testCategorySeed = {
     intervalMinutes: 30,
     expiryDays: 3,
     safety: { maxCreatesPerCycle: 25, maxMarketValuePerCycle: 25000000 },
+    playerBuying: { enabled: false, chancePercent: 10, maxPurchasesPerCycle: 1, maxUnitPrice: 100000, maxSpendPerCycle: 100000 },
     items: [{
       id: "Item_1",
       name: "Salt & Pepper <Special>",
@@ -198,7 +201,14 @@ const testCategorySeed = {
       categoryDepth: 1
     }]
   };
-  assert.equal(activationFingerprint(runtime), "266f2e49ca6f37c2a73594b75687e8f1f1b812956812a666219da385ddea23ee", "Suite fingerprint serialization must match Go encoding/json");
+  assert.equal(activationFingerprint(runtime), "db5c3a29ec2127b194b491ee5f1aa858e7d33b487e0273544a4e91d2a9b1c783", "Suite fingerprint serialization must match Go encoding/json");
+}
+
+{
+  const enabled = normalizeConfig({ playerBuying: { enabled: true, chancePercent: 35, maxPurchasesPerCycle: 4, maxUnitPrice: 25000, maxSpendPerCycle: 60000 } });
+  assert.deepEqual(enabled.playerBuying, { enabled: true, chancePercent: 35, maxPurchasesPerCycle: 4, maxUnitPrice: 25000, maxSpendPerCycle: 60000 });
+  assert.throws(() => normalizeConfig({ playerBuying: { chancePercent: 0 } }), /chance/);
+  assert.throws(() => normalizeConfig({ playerBuying: { maxPurchasesPerCycle: 21 } }), /purchases/);
 }
 
 {
@@ -286,7 +296,7 @@ const testCategorySeed = {
   const policy = pinnedCatalogPolicy(buildItemPolicies(catalog, normalizeConfig({}), testCategorySeed).map(({ sources, ...item }) => item));
   const target = { name: "abc", namespace: "funcom-seabass-abc", dbPod: "db-0", dbSvc: "db" };
   const config = runtimeConfig(normalizeConfig({
-    schemaVersion: 2,
+    schemaVersion: 3,
     enabled: true,
     activated: true,
     paused: true,
@@ -332,7 +342,8 @@ const testCategorySeed = {
   assert(serverSource.includes('"/api/market-bot/prepare"'), "staged activation API is missing");
   assert(serverSource.includes("Legacy Market Automator is locked while persistent Market Bot is activated."), "legacy/new concurrency guard is missing");
   assert(serverSource.includes("delegated-to-market-bot"), "unsafe Suite-side cleanup was not disabled");
-  assert(serverSource.includes("Legacy automated buying is disabled because Market Bot never modifies player listings."), "player-listing buyer path is not disabled");
+  assert(serverSource.includes("Legacy automated buying is disabled"), "unsafe Suite-side legacy buyer path is not disabled");
+  assert(serverSource.includes('id="marketBotPlayerBuyingEnabled"') && serverSource.includes('"/api/market-bot/player-buying"'), "persistent bounded player buyer controls are missing");
   assert(serverSource.includes("if (status.installed && status.updateRequired) return installMarketBot(config);"), "installed paused Market Bots must receive versioned migrations during Suite startup");
   assert(serverSource.includes("Legacy arbitrary listing removal is disabled."), "arbitrary listing removal path is not disabled");
   assert(serverSource.includes('id="market" class="view"') && serverSource.includes("Persistent Market Bot"), "primary Market Bot UI is missing");
@@ -364,7 +375,7 @@ const testCategorySeed = {
   assert(goSource.includes("set owner_id=(select id from selected_duke)"), "tracked legacy Market Bot orders must migrate to the native actor");
   assert(goSource.includes("not exists(select 1 from prior_cycle)"), "cycle idempotency gate is missing");
   assert(goSource.includes("extract(epoch from clock_timestamp())"), "database-clock fallback is missing");
-  assert(goSource.includes("Player listings are never changed."), "planner safety warning is missing");
+  assert(goSource.includes("Only verified player-owned active sell listings are eligible for opt-in random purchases."), "player buyer safety warning is missing");
   assert(goSource.includes("p.category_mask,p.category_depth"), "listing inserts must use verified category metadata");
   assert(goSource.includes("o.category_mask>0 and o.category_depth>0"), "invisible listings must not count as active");
   assert(goSource.includes("o.category_mask<=0 or o.category_depth<=0"), "owned invisible listings must be repaired");
@@ -375,7 +386,7 @@ const testCategorySeed = {
   assert(!goSource.includes("),1)::bigint access_point_id"), "Market Bot must not invent access point id 1");
   assert(!/p\.template_id,1\.0,1\.0,0,0,p\.unit_price/.test(goSource), "Market Bot must not create zero-mask listings");
   assert(serverSource.includes("Restart-VM -Force"), "VM restart must be non-interactive");
-  assert(!/delete from dune\.[^\n]+\n[\s\S]{0,300}is_npc_order=false/i.test(goSource), "Market Bot contains a player-listing delete path");
+  assert(goSource.includes("player_buying_enabled and (random()*100)<player_buy_chance"), "player listing purchases must remain behind the explicit random buyer gate");
 }
 
 console.log("Persistent Market Bot config, migration, pricebook, installer, and CSV tests passed.");

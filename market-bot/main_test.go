@@ -14,7 +14,7 @@ import (
 
 func testConfig() Config {
 	cfg := Config{
-		SchemaVersion:     2,
+		SchemaVersion:     3,
 		RuntimeVersion:    runtimeVersion,
 		ConfigGeneration:  "900719925474099312345678901234567890",
 		PauseGeneration:   "900719925474099312345678901234567889",
@@ -30,6 +30,10 @@ func testConfig() Config {
 		Safety: SafetyConfig{
 			MaxCreatesPerCycle: 10,
 			MaxMarketValue:     1000000,
+		},
+		PlayerBuying: PlayerBuyingConfig{
+			Enabled: false, ChancePercent: 10, MaxPurchasesPerCycle: 1,
+			MaxUnitPrice: 100000, MaxSpendPerCycle: 100000,
 		},
 		Items: []ItemPolicy{{
 			ID:             "Item_Test",
@@ -100,7 +104,7 @@ func TestConfigValidation(t *testing.T) {
 
 func TestCanonicalConfigFingerprintMatchesSuiteGolden(t *testing.T) {
 	cfg := Config{
-		SchemaVersion:   2,
+		SchemaVersion:   3,
 		Battlegroup:     "abc",
 		Namespace:       "funcom-seabass-abc",
 		DBPod:           "db-0",
@@ -111,6 +115,10 @@ func TestCanonicalConfigFingerprintMatchesSuiteGolden(t *testing.T) {
 		Safety: SafetyConfig{
 			MaxCreatesPerCycle: 25,
 			MaxMarketValue:     25000000,
+		},
+		PlayerBuying: PlayerBuyingConfig{
+			Enabled: false, ChancePercent: 10, MaxPurchasesPerCycle: 1,
+			MaxUnitPrice: 100000, MaxSpendPerCycle: 100000,
 		},
 		Items: []ItemPolicy{{
 			ID:             "Item_1",
@@ -129,8 +137,17 @@ func TestCanonicalConfigFingerprintMatchesSuiteGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "266f2e49ca6f37c2a73594b75687e8f1f1b812956812a666219da385ddea23ee" {
+	if got != "db5c3a29ec2127b194b491ee5f1aa858e7d33b487e0273544a4e91d2a9b1c783" {
 		t.Fatalf("Go fingerprint no longer matches the Suite golden: %s", got)
+	}
+	cfg.SchemaVersion = 2
+	cfg.PlayerBuying = PlayerBuyingConfig{}
+	legacyGot, err := canonicalConfigFingerprint(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyGot != "266f2e49ca6f37c2a73594b75687e8f1f1b812956812a666219da385ddea23ee" {
+		t.Fatalf("schema-2 compatibility fingerprint changed: %s", legacyGot)
 	}
 }
 
@@ -180,8 +197,23 @@ func TestExecuteIsOwnedLockedAndIdempotent(t *testing.T) {
 			t.Fatalf("execution SQL missing %q", expected)
 		}
 	}
-	if strings.Contains(sql, "o.is_npc_order = false") {
-		t.Fatal("execution planner contains a player-listing mutation predicate")
+	for _, expected := range []string{
+		"player_buying_enabled and (random()*100)<player_buy_chance",
+		"o.is_npc_order=false",
+		"a.owner_account_id is not null",
+		"join dune.accounts acct on acct.id=a.owner_account_id",
+		"history.order_id is null",
+		"max_player_purchases",
+		"max_player_unit_price",
+		"max_player_spend",
+		"insert into dune.dune_exchange_fulfilled_orders",
+		"update dune.dune_exchange_users",
+		"owner_id=(select id from bot_actor)",
+		"'player_listings_purchased'",
+	} {
+		if !strings.Contains(sql, expected) {
+			t.Fatalf("player buyer SQL missing %q", expected)
+		}
 	}
 }
 

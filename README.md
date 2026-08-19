@@ -28,6 +28,13 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.98
+
+- Added an optional random player-listing buyer to the persistent Market Bot. It is disabled by default and requires explicit confirmation.
+- Added per-cycle purchase probability, purchase-count, unit-price, and total-spend limits.
+- Purchases require strict player ownership and active-listing evidence, pay the seller through the native Exchange fulfillment shape, and are recorded in the Market Bot audit log.
+- Clean Bot Market and Uninstall Bot remain restricted to tracked bot-owned listings and never delete player listings.
+
 ### 1.0.84
 
 - Self-updates now require the SHA-256 digest and exact file size published by GitHub before the Install Update button is enabled.
@@ -69,7 +76,7 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 - Replaced the Suite-process market scheduler with a persistent Linux/amd64 Market Bot installed and supervised inside the Dune VM.
 - Added exact all-item preview, Affordable/Balanced/Expensive pricebooks, per-item target-stock reconciliation, constrained item customization, CSV export, and live status.
-- Added a database advisory lock, strict ownership metadata, idempotent transactional cycles, creation/value caps, and a hard rule that player and untracked listings are never changed.
+- Added a database advisory lock, strict ownership metadata, idempotent transactional cycles, creation/value caps, and strict protection against arbitrary changes to player and untracked listings.
 - Added preview-confirmed migration that preserves the Legacy Market Automator configuration and existing listings without activating automatically.
 
 ### 1.0.70

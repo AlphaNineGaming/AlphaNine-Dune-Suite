@@ -27,6 +27,14 @@ type SafetyConfig struct {
 	MaxMarketValue     int64 `json:"maxMarketValuePerCycle"`
 }
 
+type PlayerBuyingConfig struct {
+	Enabled              bool  `json:"enabled"`
+	ChancePercent        int   `json:"chancePercent"`
+	MaxPurchasesPerCycle int   `json:"maxPurchasesPerCycle"`
+	MaxUnitPrice         int64 `json:"maxUnitPrice"`
+	MaxSpendPerCycle     int64 `json:"maxSpendPerCycle"`
+}
+
 type ItemPolicy struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
@@ -41,26 +49,27 @@ type ItemPolicy struct {
 }
 
 type Config struct {
-	SchemaVersion     int          `json:"schemaVersion"`
-	RuntimeVersion    string       `json:"runtimeVersion"`
-	Enabled           bool         `json:"enabled"`
-	Paused            bool         `json:"paused"`
-	PauseState        string       `json:"pauseState"`
-	ConfigGeneration  string       `json:"configGeneration"`
-	PauseGeneration   string       `json:"pauseGeneration"`
-	ConfigFingerprint string       `json:"configFingerprint"`
-	Activated         bool         `json:"activated"`
-	Battlegroup       string       `json:"battlegroup"`
-	Namespace         string       `json:"namespace"`
-	DBPod             string       `json:"dbPod"`
-	DBService         string       `json:"dbService"`
-	ExchangeName      string       `json:"exchangeName"`
-	EconomyStyle      string       `json:"economyStyle"`
-	ListingCategory   string       `json:"listingCategory"`
-	IntervalMinutes   int          `json:"intervalMinutes"`
-	ExpiryDays        int          `json:"expiryDays"`
-	Safety            SafetyConfig `json:"safety"`
-	Items             []ItemPolicy `json:"items"`
+	SchemaVersion     int                `json:"schemaVersion"`
+	RuntimeVersion    string             `json:"runtimeVersion"`
+	Enabled           bool               `json:"enabled"`
+	Paused            bool               `json:"paused"`
+	PauseState        string             `json:"pauseState"`
+	ConfigGeneration  string             `json:"configGeneration"`
+	PauseGeneration   string             `json:"pauseGeneration"`
+	ConfigFingerprint string             `json:"configFingerprint"`
+	Activated         bool               `json:"activated"`
+	Battlegroup       string             `json:"battlegroup"`
+	Namespace         string             `json:"namespace"`
+	DBPod             string             `json:"dbPod"`
+	DBService         string             `json:"dbService"`
+	ExchangeName      string             `json:"exchangeName"`
+	EconomyStyle      string             `json:"economyStyle"`
+	ListingCategory   string             `json:"listingCategory"`
+	IntervalMinutes   int                `json:"intervalMinutes"`
+	ExpiryDays        int                `json:"expiryDays"`
+	Safety            SafetyConfig       `json:"safety"`
+	PlayerBuying      PlayerBuyingConfig `json:"playerBuying"`
+	Items             []ItemPolicy       `json:"items"`
 }
 
 type State struct {
@@ -370,7 +379,7 @@ func readConfig(file string) (Config, error) {
 }
 
 func validateConfig(cfg Config) error {
-	if cfg.SchemaVersion != 1 && cfg.SchemaVersion != 2 {
+	if cfg.SchemaVersion != 1 && cfg.SchemaVersion != 2 && cfg.SchemaVersion != 3 {
 		return fmt.Errorf("unsupported config schema %d", cfg.SchemaVersion)
 	}
 	if cfg.SchemaVersion >= 2 && (!validGeneration(cfg.ConfigGeneration) || !validGeneration(cfg.PauseGeneration)) {
@@ -402,6 +411,17 @@ func validateConfig(cfg Config) error {
 	if cfg.Safety.MaxMarketValue < 1 {
 		return errors.New("maxMarketValuePerCycle must be positive")
 	}
+	if cfg.SchemaVersion >= 3 {
+		if cfg.PlayerBuying.ChancePercent < 1 || cfg.PlayerBuying.ChancePercent > 100 {
+			return errors.New("playerBuying.chancePercent must be from 1 to 100")
+		}
+		if cfg.PlayerBuying.MaxPurchasesPerCycle < 1 || cfg.PlayerBuying.MaxPurchasesPerCycle > 20 {
+			return errors.New("playerBuying.maxPurchasesPerCycle must be from 1 to 20")
+		}
+		if cfg.PlayerBuying.MaxUnitPrice < 1 || cfg.PlayerBuying.MaxSpendPerCycle < 1 {
+			return errors.New("playerBuying price and spend limits must be positive")
+		}
+	}
 	seen := map[string]bool{}
 	for _, item := range cfg.Items {
 		if item.ID == "" || len(item.ID) > 240 || strings.ContainsAny(item.ID, "\r\n\t") {
@@ -420,24 +440,52 @@ func validateConfig(cfg Config) error {
 }
 
 func canonicalConfigFingerprint(cfg Config) (string, error) {
+	if cfg.SchemaVersion < 3 {
+		legacy := struct {
+			SchemaVersion   int          `json:"schemaVersion"`
+			Enabled         bool         `json:"enabled"`
+			Activated       bool         `json:"activated"`
+			Battlegroup     string       `json:"battlegroup"`
+			Namespace       string       `json:"namespace"`
+			DBPod           string       `json:"dbPod"`
+			DBService       string       `json:"dbService"`
+			EconomyStyle    string       `json:"economyStyle"`
+			ListingCategory string       `json:"listingCategory"`
+			IntervalMinutes int          `json:"intervalMinutes"`
+			ExpiryDays      int          `json:"expiryDays"`
+			Safety          SafetyConfig `json:"safety"`
+			Items           []ItemPolicy `json:"items"`
+		}{
+			cfg.SchemaVersion, cfg.Enabled, cfg.Activated, cfg.Battlegroup, cfg.Namespace,
+			cfg.DBPod, cfg.DBService, cfg.EconomyStyle, cfg.ListingCategory, cfg.IntervalMinutes,
+			cfg.ExpiryDays, cfg.Safety, cfg.Items,
+		}
+		body, err := json.Marshal(legacy)
+		if err != nil {
+			return "", err
+		}
+		hash := sha256.Sum256(body)
+		return fmt.Sprintf("%x", hash[:]), nil
+	}
 	stable := struct {
-		SchemaVersion   int          `json:"schemaVersion"`
-		Enabled         bool         `json:"enabled"`
-		Activated       bool         `json:"activated"`
-		Battlegroup     string       `json:"battlegroup"`
-		Namespace       string       `json:"namespace"`
-		DBPod           string       `json:"dbPod"`
-		DBService       string       `json:"dbService"`
-		EconomyStyle    string       `json:"economyStyle"`
-		ListingCategory string       `json:"listingCategory"`
-		IntervalMinutes int          `json:"intervalMinutes"`
-		ExpiryDays      int          `json:"expiryDays"`
-		Safety          SafetyConfig `json:"safety"`
-		Items           []ItemPolicy `json:"items"`
+		SchemaVersion   int                `json:"schemaVersion"`
+		Enabled         bool               `json:"enabled"`
+		Activated       bool               `json:"activated"`
+		Battlegroup     string             `json:"battlegroup"`
+		Namespace       string             `json:"namespace"`
+		DBPod           string             `json:"dbPod"`
+		DBService       string             `json:"dbService"`
+		EconomyStyle    string             `json:"economyStyle"`
+		ListingCategory string             `json:"listingCategory"`
+		IntervalMinutes int                `json:"intervalMinutes"`
+		ExpiryDays      int                `json:"expiryDays"`
+		Safety          SafetyConfig       `json:"safety"`
+		PlayerBuying    PlayerBuyingConfig `json:"playerBuying"`
+		Items           []ItemPolicy       `json:"items"`
 	}{
 		cfg.SchemaVersion, cfg.Enabled, cfg.Activated, cfg.Battlegroup, cfg.Namespace,
 		cfg.DBPod, cfg.DBService, cfg.EconomyStyle, cfg.ListingCategory, cfg.IntervalMinutes,
-		cfg.ExpiryDays, cfg.Safety, cfg.Items,
+		cfg.ExpiryDays, cfg.Safety, cfg.PlayerBuying, cfg.Items,
 	}
 	body, err := json.Marshal(stable)
 	if err != nil {
@@ -1261,7 +1309,10 @@ begin;
 with
 settings as (
   select %s::text cycle_id, 'execute'::text mode,
-         %d::integer max_creates, %d::bigint max_value, %d::bigint expiry_seconds
+         %d::integer max_creates, %d::bigint max_value, %d::bigint expiry_seconds,
+         %t::boolean player_buying_enabled, %d::integer player_buy_chance,
+         %d::integer max_player_purchases, %d::bigint max_player_unit_price,
+         %d::bigint max_player_spend
 ),
 lock_state as (
   select pg_try_advisory_xact_lock(hashtextextended(%s, 0)) acquired
@@ -1469,6 +1520,88 @@ tracked as (
   where exists(select 1 from inserted_sell s where s.order_id=o.id)
   returning order_id
 ),
+player_buy_gate as (
+  select player_buying_enabled and (random()*100)<player_buy_chance allowed
+  from settings
+),
+eligible_player_listings as materialized (
+  select o.id order_id,o.exchange_id,o.access_point_id,o.owner_id seller_actor_id,
+         o.template_id,o.item_id,o.item_price,i.stack_size,o.quality_level,random() random_key
+  from dune.dune_exchange_orders o
+  join dune.dune_exchange_sell_orders s on s.order_id=o.id
+  join dune.items i on i.id=o.item_id and i.template_id=o.template_id
+  join dune.inventories inv on inv.id=i.inventory_id
+  join dune.actors a on a.id=o.owner_id and a.owner_account_id is not null
+  join dune.accounts acct on acct.id=a.owner_account_id
+  join dune.dune_exchange_accesspoints ap on ap.id=o.access_point_id and ap.exchange_id=o.exchange_id
+  left join public.alphanine_market_bot_listings history on history.order_id=o.id
+  cross join settings limits
+  cross join game_clock g
+  where o.is_npc_order=false and o.exchange_id=(select exchange_id from exchange_state)
+    and i.inventory_id=(select inventory_id from exchange_state)
+    and (inv.exchange_id is null or inv.exchange_id=o.exchange_id)
+    and o.item_price>0 and o.item_price<=limits.max_player_unit_price
+    and i.stack_size between 1 and 50000 and o.item_price*i.stack_size<=limits.max_player_spend
+    and o.expiration_time>g.game_now and history.order_id is null
+    and not exists(select 1 from dune.dune_exchange_fulfilled_orders f where f.order_id=o.id)
+    and exists(select 1 from dune.dune_exchange_users seller_user where seller_user.owner_id=o.owner_id)
+    and exists(select 1 from cycle_gate) and (select allowed from player_buy_gate)
+  for update of o,i
+),
+ranked_player_listings as (
+  select e.*,row_number() over(order by random_key,order_id) purchase_sequence,
+         sum(item_price*stack_size) over(order by random_key,order_id) cumulative_spend
+  from eligible_player_listings e
+),
+selected_player_listings as materialized (
+  select r.* from ranked_player_listings r,settings s
+  where r.purchase_sequence<=s.max_player_purchases and r.cumulative_spend<=s.max_player_spend
+),
+player_payment_orders as (
+  insert into dune.dune_exchange_orders(
+    exchange_id,access_point_id,owner_id,template_id,expiration_time,
+    durability_cur,durability_max,item_price,category_mask,category_depth,is_npc_order
+  )
+  select p.exchange_id,p.access_point_id,p.seller_actor_id,p.template_id,
+         (select game_now+1209600 from game_clock),1.0,1.0,p.item_price*p.stack_size,0,0,false
+  from selected_player_listings p order by p.purchase_sequence
+  returning id,owner_id,template_id,item_price
+),
+numbered_player_payments as (
+  select p.*,row_number() over(order by p.id) purchase_sequence from player_payment_orders p
+),
+player_fulfillments as (
+  insert into dune.dune_exchange_fulfilled_orders(order_id,source_order_id,completion_type,stack_size,original_order_id)
+  select payment.id,null,4,purchase.stack_size,purchase.order_id
+  from numbered_player_payments payment
+  join selected_player_listings purchase using(purchase_sequence)
+  returning order_id,original_order_id
+),
+player_buyer_debit as (
+  update dune.dune_exchange_users
+  set solari_balance=solari_balance-coalesce((select sum(item_price*stack_size) from selected_player_listings),0)
+  where id=(select min(id) from dune.dune_exchange_users where owner_id=(select id from bot_actor))
+    and exists(select 1 from selected_player_listings)
+  returning id
+),
+deleted_player_sell as (
+  delete from dune.dune_exchange_sell_orders
+  where order_id in(select order_id from selected_player_listings)
+    and exists(select 1 from player_fulfillments)
+  returning order_id
+),
+deleted_player_orders as (
+  delete from dune.dune_exchange_orders o
+  where o.id in(select order_id from selected_player_listings)
+    and exists(select 1 from deleted_player_sell s where s.order_id=o.id)
+  returning o.id
+),
+deleted_player_items as (
+  delete from dune.items i
+  where i.id in(select item_id from selected_player_listings p where exists(
+    select 1 from deleted_player_orders d where d.id=p.order_id))
+  returning i.id
+),
 generated_result as (
   select json_build_object(
     'ok',true,
@@ -1487,8 +1620,8 @@ generated_result as (
       when (select access_point_count from selected_access_point)<1 then 'Waiting for an Exchange access point.'
       when (select game_now from game_clock)<=0 then 'Waiting for a verified Exchange clock.'
       when not exists(select 1 from bot_actor) then 'Waiting for the dedicated Market Bot actor.'
-      else format('Restock completed: %%s created, %%s expired or invisible bot-owned listings removed.',
-        (select count(*) from tracked),(select count(*) from retired_expired)) end,
+      else format('Restock completed: %%s created, %%s expired or invisible bot-owned listings removed, %%s player listings purchased.',
+        (select count(*) from tracked),(select count(*) from retired_expired),(select count(*) from deleted_player_orders)) end,
     'cycleId',(select cycle_id from settings),
     'mode','execute',
     'exchange',(select exchange_name from exchange_state),
@@ -1498,6 +1631,12 @@ generated_result as (
     'removedExpired',(select count(*) from retired_expired),
     'removedInvalidCategory',(select count(*) from expired_target where invalid_category),
     'retiredInvalid',(select count(*) from invalid_tracking),
+    'playerPurchases',(select count(*) from deleted_player_orders),
+    'playerPurchaseSpend',coalesce((select sum(item_price*stack_size) from selected_player_listings),0),
+    'purchasedPlayerListings',coalesce((select json_agg(json_build_object(
+      'orderId',p.order_id,'sellerActorId',p.seller_actor_id,'templateId',p.template_id,
+      'unitPrice',p.item_price,'stackSize',p.stack_size,'totalPaid',p.item_price*p.stack_size
+    ) order by p.purchase_sequence) from selected_player_listings p),'[]'::json),
     'items',coalesce((select json_agg(json_build_object(
       'id',p.template_id,'name',p.display_name,'category',p.category,'tier',p.tier,'unitPrice',p.unit_price,
       'stackSize',p.stack_size,'targetListings',p.target_count,'activeListings',p.active_count,
@@ -1529,7 +1668,14 @@ generated_result as (
         from planned p group by p.category
       ) c
     ),'[]'::json),
-    'warning','Only category-verified listings count as active. Existing valid listings are never repriced or reposted. Player listings are never changed.'
+    'playerBuying',json_build_object(
+      'enabled',(select player_buying_enabled from settings),
+      'chancePercent',(select player_buy_chance from settings),
+      'maxPurchasesPerCycle',(select max_player_purchases from settings),
+      'maxUnitPrice',(select max_player_unit_price from settings),
+      'maxSpendPerCycle',(select max_player_spend from settings)
+    ),
+    'warning','Only verified player-owned active sell listings are eligible for opt-in random purchases. Cleanup and restocking never arbitrarily remove player listings.'
   ) result
 ),
 completed_cycle as (
@@ -1545,6 +1691,16 @@ audit_event as (
   select (select cycle_id from settings),'reconciliation_completed',result
   from generated_result where exists(select 1 from cycle_gate)
   returning id
+),
+player_purchase_audit as (
+  insert into public.alphanine_market_bot_audit(cycle_id,event,details)
+  select (select cycle_id from settings),'player_listings_purchased',jsonb_build_object(
+    'count',(select count(*) from deleted_player_orders),
+    'spend',coalesce((select sum(item_price*stack_size) from selected_player_listings),0),
+    'orders',coalesce((select jsonb_agg(order_id order by purchase_sequence) from selected_player_listings),'[]'::jsonb)
+  )
+  where exists(select 1 from deleted_player_orders)
+  returning id
 )
 select coalesce(
   (select result::text from prior_cycle),
@@ -1552,7 +1708,9 @@ select coalesce(
   (select result::text from generated_result)
 );
 commit;`, sqlText(cycleID), cfg.Safety.MaxCreatesPerCycle, cfg.Safety.MaxMarketValue,
-		int64(cfg.ExpiryDays)*86400, sqlText("alphanine-market-bot:"+cfg.Namespace+":"+cfg.Battlegroup),
+		int64(cfg.ExpiryDays)*86400, cfg.PlayerBuying.Enabled, cfg.PlayerBuying.ChancePercent,
+		cfg.PlayerBuying.MaxPurchasesPerCycle, cfg.PlayerBuying.MaxUnitPrice, cfg.PlayerBuying.MaxSpendPerCycle,
+		sqlText("alphanine-market-bot:"+cfg.Namespace+":"+cfg.Battlegroup),
 		strings.Join(values, ",\n"), exchangePredicate)
 }
 
@@ -1568,7 +1726,7 @@ func publicConfig(cfg Config) map[string]interface{} {
 		"configFingerprint": cfg.ConfigFingerprint,
 		"economyStyle":      cfg.EconomyStyle, "intervalMinutes": cfg.IntervalMinutes, "expiryDays": cfg.ExpiryDays,
 		"listingCategory": cfg.ListingCategory,
-		"safety":          cfg.Safety, "itemCount": len(cfg.Items),
+		"safety":          cfg.Safety, "playerBuying": cfg.PlayerBuying, "itemCount": len(cfg.Items),
 	}
 }
 

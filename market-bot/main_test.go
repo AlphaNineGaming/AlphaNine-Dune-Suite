@@ -263,14 +263,20 @@ func TestCycleEvidenceUsesSeparateWallClockTransitions(t *testing.T) {
 }
 
 func TestRuntimeQuiescenceEvidenceIsStableAndFailClosed(t *testing.T) {
-	sql := runtimeQuiescenceSQL()
+	cfg := testConfig()
+	sql := runtimeQuiescenceSQL(cfg)
 	for _, expected := range []string{
-		"pg_locks", "locktype='advisory'", "alphanine_market_bot_cycle_evidence",
-		"completed_at is null", "unexpectedWriters", "openTransactions", "pg_stat_activity",
-		"activeTracking", "trackingDigest", "protectedDigest",
+		"pg_try_advisory_xact_lock", "alphanine-market-bot:", cfg.Namespace, cfg.Battlegroup,
+		"alphanine_market_bot_cycle_evidence", "completed_at is null",
+		"activeTracking", "trackingDigest",
 	} {
 		if !strings.Contains(sql, expected) {
 			t.Fatalf("quiescence evidence missing %q", expected)
+		}
+	}
+	for _, rejected := range []string{"pg_stat_activity", "protectedDigest", "unexpectedWriters", "openTransactions"} {
+		if strings.Contains(sql, rejected) {
+			t.Fatalf("quiescence evidence must ignore unrelated database activity: found %q", rejected)
 		}
 	}
 }
@@ -385,8 +391,8 @@ func TestPeriodicRevalidationFailureAndStalenessFailClosed(t *testing.T) {
 }
 
 func TestRuntimeActivityEvidenceAndLeaseFailClosed(t *testing.T) {
-	base := map[string]string{"advisoryLocks": "0", "incompleteCycles": "0", "unexpectedWriters": "0", "openTransactions": "0"}
-	for _, field := range []string{"advisoryLocks", "incompleteCycles", "unexpectedWriters", "openTransactions"} {
+	base := map[string]string{"advisoryLocks": "0", "incompleteCycles": "0"}
+	for _, field := range []string{"advisoryLocks", "incompleteCycles"} {
 		sample := map[string]string{}
 		for key, value := range base {
 			sample[key] = value
@@ -396,6 +402,10 @@ func TestRuntimeActivityEvidenceAndLeaseFailClosed(t *testing.T) {
 		if validateRuntimeQuiescenceSample(raw) == nil {
 			t.Fatalf("%s activity was accepted", field)
 		}
+	}
+	unrelated, _ := json.Marshal(map[string]string{"advisoryLocks": "0", "incompleteCycles": "0", "unexpectedWriters": "7", "openTransactions": "3"})
+	if err := validateRuntimeQuiescenceSample(unrelated); err != nil {
+		t.Fatalf("unrelated database activity blocked Market Bot quiescence: %v", err)
 	}
 	cfg := testConfig()
 	cfg.Paused = true

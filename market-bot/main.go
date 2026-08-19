@@ -695,7 +695,7 @@ func pausedVerificationPublication(previous State, cfg Config, runtimeFingerprin
 		proofErr = errors.New("Market Bot configured runtime version does not match the running binary")
 	}
 	if proofErr != nil {
-		draining := stateForConfigAt(cfg, "Draining", "Market Bot remains fail-closed until quiescence evidence is complete and stable.", nil, now)
+		draining := stateForConfigAt(cfg, "Draining", "Market Bot remains fail-closed: "+redact(proofErr.Error())+".", nil, now)
 		draining.RuntimeFingerprint = runtimeFingerprint
 		draining.ConfigFingerprint = cfg.ConfigFingerprint
 		draining.IncompleteCycle = true
@@ -721,12 +721,12 @@ func proveRuntimeQuiescence(p paths, cfg Config) (json.RawMessage, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("Market Bot cycle lease state is ambiguous")
 	}
-	first, err := executeSQL(cfg, runtimeQuiescenceSQL())
+	first, err := executeSQL(cfg, runtimeQuiescenceSQL(cfg))
 	if err != nil {
 		return nil, err
 	}
 	time.Sleep(500 * time.Millisecond)
-	second, err := executeSQL(cfg, runtimeQuiescenceSQL())
+	second, err := executeSQL(cfg, runtimeQuiescenceSQL(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -749,10 +749,10 @@ func validateRuntimeQuiescenceSample(raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &sample); err != nil {
 		return errors.New("Market Bot quiescence evidence was invalid")
 	}
-	for _, field := range []string{"advisoryLocks", "incompleteCycles", "unexpectedWriters", "openTransactions"} {
+	for _, field := range []string{"advisoryLocks", "incompleteCycles"} {
 		value, present := sample[field]
 		if !present || fmt.Sprint(value) != "0" {
-			return errors.New("Market Bot lock, cycle, writer, or transaction activity is still present")
+			return errors.New("Market Bot lock or incomplete cycle activity is still present")
 		}
 	}
 	return nil
@@ -976,37 +976,24 @@ func finishCycleEvidence(cfg Config, cycleID, outcome string) error {
 	return recordCycleEvidence(cfg, cycleID, "completed")
 }
 
-func runtimeQuiescenceSQL() string {
-	return `
-with tracking as materialized (
+func runtimeQuiescenceSQL(cfg Config) string {
+	return fmt.Sprintf(`
+with lock_state as materialized (
+  select pg_try_advisory_xact_lock(hashtextextended(%s, 0)) acquired
+), tracking as materialized (
   select order_id,item_id,template_id,cycle_id,unit_price,stack_size,expiration_time,retired_at
   from public.alphanine_market_bot_listings
-), protected as materialized (
-  select o.* from dune.dune_exchange_orders o
-  where not exists(select 1 from tracking t where t.order_id=o.id)
 )
 select json_build_object(
-  'advisoryLocks',(select count(*)::text from pg_locks where locktype='advisory' and granted),
+  'advisoryLocks',(select case when acquired then '0' else '1' end from lock_state),
   'incompleteCycles',(
     (select count(*) from public.alphanine_market_bot_cycles where completed_at is null)+
     (select count(*) from public.alphanine_market_bot_cycle_evidence where completed_at is null or state in('queued','started','transaction_committed'))
   )::text,
-  'unexpectedWriters',(
-    select count(*)::text from pg_stat_activity
-    where datname=current_database() and pid<>pg_backend_pid() and backend_type='client backend'
-      and (state='active' or state like 'idle in transaction%' or backend_xid is not null)
-  ),
-  'openTransactions',(
-    select count(*)::text from pg_stat_activity
-    where datname=current_database() and pid<>pg_backend_pid() and backend_type='client backend'
-      and (backend_xid is not null or state like 'idle in transaction%')
-  ),
   'activeTracking',(select count(*)::text from tracking where retired_at is null),
   'totalTracking',(select count(*)::text from tracking),
-  'trackingDigest',(select md5(coalesce(jsonb_agg(to_jsonb(t) order by order_id),'[]'::jsonb)::text) from tracking t),
-  'protectedOrders',(select count(*)::text from protected),
-  'protectedDigest',(select md5(coalesce(jsonb_agg(to_jsonb(p) order by id),'[]'::jsonb)::text) from protected p)
-)::text;`
+  'trackingDigest',(select md5(coalesce(jsonb_agg(to_jsonb(t) order by order_id),'[]'::jsonb)::text) from tracking t)
+)::text;`, sqlText("alphanine-market-bot:"+cfg.Namespace+":"+cfg.Battlegroup))
 }
 
 func cleanupSQL(cfg Config) string {

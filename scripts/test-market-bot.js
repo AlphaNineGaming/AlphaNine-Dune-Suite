@@ -18,6 +18,7 @@ const {
   marketCategoryMaskSeed,
   runtimeConfig,
   activationFingerprint,
+  repairTargetMatches,
   buildInstallCommand,
   buildPausedRuntimeDeploymentCommand,
   buildPausedRuntimeRollbackCleanupCommand,
@@ -32,8 +33,19 @@ const {
   openRcSource
 } = require("../lib/market-bot");
 
+assert.equal(repairTargetMatches(
+  { battlegroup: "sh-bc-test" },
+  { name: "sh-bc-test", namespace: "funcom-seabass-sh-bc-test", dbPod: "db-0", dbSvc: "db-svc" }
+), true, "repair target matching must accept the public remote config, which intentionally omits namespace");
+assert.equal(repairTargetMatches(
+  { battlegroup: "sh-bc-other" },
+  { name: "sh-bc-test", namespace: "funcom-seabass-sh-bc-test", dbPod: "db-0", dbSvc: "db-svc" }
+), false, "repair target matching must reject a different battlegroup");
+
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 assert.match(serverSource, /remoteFailure = parseMarketBotJson\(result\.stdout\)[\s\S]*remoteFailure\?\.ok === false/, "failed status probes must surface the bot's structured validation error instead of the raw SSH command");
+const marketBotImport = serverSource.match(/const \{([\s\S]*?)\} = require\("\.\/lib\/market-bot"\);/)?.[1] || "";
+assert(marketBotImport.includes("VM_MARKET_BOT_PAUSE_MARKER") && marketBotImport.includes("VM_MARKET_BOT_CYCLE_LEASE"), "repair boundary constants must be imported into the server runtime");
 const goSource = fs.readFileSync(path.join(__dirname, "..", "market-bot", "main.go"), "utf8");
 const runtimeBinary = fs.readFileSync(path.join(__dirname, "..", "assets", "market-bot", "linux-amd64", "alphanine-market-bot"));
 assert.equal(
@@ -326,14 +338,24 @@ const testCategorySeed = {
   assert(serverSource.includes('id="market" class="view"') && serverSource.includes("Persistent Market Bot"), "primary Market Bot UI is missing");
   assert(serverSource.includes("Category-verified catalog items") && serverSource.includes("Skipped (category metadata unavailable)"), "Market Bot UI must distinguish visible from skipped catalog items");
   assert(serverSource.includes('id="marketBotListingCategory"') && serverSource.includes('"/api/market-bot/category"'), "persistent listing category control is missing");
+  assert(serverSource.includes('id="marketBotRepairButton"') && serverSource.includes('"/api/market-bot/repair-runtime"'), "normal Market Bot UI must expose safe runtime repair");
+  assert(serverSource.includes("if (!before.pauseProtocolCompatible)") && serverSource.includes("marketBotRepairBoundary(minimumGeneration, remoteFingerprint)"), "runtime repair must use only the compatible legacy pause protocol and an independent pause boundary");
+  assert(serverSource.includes("VM_MARKET_BOT_PAUSE_MARKER") && serverSource.includes("VM_MARKET_BOT_CYCLE_LEASE") && serverSource.includes("pg_try_advisory_xact_lock"), "runtime repair must verify the pause marker, cycle lease, and Market Bot-specific database lock");
+  assert(serverSource.includes("if (!repaired.quiescent || repaired.updateRequired || !repaired.generationMatch)"), "runtime repair must finish current, matching-generation, and Quiescent");
+  assert(serverSource.includes("resumed: false"), "runtime repair must never resume the bot automatically");
   assert(serverSource.includes('catalogSelection !== "preserve-remote"') && serverSource.includes("buildPinnedMarketBotCatalogPolicy(runtimeEvidence.config.items)"), "bootstrap reconciliation must require explicit remote-catalog preservation");
   assert(serverSource.includes("publishPinnedPausedMarketBotPolicy(before") && serverSource.includes("BigInt(generation) - 1n"), "bootstrap reconciliation must atomically publish a staged paused policy before the final Pause generation");
   assert(serverSource.includes('sshCommand("bash -s", 45000') && serverSource.includes("inputPath: publisherPath"), "large pinned policies must be streamed over SSH stdin rather than placed on the process command line");
   assert(serverSource.includes("configSha256Before") && serverSource.includes("configSha256After") && serverSource.includes("configBase64"), "remote policy evidence must bind one binary-safe capture between stable file hashes");
   assert(/const firstWriterText = await migrationSql\(target, ACTIVE_WRITERS_SQL\);\r?\n\s*const firstSampleResult = await migrationSql/.test(serverSource), "writer sampling must finish before the Suite opens its own semantic evidence session");
   assert(serverSource.includes("Clean Bot Market") && serverSource.includes('"/api/market-bot/clean"'), "tracked-only Market Bot cleanup control is missing");
+  assert(serverSource.includes('id="marketBotUninstallButton"') && serverSource.includes('"/api/market-bot/uninstall"'), "safe Market Bot uninstall control is missing");
+  assert(/async function uninstallMarketBot\(input = \{\}\)[\s\S]*setMarketBotPaused\(true[\s\S]*buildMarketBotMigrationStopCommand\(\)[\s\S]*buildMarketBotMigrationUninstallCommand[\s\S]*requireAbsent: true[\s\S]*marketBotStore\.save/.test(serverSource), "Market Bot uninstall must prove Quiescent, stop, remove with rollback, prove absence, and only then deactivate local state");
+  assert(serverSource.includes("market_bot_paused_for_uninstall") && serverSource.includes("A compatible older runtime acknowledged the authoritative uninstall drain without being replaced."), "safe uninstall must drain a compatible older runtime without requiring a replacement build");
+  assert(serverSource.includes("Choose what happens to active listings strictly tracked as Market Bot-owned") && serverSource.includes('body:JSON.stringify({confirmed:true,removeBotListings})'), "Market Bot uninstall must require an explicit keep-or-remove listing choice");
   assert(serverSource.includes('id="legacy-market" class="view hidden"'), "legacy market UI is not isolated");
   assert(goSource.includes("pg_try_advisory_xact_lock"), "database lock is missing");
+  assert(!/func runtimeQuiescenceSQL[\s\S]*?pg_stat_activity[\s\S]*?func cleanupSQL/.test(goSource), "runtime quiescence must not be blocked by unrelated player/database writers");
   assert(goSource.includes("public.alphanine_market_bot_listings"), "strict ownership table is missing");
   assert(goSource.includes("class='Duke' and owner_account_id is null"), "Market Bot must use a native clean Duke actor");
   assert(goSource.includes("set owner_id=(select id from selected_duke)"), "tracked legacy Market Bot orders must migrate to the native actor");

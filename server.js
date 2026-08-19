@@ -96,11 +96,14 @@ const {
   createMarketBotStore,
   VM_MARKET_BOT_BINARY,
   VM_MARKET_BOT_CONFIG,
+  VM_MARKET_BOT_PAUSE_MARKER,
+  VM_MARKET_BOT_CYCLE_LEASE,
   normalizeConfig: normalizeMarketBotConfig,
   pinnedCatalogPolicy: buildPinnedMarketBotCatalogPolicy,
   buildItemPolicies: buildMarketBotItemPolicies,
   runtimeConfig: buildMarketBotRuntimeConfig,
   activationFingerprint: marketBotActivationFingerprint,
+  repairTargetMatches: marketBotRepairTargetMatches,
   buildInstallCommand: buildMarketBotInstallCommand,
   buildPausedRuntimeDeploymentCommand: buildMarketBotPausedRuntimeDeploymentCommand,
   buildPausedRuntimeRollbackCleanupCommand: buildMarketBotPausedRuntimeRollbackCleanupCommand,
@@ -4027,6 +4030,24 @@ async function marketBotStatus(options = {}) {
     const remote = options.strictEvidence === true
       ? parseMarketBotSingleObject({ stdout: result.stdout, stderr: result.stderr }, "Market Bot remote status evidence").value
       : parseMarketBotJson(result.stdout);
+    if (remote.installed === false) {
+      return {
+        ...remote,
+        ok: true,
+        installed: false,
+        reachable: true,
+        status: "Not Installed",
+        pauseState: MARKET_BOT_PAUSE_STATES.UNKNOWN,
+        quiescent: false,
+        generationMatch: false,
+        pauseProtocolCompatible: false,
+        message: remote.message || "Market Bot is not installed in the VM.",
+        installedVersion: "",
+        expectedVersion: APP_VERSION,
+        updateRequired: false,
+        localConfig: publicMarketBotLocal(localConfig)
+      };
+    }
     const state = remote.state || {};
     const remoteConfig = remote.config || {};
     const pauseProtocolCompatible = Number(remoteConfig.schemaVersion || 0) >= 2
@@ -4317,6 +4338,116 @@ async function setMarketBotPaused(paused, options = {}) {
   return publishProtectedMarketBotPause(paused, generation, options);
 }
 
+async function marketBotRepairBoundary(generation, remoteFingerprint) {
+  const status = await marketBotStatus({ strictEvidence: true });
+  const remoteConfig = status.config || {};
+  if (!status.reachable || remoteConfig.paused !== true
+    || String(remoteConfig.configGeneration || "") !== String(generation)
+    || String(remoteConfig.pauseGeneration || "") !== String(generation)
+    || String(remoteConfig.configFingerprint || "") !== String(remoteFingerprint)) {
+    return { ok: false, message: "The old runtime has not acknowledged the exact repair pause generation." };
+  }
+
+  const boundaryCommand = `test -f ${shQuote(VM_MARKET_BOT_PAUSE_MARKER)} && test ! -e ${shQuote(VM_MARKET_BOT_CYCLE_LEASE)}`;
+  const firstBoundary = await sshCommand(boundaryCommand, 30000, { maxBuffer: 1024 * 16 });
+  if (!firstBoundary.ok) return { ok: false, message: "The pause marker is missing or a Market Bot cycle lease is still present." };
+
+  const target = await marketBotTarget();
+  if (!marketBotRepairTargetMatches(remoteConfig, target)) {
+    return { ok: false, terminal: true, message: "The selected battlegroup does not match the installed Market Bot repair target." };
+  }
+  const lockKey = `alphanine-market-bot:${target.namespace}:${target.name}`;
+  const sql = `with lock_state as materialized (
+  select pg_try_advisory_xact_lock(hashtextextended(${sqlTextLiteral(lockKey)}, 0)) acquired
+), tracking as materialized (
+  select order_id,item_id,template_id,cycle_id,unit_price,stack_size,expiration_time,retired_at
+  from public.alphanine_market_bot_listings
+)
+select json_build_object(
+  'advisoryLocks',(select case when acquired then '0' else '1' end from lock_state),
+  'incompleteCycles',(
+    (select count(*) from public.alphanine_market_bot_cycles where completed_at is null)+
+    (select count(*) from public.alphanine_market_bot_cycle_evidence where completed_at is null or state in('queued','started','transaction_committed'))
+  )::text,
+  'activeTracking',(select count(*)::text from tracking where retired_at is null),
+  'totalTracking',(select count(*)::text from tracking),
+  'trackingDigest',(select md5(coalesce(jsonb_agg(to_jsonb(t) order by order_id),'[]'::jsonb)::text) from tracking t)
+)::text;`;
+  const first = await dbQueryStreamed(sql, 120000, target);
+  await sleepMs(500);
+  const second = await dbQueryStreamed(sql, 120000, target);
+  const secondBoundary = await sshCommand(boundaryCommand, 30000, { maxBuffer: 1024 * 16 });
+  if (!secondBoundary.ok) return { ok: false, message: "The Market Bot cycle boundary changed during repair verification." };
+  if (first !== second) return { ok: false, message: "Market Bot counts or tracked-listing evidence changed between repair samples." };
+  const sample = parseMarketBotJson(second);
+  if (String(sample.advisoryLocks) !== "0") return { ok: false, message: "The Market Bot advisory lock is still held by a cycle." };
+  if (String(sample.incompleteCycles) !== "0") return { ok: false, message: "Market Bot has unfinished durable cycle evidence." };
+  return { ok: true, status, sample };
+}
+
+async function repairMarketBotRuntime(input = {}) {
+  if (input.confirmed !== true) throw new Error("Explicit confirmation is required before repairing Market Bot.");
+  const before = await marketBotStatus({ strictEvidence: true });
+  const current = localMarketBotConfig();
+  if (!current.activated) throw new Error("Market Bot has not been activated.");
+  if (!before.installed) throw new Error("The Market Bot runtime is not installed. Use the normal Market Bot activation workflow.");
+  if (!before.pauseProtocolCompatible) {
+    throw new Error("The installed Market Bot is too old for automatic repair. No remote changes were made.");
+  }
+  if (!before.updateRequired && before.generationMatch && before.quiescent) {
+    return { ok: true, repaired: false, message: "Market Bot is already current and Quiescent.", status: before };
+  }
+
+  const remoteFingerprint = String(before.config?.configFingerprint || "");
+  if (!/^[a-f0-9]{64}$/.test(remoteFingerprint)) throw new Error("The installed Market Bot configuration fingerprint is invalid. No remote changes were made.");
+  const minimumGeneration = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration, before.config?.configGeneration, before.config?.pauseGeneration);
+  const pausedConfig = marketBotStore.save(normalizeMarketBotConfig({
+    ...current,
+    enabled: true,
+    paused: true,
+    pauseState: MARKET_BOT_PAUSE_STATES.REQUESTED,
+    configGeneration: minimumGeneration,
+    pauseGeneration: minimumGeneration,
+    runtimeFingerprint: remoteFingerprint
+  }));
+  const pauseResult = await sshCommand(buildMarketBotActionCommand("pause", { generation: minimumGeneration }), 45000, { maxBuffer: 1024 * 1024 * 8 });
+  if (!pauseResult.ok) throw new Error(pauseResult.stderr || pauseResult.stdout || pauseResult.error || "The old Market Bot did not accept the repair pause generation.");
+  const pauseResponse = parseMarketBotSingleObject({ stdout: pauseResult.stdout, stderr: pauseResult.stderr }, "Market Bot repair pause response").value;
+  if (pauseResponse.ok === false) throw new Error(pauseResponse.error || pauseResponse.message || "The old Market Bot rejected the repair pause generation.");
+
+  let boundary = { ok: false, message: "Waiting for the Market Bot repair boundary." };
+  for (let attempt = 0; attempt < 60 && !boundary.ok; attempt += 1) {
+    try { boundary = await marketBotRepairBoundary(minimumGeneration, remoteFingerprint); }
+    catch (error) { boundary = { ok: false, message: error.message }; }
+    if (boundary.terminal) break;
+    if (!boundary.ok) await sleepMs(2000);
+  }
+  if (!boundary.ok) throw new Error(`${boundary.message || "Market Bot repair quiescence could not be proven"} No runtime was replaced.`);
+
+  await installMarketBot(pausedConfig);
+  let repaired = await marketBotStatus({ strictEvidence: true });
+  for (let attempt = 0; attempt < 45 && (!repaired.quiescent || repaired.updateRequired || !repaired.generationMatch); attempt += 1) {
+    await sleepMs(2000);
+    repaired = await marketBotStatus({ strictEvidence: true });
+    if (!repaired.reachable || repaired.status === "Error") break;
+  }
+  if (!repaired.quiescent || repaired.updateRequired || !repaired.generationMatch) {
+    throw new Error(`Market Bot was updated but did not publish matching-generation Quiescent: ${repaired.message || repaired.status || "Unknown"}. It remains paused.`);
+  }
+  appendAdminAudit("market_bot_runtime_repaired", {
+    previousVersion: before.installedVersion || "unknown",
+    installedVersion: repaired.installedVersion || APP_VERSION,
+    generation: repaired.config?.configGeneration || pausedConfig.configGeneration,
+    resumed: false
+  });
+  return {
+    ok: true,
+    repaired: true,
+    message: `Market Bot was updated from ${before.installedVersion || "an older version"} to ${repaired.installedVersion || APP_VERSION} and remains safely paused.`,
+    status: repaired
+  };
+}
+
 async function deployPausedMarketBotRuntime(input = {}) {
   if (!MIGRATION_STARTUP_SUPPRESSED_RUNNER) throw new Error("Controlled paused runtime deployment requires --migration-startup-suppressed.");
   if (String(input.confirmText || "") !== "DEPLOY PAUSED MARKET BOT") {
@@ -4519,6 +4650,131 @@ async function cleanMarketBot(input = {}) {
     paused: true
   });
   return { ...parsed, status: await marketBotStatus() };
+}
+
+async function uninstallMarketBot(input = {}) {
+  if (input.confirmed !== true) throw new Error("Explicit confirmation is required before uninstalling Market Bot.");
+  if (typeof input.removeBotListings !== "boolean") throw new Error("Choose whether tracked bot-owned listings should be kept or removed.");
+
+  let current = localMarketBotConfig();
+  let status = await marketBotStatus({ strictEvidence: true });
+  if (!status.reachable) throw new Error("The Market Bot VM must be reachable before uninstalling. No runtime was removed.");
+  if (!status.installed) {
+    const generation = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
+    const next = marketBotStore.save(normalizeMarketBotConfig({
+      ...current,
+      enabled: false,
+      activated: false,
+      paused: true,
+      pauseState: MARKET_BOT_PAUSE_STATES.UNKNOWN,
+      configGeneration: generation,
+      pauseGeneration: generation,
+      runtimeFingerprint: "",
+      legacyMigration: { ...current.legacyMigration, activationFingerprint: "" }
+    }));
+    return { ok: true, alreadyAbsent: true, removedBotListings: 0, config: publicMarketBotLocal(next), status: await marketBotStatus() };
+  }
+  if (!status.pauseProtocolCompatible) {
+    throw new Error("The installed Market Bot does not support authoritative pause/drain and cannot be safely uninstalled automatically. No runtime was removed.");
+  }
+
+  if (!status.quiescent || !status.generationMatch || current.paused !== true) {
+    if (!current.activated) throw new Error("The installed Market Bot is not authoritatively Quiescent. No runtime was removed.");
+    if (!status.updateRequired) {
+      status = await setMarketBotPaused(true, { strictEvidence: true });
+    } else {
+      const remoteFingerprint = String(status.config?.configFingerprint || "");
+      if (!/^[a-f0-9]{64}$/.test(remoteFingerprint)) throw new Error("The installed Market Bot configuration fingerprint is invalid. No runtime was removed.");
+      const generation = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration, status.config?.configGeneration, status.config?.pauseGeneration);
+      marketBotStore.save(normalizeMarketBotConfig({
+        ...current,
+        enabled: true,
+        paused: true,
+        pauseState: MARKET_BOT_PAUSE_STATES.REQUESTED,
+        configGeneration: generation,
+        pauseGeneration: generation,
+        runtimeFingerprint: remoteFingerprint
+      }));
+      const pauseResult = await sshCommand(buildMarketBotActionCommand("pause", { generation }), 45000, { maxBuffer: 1024 * 1024 * 8 });
+      if (!pauseResult.ok) throw new Error(pauseResult.stderr || pauseResult.stdout || pauseResult.error || "The installed Market Bot did not accept the uninstall pause generation.");
+      const pauseResponse = parseMarketBotSingleObject({ stdout: pauseResult.stdout, stderr: pauseResult.stderr || "" }, "Market Bot uninstall pause response").value;
+      if (pauseResponse.ok === false) throw new Error(pauseResponse.error || pauseResponse.message || "The installed Market Bot rejected the uninstall pause generation.");
+      for (let attempt = 0; attempt < 180; attempt += 1) {
+        status = await marketBotStatus({ strictEvidence: true });
+        if (status.quiescent && status.generationMatch && String(status.config?.pauseGeneration || "") === generation) break;
+        if (!status.reachable || status.status === "Error") break;
+        await sleepMs(1000);
+      }
+      if (!status.quiescent || !status.generationMatch || String(status.config?.pauseGeneration || "") !== generation) {
+        throw new Error(`Market Bot pause remains ${status.status || "Unknown"}; quiescence was not proven for uninstall generation ${generation}. No runtime was removed.`);
+      }
+      appendAdminAudit("market_bot_paused_for_uninstall", {
+        generation,
+        installedVersion: status.installedVersion || "",
+        expectedVersion: APP_VERSION,
+        message: "A compatible older runtime acknowledged the authoritative uninstall drain without being replaced."
+      });
+    }
+    current = localMarketBotConfig();
+  }
+  if (!status.quiescent || !status.generationMatch || current.paused !== true) {
+    throw new Error("Market Bot quiescence could not be proven. No runtime was removed.");
+  }
+
+  let removedBotListings = 0;
+  if (input.removeBotListings === true) {
+    if (!current.activated) throw new Error("Tracked bot-owned listings cannot be cleaned from an unactivated installation. No runtime was removed.");
+    const cleaned = await cleanMarketBot({ confirmed: true, maintenanceCheckpoint: input.maintenanceCheckpoint || null });
+    removedBotListings = Number(cleaned.result?.removed ?? cleaned.removed ?? 0) || 0;
+  }
+
+  status = await marketBotStatus({ strictEvidence: true });
+  if (!status.quiescent || !status.generationMatch || status.localConfig?.paused !== true) {
+    throw new Error("Market Bot left authoritative Quiescent before service removal. No runtime was removed.");
+  }
+
+  const stopResult = await sshCommand(buildMarketBotMigrationStopCommand(), 60000, { maxBuffer: 1024 * 64 });
+  if (!stopResult.ok) throw new Error(stopResult.stderr || stopResult.stdout || stopResult.error || "Market Bot service could not be stopped. No runtime was removed.");
+  const stopped = parseMarketBotSingleObject({ stdout: stopResult.stdout, stderr: stopResult.stderr || "" }, "Market Bot uninstall stop evidence").value;
+  const stoppedService = stopped.serviceInstalled === false
+    || (stopped.serviceManager === "openrc" && stopped.serviceState === "stopped" && stopped.serviceAuthoritative === true);
+  if (!stoppedService || stopped.pidFilePresent !== false || String(stopped.matchingProcessCount) !== "0" || String(stopped.supervisorProcessCount) !== "0") {
+    throw new Error("Market Bot service stop evidence was not authoritative. The runtime was left installed and stopped.");
+  }
+
+  const token = crypto.randomBytes(16).toString("hex");
+  const uninstallResult = await sshCommand(buildMarketBotMigrationUninstallCommand({ token }), 60000, { maxBuffer: 1024 * 64 });
+  if (!uninstallResult.ok) throw new Error(uninstallResult.stderr || uninstallResult.stdout || uninstallResult.error || "Market Bot runtime removal failed closed.");
+  const absent = parseMarketBotSingleObject({ stdout: uninstallResult.stdout, stderr: uninstallResult.stderr || "" }, "Market Bot uninstall absence evidence").value;
+  const infrastructure = publicMarketBotInfrastructureEvidence(absent, { requireAbsent: true });
+
+  const generation = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
+  const next = marketBotStore.save(normalizeMarketBotConfig({
+    ...current,
+    enabled: false,
+    activated: false,
+    paused: true,
+    pauseState: MARKET_BOT_PAUSE_STATES.UNKNOWN,
+    configGeneration: generation,
+    pauseGeneration: generation,
+    runtimeFingerprint: "",
+    legacyMigration: { ...current.legacyMigration, activationFingerprint: "" }
+  }));
+  appendAdminAudit("market_bot_uninstalled", {
+    removedBotListings,
+    keptBotListings: input.removeBotListings !== true,
+    playerListingsChanged: 0,
+    infrastructure
+  });
+  return {
+    ok: true,
+    removedBotListings,
+    keptBotListings: input.removeBotListings !== true,
+    playerListingsChanged: 0,
+    infrastructure,
+    config: publicMarketBotLocal(next),
+    status: await marketBotStatus()
+  };
 }
 
 async function rollbackMarketBot() {
@@ -22162,12 +22418,14 @@ function appPage() {
           <button id="marketBotPreviewButton" type="button" onclick="previewMarketBot()">Preview Market</button>
           <button id="marketBotRestockButton" type="button" onclick="restockMarketBot()">Restock Now</button>
           <button id="marketBotPauseButton" type="button" onclick="toggleMarketBotPause()">Pause Bot</button>
+          <button id="marketBotRepairButton" type="button" class="primary hidden" onclick="repairMarketBot()">Repair / Update Bot</button>
           <button type="button" onclick="saveMarketBotCategory()">Save Category</button>
           <button type="button" onclick="toggleMarketBotCustomize()">Customize Items</button>
           <button id="marketBotCleanButton" type="button" class="danger" onclick="cleanMarketBot()">Clean Bot Market</button>
+          <button id="marketBotUninstallButton" type="button" class="danger" onclick="uninstallMarketBot()">Uninstall Bot</button>
         </div>
         <div id="marketBotActionResult" class="empty mt">Market Bot is disabled until previewed and explicitly enabled.</div>
-        <div class="warning mt">Normal restocks leave active listings unchanged. Clean Bot Market removes only listings tracked as Market Bot-owned, never player listings, and pauses the bot afterward.</div>
+        <div class="warning mt">Normal restocks leave active listings unchanged. Clean Bot Market removes only listings tracked as Market Bot-owned, never player listings, and pauses the bot afterward. Uninstall Bot lets you explicitly keep or remove bot-owned listings.</div>
       </div>
       <div class="panel pad mt">
         <div class="panel-head">
@@ -24010,7 +24268,7 @@ function marketBotDate(value){if(!value)return"--";const date=new Date(value);re
 function marketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"0";}
 function marketBotStatusClass(value){const status=String(value||"").toLowerCase();return status==="running"?"ok":status==="error"?"bad":"warn";}
 function fillMarketBotListingCategories(local={}){const select=document.getElementById("marketBotListingCategory");if(!select)return;const categories=Array.isArray(local.availableCategories)?local.availableCategories:[];select.innerHTML='<option value="">All categories</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");select.value=categories.includes(local.listingCategory)?local.listingCategory:"";}
-function renderMarketBotStatus(data={}){marketBotStateData=data;const local=data.localConfig||data.config||{},cycle=data.lastCycle||{},totals=cycle.totals||{};const status=data.status||(!data.installed?"Not Installed":"Unknown");tone("marketBotState",status);setText("marketBotMessage",data.message||(!data.installed?"Enable Market Bot to install it in the VM.":"Persistent VM runtime reachable."));setText("marketBotLastRun",marketBotDate(data.lastRunAt));setText("marketBotLastResult",cycle.message||"No completed cycle loaded.");setText("marketBotCycleResult",marketBotNumber(cycle.created??totals.created??totals.createNow)+" / "+marketBotNumber(cycle.removedExpired)+" / "+(status==="Error"?"1":"0"));setText("marketBotCycleDetail","Created / expired bot-owned removed / errors");setText("marketBotNextRun",marketBotDate(data.nextRunAt));setText("marketBotVersion",(data.installedVersion||"Not installed")+" / expected "+(data.expectedVersion||"--")+(data.updateRequired?" / update required":""));setValue("marketBotEconomyStyle",local.economyStyle||"Expensive");fillMarketBotListingCategories(local);setText("marketBotPauseButton",local.paused?"Resume Bot":"Pause Bot");const active=local.activated===true,quiescent=data.quiescent===true;const pauseButton=document.getElementById("marketBotPauseButton"),restockButton=document.getElementById("marketBotRestockButton"),cleanButton=document.getElementById("marketBotCleanButton");if(pauseButton)pauseButton.disabled=!active||(local.paused===true&&!quiescent);if(restockButton)restockButton.disabled=!active||local.paused===true||!data.generationMatch;if(cleanButton)cleanButton.disabled=!active||!quiescent;setText("marketBotEnableButton",active?"Market Bot Enabled":"Enable Market Bot");const enableButton=document.getElementById("marketBotEnableButton");if(enableButton)enableButton.disabled=active;const migration=local.legacyMigration||{};setText("marketBotMigration",migration.detected?("Legacy configuration preserved. Converted "+(migration.convertedAt||"--")+". "+(migration.legacyDisabledAt?"Legacy engine disabled "+migration.legacyDisabledAt+".":"Activation has not disabled the legacy engine yet.")):"No Legacy Market Automator configuration was detected.");}
+function renderMarketBotStatus(data={}){marketBotStateData=data;const local=data.localConfig||data.config||{},cycle=data.lastCycle||{},totals=cycle.totals||{};const status=data.status||(!data.installed?"Not Installed":"Unknown");tone("marketBotState",status);setText("marketBotMessage",data.message||(!data.installed?"Enable Market Bot to install it in the VM.":"Persistent VM runtime reachable."));setText("marketBotLastRun",marketBotDate(data.lastRunAt));setText("marketBotLastResult",cycle.message||"No completed cycle loaded.");setText("marketBotCycleResult",marketBotNumber(cycle.created??totals.created??totals.createNow)+" / "+marketBotNumber(cycle.removedExpired)+" / "+(status==="Error"?"1":"0"));setText("marketBotCycleDetail","Created / expired bot-owned removed / errors");setText("marketBotNextRun",marketBotDate(data.nextRunAt));setText("marketBotVersion",(data.installedVersion||"Not installed")+" / expected "+(data.expectedVersion||"--")+(data.updateRequired?" / update required":""));setValue("marketBotEconomyStyle",local.economyStyle||"Expensive");fillMarketBotListingCategories(local);setText("marketBotPauseButton",local.paused?"Resume Bot":"Pause Bot");const active=local.activated===true,quiescent=data.quiescent===true,repairNeeded=active&&data.installed===true&&data.pauseProtocolCompatible===true&&(data.updateRequired===true||data.generationMatch!==true);const pauseButton=document.getElementById("marketBotPauseButton"),repairButton=document.getElementById("marketBotRepairButton"),restockButton=document.getElementById("marketBotRestockButton"),cleanButton=document.getElementById("marketBotCleanButton"),uninstallButton=document.getElementById("marketBotUninstallButton");if(pauseButton)pauseButton.disabled=!active||(local.paused===true&&!quiescent);if(repairButton){repairButton.classList.toggle("hidden",!repairNeeded);repairButton.disabled=!repairNeeded;}if(restockButton)restockButton.disabled=!active||local.paused===true||!data.generationMatch;if(cleanButton)cleanButton.disabled=!active||!quiescent;if(uninstallButton)uninstallButton.disabled=data.installed!==true;setText("marketBotEnableButton",active?"Market Bot Enabled":"Enable Market Bot");const enableButton=document.getElementById("marketBotEnableButton");if(enableButton)enableButton.disabled=active;const migration=local.legacyMigration||{};setText("marketBotMigration",migration.detected?("Legacy configuration preserved. Converted "+(migration.convertedAt||"--")+". "+(migration.legacyDisabledAt?"Legacy engine disabled "+migration.legacyDisabledAt+".":"Activation has not disabled the legacy engine yet.")):"No Legacy Market Automator configuration was detected.");}
 async function refreshMarketBot(){try{const data=await getJson("/api/market-bot",{timeoutMs:50000});renderMarketBotStatus(data);return data;}catch(error){renderMarketBotStatus({status:"Error",message:betterError(error),localConfig:marketBotStateData?.localConfig||{}});return null;}}
 function marketBotPreviewRows(){const rows=marketBotPreviewData?.items||[],query=(getValue("marketBotPreviewSearch")||"").trim().toLowerCase(),category=getValue("marketBotPreviewCategory"),tier=getValue("marketBotPreviewTier");return rows.filter(row=>(!query||[row.id,row.name,row.category].some(value=>String(value||"").toLowerCase().includes(query)))&&(!category||row.category===category)&&(!tier||String(row.tier||"")===tier));}
 function fillMarketBotPreviewFilters(){const rows=marketBotPreviewData?.items||[];for(const [id,key,label] of [["marketBotPreviewCategory","category","All categories"],["marketBotPreviewTier","tier","All tiers"]]){const select=document.getElementById(id);if(!select)continue;const current=select.value;const values=[...new Set(rows.map(row=>String(row[key]||"").trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">'+label+'</option>'+values.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");select.value=values.includes(current)?current:"";}}
@@ -24019,9 +24277,11 @@ function useMarketBotPreview(data){marketBotPreviewData=data?.preview||data?.res
 async function previewMarketBot(){const button=document.getElementById("marketBotPreviewButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Running the production planner in the VM. No listings will be changed...");const data=await getJson("/api/market-bot/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive",listingCategory:getValue("marketBotListingCategory")||""}),timeoutMs:600000});useMarketBotPreview(data);setText("marketBotActionResult",(data.message||marketBotPreviewData?.message||"Preview ready.")+" "+(marketBotPreviewData?.warning||""));await refreshMarketBot();showToast("Exact market preview loaded","success");return data;}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
 async function enableMarketBot(){const button=document.getElementById("marketBotEnableButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Installing Market Bot paused and generating the activation preview...");const prepared=await getJson("/api/market-bot/prepare",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive",listingCategory:getValue("marketBotListingCategory")||""}),timeoutMs:600000});useMarketBotPreview(prepared.preview);const totals=marketBotPreviewData?.totals||{};const confirmed=await appConfirm("Enable Persistent Market Bot","Preview fingerprint: "+prepared.fingerprint+"\\n\\nItems: "+marketBotNumber(totals.catalogItems)+"\\nCreate this first cycle: "+marketBotNumber(totals.createNow)+"\\nPlanned value: "+marketBotNumber(totals.marketValue)+" Solari\\n\\nActive listings remain unchanged. Player listings are never modified.","Enable Market Bot","Cancel");if(!confirmed){setText("marketBotActionResult","Market Bot remains installed and paused. Activation was not confirmed.");await refreshMarketBot();return;}const activated=await getJson("/api/market-bot/activate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({fingerprint:prepared.fingerprint,confirmed:true}),timeoutMs:600000});renderMarketBotStatus(activated.status||activated);setText("marketBotActionResult","Market Bot is active in the VM. Legacy Market Automator is disabled and preserved for rollback.");showToast("Persistent Market Bot enabled","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=marketBotStateData?.localConfig?.activated===true;}}
 async function toggleMarketBotPause(){const paused=marketBotStateData?.localConfig?.paused===true,action=paused?"resume":"pause";try{const data=await getJson("/api/market-bot/"+action,{method:"POST",timeoutMs:600000});renderMarketBotStatus(data);setText("marketBotActionResult",paused?"Market Bot resumed.":"Market Bot paused; active listings were left unchanged.");showToast(paused?"Market Bot resumed":"Market Bot paused","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
+async function repairMarketBot(){if(!(await appConfirm("Repair & Update Market Bot","The Suite will republish a safe pause to the existing VM bot, wait for authoritative Quiescent, install the bundled current runtime, and verify it remains paused. No listings will be created or removed.","Repair & Update","Cancel")))return;const button=document.getElementById("marketBotRepairButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Pausing and verifying the existing VM bot before repair...");const data=await getJson("/api/market-bot/repair-runtime",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true}),timeoutMs:900000});renderMarketBotStatus(data.status||data);setText("marketBotActionResult",data.message||"Market Bot repaired and left safely paused.");showToast("Market Bot repaired and paused","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=false;}}
 async function restockMarketBot(){if(!(await appConfirm("Restock Market Now","Run one capped target-stock reconciliation cycle in the VM? Existing active and player listings remain unchanged.","Restock Now","Cancel")))return;try{setText("marketBotActionResult","Restock cycle is acquiring the database lock...");const data=await getJson("/api/market-bot/restock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cycleId:"manual-"+Date.now()+"-"+Math.random().toString(16).slice(2)}),timeoutMs:600000});setText("marketBotActionResult",data.message||data.result?.message||"Restock complete.");renderMarketBotStatus(data.status||data);await previewMarketBot();showToast("Market restock completed","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
 async function saveMarketBotCategory(){try{const listingCategory=getValue("marketBotListingCategory")||"";const data=await getJson("/api/market-bot/category",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({listingCategory}),timeoutMs:600000});renderMarketBotStatus(data.status||data);setText("marketBotActionResult","Listing category saved: "+(listingCategory||"All categories")+". Future restocks will use this selection.");await previewMarketBot();showToast("Market category saved","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
 async function cleanMarketBot(){if(!(await appConfirm("Clean Bot Market","Remove every active listing that is strictly tracked as Market Bot-owned?\\n\\nPlayer listings and untracked NPC listings will not be touched. The Market Bot will be paused after cleanup so it cannot immediately refill.","Clean Bot Market","Cancel")))return;const button=document.getElementById("marketBotCleanButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Pausing Market Bot and removing only tracked bot-owned listings...");const data=await getJson("/api/market-bot/clean",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true}),timeoutMs:600000});renderMarketBotStatus(data.status||data);const removed=data.result?.removed??data.removed??0;setText("marketBotActionResult","Clean complete: "+marketBotNumber(removed)+" tracked bot-owned listing(s) removed. Market Bot is paused. Player listings changed: 0.");await previewMarketBot();showToast("Bot-owned market listings cleaned","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{if(button)button.disabled=marketBotStateData?.localConfig?.activated!==true;}}
+async function uninstallMarketBot(){const removeBotListings=await appConfirm("Listings After Uninstall","Choose what happens to active listings strictly tracked as Market Bot-owned. Player listings and untracked NPC listings are never changed.","Remove Bot Listings","Keep Bot Listings");const choice=removeBotListings?"remove tracked bot-owned listings":"keep existing bot-owned listings";if(!(await appConfirm("Uninstall Market Bot","The Suite will pause and prove the bot Quiescent, "+choice+", stop and unregister its VM service, remove its runtime/configuration/state files, and verify that no bot process remains.\\n\\nPlayer listings will not be changed.","Uninstall Bot","Cancel")))return;const button=document.getElementById("marketBotUninstallButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Pausing and proving Market Bot Quiescent before uninstall...");const data=await getJson("/api/market-bot/uninstall",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true,removeBotListings}),timeoutMs:900000});renderMarketBotStatus(data.status||data);const listingResult=data.keptBotListings?"Existing bot-owned listings were kept.":marketBotNumber(data.removedBotListings)+" tracked bot-owned listing(s) removed.";setText("marketBotActionResult","Market Bot uninstalled and its VM service verified absent. "+listingResult+" Player listings changed: 0.");marketBotPreviewData=null;renderMarketBotPreview();showToast("Market Bot uninstalled","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=marketBotStateData?.installed!==true;}}
 function downloadMarketBotPreviewCsv(){const rows=marketBotPreviewData?.items||[],categories=marketBotPreviewData?.categories||[];if(!rows.length){showToast("Run Preview Market before exporting CSV.","warning");return;}const header=["Item ID","Name","Category","Tier","Unit Price","Stack Size","Target Listings","Active Listings","Deficit","Create Now","Planned Value"],categoryHeader=["Category","Items","Active Listings","Target Listings","Deficit","Create Now","Planned Value"],quote=value=>'"'+String(value??"").replaceAll('"','""')+'"';const itemLines=[header,...rows.map(row=>[row.id,row.name,row.category,row.tier,row.unitPrice,row.stackSize,row.targetListings,row.activeListings,row.deficit,row.createNow,row.plannedValue])],categoryLines=[categoryHeader,...categories.map(row=>[row.category,row.items,row.activeListings,row.targetListings,row.deficit,row.createNow,row.plannedValue])],lines=[...itemLines.map(row=>row.map(quote).join(",")),"",...categoryLines.map(row=>row.map(quote).join(","))];const blob=new Blob([lines.join("\\r\\n")+"\\r\\n"],{type:"text/csv;charset=utf-8"}),link=document.createElement("a");link.href=URL.createObjectURL(blob);link.download="alphanine-market-preview.csv";link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);}
 async function toggleMarketBotCustomize(){const panel=document.getElementById("marketBotCustomizePanel");if(!panel)return;panel.classList.toggle("hidden");if(!panel.classList.contains("hidden")&&!marketBotItems.length){try{const data=await getJson("/api/market-bot/items",{timeoutMs:60000});marketBotItems=data.items||[];marketBotItemChanges.clear();renderMarketBotCustomize();}catch(error){setText("marketBotCustomizeRows",betterError(error));}}}
 function marketBotCustomizeVisible(){const query=(getValue("marketBotCustomizeSearch")||"").trim().toLowerCase();return marketBotItems.filter(row=>!query||[row.id,row.name,row.category].some(value=>String(value||"").toLowerCase().includes(query)));}
@@ -26452,6 +26712,22 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === "/api/market-bot/repair-runtime" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req);
+      const result = await runTrackedOperation("market-bot:install", "Repair Market Bot Runtime", async ({ update }) => {
+        update("Proving existing bot is paused", "Republishing a matching pause generation through the compatible legacy runtime.");
+        const repaired = await repairMarketBotRuntime(body);
+        update("Market Bot repaired and Quiescent", "The current bundled runtime is installed, verified, and remains paused.");
+        return repaired;
+      }, { category: "market", detail: "Safe paused runtime recovery" });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
+    return;
+  }
   if (url.pathname === "/api/market-bot/pause" && req.method === "POST") {
     try { await json(res, await setMarketBotPaused(true)); }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
@@ -26487,6 +26763,22 @@ async function route(req, res) {
         update("Bot market cleaned", `${cleaned.result?.removed ?? cleaned.removed ?? 0} tracked bot-owned listing(s) removed; player listings changed: 0.`);
         return cleaned;
       }, { category: "market", detail: "Tracked bot-owned listings only" });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/uninstall" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req);
+      const result = await runTrackedOperation("market-bot:uninstall", "Uninstall Market Bot", async ({ update }) => {
+        update("Proving Market Bot Quiescent", "Waiting for the exact pause generation before stopping the VM service.");
+        const removed = await uninstallMarketBot(body);
+        update("Market Bot uninstalled", `VM service and runtime verified absent; ${removed.removedBotListings} tracked bot-owned listing(s) removed; player listings changed: 0.`);
+        return removed;
+      }, { category: "market", detail: body.removeBotListings === true ? "Remove tracked bot-owned listings" : "Keep existing listings" });
       await json(res, result);
     } catch (error) {
       const failure = operationErrorResponse(error);

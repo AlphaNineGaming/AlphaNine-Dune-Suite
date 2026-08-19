@@ -297,7 +297,9 @@ const {
   playerRenamePreviewExpired
 } = require("./lib/player-rename");
 
-const { version: APP_VERSION } = require("./package.json");
+const APP_PACKAGE = require("./package.json");
+const APP_VERSION = String(APP_PACKAGE.version);
+const MARKET_BOT_RUNTIME_VERSION = String(APP_PACKAGE.marketBotRuntimeVersion || APP_VERSION);
 // Server Migration is intentionally not shipped in this Suite build. Keep the
 // dormant implementation isolated until it is either removed from source or
 // deliberately reintroduced as a separately reviewed product feature.
@@ -4014,7 +4016,7 @@ async function marketBotStatus(options = {}) {
         message,
         error: message,
         localConfig: publicMarketBotLocal(localConfig),
-        expectedVersion: APP_VERSION
+        expectedVersion: MARKET_BOT_RUNTIME_VERSION
       };
     }
     return {
@@ -4024,7 +4026,7 @@ async function marketBotStatus(options = {}) {
       status: "Waiting for Exchange",
       message: result.stderr || result.error || "The Market Bot VM is unavailable.",
       localConfig: publicMarketBotLocal(localConfig),
-      expectedVersion: APP_VERSION
+      expectedVersion: MARKET_BOT_RUNTIME_VERSION
     };
   }
   try {
@@ -4044,7 +4046,7 @@ async function marketBotStatus(options = {}) {
         pauseProtocolCompatible: false,
         message: remote.message || "Market Bot is not installed in the VM.",
         installedVersion: "",
-        expectedVersion: APP_VERSION,
+        expectedVersion: MARKET_BOT_RUNTIME_VERSION,
         updateRequired: false,
         localConfig: publicMarketBotLocal(localConfig)
       };
@@ -4083,8 +4085,8 @@ async function marketBotStatus(options = {}) {
       lastRunAt: state.lastRunAt || "",
       nextRunAt: state.nextRunAt || "",
       installedVersion: remote.config?.runtimeVersion || remote.version || "",
-      expectedVersion: APP_VERSION,
-      updateRequired: Boolean(remote.installed && (String(remote.config?.runtimeVersion || "") !== String(APP_VERSION) || !pauseProtocolCompatible)),
+      expectedVersion: MARKET_BOT_RUNTIME_VERSION,
+      updateRequired: Boolean(remote.installed && (String(remote.config?.runtimeVersion || "") !== MARKET_BOT_RUNTIME_VERSION || !pauseProtocolCompatible)),
       localConfig: publicMarketBotLocal(localConfig)
     };
   } catch (error) {
@@ -4095,7 +4097,7 @@ async function marketBotStatus(options = {}) {
       status: "Error",
       message: error.message,
       localConfig: publicMarketBotLocal(localConfig),
-      expectedVersion: APP_VERSION
+      expectedVersion: MARKET_BOT_RUNTIME_VERSION
     };
   }
 }
@@ -4107,9 +4109,9 @@ async function installMarketBot(configInput, options = {}) {
     throw new Error("Bundled Linux/amd64 Market Bot is missing from this Suite build.");
   }
   const binary = fs.readFileSync(MARKET_BOT_BINARY_PATH);
-  const runtime = buildMarketBotRuntimeConfig(config, target, marketBotCatalog(), APP_VERSION);
+  const runtime = buildMarketBotRuntimeConfig(config, target, marketBotCatalog(), MARKET_BOT_RUNTIME_VERSION);
   const persistedConfig = normalizeMarketBotConfig({ ...config, runtimeFingerprint: runtime.configFingerprint });
-  const installerSource = `#!/bin/sh\n${buildMarketBotInstallCommand({ config: runtime, binary, appVersion: APP_VERSION })}\n`;
+  const installerSource = `#!/bin/sh\n${buildMarketBotInstallCommand({ config: runtime, binary, appVersion: MARKET_BOT_RUNTIME_VERSION })}\n`;
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const installerPath = path.join(DATA_DIR, `market-bot-install-${process.pid}-${Date.now()}.sh`);
   fs.writeFileSync(installerPath, installerSource, { encoding: "utf8", mode: 0o600 });
@@ -4124,7 +4126,7 @@ async function installMarketBot(configInput, options = {}) {
   if (remote.ok === false) throw new Error(remote.error || remote.message || "Market Bot VM self-test failed.");
   const saved = options.save === false ? persistedConfig : marketBotStore.save(persistedConfig);
   appendAdminAudit("market_bot_installed", {
-    version: APP_VERSION,
+    version: MARKET_BOT_RUNTIME_VERSION,
     battlegroup: target.name,
     namespace: target.namespace,
     activated: saved.activated,
@@ -4187,7 +4189,7 @@ async function activateMarketBot(input = {}) {
   }
   if (input.confirmed !== true) throw new Error("Explicit confirmation is required before activating Market Bot.");
   const target = await marketBotTarget();
-  const runtime = buildMarketBotRuntimeConfig(current, target, marketBotCatalog(), APP_VERSION);
+  const runtime = buildMarketBotRuntimeConfig(current, target, marketBotCatalog(), MARKET_BOT_RUNTIME_VERSION);
   if (marketBotActivationFingerprint(runtime) !== fingerprint) {
     throw new Error("Market configuration changed after preview. Generate a fresh preview before activation.");
   }
@@ -4453,14 +4455,14 @@ async function repairMarketBotRuntime(input = {}) {
   }
   appendAdminAudit("market_bot_runtime_repaired", {
     previousVersion: before.installedVersion || "unknown",
-    installedVersion: repaired.installedVersion || APP_VERSION,
+    installedVersion: repaired.installedVersion || MARKET_BOT_RUNTIME_VERSION,
     generation: repaired.config?.configGeneration || pausedConfig.configGeneration,
     resumed: false
   });
   return {
     ok: true,
     repaired: true,
-    message: `Market Bot was updated from ${before.installedVersion || "an older version"} to ${repaired.installedVersion || APP_VERSION} and remains safely paused.`,
+    message: `Market Bot was updated from ${before.installedVersion || "an older version"} to ${repaired.installedVersion || MARKET_BOT_RUNTIME_VERSION} and remains safely paused.`,
     status: repaired
   };
 }
@@ -4756,7 +4758,7 @@ async function uninstallMarketBot(input = {}) {
       appendAdminAudit("market_bot_paused_for_uninstall", {
         generation,
         installedVersion: status.installedVersion || "",
-        expectedVersion: APP_VERSION,
+        expectedVersion: MARKET_BOT_RUNTIME_VERSION,
         message: "A compatible older runtime acknowledged the authoritative uninstall drain without being replaced."
       });
     }
@@ -7323,7 +7325,7 @@ async function collectAuthoritativeMarketBotEvidence(target, options = {}) {
     localConfig: options.localConfig,
     requireLocalAgreement: options.requireLocalAgreement !== false,
     expected: {
-      runtimeVersion: APP_VERSION,
+      runtimeVersion: MARKET_BOT_RUNTIME_VERSION,
       ...(options.expected || {})
     }
   });
@@ -7469,7 +7471,7 @@ async function maintenanceBootstrapPauseReconciliationPreflight(options = {}) {
     paused: true,
     pauseState: MARKET_BOT_PAUSE_STATES.REQUESTED,
     activated: true
-  }, target, marketBotCatalog(), APP_VERSION);
+  }, target, marketBotCatalog(), MARKET_BOT_RUNTIME_VERSION);
   const semanticDifferenceCategories = marketBotSemanticDifferenceCategories(expectedRuntime, runtimeEvidence.config);
   conditions.push(migrationCondition("semantic-configuration", semanticDifferenceCategories.length === 0, semanticDifferenceCategories.length ? "Local and remote semantic Market Bot configuration differs." : "Local and remote semantic Market Bot configuration matches.", { differingCategories: semanticDifferenceCategories }));
   const expectedFingerprint = marketBotActivationFingerprint(expectedRuntime);
@@ -7496,7 +7498,7 @@ async function maintenanceBootstrapPauseReconciliationPreflight(options = {}) {
     remote: remoteStatus,
     samples,
     writers,
-    expectedVersion: APP_VERSION,
+    expectedVersion: MARKET_BOT_RUNTIME_VERSION,
     expectedConfigFingerprint: staleFingerprintRefreshAllowed ? remoteStoredFingerprint : expectedFingerprint,
     expectedBinaryHash: bundledBinaryHash,
     remoteBinaryHash: runtimeEvidence.remoteBinaryHash
@@ -7716,7 +7718,7 @@ async function migrationOfflineMarketBotReconciliationPreflight(options = {}) {
   if (!conditions.some((condition) => condition.id === "local-update-scope")) {
     conditions.push(migrationCondition("local-update-scope", true, "Only local generation, pause state, pinned catalog, fingerprint evidence, and durability timestamp may change.", { fields: updateScope.evidenceFields }));
   }
-  const expectedRuntime = buildMarketBotRuntimeConfig(candidateLocalConfig, target, [], APP_VERSION);
+  const expectedRuntime = buildMarketBotRuntimeConfig(candidateLocalConfig, target, [], MARKET_BOT_RUNTIME_VERSION);
   const semanticDifferences = marketBotSemanticDifferenceCategories(expectedRuntime, runtimeConfig);
   conditions.push(migrationCondition("semantic-economic-policy", semanticDifferences.length === 0, semanticDifferences.length ? "Local and remote semantic economic policy differs." : "Local and remote economic policy fields are semantically identical.", { differingCategories: semanticDifferences }));
   const localRecalculatedFingerprint = marketBotActivationFingerprint(expectedRuntime);
@@ -21965,7 +21967,7 @@ function appPage() {
           <div class="sound-widget advanced-only" aria-label="UI sound controls">
             <div class="sound-widget-head">
               <div class="label">Interface Audio</div>
-              <button id="dashboardSoundToggle" class="sound-toggle" type="button">ðŸ”‡ Sounds OFF</button>
+              <button id="dashboardSoundToggle" class="sound-toggle" type="button">Sounds OFF</button>
             </div>
             <label class="sound-slider">Volume <input id="dashboardSoundVolume" type="range" min="0" max="100" value="100"><span id="dashboardSoundVolumeLabel" class="sound-volume-readout">100%</span></label>
           </div>
@@ -24464,7 +24466,7 @@ function uiSoundGain(scale=1){return Math.min(.18,(clampSoundVolume(uiSoundPrefs
 function ensureUiSoundContext(){if(!uiSoundContext){const AudioCtor=window.AudioContext||window.webkitAudioContext;if(!AudioCtor)return null;uiSoundContext=new AudioCtor();}if(uiSoundContext.state==="suspended")uiSoundContext.resume().catch(()=>{});return uiSoundContext;}
 function playTone(freq,duration=70,type="sine",delay=0,gainScale=.8,endFreq){const ctx=ensureUiSoundContext();if(!ctx||!uiSoundPrefs.enabled||uiSoundPrefs.volume<=0)return;const osc=ctx.createOscillator();const gain=ctx.createGain();const now=ctx.currentTime+delay;const level=uiSoundGain(gainScale);osc.type=type;osc.frequency.setValueAtTime(freq,now);if(endFreq)osc.frequency.exponentialRampToValueAtTime(Math.max(1,endFreq),now+duration/1000);gain.gain.setValueAtTime(0.0001,now);gain.gain.exponentialRampToValueAtTime(Math.max(0.0002,level),now+.012);gain.gain.exponentialRampToValueAtTime(0.0001,now+duration/1000);osc.connect(gain);gain.connect(ctx.destination);osc.start(now);osc.stop(now+duration/1000+.025);}
 function playUiSound(kind){if(!uiSoundPrefs.enabled||uiSoundPrefs.volume<=0)return;try{if(kind==="hover")playTone(880,45,"sine",0,.26,1040);else if(kind==="click")playTone(520,65,"triangle",0,.42,420);else if(kind==="tab"){playTone(360,55,"sine",0,.36,480);playTone(760,65,"sine",.055,.26,920);}else if(kind==="success"){playTone(520,70,"triangle",0,.38,680);playTone(920,90,"sine",.075,.28,1180);}else if(kind==="warning"){playTone(320,95,"triangle",0,.34,220);playTone(180,110,"sine",.09,.24,150);}}catch{}}
-function syncUiSoundSettings(){const enabled=document.getElementById("uiSoundsEnabled");const volume=document.getElementById("uiSoundVolume");const label=document.getElementById("uiSoundVolumeLabel");const status=document.getElementById("uiSoundStatus");const dashToggle=document.getElementById("dashboardSoundToggle");const dashVolume=document.getElementById("dashboardSoundVolume");const dashLabel=document.getElementById("dashboardSoundVolumeLabel");const pct=clampSoundVolume(uiSoundPrefs.volume);if(enabled)enabled.checked=Boolean(uiSoundPrefs.enabled);if(volume)volume.value=String(pct);if(label)label.textContent=pct+"%";if(dashToggle){dashToggle.textContent=uiSoundPrefs.enabled?"ðŸ”Š Sounds ON":"ðŸ”‡ Sounds OFF";dashToggle.classList.toggle("primary",Boolean(uiSoundPrefs.enabled));}if(dashVolume)dashVolume.value=String(pct);if(dashLabel)dashLabel.textContent=pct+"%";if(status){status.className=uiSoundPrefs.enabled?"empty":"warning";status.textContent=(uiSoundPrefs.enabled?"Sounds ON. ":"Sounds OFF. ")+"Volume "+pct+"%.";}}
+function syncUiSoundSettings(){const enabled=document.getElementById("uiSoundsEnabled");const volume=document.getElementById("uiSoundVolume");const label=document.getElementById("uiSoundVolumeLabel");const status=document.getElementById("uiSoundStatus");const dashToggle=document.getElementById("dashboardSoundToggle");const dashVolume=document.getElementById("dashboardSoundVolume");const dashLabel=document.getElementById("dashboardSoundVolumeLabel");const pct=clampSoundVolume(uiSoundPrefs.volume);if(enabled)enabled.checked=Boolean(uiSoundPrefs.enabled);if(volume)volume.value=String(pct);if(label)label.textContent=pct+"%";if(dashToggle){dashToggle.textContent=uiSoundPrefs.enabled?"Sounds ON":"Sounds OFF";dashToggle.classList.toggle("primary",Boolean(uiSoundPrefs.enabled));}if(dashVolume)dashVolume.value=String(pct);if(dashLabel)dashLabel.textContent=pct+"%";if(status){status.className=uiSoundPrefs.enabled?"empty":"warning";status.textContent=(uiSoundPrefs.enabled?"Sounds ON. ":"Sounds OFF. ")+"Volume "+pct+"%.";}}
 async function saveUiSoundSettings(){try{const current=await getJson("/api/config");const config={...current,uiSoundsEnabled:Boolean(uiSoundPrefs.enabled),uiSoundVolume:clampSoundVolume(uiSoundPrefs.volume)};await getJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(config)});syncUiSoundSettings();}catch(e){const status=document.getElementById("uiSoundStatus");if(status){status.className="warning";status.textContent="Could not save UI sound preference: "+betterError(e);}playUiSound("warning");}}
 function scheduleUiSoundSave(){clearTimeout(uiSoundSaveTimer);uiSoundSaveTimer=setTimeout(saveUiSoundSettings,300);}
 async function loadUiSoundSettings(){try{const cfg=await getJson("/api/config");uiSoundPrefs.enabled=cfg.uiSoundsEnabled===true;uiSoundPrefs.volume=clampSoundVolume(cfg.uiSoundVolume ?? UI_SOUND_DEFAULTS.volume);}catch{}syncUiSoundSettings();}
@@ -24487,7 +24489,7 @@ let statusRefreshInFlight=null,vmMonitorRefreshInFlight=null,indicatorDelayActiv
 function isIndicatorPollDelay(error){return /request timed out for \/api\/(?:status|vm-monitor)/i.test(String(error?.message||error||""));}
 function reportIndicatorDelay(key,message,detail){const now=Date.now(),last=Number(indicatorDelayActivityAt[key]||0);if(now-last<60000)return;indicatorDelayActivityAt[key]=now;addActivity("warn",message,detail);}
 function clearIndicatorDelay(key){delete indicatorDelayActivityAt[key];}
-async function refreshStatusPoll(){try{const data=await getJson("/api/status",{timeoutMs:45000});clearIndicatorDelay("status");const s=data.status?.summary||{};const dbLabel=databaseHealthLabel(data);const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?((selected.title||"Title not found")+" / "+selected.namespace+" / "+selected.name):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",dbLabel);tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));badge("topDb",dbLabel);document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+dbLabel+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return data;}catch(e){if(isIndicatorPollDelay(e)){const message="Server status check delayed; keeping the last confirmed indicators.";document.getElementById("serverLog").textContent=message;setText("dashboardLog",message);syncLogs();reportIndicatorDelay("status","Server status delayed",message);return{ok:false,delayed:true,error:betterError(e)};}renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");badge("topDb","DB status unknown");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return{ok:false,error:betterError(e)};}}
+async function refreshStatusPoll(){try{const data=await getJson("/api/status",{timeoutMs:45000});clearIndicatorDelay("status");const s=data.status?.summary||{};const dbLabel=databaseHealthLabel(data);const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?[selected.title,selected.namespace,selected.name].filter(Boolean).join(" / "):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",dbLabel);tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));badge("topDb",dbLabel);document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+dbLabel+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return data;}catch(e){if(isIndicatorPollDelay(e)){const message="Server status check delayed; keeping the last confirmed indicators.";document.getElementById("serverLog").textContent=message;setText("dashboardLog",message);syncLogs();reportIndicatorDelay("status","Server status delayed",message);return{ok:false,delayed:true,error:betterError(e)};}renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");badge("topDb","DB status unknown");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return{ok:false,error:betterError(e)};}}
 function refresh(){if(statusRefreshInFlight)return statusRefreshInFlight;statusRefreshInFlight=refreshStatusPoll().finally(()=>{statusRefreshInFlight=null;});return statusRefreshInFlight;}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(row){if(row&&typeof row==="object"&&row.statusLabel)return row.statusLabel;const open=row&&typeof row==="object"?row.open:row;if(open===null||open===undefined)return"Discovered";return open?"Open":"Closed";}

@@ -6,7 +6,11 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-assert.doesNotMatch(serverSource, /Â·|â€¦|â€”|â€“|â†’|Ã—|âŒ„|â—|â—†|â—‡|âœ¦|â˜¼|âœ“/, "Suite source contains mojibake text");
+const packageManifest = require(path.join(__dirname, "..", "package.json"));
+assert.doesNotMatch(serverSource, /Â·|â€¦|â€”|â€“|â†’|Ã—|âŒ„|â—|â—†|â—‡|âœ¦|â˜¼|âœ“|ðŸ/, "Suite source contains mojibake text");
+assert.equal(packageManifest.marketBotRuntimeVersion, "1.0.98", "UI hotfix unexpectedly changes the Market Bot runtime version.");
+assert(serverSource.includes("expectedVersion: MARKET_BOT_RUNTIME_VERSION"), "Market Bot status is not pinned to its independent runtime version.");
+assert(!serverSource.includes("marketBotCatalog(), APP_VERSION"), "A Market Bot runtime path still inherits the Suite UI version.");
 
 const port = 18910 + Math.floor(Math.random() * 200);
 const httpsPort = port + 500;
@@ -70,6 +74,7 @@ function extractFunction(source, name) {
     assert(!html.includes('data-view="server-migration"') && !html.includes('id="server-migration"'), "Rendered Suite still exposes Server Migration.");
     assert(!html.includes('id="migrationMaintenanceBanner"') && !html.includes('id="migrationOfflineBanner"'), "Rendered Suite still exposes migration startup-hold banners.");
     assert(html.includes('id="repair"'), "Rendered Repair Inspector is missing.");
+    assert(html.includes('id="dashboardSoundToggle" class="sound-toggle" type="button">Sounds OFF</button>'), "Dashboard sound toggle has invalid initial text.");
     assert(html.includes('id="landsraad"'), "Rendered Landsraad tier editor is missing.");
     assert(html.includes("Exactly five distinct thresholds"), "Rendered Landsraad policy is missing the exact-five requirement.");
     assert(/id="landsraadTierPreviewButton"[^>]*disabled/.test(html), "Rendered Landsraad preview button is not fail-closed by default.");
@@ -140,6 +145,10 @@ function extractFunction(source, name) {
     assert(scripts.length, "No inline UI script was rendered.");
     for (const script of scripts) new Function(script);
     const suiteScript = scripts.join("\n");
+    const statusPollSource = extractFunction(suiteScript, "refreshStatusPoll");
+    assert(!statusPollSource.includes("Title not found"), "Dashboard still renders the misleading missing-title placeholder.");
+    assert(statusPollSource.includes('+"\\nServer: "+'), "Dashboard status summary is missing its line break.");
+    assert(!statusPollSource.includes('+"\\\\nServer: "+'), "Dashboard status summary renders a literal \\n sequence.");
     const getJsonForTest = new Function("fetch", "AbortController", "setTimeout", "clearTimeout", "location", "window", `
       function csrfCookie(){return "";}
       ${extractFunction(suiteScript, "getJson")}

@@ -5,9 +5,9 @@
   "progressApiVersion": "migration-progress-v1",
   "migrationWorkerTransportVersion": "destination-durable-worker-v1",
   "files": {
-    "server.js": "dd97c18bebbe07c803aba02cdc803f48151ffed84a37a2b18700a9689126f1b3",
+    "server.js": "d2f0861e16c7651ded6ea5d732a925945a53ab7714930be0e5231fb148cf61f1",
     "lib/battlegroup-control.js": "88a9ea0851d089298e9cb2318a998690a4463800b858c0676a81694bd5620117",
-    "lib/database-backup.js": "88cac0fa23a10546a5db9097961fe97dec747f7d1032a23b12dca23df1f27244",
+    "lib/database-backup.js": "4e3aa8ebe88701bdfed3e37252091355f1258df1475107f4c6cd505324ceb4e0",
     "lib/server-migration-export.js": "5e00e8b5424d2230ae63cd009e7524bf59b4ba0b7f6033166fe67b94be5215ee",
     "lib/server-migration-import.js": "67eeb316ba066ecd544608efe5b3f554bf4f3317e8c6c182211e68340ca22092",
     "lib/migration-destination-worker.js": "1894947c59789bce6003eead805479f3ea8cfcf170728888d13e9ab1e29528cc",
@@ -31,5 +31,5 @@
     "assets/migration-worker/linux-amd64/alphanine-migration-worker": "f329dd2bb0e9904f8c41b2ddf35e16daf882e8c5a53b5d623a25b5ffed629deb",
     "assets/migration-worker/linux-amd64/alphanine-migration-worker.sha256": "5b72b0a13bd75e10bb20c0bbaa92ed07a2f34fab150069a33883f6238e8b6e2c"
   },
-  "sourceBuildFingerprint": "fc5ce3cbfbd50d07edd2437616746c0d7485976edfd2d9e28f3bc8a7f9684d6c"
+  "sourceBuildFingerprint": "48b84ab1c2e528eac8e81dad0deff6763292fd5de28d0f8a34e2a12cabbbcd73"
 }

@@ -28,6 +28,13 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.0.99
+
+- Fixed the dashboard sound toggle displaying corrupted emoji text.
+- Fixed the Quick Actions battlegroup summary showing a literal `\\n` instead of a line break.
+- Removed the misleading `Title not found` placeholder when a battlegroup title is unavailable.
+- Kept the Market Bot runtime pinned to 1.0.98 so this UI-only update does not require bot replacement or repair.
+
 ### 1.0.98
 
 - Added an optional random player-listing buyer to the persistent Market Bot. It is disabled by default and requires explicit confirmation.

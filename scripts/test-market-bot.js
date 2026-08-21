@@ -73,6 +73,7 @@ const testCategorySeed = {
   assert.equal(config.pauseGeneration, "0");
   assert.equal(config.runtimeFingerprint, "");
   assert.equal(config.activated, false);
+  assert.equal(config.exchangeName, "");
   assert.equal(config.economyStyle, "Expensive");
   assert.equal(config.listingCategory, "");
   assert.equal(config.playerBuying.enabled, false, "player buying must be opt-in");
@@ -152,12 +153,14 @@ const testCategorySeed = {
 
 {
   const config = normalizeConfig({
+    exchangeName: "Arrakeen_EX",
     economyStyle: "Balanced",
     overrides: { Item_A: { enabled: false, unitPrice: 123, stackSize: 7, targetListings: 3 } }
   });
   const target = { name: "abc", namespace: "funcom-seabass-abc", dbPod: "db-0", dbSvc: "db" };
   const runtime = runtimeConfig(config, target, catalog, "1.2.3");
   const item = runtime.items.find((row) => row.id === "Item_A");
+  assert.equal(runtime.exchangeName, "Arrakeen_EX", "the selected Exchange must survive normalization into the VM runtime config");
   assert.equal(item.enabled, false);
   assert.equal(item.unitPrice, 123);
   assert.equal(item.stackSize, 7);
@@ -349,6 +352,9 @@ const testCategorySeed = {
   assert(serverSource.includes('id="market" class="view"') && serverSource.includes("Persistent Market Bot"), "primary Market Bot UI is missing");
   assert(serverSource.includes("Category-verified catalog items") && serverSource.includes("Skipped (category metadata unavailable)"), "Market Bot UI must distinguish visible from skipped catalog items");
   assert(serverSource.includes('id="marketBotListingCategory"') && serverSource.includes('"/api/market-bot/category"'), "persistent listing category control is missing");
+  assert(serverSource.includes('id="marketBotExchange"') && serverSource.includes('"/api/market-bot/exchanges"') && serverSource.includes('"/api/market-bot/exchange"'), "live Exchange selection and persistence controls are missing");
+  assert(serverSource.includes("await setMarketBotPaused(true, { strictEvidence: true })") && serverSource.includes("existingListingsMoved: false"), "Exchange changes must pause safely and explicitly leave existing listings in place");
+  assert(serverSource.includes("marketBotActivationPreviewFingerprint") && serverSource.includes('exchangeName: String(runtime.exchangeName || "")'), "activation confirmation must be bound to the selected Exchange");
   assert(serverSource.includes('id="marketBotRepairButton"') && serverSource.includes('"/api/market-bot/repair-runtime"'), "normal Market Bot UI must expose safe runtime repair");
   assert(serverSource.includes("if (!before.pauseProtocolCompatible)") && serverSource.includes("marketBotRepairBoundary(minimumGeneration, remoteFingerprint)"), "runtime repair must use only the compatible legacy pause protocol and an independent pause boundary");
   assert(serverSource.includes("VM_MARKET_BOT_PAUSE_MARKER") && serverSource.includes("VM_MARKET_BOT_CYCLE_LEASE") && serverSource.includes("pg_try_advisory_xact_lock"), "runtime repair must verify the pause marker, cycle lease, and Market Bot-specific database lock");
@@ -363,8 +369,13 @@ const testCategorySeed = {
   assert(serverSource.includes("configSha256Before") && serverSource.includes("configSha256After") && serverSource.includes("configBase64"), "remote policy evidence must bind one binary-safe capture between stable file hashes");
   assert(/const firstWriterText = await migrationSql\(target, ACTIVE_WRITERS_SQL\);\r?\n\s*const firstSampleResult = await migrationSql/.test(serverSource), "writer sampling must finish before the Suite opens its own semantic evidence session");
   assert(serverSource.includes("Clean Bot Market") && serverSource.includes('"/api/market-bot/clean"'), "tracked-only Market Bot cleanup control is missing");
+  const cleanWorkflow = serverSource.slice(serverSource.indexOf("async function cleanMarketBot(input = {})"), serverSource.indexOf("async function updateMarketBotPlayerBuying"));
+  assert.doesNotMatch(cleanWorkflow, /maintenanceCheckpoint|verifyMaintenanceCheckpointRemote|Migration Maintenance/, "normal Market Bot cleanup must not depend on the removed Migration Maintenance workflow");
+  assert.match(cleanWorkflow, /marketBotStatus\(\{ strictEvidence: true \}\)[\s\S]*setMarketBotPaused\(true, \{ strictEvidence: true \}\)[\s\S]*status\.quiescent[\s\S]*status\.generationMatch[\s\S]*current\.paused !== true[\s\S]*buildMarketBotActionCommand\("clean"\)/, "Clean Bot must automatically pause when needed and prove authoritative Quiescent before deleting tracked listings");
+  assert(serverSource.includes("if(cleanButton)cleanButton.disabled=!active;"), "Clean Bot must remain clickable while an activated running bot is available for automatic pause");
   assert(serverSource.includes('id="marketBotUninstallButton"') && serverSource.includes('"/api/market-bot/uninstall"'), "safe Market Bot uninstall control is missing");
   assert(/async function uninstallMarketBot\(input = \{\}\)[\s\S]*setMarketBotPaused\(true[\s\S]*buildMarketBotMigrationStopCommand\(\)[\s\S]*buildMarketBotMigrationUninstallCommand[\s\S]*requireAbsent: true[\s\S]*marketBotStore\.save/.test(serverSource), "Market Bot uninstall must prove Quiescent, stop, remove with rollback, prove absence, and only then deactivate local state");
+  assert(!serverSource.includes("cleanMarketBot({ confirmed: true, maintenanceCheckpoint:"), "uninstall cleanup must not pass the removed Migration Maintenance checkpoint");
   assert(serverSource.includes("market_bot_paused_for_uninstall") && serverSource.includes("A compatible older runtime acknowledged the authoritative uninstall drain without being replaced."), "safe uninstall must drain a compatible older runtime without requiring a replacement build");
   assert(serverSource.includes("Choose what happens to active listings strictly tracked as Market Bot-owned") && serverSource.includes('body:JSON.stringify({confirmed:true,removeBotListings})'), "Market Bot uninstall must require an explicit keep-or-remove listing choice");
   assert(serverSource.includes('id="legacy-market" class="view hidden"'), "legacy market UI is not isolated");
@@ -383,6 +394,7 @@ const testCategorySeed = {
   assert(!goSource.includes("row_number() over(order by lower(e.category),lower(e.display_name)"), "alphabetical category starvation ordering must not return");
   assert(goSource.includes("'playerListingsChanged',0") && goSource.includes("join bot_actor b on b.id=o.owner_id"), "cleanup must report and enforce tracked bot ownership");
   assert(goSource.includes("dune.dune_exchange_accesspoints"), "access point must resolve from a live foreign-key row");
+  assert(goSource.includes('exchange_name = " + sqlText(cfg.ExchangeName)'), "the VM bot must target the exact selected Exchange name");
   assert(!goSource.includes("),1)::bigint access_point_id"), "Market Bot must not invent access point id 1");
   assert(!/p\.template_id,1\.0,1\.0,0,0,p\.unit_price/.test(goSource), "Market Bot must not create zero-mask listings");
   assert(serverSource.includes("Restart-VM -Force"), "VM restart must be non-interactive");

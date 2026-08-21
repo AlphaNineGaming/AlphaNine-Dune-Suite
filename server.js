@@ -3948,6 +3948,13 @@ function marketBotCategories() {
     .sort((left, right) => left.localeCompare(right));
 }
 
+function marketBotActivationPreviewFingerprint(runtime) {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    configFingerprint: marketBotActivationFingerprint(runtime),
+    exchangeName: String(runtime.exchangeName || "")
+  })).digest("hex");
+}
+
 function localMarketBotConfig() {
   try { return marketBotStore.load(); }
   catch (error) {
@@ -3965,6 +3972,7 @@ function publicMarketBotLocal(config = localMarketBotConfig()) {
     pauseGeneration: String(config.pauseGeneration || "0"),
     runtimeFingerprint: config.runtimeFingerprint || "",
     activated: config.activated,
+    exchangeName: config.exchangeName || "",
     economyStyle: config.economyStyle,
     listingCategory: config.listingCategory || "",
     availableCategories: marketBotCategories(),
@@ -4140,11 +4148,14 @@ async function installMarketBot(configInput, options = {}) {
 async function prepareMarketBot(input = {}) {
   const current = localMarketBotConfig();
   if (current.activated) throw new Error("Market Bot is already activated. Use Preview Market to inspect the current plan.");
+  const exchangeName = String(input.exchangeName ?? current.exchangeName ?? "").trim();
+  if (exchangeName) await requireUsableMarketBotExchange(exchangeName);
   const listingCategory = String(input.listingCategory ?? current.listingCategory ?? "").trim();
   if (listingCategory && !marketBotCategories().includes(listingCategory)) throw new Error(`Unknown market category: ${listingCategory}`);
   const stagedGeneration = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
   const staged = normalizeMarketBotConfig({
     ...current,
+    exchangeName,
     economyStyle: input.economyStyle || current.economyStyle,
     listingCategory,
     enabled: false,
@@ -4155,7 +4166,7 @@ async function prepareMarketBot(input = {}) {
     activated: false
   });
   const installed = await installMarketBot(staged);
-  const fingerprint = marketBotActivationFingerprint(installed.runtime);
+  const fingerprint = marketBotActivationPreviewFingerprint(installed.runtime);
   staged.runtimeFingerprint = installed.runtime.configFingerprint;
   staged.legacyMigration.activationFingerprint = fingerprint;
   marketBotStore.save(staged);
@@ -4164,6 +4175,7 @@ async function prepareMarketBot(input = {}) {
   const preview = parseMarketBotJson(previewRaw.stdout);
   appendAdminAudit("market_bot_activation_preview", {
     fingerprint,
+    exchangeName: staged.exchangeName || "Automatic",
     economyStyle: staged.economyStyle,
     listingCategory: staged.listingCategory || "All categories",
     totals: preview.result?.totals || null,
@@ -4173,6 +4185,7 @@ async function prepareMarketBot(input = {}) {
     ok: true,
     activationRequired: true,
     fingerprint,
+    exchangeName: staged.exchangeName || "Automatic",
     warning: staged.playerBuying?.enabled
       ? "Active bot listings remain unchanged. The explicitly configured player buyer may purchase eligible listings after activation."
       : "Active listings remain unchanged. Player buying is disabled.",
@@ -4190,7 +4203,7 @@ async function activateMarketBot(input = {}) {
   if (input.confirmed !== true) throw new Error("Explicit confirmation is required before activating Market Bot.");
   const target = await marketBotTarget();
   const runtime = buildMarketBotRuntimeConfig(current, target, marketBotCatalog(), MARKET_BOT_RUNTIME_VERSION);
-  if (marketBotActivationFingerprint(runtime) !== fingerprint) {
+  if (marketBotActivationPreviewFingerprint(runtime) !== fingerprint) {
     throw new Error("Market configuration changed after preview. Generate a fresh preview before activation.");
   }
   const legacyRuntime = await marketAutomator.overview();
@@ -4221,16 +4234,19 @@ async function activateMarketBot(input = {}) {
 async function previewMarketBot(input = {}) {
   let status = await marketBotStatus();
   const current = localMarketBotConfig();
+  const requestedExchange = String(input.exchangeName ?? current.exchangeName ?? "").trim();
+  if (requestedExchange) await requireUsableMarketBotExchange(requestedExchange);
   const requestedStyle = input.economyStyle || current.economyStyle;
   const requestedCategory = String(input.listingCategory ?? current.listingCategory ?? "").trim();
   if (requestedCategory && !marketBotCategories().includes(requestedCategory)) throw new Error(`Unknown market category: ${requestedCategory}`);
-  if (!status.installed || status.updateRequired || requestedStyle !== current.economyStyle || requestedCategory !== current.listingCategory) {
+  if (!status.installed || status.updateRequired || requestedExchange !== current.exchangeName || requestedStyle !== current.economyStyle || requestedCategory !== current.listingCategory) {
     if (status.installed && current.activated && !status.quiescent) {
       throw new Error("Pause and drain Market Bot to Quiescent before installing a changed preview configuration.");
     }
     const stagedGeneration = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
     const staged = normalizeMarketBotConfig({
       ...current,
+      exchangeName: requestedExchange,
       economyStyle: requestedStyle,
       listingCategory: requestedCategory,
       configGeneration: stagedGeneration,
@@ -4638,6 +4654,55 @@ async function updateMarketBotCategory(input = {}) {
   return { ok: true, config: publicMarketBotLocal(next), status: await marketBotStatus() };
 }
 
+async function updateMarketBotExchange(input = {}) {
+  const exchangeName = String(input.exchangeName || "").trim();
+  const selected = await requireUsableMarketBotExchange(exchangeName);
+  let current = localMarketBotConfig();
+  let before = await marketBotStatus({ strictEvidence: true });
+  let pausedForChange = false;
+  if (before.installed && current.activated && !before.quiescent) {
+    before = await setMarketBotPaused(true, { strictEvidence: true });
+    current = localMarketBotConfig();
+    pausedForChange = true;
+  }
+  if (before.installed && current.activated && (!before.quiescent || current.paused !== true)) {
+    throw new Error("Market Bot must be authoritatively Quiescent before changing its Exchange.");
+  }
+  const generation = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
+  const next = marketBotStore.save(normalizeMarketBotConfig({
+    ...current,
+    exchangeName,
+    configGeneration: generation,
+    pauseGeneration: current.paused ? generation : current.pauseGeneration
+  }));
+  if (before.installed) await installMarketBot(next);
+  let finalStatus = await marketBotStatus({ strictEvidence: true });
+  if (before.installed && current.activated) {
+    for (let attempt = 0; attempt < 45 && (!finalStatus.quiescent || !finalStatus.generationMatch); attempt += 1) {
+      await sleepMs(2000);
+      finalStatus = await marketBotStatus({ strictEvidence: true });
+      if (!finalStatus.reachable || finalStatus.status === "Error") break;
+    }
+    if (!finalStatus.quiescent || !finalStatus.generationMatch) {
+      throw new Error(`The Exchange was saved, but the Market Bot has not yet proven matching-generation Quiescent: ${finalStatus.message || finalStatus.status || "Unknown"}. It remains paused.`);
+    }
+  }
+  appendAdminAudit("market_bot_exchange_saved", {
+    exchangeId: selected.id,
+    exchangeName,
+    pausedForChange,
+    existingListingsMoved: false
+  });
+  return {
+    ok: true,
+    exchange: selected,
+    pausedForChange,
+    existingListingsMoved: false,
+    config: publicMarketBotLocal(next),
+    status: finalStatus
+  };
+}
+
 async function restockMarketBot(input = {}) {
   assertWorkloadStartAllowed("run a Market Bot cycle");
   const cycleId = String(input.cycleId || `manual-${crypto.randomUUID()}`).slice(0, 160);
@@ -4649,19 +4714,19 @@ async function restockMarketBot(input = {}) {
 }
 
 async function cleanMarketBot(input = {}) {
-  const checkpoint = maintenanceCheckpoint("Market Bot cleanup", input.maintenanceCheckpoint || null);
-  await verifyMaintenanceCheckpointRemote(checkpoint, "before Clean Bot ownership verification");
   if (input.confirmed !== true) throw new Error("Explicit confirmation is required before cleaning Market Bot listings.");
-  const current = localMarketBotConfig();
+  let current = localMarketBotConfig();
   if (!current.activated) throw new Error("Market Bot has not been activated.");
-  const status = await marketBotStatus();
+  let status = await marketBotStatus({ strictEvidence: true });
+  if (!status.quiescent || !status.generationMatch || current.paused !== true) {
+    status = await setMarketBotPaused(true, { strictEvidence: true });
+    current = localMarketBotConfig();
+  }
   if (!status.quiescent || !status.generationMatch || current.paused !== true) {
     throw new Error("Clean Bot requires an authoritative Quiescent Market Bot with matching local and remote pause generations.");
   }
-  await verifyMaintenanceCheckpointRemote(checkpoint, "before Clean Bot deletion");
   const result = await sshCommand(buildMarketBotActionCommand("clean"), 180000, { maxBuffer: 1024 * 1024 * 32 });
   if (!result.ok) throw new Error(result.stderr || result.stdout || result.error || "Market Bot cleanup failed.");
-  await verifyMaintenanceCheckpointRemote(checkpoint, "after Clean Bot deletion");
   const parsed = parseMarketBotJson(result.stdout);
   appendAdminAudit("market_bot_cleaned", {
     removed: parsed.result?.removed ?? parsed.removed ?? 0,
@@ -4771,7 +4836,7 @@ async function uninstallMarketBot(input = {}) {
   let removedBotListings = 0;
   if (input.removeBotListings === true) {
     if (!current.activated) throw new Error("Tracked bot-owned listings cannot be cleaned from an unactivated installation. No runtime was removed.");
-    const cleaned = await cleanMarketBot({ confirmed: true, maintenanceCheckpoint: input.maintenanceCheckpoint || null });
+    const cleaned = await cleanMarketBot({ confirmed: true });
     removedBotListings = Number(cleaned.result?.removed ?? cleaned.removed ?? 0) || 0;
   }
 
@@ -17096,6 +17161,349 @@ async function runMarketExpiredCleanupBackground(source = "timer") {
   }
 }
 
+const ARRAKEEN_EXCHANGE_NAME = "Arrakeen_EX";
+const ARRAKEEN_ACCESS_POINT_NAME = "Arrakeen_AP";
+const ARRAKEEN_EXCHANGE_CONFIRM_TEXT = "INITIALIZE ARRAKEEN EXCHANGE";
+const ARRAKEEN_EXCHANGE_PREVIEW_TTL_MS = 10 * 60 * 1000;
+const arrakeenExchangePreviews = new Map();
+
+function arrakeenExchangeBackupPath(previewId) {
+  const folder = path.join(DATA_DIR, "market-exchange-backups");
+  fs.mkdirSync(folder, { recursive: true });
+  return path.join(folder, `${new Date().toISOString().replace(/[:.]/g, "-")}-arrakeen-exchange-${previewId}.json`);
+}
+
+function arrakeenExchangeSignature(inspect) {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    mapCount: inspect.mapCount,
+    mapPartitionId: inspect.mapPartitionId,
+    mapServerId: inspect.mapServerId,
+    exchangeCount: inspect.exchangeCount,
+    exchangeId: inspect.exchangeId,
+    inventoryId: inspect.inventoryId,
+    inventoryRowCount: inspect.inventoryRowCount,
+    inventoryExchangeId: inspect.inventoryExchangeId,
+    linkedInventoryCount: inspect.linkedInventoryCount,
+    accessPointCount: inspect.accessPointCount,
+    accessPointId: inspect.accessPointId,
+    namedAccessPointCount: inspect.namedAccessPointCount,
+    namedAccessPointExchangeId: inspect.namedAccessPointExchangeId,
+    listingCount: inspect.listingCount
+  })).digest("hex");
+}
+
+async function inspectArrakeenExchange() {
+  const sql = `
+    with target_exchange as (
+      select id, inventory_id
+      from dune.dune_exchanges
+      where exchange_name = ${sqlString(ARRAKEEN_EXCHANGE_NAME)}
+    ), target_access_points as (
+      select ap.id, ap.exchange_id
+      from dune.dune_exchange_accesspoints ap
+      where ap.exchange_id in (select id from target_exchange)
+    ), named_access_points as (
+      select ap.id, ap.exchange_id
+      from dune.dune_exchange_accesspoints ap
+      where ap.name = ${sqlString(ARRAKEEN_ACCESS_POINT_NAME)}
+    )
+    select
+      (select count(*)::text from dune.world_partition where map = 'SH_Arrakeen' or label = 'Arrakeen_0'),
+      coalesce((select min(partition_id)::text from dune.world_partition where map = 'SH_Arrakeen' or label = 'Arrakeen_0'), ''),
+      coalesce((select min(server_id) from dune.world_partition where map = 'SH_Arrakeen' or label = 'Arrakeen_0'), ''),
+      (select count(*)::text from target_exchange),
+      coalesce((select min(id)::text from target_exchange), ''),
+      coalesce((select min(inventory_id)::text from target_exchange), ''),
+      (select count(*)::text from dune.inventories where id in (select inventory_id from target_exchange)),
+      coalesce((select min(exchange_id)::text from dune.inventories where id in (select inventory_id from target_exchange)), ''),
+      (select count(*)::text from dune.inventories where exchange_id in (select id from target_exchange)),
+      (select count(*)::text from target_access_points),
+      coalesce((select min(id)::text from target_access_points), ''),
+      (select count(*)::text from named_access_points),
+      coalesce((select min(exchange_id)::text from named_access_points), ''),
+      (select count(*)::text from dune.dune_exchange_orders where exchange_id in (select id from target_exchange));
+  `;
+  const row = parseDbRows(await dbQuery(sql, 20000), [
+    "mapCount", "mapPartitionId", "mapServerId", "exchangeCount", "exchangeId", "inventoryId",
+    "inventoryRowCount", "inventoryExchangeId", "linkedInventoryCount", "accessPointCount", "accessPointId",
+    "namedAccessPointCount", "namedAccessPointExchangeId", "listingCount"
+  ])[0] || {};
+  const inspect = {
+    mapCount: Number(row.mapCount || 0) || 0,
+    mapPartitionId: row.mapPartitionId || "",
+    mapServerId: row.mapServerId || "",
+    exchangeCount: Number(row.exchangeCount || 0) || 0,
+    exchangeId: row.exchangeId || "",
+    inventoryId: row.inventoryId || "",
+    inventoryRowCount: Number(row.inventoryRowCount || 0) || 0,
+    inventoryExchangeId: row.inventoryExchangeId || "",
+    linkedInventoryCount: Number(row.linkedInventoryCount || 0) || 0,
+    accessPointCount: Number(row.accessPointCount || 0) || 0,
+    accessPointId: row.accessPointId || "",
+    namedAccessPointCount: Number(row.namedAccessPointCount || 0) || 0,
+    namedAccessPointExchangeId: row.namedAccessPointExchangeId || "",
+    listingCount: Number(row.listingCount || 0) || 0
+  };
+  inspect.ready = inspect.exchangeCount === 1 && inspect.inventoryId !== "" && inspect.inventoryRowCount === 1
+    && inspect.linkedInventoryCount === 1
+    && inspect.inventoryExchangeId === inspect.exchangeId && inspect.accessPointCount === 1
+    && inspect.namedAccessPointCount === 1 && inspect.namedAccessPointExchangeId === inspect.exchangeId;
+  const conflicts = [];
+  if (inspect.mapCount !== 1) conflicts.push(`Expected one SH_Arrakeen world partition; found ${inspect.mapCount}.`);
+  if (inspect.exchangeCount > 1) conflicts.push(`Found ${inspect.exchangeCount} ${ARRAKEEN_EXCHANGE_NAME} rows.`);
+  if (inspect.linkedInventoryCount > 1) conflicts.push(`Found ${inspect.linkedInventoryCount} inventories linked to ${ARRAKEEN_EXCHANGE_NAME}.`);
+  if (inspect.accessPointCount > 1) conflicts.push(`Found ${inspect.accessPointCount} access points attached to ${ARRAKEEN_EXCHANGE_NAME}.`);
+  if (inspect.namedAccessPointCount > 1) conflicts.push(`Found ${inspect.namedAccessPointCount} ${ARRAKEEN_ACCESS_POINT_NAME} rows.`);
+  if (inspect.namedAccessPointCount === 1 && inspect.exchangeId && inspect.namedAccessPointExchangeId !== inspect.exchangeId) conflicts.push(`${ARRAKEEN_ACCESS_POINT_NAME} belongs to another Exchange.`);
+  if (inspect.exchangeCount === 0 && inspect.namedAccessPointCount > 0) conflicts.push(`${ARRAKEEN_ACCESS_POINT_NAME} exists without ${ARRAKEEN_EXCHANGE_NAME}.`);
+  if (inspect.accessPointCount === 1 && inspect.namedAccessPointCount === 0) conflicts.push(`The access point attached to ${ARRAKEEN_EXCHANGE_NAME} is not named ${ARRAKEEN_ACCESS_POINT_NAME}.`);
+  if (inspect.inventoryId && inspect.inventoryRowCount !== 1) conflicts.push("The saved Arrakeen Exchange inventory does not resolve to exactly one inventory row.");
+  if (inspect.inventoryExchangeId && inspect.exchangeId && inspect.inventoryExchangeId !== inspect.exchangeId) conflicts.push("The Arrakeen inventory belongs to another Exchange.");
+  if (!inspect.ready && inspect.listingCount > 0) conflicts.push("Arrakeen already has listings but its Exchange structure is incomplete.");
+  inspect.conflicts = conflicts;
+  inspect.canInitialize = !inspect.ready && conflicts.length === 0;
+  inspect.status = inspect.ready ? "ready" : inspect.canInitialize ? "missing" : "conflict";
+  inspect.message = inspect.ready
+    ? "Arrakeen Exchange is initialized and usable."
+    : inspect.canInitialize
+      ? "Arrakeen exists as a world partition but its Exchange records are missing or incomplete."
+      : conflicts.join(" ");
+  inspect.signature = arrakeenExchangeSignature(inspect);
+  return inspect;
+}
+
+async function previewArrakeenExchangeInitialization() {
+  const inspect = await inspectArrakeenExchange();
+  if (inspect.ready) return { ok: true, status: "already_ready", inspect, message: inspect.message };
+  if (!inspect.canInitialize) throw new Error(inspect.message || "Arrakeen Exchange cannot be initialized safely.");
+  const previewId = crypto.randomBytes(16).toString("hex");
+  const backupPath = arrakeenExchangeBackupPath(previewId);
+  const preview = {
+    ok: true,
+    status: "preview",
+    previewId,
+    createdAt: Date.now(),
+    expiresAt: new Date(Date.now() + ARRAKEEN_EXCHANGE_PREVIEW_TTL_MS).toISOString(),
+    signature: inspect.signature,
+    inspect,
+    plan: {
+      exchangeName: ARRAKEEN_EXCHANGE_NAME,
+      accessPointName: ARRAKEEN_ACCESS_POINT_NAME,
+      createExchange: inspect.exchangeCount === 0,
+      createInventory: inspect.inventoryId === "" && inspect.linkedInventoryCount === 0,
+      createAccessPoint: inspect.accessPointCount === 0,
+      createListings: false,
+      moveListings: false
+    },
+    backupPath,
+    confirmText: ARRAKEEN_EXCHANGE_CONFIRM_TEXT,
+    warning: `This adds only the missing Arrakeen Exchange structure. Type ${ARRAKEEN_EXCHANGE_CONFIRM_TEXT} exactly before applying.`
+  };
+  fs.writeFileSync(backupPath, JSON.stringify({
+    createdAt: new Date().toISOString(),
+    action: "initialize_arrakeen_exchange",
+    source: "arrakeen-exchange-preview",
+    readOnlyRecoverySnapshot: true,
+    before: inspect,
+    plan: preview.plan
+  }, null, 2), { encoding: "utf8", flag: "wx" });
+  arrakeenExchangePreviews.set(previewId, preview);
+  appendAdminAudit("arrakeen_exchange_initialization_previewed", { previewId, backupPath, before: inspect, plan: preview.plan });
+  return preview;
+}
+
+async function applyArrakeenExchangeInitialization(input = {}) {
+  const previewId = String(input.previewId || "").trim();
+  const preview = arrakeenExchangePreviews.get(previewId);
+  if (!preview) throw new Error("Generate a fresh Arrakeen Exchange preview and recovery snapshot first.");
+  if (String(input.confirmText || "") !== ARRAKEEN_EXCHANGE_CONFIRM_TEXT) throw new Error(`Type ${ARRAKEEN_EXCHANGE_CONFIRM_TEXT} exactly.`);
+  if (Date.now() - preview.createdAt > ARRAKEEN_EXCHANGE_PREVIEW_TTL_MS) throw new Error("The Arrakeen Exchange preview expired. Generate a fresh preview.");
+  if (!fs.existsSync(preview.backupPath)) throw new Error("The matching Arrakeen recovery snapshot is missing.");
+  const before = await inspectArrakeenExchange();
+  if (before.signature !== preview.signature || !before.canInitialize) throw new Error("Arrakeen Exchange state changed after preview. No database changes were made.");
+  const sql = `
+    begin;
+    lock table dune.world_partition, dune.dune_exchanges, dune.dune_exchange_accesspoints, dune.inventories, dune.dune_exchange_orders in share row exclusive mode;
+    do $arrakeen$
+    begin
+      if (select count(*) from dune.world_partition where map = 'SH_Arrakeen' or label = 'Arrakeen_0') <> 1 then
+        raise exception 'Expected exactly one SH_Arrakeen world partition.';
+      end if;
+      if (select count(*) from dune.dune_exchanges where exchange_name = ${sqlString(ARRAKEEN_EXCHANGE_NAME)}) > 1 then
+        raise exception 'Duplicate Arrakeen Exchange rows detected.';
+      end if;
+      if exists (
+        select 1 from dune.dune_exchanges e
+        where e.exchange_name = ${sqlString(ARRAKEEN_EXCHANGE_NAME)}
+          and (select count(*) from dune.inventories i where i.exchange_id = e.id) > 1
+      ) then
+        raise exception 'Multiple inventories are linked to the Arrakeen Exchange.';
+      end if;
+      if exists (
+        select 1 from dune.dune_exchanges e
+        where e.exchange_name = ${sqlString(ARRAKEEN_EXCHANGE_NAME)}
+          and exists (select 1 from dune.dune_exchange_accesspoints ap where ap.exchange_id = e.id)
+          and not exists (
+            select 1 from dune.dune_exchange_accesspoints ap
+            where ap.exchange_id = e.id and ap.name = ${sqlString(ARRAKEEN_ACCESS_POINT_NAME)}
+          )
+      ) then
+        raise exception 'The Arrakeen Exchange access point has an unexpected name.';
+      end if;
+      if exists (
+        select 1 from dune.dune_exchange_accesspoints ap
+        where ap.name = ${sqlString(ARRAKEEN_ACCESS_POINT_NAME)}
+          and not exists (
+            select 1 from dune.dune_exchanges e
+            where e.id = ap.exchange_id and e.exchange_name = ${sqlString(ARRAKEEN_EXCHANGE_NAME)}
+          )
+      ) then
+        raise exception 'Arrakeen access point belongs to another Exchange.';
+      end if;
+      if exists (
+        select 1 from dune.dune_exchanges e
+        join dune.inventories i on i.id = e.inventory_id
+        where e.exchange_name = ${sqlString(ARRAKEEN_EXCHANGE_NAME)}
+          and i.exchange_id is distinct from e.id
+      ) then
+        raise exception 'Arrakeen inventory belongs to another Exchange.';
+      end if;
+      if exists (
+        select 1 from dune.dune_exchanges e
+        where e.exchange_name = ${sqlString(ARRAKEEN_EXCHANGE_NAME)}
+          and exists (select 1 from dune.dune_exchange_orders o where o.exchange_id = e.id)
+          and (e.inventory_id is null or not exists (select 1 from dune.dune_exchange_accesspoints ap where ap.exchange_id = e.id))
+      ) then
+        raise exception 'Arrakeen has listings but incomplete Exchange structure.';
+      end if;
+    end $arrakeen$;
+    with existing_exchange as (
+      select id, inventory_id from dune.dune_exchanges where exchange_name = ${sqlString(ARRAKEEN_EXCHANGE_NAME)}
+    ), inserted_exchange as (
+      insert into dune.dune_exchanges(exchange_name)
+      select ${sqlString(ARRAKEEN_EXCHANGE_NAME)}
+      where not exists (select 1 from existing_exchange)
+      returning id, inventory_id
+    ), selected_exchange as (
+      select id, inventory_id from existing_exchange
+      union all
+      select id, inventory_id from inserted_exchange
+      limit 1
+    ), existing_inventory as (
+      select i.id
+      from dune.inventories i cross join selected_exchange e
+      where i.id = e.inventory_id or i.exchange_id = e.id
+      order by case when i.id = e.inventory_id then 0 else 1 end, i.id
+      limit 1
+    ), inserted_inventory as (
+      insert into dune.inventories(exchange_id)
+      select e.id from selected_exchange e
+      where not exists (select 1 from existing_inventory)
+      returning id
+    ), selected_inventory as (
+      select id from existing_inventory
+      union all
+      select id from inserted_inventory
+      limit 1
+    ), updated_exchange as (
+      update dune.dune_exchanges e
+      set inventory_id = i.id
+      from selected_exchange selected, selected_inventory i
+      where e.id = selected.id and e.inventory_id is distinct from i.id
+      returning e.id
+    ), inserted_access_point as (
+      insert into dune.dune_exchange_accesspoints(exchange_id, name)
+      select e.id, ${sqlString(ARRAKEEN_ACCESS_POINT_NAME)} from selected_exchange e
+      where not exists (select 1 from dune.dune_exchange_accesspoints ap where ap.exchange_id = e.id)
+      returning id
+    )
+    select json_build_object(
+      'ok', true,
+      'exchangeId', (select id::text from selected_exchange),
+      'inventoryId', (select id::text from selected_inventory),
+      'accessPointId', coalesce(
+        (select id::text from inserted_access_point),
+        (select min(ap.id)::text from dune.dune_exchange_accesspoints ap where ap.exchange_id = (select id from selected_exchange))
+      ),
+      'createdExchange', exists(select 1 from inserted_exchange),
+      'createdInventory', exists(select 1 from inserted_inventory),
+      'createdAccessPoint', exists(select 1 from inserted_access_point),
+      'createdListings', false,
+      'movedListings', false
+    )::text;
+    commit;
+  `;
+  const result = parseMarketBotJson(await dbQueryStreamed(sql, 60000));
+  const readBack = await inspectArrakeenExchange();
+  if (!readBack.ready) throw new Error(`Arrakeen initialization committed but verification failed: ${readBack.message || "unknown state"}. No listings were created.`);
+  const resultPath = preview.backupPath.replace(/\.json$/i, "-result.json");
+  fs.writeFileSync(resultPath, JSON.stringify({
+    appliedAt: new Date().toISOString(),
+    action: "initialize_arrakeen_exchange",
+    previewId,
+    recoverySnapshotPath: preview.backupPath,
+    result,
+    verifiedAfter: readBack,
+    rollbackBoundary: "Delete only the newly created access point, empty Exchange inventory, and Exchange row before any Arrakeen listing or user dependency exists."
+  }, null, 2), { encoding: "utf8", flag: "wx" });
+  arrakeenExchangePreviews.delete(previewId);
+  appendAdminAudit("arrakeen_exchange_initialized", { previewId, backupPath: preview.backupPath, resultPath, result, verifiedAfter: readBack });
+  return { ok: true, status: "initialized", result, inspect: readBack, backupPath: preview.backupPath, resultPath, message: "Arrakeen Exchange was initialized and verified. No listings were created or moved." };
+}
+
+async function marketBotExchanges() {
+  const sql = `
+    select
+      e.id::text,
+      coalesce(e.exchange_name, ''),
+      coalesce(e.inventory_id::text, ''),
+      (select count(*)::text from dune.dune_exchange_accesspoints ap where ap.exchange_id = e.id),
+      (select count(*)::text from dune.dune_exchange_orders o where o.exchange_id = e.id),
+      count(*) over (partition by e.exchange_name)::text
+    from dune.dune_exchanges e
+    where coalesce(btrim(e.exchange_name), '') <> ''
+    order by case when e.exchange_name = 'Global' then 1 else 0 end, lower(e.exchange_name), e.id
+  `;
+  const rows = parseDbRows(await dbQuery(sql, 20000), ["id", "name", "inventoryId", "accessPointCount", "listingCount", "nameCount"]);
+  const exchanges = rows.map((row) => {
+    const accessPointCount = Number(row.accessPointCount || 0) || 0;
+    const nameCount = Number(row.nameCount || 0) || 0;
+    const inventoryConfigured = Boolean(row.inventoryId);
+    const usable = inventoryConfigured && accessPointCount > 0 && nameCount === 1;
+    let unavailableReason = "";
+    if (!inventoryConfigured) unavailableReason = "No Exchange inventory";
+    else if (accessPointCount < 1) unavailableReason = "No Exchange access point";
+    else if (nameCount !== 1) unavailableReason = "Exchange name is not unique";
+    return {
+      id: row.id,
+      name: row.name,
+      inventoryId: row.inventoryId,
+      accessPointCount,
+      listingCount: Number(row.listingCount || 0) || 0,
+      usable,
+      unavailableReason
+    };
+  });
+  const arrakeen = await inspectArrakeenExchange();
+  return {
+    ok: true,
+    exchanges,
+    arrakeen,
+    selectedExchangeName: localMarketBotConfig().exchangeName || "",
+    usableCount: exchanges.filter((exchange) => exchange.usable).length
+  };
+}
+
+async function requireUsableMarketBotExchange(exchangeName) {
+  const requested = String(exchangeName || "").trim();
+  if (!requested) throw new Error("Select an Exchange where the Market Bot should create future listings.");
+  const result = await marketBotExchanges();
+  const exchange = result.exchanges.find((candidate) => candidate.name === requested);
+  if (!exchange) throw new Error(`Exchange not found in the live game database: ${requested}`);
+  if (!exchange.usable) throw new Error(`${requested} cannot host Market Bot listings: ${exchange.unavailableReason || "Exchange is unavailable"}.`);
+  return exchange;
+}
+
 async function marketPostingStatus() {
   const started = Date.now();
   const expiredCleanup = await cleanupExpiredMarketListings({ source: "status" }).catch((error) => ({ ok: false, error: error.message }));
@@ -20808,6 +21216,8 @@ function appPage() {
     .market-automator-layout { grid-template-columns:minmax(0,2fr) minmax(300px,1fr); }
     #marketAutomatorOverrideResults { display:grid; gap:7px; max-height:260px; overflow:auto; }
     .market-listing-header,.market-listing-row { display:grid; grid-template-columns:34px minmax(260px,2fr) minmax(130px,.8fr) 86px 72px minmax(150px,1fr) 120px minmax(155px,1fr) minmax(170px,auto); }
+    .market-listing-grid.tracking-only { min-width:980px; }
+    .market-listing-header.tracking-only,.market-listing-row.tracking-only { grid-template-columns:minmax(260px,2fr) minmax(130px,.8fr) 86px 72px minmax(150px,1fr) 120px minmax(155px,1fr); }
     .market-listing-header { position:sticky; top:0; z-index:1; color:var(--gold-bright); background:var(--panel-strong); border-bottom:1px solid rgba(214,166,69,.42); font-size:10px; font-weight:900; text-transform:uppercase; }
     .market-listing-header > span,.market-listing-cell { min-width:0; padding:9px 10px; border-right:1px solid rgba(214,166,69,.18); }
     .market-listing-header > span:last-child,.market-listing-cell:last-child { border-right:0; }
@@ -22457,6 +22867,12 @@ function appPage() {
           <button type="button" onclick="refreshMarketBot()">Refresh</button>
         </div>
         <div class="field-grid mt">
+          <div>
+            <label>Bot Listing Exchange<select id="marketBotExchange"><option value="">Loading live Exchanges...</option></select></label>
+            <div id="marketBotExchangeHelp" class="subtle">Choose the in-game Exchange for future bot listings.</div>
+            <div class="action-row mt"><button id="marketBotInitializeArrakeenButton" type="button" class="hidden" onclick="initializeArrakeenExchange()">Initialize Arrakeen Exchange</button></div>
+            <div id="marketBotArrakeenStatus" class="subtle mt"></div>
+          </div>
           <label>Economy Style<select id="marketBotEconomyStyle"><option>Affordable</option><option>Balanced</option><option selected>Expensive</option></select></label>
           <label>Listing Category<select id="marketBotListingCategory"><option value="">All categories</option></select></label>
         </div>
@@ -22466,13 +22882,14 @@ function appPage() {
           <button id="marketBotRestockButton" type="button" onclick="restockMarketBot()">Restock Now</button>
           <button id="marketBotPauseButton" type="button" onclick="toggleMarketBotPause()">Pause Bot</button>
           <button id="marketBotRepairButton" type="button" class="primary hidden" onclick="repairMarketBot()">Repair / Update Bot</button>
+          <button id="marketBotSaveExchangeButton" type="button" onclick="saveMarketBotExchange()">Save Exchange</button>
           <button type="button" onclick="saveMarketBotCategory()">Save Category</button>
           <button type="button" onclick="toggleMarketBotCustomize()">Customize Items</button>
           <button id="marketBotCleanButton" type="button" class="danger" onclick="cleanMarketBot()">Clean Bot Market</button>
           <button id="marketBotUninstallButton" type="button" class="danger" onclick="uninstallMarketBot()">Uninstall Bot</button>
         </div>
         <div id="marketBotActionResult" class="empty mt">Market Bot is disabled until previewed and explicitly enabled.</div>
-        <div class="warning mt">Normal restocks leave active listings unchanged. Clean Bot Market removes only listings tracked as Market Bot-owned, never player listings, and pauses the bot afterward. Uninstall Bot lets you explicitly keep or remove bot-owned listings.</div>
+        <div class="warning mt">Changing the Bot Listing Exchange affects future listings only and safely leaves the bot paused. Existing listings stay at their original Exchange until they expire or you use Clean Bot Market. Clean Bot Market removes only listings tracked as Market Bot-owned, never player listings.</div>
         <details class="panel pad mt">
           <summary>Random Player Listing Buyer</summary>
           <div class="subtle mt">Optionally purchase verified player-owned sell listings during each normal Market Bot cycle. Disabled by default.</div>
@@ -22487,9 +22904,10 @@ function appPage() {
           <div class="warning mt">Purchases are irreversible: the selected listing is fulfilled, the seller receives the payout, and the purchased item leaves the market. Pause the bot before changing these settings.</div>
         </details>
       </div>
-      <div class="panel pad mt">
+      <details id="marketBotPreviewPanel" class="panel pad mt">
+        <summary>Bot Catalog &amp; Exact Market Preview</summary>
         <div class="panel-head">
-          <div><div class="label">Exact Market Preview</div><div class="subtle">The VM bot’s production planner returns every enabled catalog item; display filters do not truncate the plan.</div></div>
+          <div><div class="label">Bot Catalog &amp; Exact Market Preview</div><div class="subtle">Potential items the bot is allowed to sell. These rows are a plan, not the current in-game market.</div></div>
           <button type="button" onclick="downloadMarketBotPreviewCsv()">Export CSV</button>
         </div>
         <div class="give-catalog-filters mt">
@@ -22501,7 +22919,7 @@ function appPage() {
         </div>
         <div id="marketBotPreviewTotals" class="detail-list mt"><div class="empty">Run Preview Market to load the exact plan.</div></div>
         <div id="marketBotPreviewRows" class="market-preview-scroll mt"><div class="empty">No preview loaded.</div></div>
-      </div>
+      </details>
       <div id="marketBotCustomizePanel" class="panel pad mt hidden">
         <div class="panel-head">
           <div><div class="label">Customize Items</div><div class="subtle">Only enable/disable, unit price, stack size, and target listing count can be changed.</div></div>
@@ -22509,6 +22927,21 @@ function appPage() {
         </div>
         <label class="mt">Search Items<input id="marketBotCustomizeSearch" placeholder="Search catalog items" oninput="renderMarketBotCustomize()"></label>
         <div id="marketBotCustomizeRows" class="market-preview-scroll mt"><div class="empty">Open Customize Items to load catalog policies.</div></div>
+      </div>
+      <div id="liveMarketListingsPanel" class="panel pad mt">
+        <div class="panel-head">
+          <div>
+            <div class="label">Live In-Game Market Listings</div>
+            <div class="subtle">Read-only tracking of current Exchange sell orders from the live game database.</div>
+          </div>
+          <button type="button" onclick="refreshMarketListings()">Refresh Listings</button>
+        </div>
+        <div class="field-grid mt">
+          <label>Search Live Market<input id="marketListingsSearch" placeholder="Search template, exchange, or seller type" oninput="refreshMarketListingsSoon()"></label>
+          <label>Rows<select id="marketListingsLimit" onchange="refreshMarketListings()"><option>50</option><option selected>100</option><option>150</option><option>250</option></select></label>
+        </div>
+        <div id="marketListingsSummary" class="subtle mt">Live listings have not been loaded.</div>
+        <div id="marketListings" class="mt"><div class="empty">Open Market Automation or click Refresh Listings to load the live market.</div></div>
       </div>
       <details class="panel pad mt">
         <summary>Legacy Market Automator migration</summary>
@@ -22601,26 +23034,6 @@ function appPage() {
           <div id="marketStatus" class="warning mt">Market status not checked.</div>
           <div id="marketItems" class="admin-items mt"><div class="empty">Loading market item templates...</div></div>
         </div>
-      </div>
-      <div class="panel pad mt">
-        <div class="panel-head">
-          <div>
-            <div class="label">Live Market Listings</div>
-            <div class="subtle">Current exchange sell orders from the live database.</div>
-          </div>
-          <button type="button" onclick="refreshMarketListings()">Refresh Listings</button>
-        </div>
-        <div class="field-grid mt">
-          <label>Search Live Market<input id="marketListingsSearch" placeholder="Search template, exchange, or owner" oninput="refreshMarketListingsSoon()"></label>
-          <label>Rows<select id="marketListingsLimit" onchange="refreshMarketListings()"><option>50</option><option selected>100</option><option>150</option><option>250</option></select></label>
-        </div>
-        <div class="action-row mt">
-          <button type="button" onclick="selectVisibleNpcMarketListings()">Select Visible</button>
-          <button type="button" onclick="clearSelectedMarketListings()">Clear Selection</button>
-          <button type="button" class="danger" onclick="removeSelectedMarketListings()">Remove Selected</button>
-          <span id="marketListingsSelection" class="subtle">0 selected.</span>
-        </div>
-        <div id="marketListings" class="mt"><div class="empty">Load live market listings.</div></div>
       </div>
       <div class="panel pad mt">
         <details id="marketResultFold" class="vm-details">
@@ -23804,7 +24217,7 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin"||name==="server-migration")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market")refreshMarketBot();if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+function setView(name){if(name==="admin"||name==="server-migration")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){refreshMarketBot();refreshMarketListings();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
 let migrationPreflightState=null,migrationExportPolling="";
 let migrationMaintenanceState=null;
 function renderMigrationMaintenance(state={}){migrationMaintenanceState=state;const active=state.active===true;const banner=document.getElementById("migrationMaintenanceBanner");if(banner)banner.classList.toggle("hidden",!active);tone("migrationMaintenanceBadge",active?(state.failClosed?"Recovery Hold":"Active"):"Inactive");const detail=document.getElementById("migrationMaintenanceDetail");if(detail){detail.className=(state.failClosed?"warning":"subtle")+" mt";detail.textContent=active?((state.banner||"Migration Maintenance Mode — Game Server Held Offline")+" · Generation "+(state.generation||"unknown")+(state.error?" · "+state.error:"")):"Inactive. Normal controls are available; exiting maintenance never starts the server.";}const enter=document.getElementById("migrationMaintenanceEnterButton"),exit=document.getElementById("migrationMaintenanceExitButton");if(enter)enter.disabled=active;if(exit)exit.disabled=!active||state.sideEffectFree===true;}
@@ -24323,25 +24736,28 @@ function renderActivity(){const html=activity.length?activity.map(a=>'<div class
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
 function csrfCookie(){const match=document.cookie.match(/(?:^|;\s*)alphanine_csrf=([^;]+)/);return match?decodeURIComponent(match[1]):"";}
 async function getJson(url, options={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs||30000));let r,t="",d={};try{const request={...options,signal:controller.signal};delete request.timeoutMs;delete request._reauthTried;const method=String(request.method||"GET").toUpperCase();if(!["GET","HEAD","OPTIONS"].includes(method)){request.headers={...(request.headers||{}),"X-CSRF-Token":csrfCookie()};}r=await fetch(url,request);try{t=await r.text();}catch(error){throw new Error("Request body read failed for "+url+": "+error.message);}try{d=t?JSON.parse(t):{};}catch{d={raw:t};}if(r.status===428&&location.protocol==="https:"&&!options._reauthTried){const password=window.prompt("Confirm the Remote Owner password to continue:");if(password===null)throw new Error("Owner confirmation cancelled.");const totp=window.prompt("Authenticator code, or leave blank if 2FA is disabled:")||"";const confirmResponse=await fetch("/api/auth/reauth",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfCookie()},body:JSON.stringify({password,totp})});const confirmData=await confirmResponse.json().catch(()=>({}));if(!confirmResponse.ok)throw new Error(confirmData.error||"Owner confirmation failed.");return await getJson(url,{...options,_reauthTried:true});}if(r.status===401&&location.protocol==="https:"){location.href="/login";throw new Error("Remote session expired. Sign in again.");}if(!r.ok){const responseMessage=[d?.reason,d?.error,d?.message].find(value=>typeof value==="string"&&value.trim());const responseError=new Error(responseMessage||(!t.trim().startsWith("{")&&!t.trim().startsWith("[")?t:"")||("Request failed for "+url+" with HTTP "+r.status));responseError.apiResponse=d;throw responseError;}return d;}catch(error){if(error.name==="AbortError")throw new Error("Request timed out for "+url);if(error instanceof TypeError)throw new Error("Network request failed for "+url+": "+error.message);throw error;}finally{clearTimeout(timeout);}}
-let marketBotStateData=null,marketBotPreviewData=null,marketBotItems=[],marketBotItemChanges=new Map();
+let marketBotStateData=null,marketBotPreviewData=null,marketBotItems=[],marketBotExchangeData=[],marketBotArrakeenData=null,marketBotItemChanges=new Map();
 function marketBotDate(value){if(!value)return"--";const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString();}
 function marketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"0";}
 function marketBotStatusClass(value){const status=String(value||"").toLowerCase();return status==="running"?"ok":status==="error"?"bad":"warn";}
+function fillMarketBotExchange(local={}){const select=document.getElementById("marketBotExchange"),help=document.getElementById("marketBotExchangeHelp"),initializeButton=document.getElementById("marketBotInitializeArrakeenButton"),arrakeenStatus=document.getElementById("marketBotArrakeenStatus");if(!select)return;const current=String(local.exchangeName||"");let options='<option value="">Select an Exchange...</option>';options+=marketBotExchangeData.map(exchange=>'<option value="'+esc(exchange.name)+'"'+(exchange.usable?'':' disabled')+'>'+esc(exchange.name)+' · '+marketBotNumber(exchange.listingCount)+' live'+(exchange.usable?'':' · '+esc(exchange.unavailableReason||'unavailable'))+'</option>').join('');if(marketBotArrakeenData&&!marketBotArrakeenData.ready&&!marketBotExchangeData.some(exchange=>exchange.name==="Arrakeen_EX"))options+='<option value="" disabled>Arrakeen · Exchange not initialized</option>';if(current&&!marketBotExchangeData.some(exchange=>exchange.name===current))options+='<option value="'+esc(current)+'">'+esc(current)+' · saved</option>';select.innerHTML=options;select.value=current;const selected=marketBotExchangeData.find(exchange=>exchange.name===current);if(help)help.textContent=current?(current+' is saved for future bot listings'+(selected?' · '+marketBotNumber(selected.listingCount)+' currently live.':'.')):'Choose the in-game Exchange for future bot listings.';if(initializeButton)initializeButton.classList.toggle("hidden",marketBotArrakeenData?.canInitialize!==true);if(arrakeenStatus)arrakeenStatus.textContent=marketBotArrakeenData?.ready?"Arrakeen Exchange is initialized and selectable.":marketBotArrakeenData?.canInitialize?"Arrakeen map detected, but its Exchange is missing. Generate a protected preview to initialize it.":marketBotArrakeenData?.message||"";}
 function fillMarketBotListingCategories(local={}){const select=document.getElementById("marketBotListingCategory");if(!select)return;const categories=Array.isArray(local.availableCategories)?local.availableCategories:[];select.innerHTML='<option value="">All categories</option>'+categories.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");select.value=categories.includes(local.listingCategory)?local.listingCategory:"";}
-function renderMarketBotStatus(data={}){marketBotStateData=data;const local=data.localConfig||data.config||{},cycle=data.lastCycle||{},totals=cycle.totals||{},buyer=local.playerBuying||{};const status=data.status||(!data.installed?"Not Installed":"Unknown");tone("marketBotState",status);setText("marketBotMessage",data.message||(!data.installed?"Enable Market Bot to install it in the VM.":"Persistent VM runtime reachable."));setText("marketBotLastRun",marketBotDate(data.lastRunAt));setText("marketBotLastResult",cycle.message||"No completed cycle loaded.");setText("marketBotCycleResult",marketBotNumber(cycle.created??totals.created??totals.createNow)+" / "+marketBotNumber(cycle.removedExpired)+" / "+marketBotNumber(cycle.playerPurchases)+" / "+(status==="Error"?"1":"0"));setText("marketBotCycleDetail","Created / expired bot-owned removed / player bought / errors");setText("marketBotNextRun",marketBotDate(data.nextRunAt));setText("marketBotVersion",(data.installedVersion||"Not installed")+" / expected "+(data.expectedVersion||"--")+(data.updateRequired?" / update required":""));setValue("marketBotEconomyStyle",local.economyStyle||"Expensive");fillMarketBotListingCategories(local);setChecked("marketBotPlayerBuyingEnabled",buyer.enabled===true);setValue("marketBotPlayerBuyChance",buyer.chancePercent??10);setValue("marketBotPlayerBuyCount",buyer.maxPurchasesPerCycle??1);setValue("marketBotPlayerBuyUnitPrice",buyer.maxUnitPrice??100000);setValue("marketBotPlayerBuySpend",buyer.maxSpendPerCycle??100000);setText("marketBotPauseButton",local.paused?"Resume Bot":"Pause Bot");const active=local.activated===true,quiescent=data.quiescent===true,repairNeeded=active&&data.installed===true&&data.pauseProtocolCompatible===true&&(data.updateRequired===true||data.generationMatch!==true);const pauseButton=document.getElementById("marketBotPauseButton"),repairButton=document.getElementById("marketBotRepairButton"),restockButton=document.getElementById("marketBotRestockButton"),cleanButton=document.getElementById("marketBotCleanButton"),uninstallButton=document.getElementById("marketBotUninstallButton");if(pauseButton)pauseButton.disabled=!active||(local.paused===true&&!quiescent);if(repairButton){repairButton.classList.toggle("hidden",!repairNeeded);repairButton.disabled=!repairNeeded;}if(restockButton)restockButton.disabled=!active||local.paused===true||!data.generationMatch;if(cleanButton)cleanButton.disabled=!active||!quiescent;if(uninstallButton)uninstallButton.disabled=data.installed!==true;setText("marketBotEnableButton",active?"Market Bot Enabled":"Enable Market Bot");const enableButton=document.getElementById("marketBotEnableButton");if(enableButton)enableButton.disabled=active;const migration=local.legacyMigration||{};setText("marketBotMigration",migration.detected?("Legacy configuration preserved. Converted "+(migration.convertedAt||"--")+". "+(migration.legacyDisabledAt?"Legacy engine disabled "+migration.legacyDisabledAt+".":"Activation has not disabled the legacy engine yet.")):"No Legacy Market Automator configuration was detected.");const actionResult=document.getElementById("marketBotActionResult");if(local.paused!==true&&/cannot resume/i.test(String(actionResult?.textContent||"")))setText("marketBotActionResult","Market Bot is resumed and will retry automatically. "+(data.message||"Waiting for the next cycle."));}
-async function refreshMarketBot(){try{const data=await getJson("/api/market-bot",{timeoutMs:50000});renderMarketBotStatus(data);return data;}catch(error){renderMarketBotStatus({status:"Error",message:betterError(error),localConfig:marketBotStateData?.localConfig||{}});return null;}}
+function renderMarketBotStatus(data={}){marketBotStateData=data;const local=data.localConfig||data.config||{},cycle=data.lastCycle||{},totals=cycle.totals||{},buyer=local.playerBuying||{};const status=data.status||(!data.installed?"Not Installed":"Unknown");tone("marketBotState",status);setText("marketBotMessage",data.message||(!data.installed?"Enable Market Bot to install it in the VM.":"Persistent VM runtime reachable."));setText("marketBotLastRun",marketBotDate(data.lastRunAt));setText("marketBotLastResult",cycle.message||"No completed cycle loaded.");setText("marketBotCycleResult",marketBotNumber(cycle.created??totals.created??totals.createNow)+" / "+marketBotNumber(cycle.removedExpired)+" / "+marketBotNumber(cycle.playerPurchases)+" / "+(status==="Error"?"1":"0"));setText("marketBotCycleDetail","Created / expired bot-owned removed / player bought / errors");setText("marketBotNextRun",marketBotDate(data.nextRunAt));setText("marketBotVersion",(data.installedVersion||"Not installed")+" / expected "+(data.expectedVersion||"--")+(data.updateRequired?" / update required":""));fillMarketBotExchange(local);setValue("marketBotEconomyStyle",local.economyStyle||"Expensive");fillMarketBotListingCategories(local);setChecked("marketBotPlayerBuyingEnabled",buyer.enabled===true);setValue("marketBotPlayerBuyChance",buyer.chancePercent??10);setValue("marketBotPlayerBuyCount",buyer.maxPurchasesPerCycle??1);setValue("marketBotPlayerBuyUnitPrice",buyer.maxUnitPrice??100000);setValue("marketBotPlayerBuySpend",buyer.maxSpendPerCycle??100000);setText("marketBotPauseButton",local.paused?"Resume Bot":"Pause Bot");const active=local.activated===true,quiescent=data.quiescent===true,repairNeeded=active&&data.installed===true&&data.pauseProtocolCompatible===true&&(data.updateRequired===true||data.generationMatch!==true);const pauseButton=document.getElementById("marketBotPauseButton"),repairButton=document.getElementById("marketBotRepairButton"),restockButton=document.getElementById("marketBotRestockButton"),cleanButton=document.getElementById("marketBotCleanButton"),uninstallButton=document.getElementById("marketBotUninstallButton");if(pauseButton)pauseButton.disabled=!active||(local.paused===true&&!quiescent);if(repairButton){repairButton.classList.toggle("hidden",!repairNeeded);repairButton.disabled=!repairNeeded;}if(restockButton)restockButton.disabled=!active||local.paused===true||!data.generationMatch;if(cleanButton)cleanButton.disabled=!active;if(uninstallButton)uninstallButton.disabled=data.installed!==true;setText("marketBotEnableButton",active?"Market Bot Enabled":"Enable Market Bot");const enableButton=document.getElementById("marketBotEnableButton");if(enableButton)enableButton.disabled=active;const migration=local.legacyMigration||{};setText("marketBotMigration",migration.detected?("Legacy configuration preserved. Converted "+(migration.convertedAt||"--")+". "+(migration.legacyDisabledAt?"Legacy engine disabled "+migration.legacyDisabledAt+".":"Activation has not disabled the legacy engine yet.")):"No Legacy Market Automator configuration was detected.");const actionResult=document.getElementById("marketBotActionResult");if(local.paused!==true&&/cannot resume/i.test(String(actionResult?.textContent||"")))setText("marketBotActionResult","Market Bot is resumed and will retry automatically. "+(data.message||"Waiting for the next cycle."));}
+async function refreshMarketBot(){try{const results=await Promise.allSettled([getJson("/api/market-bot",{timeoutMs:50000}),getJson("/api/market-bot/exchanges",{timeoutMs:50000})]);if(results[1].status==="fulfilled"){marketBotExchangeData=Array.isArray(results[1].value?.exchanges)?results[1].value.exchanges:[];marketBotArrakeenData=results[1].value?.arrakeen||null;}if(results[0].status!=="fulfilled")throw results[0].reason;renderMarketBotStatus(results[0].value);return results[0].value;}catch(error){renderMarketBotStatus({status:"Error",message:betterError(error),localConfig:marketBotStateData?.localConfig||{}});return null;}}
 function marketBotPreviewRows(){const rows=marketBotPreviewData?.items||[],query=(getValue("marketBotPreviewSearch")||"").trim().toLowerCase(),category=getValue("marketBotPreviewCategory"),tier=getValue("marketBotPreviewTier");return rows.filter(row=>(!query||[row.id,row.name,row.category].some(value=>String(value||"").toLowerCase().includes(query)))&&(!category||row.category===category)&&(!tier||String(row.tier||"")===tier));}
 function fillMarketBotPreviewFilters(){const rows=marketBotPreviewData?.items||[];for(const [id,key,label] of [["marketBotPreviewCategory","category","All categories"],["marketBotPreviewTier","tier","All tiers"]]){const select=document.getElementById(id);if(!select)continue;const current=select.value;const values=[...new Set(rows.map(row=>String(row[key]||"").trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">'+label+'</option>'+values.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join("");select.value=values.includes(current)?current:"";}}
 function renderMarketBotPreview(){const wrap=document.getElementById("marketBotPreviewRows"),totals=document.getElementById("marketBotPreviewTotals");if(!wrap||!totals)return;const all=marketBotPreviewData?.items||[],rows=marketBotPreviewRows(),summary=marketBotPreviewData?.totals||{},categories=marketBotPreviewData?.categories||[];const categoryText=categories.map(row=>row.category+": "+marketBotNumber(row.createNow)+" create / "+marketBotNumber(row.plannedValue)+" Solari").join(" · ");totals.innerHTML=marketBotPreviewData?'<div class="detail-row"><span class="subtle">Category-verified catalog items</span><strong>'+marketBotNumber(summary.catalogItems??all.length)+'</strong></div>'+(summary.skippedUnknownCategoryMasks?'<div class="detail-row"><span class="subtle">Skipped (category metadata unavailable)</span><strong>'+marketBotNumber(summary.skippedUnknownCategoryMasks)+'</strong></div>':'')+'<div class="detail-row"><span class="subtle">Visible active / deficit / create this cycle</span><strong>'+marketBotNumber(summary.activeListings)+' / '+marketBotNumber(summary.totalDeficit)+' / '+marketBotNumber(summary.createNow??summary.created)+'</strong></div><div class="detail-row"><span class="subtle">Planned market value</span><strong>'+marketBotNumber(summary.marketValue)+' Solari</strong></div><div class="detail-row"><span class="subtle">Displayed after filters</span><strong>'+marketBotNumber(rows.length)+' of '+marketBotNumber(all.length)+'</strong></div>'+(categoryText?'<div class="detail-row"><span class="subtle">Category totals</span><strong>'+esc(categoryText)+'</strong></div>':''):'<div class="empty">Run Preview Market to load the exact plan.</div>';if(!rows.length){wrap.innerHTML='<div class="empty">No preview items match these display filters.</div>';return;}wrap.innerHTML='<table class="market-preview-table"><thead><tr><th>Item</th><th>Category / Tier</th><th>Unit Price</th><th>Stack</th><th>Target</th><th>Active</th><th>Deficit</th><th>Create Now</th><th>Value</th></tr></thead><tbody>'+rows.map(row=>'<tr><td><strong>'+esc(row.name||row.id)+'</strong><div class="subtle">'+esc(row.id)+'</div></td><td>'+esc(row.category||"Other")+'<div class="subtle">'+esc(row.tier||"--")+'</div></td><td>'+marketBotNumber(row.unitPrice)+'</td><td>'+marketBotNumber(row.stackSize)+'</td><td>'+marketBotNumber(row.targetListings)+'</td><td>'+marketBotNumber(row.activeListings)+'</td><td>'+marketBotNumber(row.deficit)+'</td><td><strong>'+marketBotNumber(row.createNow)+'</strong></td><td>'+marketBotNumber(row.plannedValue)+'</td></tr>').join("")+'</tbody></table>';}
 function useMarketBotPreview(data){marketBotPreviewData=data?.preview||data?.result||data||null;fillMarketBotPreviewFilters();renderMarketBotPreview();}
-async function previewMarketBot(){const button=document.getElementById("marketBotPreviewButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Running the production planner in the VM. No listings will be changed...");const data=await getJson("/api/market-bot/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive",listingCategory:getValue("marketBotListingCategory")||""}),timeoutMs:600000});useMarketBotPreview(data);setText("marketBotActionResult",(data.message||marketBotPreviewData?.message||"Preview ready.")+" "+(marketBotPreviewData?.warning||""));await refreshMarketBot();showToast("Exact market preview loaded","success");return data;}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
-async function enableMarketBot(){const button=document.getElementById("marketBotEnableButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Installing Market Bot paused and generating the activation preview...");const prepared=await getJson("/api/market-bot/prepare",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({economyStyle:getValue("marketBotEconomyStyle")||"Expensive",listingCategory:getValue("marketBotListingCategory")||""}),timeoutMs:600000});useMarketBotPreview(prepared.preview);const totals=marketBotPreviewData?.totals||{};const confirmed=await appConfirm("Enable Persistent Market Bot","Preview fingerprint: "+prepared.fingerprint+"\\n\\nItems: "+marketBotNumber(totals.catalogItems)+"\\nCreate this first cycle: "+marketBotNumber(totals.createNow)+"\\nPlanned value: "+marketBotNumber(totals.marketValue)+" Solari\\n\\nActive listings remain unchanged. Player buying stays disabled unless explicitly configured.","Enable Market Bot","Cancel");if(!confirmed){setText("marketBotActionResult","Market Bot remains installed and paused. Activation was not confirmed.");await refreshMarketBot();return;}const activated=await getJson("/api/market-bot/activate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({fingerprint:prepared.fingerprint,confirmed:true}),timeoutMs:600000});renderMarketBotStatus(activated.status||activated);setText("marketBotActionResult","Market Bot is active in the VM. Legacy Market Automator is disabled and preserved for rollback.");showToast("Persistent Market Bot enabled","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=marketBotStateData?.localConfig?.activated===true;}}
+async function previewMarketBot(showFeedback=true){const button=document.getElementById("marketBotPreviewButton");if(button)button.disabled=true;try{if(showFeedback)setText("marketBotActionResult","Running the production planner in the VM. No listings will be changed...");const data=await getJson("/api/market-bot/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({exchangeName:getValue("marketBotExchange")||"",economyStyle:getValue("marketBotEconomyStyle")||"Expensive",listingCategory:getValue("marketBotListingCategory")||""}),timeoutMs:600000});useMarketBotPreview(data);const panel=document.getElementById("marketBotPreviewPanel");if(showFeedback&&panel)panel.open=true;if(showFeedback){setText("marketBotActionResult",(data.message||marketBotPreviewData?.message||"Preview ready.")+" "+(marketBotPreviewData?.warning||""));showToast("Exact market preview loaded","success");}await refreshMarketBot();return data;}catch(error){if(showFeedback){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}return null;}finally{if(button)button.disabled=false;}}
+async function enableMarketBot(){const button=document.getElementById("marketBotEnableButton");if(button)button.disabled=true;try{const exchangeName=getValue("marketBotExchange")||"";if(!exchangeName)throw new Error("Select the Bot Listing Exchange before enabling Market Bot.");setText("marketBotActionResult","Installing Market Bot paused and generating the activation preview...");const prepared=await getJson("/api/market-bot/prepare",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({exchangeName,economyStyle:getValue("marketBotEconomyStyle")||"Expensive",listingCategory:getValue("marketBotListingCategory")||""}),timeoutMs:600000});useMarketBotPreview(prepared.preview);const totals=marketBotPreviewData?.totals||{};const confirmed=await appConfirm("Enable Persistent Market Bot","Exchange: "+prepared.exchangeName+"\\nPreview fingerprint: "+prepared.fingerprint+"\\n\\nItems: "+marketBotNumber(totals.catalogItems)+"\\nCreate this first cycle: "+marketBotNumber(totals.createNow)+"\\nPlanned value: "+marketBotNumber(totals.marketValue)+" Solari\\n\\nActive listings remain unchanged. Player buying stays disabled unless explicitly configured.","Enable Market Bot","Cancel");if(!confirmed){setText("marketBotActionResult","Market Bot remains installed and paused. Activation was not confirmed.");await refreshMarketBot();return;}const activated=await getJson("/api/market-bot/activate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({fingerprint:prepared.fingerprint,confirmed:true}),timeoutMs:600000});renderMarketBotStatus(activated.status||activated);setText("marketBotActionResult","Market Bot is active in the VM at "+exchangeName+". Legacy Market Automator is disabled and preserved for rollback.");showToast("Persistent Market Bot enabled","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=marketBotStateData?.localConfig?.activated===true;}}
 async function toggleMarketBotPause(){const paused=marketBotStateData?.localConfig?.paused===true,action=paused?"resume":"pause";try{const data=await getJson("/api/market-bot/"+action,{method:"POST",timeoutMs:600000});renderMarketBotStatus(data);setText("marketBotActionResult",paused?"Market Bot resumed.":"Market Bot paused; active listings were left unchanged.");showToast(paused?"Market Bot resumed":"Market Bot paused","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
 async function repairMarketBot(){if(!(await appConfirm("Repair & Update Market Bot","The Suite will republish a safe pause to the existing VM bot, wait for authoritative Quiescent, install the bundled current runtime, and verify it remains paused. No listings will be created or removed.","Repair & Update","Cancel")))return;const button=document.getElementById("marketBotRepairButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Pausing and verifying the existing VM bot before repair...");const data=await getJson("/api/market-bot/repair-runtime",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true}),timeoutMs:900000});renderMarketBotStatus(data.status||data);setText("marketBotActionResult",data.message||"Market Bot repaired and left safely paused.");showToast("Market Bot repaired and paused","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=false;}}
 async function restockMarketBot(){const buying=marketBotStateData?.localConfig?.playerBuying?.enabled===true;if(!(await appConfirm("Restock Market Now","Run one capped target-stock reconciliation cycle in the VM? Existing active bot listings remain unchanged."+(buying?" The configured random player-listing buyer may also make purchases.":" Player buying is disabled."),"Restock Now","Cancel")))return;try{setText("marketBotActionResult","Restock cycle is acquiring the database lock...");const data=await getJson("/api/market-bot/restock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cycleId:"manual-"+Date.now()+"-"+Math.random().toString(16).slice(2)}),timeoutMs:600000});setText("marketBotActionResult",data.message||data.result?.message||"Restock complete.");renderMarketBotStatus(data.status||data);await previewMarketBot();showToast("Market restock completed","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
+async function initializeArrakeenExchange(){const button=document.getElementById("marketBotInitializeArrakeenButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Inspecting Arrakeen and creating a recovery snapshot. No database changes yet...");const preview=await getJson("/api/market-bot/exchanges/arrakeen/preview",{method:"POST",timeoutMs:60000});if(preview.status==="already_ready"){setText("marketBotActionResult","Arrakeen Exchange is already initialized.");await refreshMarketBot();return;}const required=preview.confirmText||"INITIALIZE ARRAKEEN EXCHANGE";const typed=window.prompt("Recovery snapshot created:\\n"+preview.backupPath+"\\n\\nPlan: create only missing Arrakeen Exchange, inventory, and access-point records. No listings will be created or moved.\\n\\nType "+required+" exactly:")||"";if(typed!==required){setText("marketBotActionResult","Arrakeen initialization cancelled. The recovery snapshot was kept; no database changes were made.");showToast("Initialization cancelled","warning");return;}if(!(await appConfirm("Initialize Arrakeen Exchange","Apply the verified dry-run now?\\n\\nThis is additive and transactional. It aborts on any changed or conflicting state. It creates no listings and does not move the existing Harko Village market.","Initialize Arrakeen","Cancel"))){setText("marketBotActionResult","Arrakeen initialization cancelled; no database changes were made.");return;}setText("marketBotActionResult","Initializing and verifying Arrakeen Exchange...");const result=await getJson("/api/market-bot/exchanges/arrakeen/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:preview.previewId,confirmText:typed}),timeoutMs:180000});await refreshMarketBot();setValue("marketBotExchange","Arrakeen_EX");setText("marketBotActionResult",(result.message||"Arrakeen Exchange initialized and verified.")+" Arrakeen is selected but not saved to the bot yet; click Save Exchange when ready.");showToast("Arrakeen Exchange initialized","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{if(button)button.disabled=false;}}
+async function saveMarketBotExchange(){const exchangeName=getValue("marketBotExchange")||"";if(!exchangeName){setText("marketBotActionResult","Select a usable Bot Listing Exchange first.");showToast("Select an Exchange","error");return;}const current=marketBotStateData?.localConfig?.exchangeName||"";if(exchangeName===current){setText("marketBotActionResult",exchangeName+" is already the saved Bot Listing Exchange.");return;}if(!(await appConfirm("Change Bot Listing Exchange","Future Market Bot listings will be created at "+exchangeName+".\\n\\nThe bot will pause and drain safely before its configuration changes. Existing listings will stay at their original Exchange until they expire or you clean them.","Save Exchange","Cancel")))return;const button=document.getElementById("marketBotSaveExchangeButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Pausing Market Bot safely and saving "+exchangeName+"...");const data=await getJson("/api/market-bot/exchange",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({exchangeName}),timeoutMs:900000});renderMarketBotStatus(data.status||data);setText("marketBotActionResult","Bot Listing Exchange saved: "+exchangeName+". Future listings will be created there. Existing listings were not moved. Market Bot is paused; use Resume Bot when ready.");await previewMarketBot(false);await refreshMarketListings();showToast("Bot Exchange saved","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=false;}}
 async function saveMarketBotCategory(){try{const listingCategory=getValue("marketBotListingCategory")||"";const data=await getJson("/api/market-bot/category",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({listingCategory}),timeoutMs:600000});renderMarketBotStatus(data.status||data);setText("marketBotActionResult","Listing category saved: "+(listingCategory||"All categories")+". Future restocks will use this selection.");await previewMarketBot();showToast("Market category saved","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}}
 async function saveMarketBotPlayerBuying(){const enabled=document.getElementById("marketBotPlayerBuyingEnabled")?.checked===true;const body={enabled,chancePercent:Number(getValue("marketBotPlayerBuyChance")),maxPurchasesPerCycle:Number(getValue("marketBotPlayerBuyCount")),maxUnitPrice:Number(getValue("marketBotPlayerBuyUnitPrice")),maxSpendPerCycle:Number(getValue("marketBotPlayerBuySpend")),confirmed:false};if(enabled){body.confirmed=await appConfirm("Enable Player Listing Purchases","Market Bot will randomly fulfill verified player listings and pay their sellers within these limits:\n\nChance: "+body.chancePercent+"% per cycle\nMaximum purchases: "+body.maxPurchasesPerCycle+"\nMaximum unit price: "+marketBotNumber(body.maxUnitPrice)+" Solari\nMaximum spend: "+marketBotNumber(body.maxSpendPerCycle)+" Solari\n\nPurchases cannot be undone.","Enable Player Buyer","Cancel");if(!body.confirmed)return;}try{setText("marketBotActionResult","Saving player buyer policy to the paused VM bot...");const data=await getJson("/api/market-bot/player-buying",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),timeoutMs:600000});renderMarketBotStatus(data.status||data);setText("marketBotActionResult",enabled?"Random player listing purchases are enabled within the configured limits.":"Player listing purchases are disabled.");showToast(enabled?"Player buyer enabled":"Player buyer disabled","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();}}
-async function cleanMarketBot(){if(!(await appConfirm("Clean Bot Market","Remove every active listing that is strictly tracked as Market Bot-owned?\\n\\nPlayer listings and untracked NPC listings will not be touched. The Market Bot will be paused after cleanup so it cannot immediately refill.","Clean Bot Market","Cancel")))return;const button=document.getElementById("marketBotCleanButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Pausing Market Bot and removing only tracked bot-owned listings...");const data=await getJson("/api/market-bot/clean",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true}),timeoutMs:600000});renderMarketBotStatus(data.status||data);const removed=data.result?.removed??data.removed??0;setText("marketBotActionResult","Clean complete: "+marketBotNumber(removed)+" tracked bot-owned listing(s) removed. Market Bot is paused. Player listings changed: 0.");await previewMarketBot();showToast("Bot-owned market listings cleaned","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{if(button)button.disabled=marketBotStateData?.localConfig?.activated!==true;}}
+async function cleanMarketBot(){if(!(await appConfirm("Clean Bot Market","Remove every active listing that is strictly tracked as Market Bot-owned?\\n\\nPlayer listings and untracked NPC listings will not be touched. The Market Bot will be paused after cleanup so it cannot immediately refill.","Clean Bot Market","Cancel")))return;const button=document.getElementById("marketBotCleanButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Pausing Market Bot and removing only tracked bot-owned listings...");const data=await getJson("/api/market-bot/clean",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true}),timeoutMs:600000});renderMarketBotStatus(data.status||data);const removed=data.result?.removed??data.removed??0;setText("marketBotActionResult","Clean complete: "+marketBotNumber(removed)+" tracked bot-owned listing(s) removed. Market Bot is paused. Player listings changed: 0.");await previewMarketBot(false);await refreshMarketListings();showToast("Bot-owned market listings cleaned","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{if(button)button.disabled=marketBotStateData?.localConfig?.activated!==true;}}
 async function uninstallMarketBot(){const removeBotListings=await appConfirm("Listings After Uninstall","Choose what happens to active listings strictly tracked as Market Bot-owned. Player listings and untracked NPC listings are never changed.","Remove Bot Listings","Keep Bot Listings");const choice=removeBotListings?"remove tracked bot-owned listings":"keep existing bot-owned listings";if(!(await appConfirm("Uninstall Market Bot","The Suite will pause and prove the bot Quiescent, "+choice+", stop and unregister its VM service, remove its runtime/configuration/state files, and verify that no bot process remains.\\n\\nPlayer listings will not be changed.","Uninstall Bot","Cancel")))return;const button=document.getElementById("marketBotUninstallButton");if(button)button.disabled=true;try{setText("marketBotActionResult","Pausing and proving Market Bot Quiescent before uninstall...");const data=await getJson("/api/market-bot/uninstall",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmed:true,removeBotListings}),timeoutMs:900000});renderMarketBotStatus(data.status||data);const listingResult=data.keptBotListings?"Existing bot-owned listings were kept.":marketBotNumber(data.removedBotListings)+" tracked bot-owned listing(s) removed.";setText("marketBotActionResult","Market Bot uninstalled and its VM service verified absent. "+listingResult+" Player listings changed: 0.");marketBotPreviewData=null;renderMarketBotPreview();showToast("Market Bot uninstalled","success");}catch(error){setText("marketBotActionResult",betterError(error));showToast(betterError(error),"error");}finally{await refreshMarketBot();if(button)button.disabled=marketBotStateData?.installed!==true;}}
 function downloadMarketBotPreviewCsv(){const rows=marketBotPreviewData?.items||[],categories=marketBotPreviewData?.categories||[];if(!rows.length){showToast("Run Preview Market before exporting CSV.","warning");return;}const header=["Item ID","Name","Category","Tier","Unit Price","Stack Size","Target Listings","Active Listings","Deficit","Create Now","Planned Value"],categoryHeader=["Category","Items","Active Listings","Target Listings","Deficit","Create Now","Planned Value"],quote=value=>'"'+String(value??"").replaceAll('"','""')+'"';const itemLines=[header,...rows.map(row=>[row.id,row.name,row.category,row.tier,row.unitPrice,row.stackSize,row.targetListings,row.activeListings,row.deficit,row.createNow,row.plannedValue])],categoryLines=[categoryHeader,...categories.map(row=>[row.category,row.items,row.activeListings,row.targetListings,row.deficit,row.createNow,row.plannedValue])],lines=[...itemLines.map(row=>row.map(quote).join(",")),"",...categoryLines.map(row=>row.map(quote).join(","))];const blob=new Blob([lines.join("\\r\\n")+"\\r\\n"],{type:"text/csv;charset=utf-8"}),link=document.createElement("a");link.href=URL.createObjectURL(blob);link.download="alphanine-market-preview.csv";link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);}
 async function toggleMarketBotCustomize(){const panel=document.getElementById("marketBotCustomizePanel");if(!panel)return;panel.classList.toggle("hidden");if(!panel.classList.contains("hidden")&&!marketBotItems.length){try{const data=await getJson("/api/market-bot/items",{timeoutMs:60000});marketBotItems=data.items||[];marketBotItemChanges.clear();renderMarketBotCustomize();}catch(error){setText("marketBotCustomizeRows",betterError(error));}}}
@@ -24868,8 +25284,8 @@ async function refreshMarketStatus(){const status=document.getElementById("marke
 function syncMarketListingSelection(){const el=document.getElementById("marketListingsSelection");if(el)el.textContent=selectedMarketListingIds.size+" selected.";}
 function toggleMarketListingSelection(orderId,checked){orderId=Number(orderId)||0;if(!orderId)return;if(checked)selectedMarketListingIds.add(orderId);else selectedMarketListingIds.delete(orderId);syncMarketListingSelection();}
 function formatMarketListingExpiry(expirationTime,gameNow){const expiry=Number(expirationTime||0);const now=Number(gameNow||0);if(!Number.isFinite(expiry)||expiry<=0)return{label:"No expiration",detail:"No valid game-clock expiry",expired:true};if(!Number.isFinite(now)||now<=0)return{label:"Expiry unavailable",detail:"Game time "+Math.floor(expiry).toLocaleString(),expired:false};const remaining=Math.floor(expiry-now);if(remaining<=0)return{label:"Expired",detail:"0 seconds remaining",expired:true};const days=Math.floor(remaining/86400);const hours=Math.floor((remaining%86400)/3600);const minutes=Math.max(1,Math.floor((remaining%3600)/60));const label=days>0?(days+"d "+hours+"h remaining"):(hours>0?(hours+"h "+minutes+"m remaining"):(minutes+"m remaining"));return{label,detail:"Game expiry "+Math.floor(expiry).toLocaleString(),expired:false};}
-function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[];const gameNow=Number(data?.gameNow||0);marketListingRows=listings;const visibleIds=new Set(listings.map(row=>Number(row.orderId)||0));selectedMarketListingIds=new Set([...selectedMarketListingIds].filter(id=>visibleIds.has(id)));const header='<div class="market-listing-header"><span></span><span>Item</span><span>Grade</span><span>Tier</span><span>Stack</span><span>Seller / Type</span><span>Price</span><span>Expiration</span><span>Actions</span></div>';const rows=listings.map(row=>{const orderId=Number(row.orderId)||0;const checkbox='<input class="market-listing-check" type="checkbox" aria-label="Select listing '+orderId+'" '+(selectedMarketListingIds.has(orderId)?"checked":"")+' onchange="toggleMarketListingSelection('+orderId+',this.checked)">';const buyAction=row.isNpcOrder?'':'<button type="button" onclick="buyMarketListing('+orderId+')">Buy & Pay</button>';const action=buyAction+'<button type="button" onclick="removeMarketListing('+orderId+')">Remove</button>';const grade=row.gradeLabel||("Grade "+(row.quality||0));const tier=row.tier||"--";const owner=row.ownerClass||("Owner "+(row.ownerId||"-"));const type=row.isNpcOrder?"NPC / manual":"Player listing";const expiry=formatMarketListingExpiry(row.expirationTime,gameNow);return '<div class="market-listing-row"><div class="market-listing-cell market-listing-select">'+checkbox+'</div><div class="market-listing-cell market-listing-item"><strong>'+esc(row.name||row.template)+'</strong><span class="subtle env-path-value">'+esc(row.template)+'</span><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+(row.category?' / '+esc(row.category):'')+'</span></div><div class="market-listing-cell"><span class="item-grade-badge">'+esc(grade)+'</span></div><div class="market-listing-cell"><strong>'+esc(tier)+'</strong></div><div class="market-listing-cell"><strong>'+esc(row.stackSize||row.initialStackSize||0)+'</strong></div><div class="market-listing-cell"><strong>'+esc(owner)+'</strong><span class="subtle">'+esc(type)+'</span></div><div class="market-listing-cell"><strong class="market-listing-price">'+esc(row.price)+' Solari</strong></div><div class="market-listing-cell market-listing-expiry '+(expiry.expired?'expired':'')+'"><strong>'+esc(expiry.label)+'</strong><span class="subtle">'+esc(expiry.detail)+'</span></div><div class="market-listing-cell market-listing-actions"><span class="action-row">'+action+'</span></div></div>';}).join('');wrap.innerHTML=listings.length?'<div class="market-listing-grid">'+header+rows+'</div>':'<div class="empty">No live market listings found.</div>';syncMarketListingSelection();}
-async function refreshMarketListings(){const wrap=document.getElementById("marketListings");try{if(wrap)wrap.innerHTML='<div class="warning">Loading live market listings...</div>';const q=document.getElementById("marketListingsSearch")?.value||"";const limit=document.getElementById("marketListingsLimit")?.value||100;const data=await getJson("/api/market/listings?limit="+encodeURIComponent(limit)+"&q="+encodeURIComponent(q),{timeoutMs:25000});renderMarketListings(data);return data;}catch(e){if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(e))+'</div>';return null;}}
+function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[],gameNow=Number(data?.gameNow||0),summary=document.getElementById("marketListingsSummary");marketListingRows=listings;if(summary)summary.textContent="Showing "+listings.length+" live listing(s) · updated "+new Date().toLocaleTimeString()+".";const header='<div class="market-listing-header tracking-only"><span>Item</span><span>Grade</span><span>Tier</span><span>Stack</span><span>Seller / Type</span><span>Price</span><span>Expiration</span></div>';const rows=listings.map(row=>{const grade=row.gradeLabel||("Grade "+(row.quality||0)),tier=row.tier||"--",owner=row.ownerClass||("Owner "+(row.ownerId||"-")),type=row.isNpcOrder?"NPC / bot":"Player listing",expiry=formatMarketListingExpiry(row.expirationTime,gameNow);return '<div class="market-listing-row tracking-only"><div class="market-listing-cell market-listing-item"><strong>'+esc(row.name||row.template)+'</strong><span class="subtle env-path-value">'+esc(row.template)+'</span><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+(row.category?' / '+esc(row.category):'')+'</span></div><div class="market-listing-cell"><span class="item-grade-badge">'+esc(grade)+'</span></div><div class="market-listing-cell"><strong>'+esc(tier)+'</strong></div><div class="market-listing-cell"><strong>'+esc(row.stackSize||row.initialStackSize||0)+'</strong></div><div class="market-listing-cell"><strong>'+esc(owner)+'</strong><span class="subtle">'+esc(type)+'</span></div><div class="market-listing-cell"><strong class="market-listing-price">'+esc(row.price)+' Solari</strong></div><div class="market-listing-cell market-listing-expiry '+(expiry.expired?'expired':'')+'"><strong>'+esc(expiry.label)+'</strong><span class="subtle">'+esc(expiry.detail)+'</span></div></div>';}).join('');wrap.innerHTML=listings.length?'<div class="market-listing-grid tracking-only">'+header+rows+'</div>':'<div class="empty">No live market listings found.</div>';}
+async function refreshMarketListings(){const wrap=document.getElementById("marketListings"),summary=document.getElementById("marketListingsSummary");try{if(wrap)wrap.innerHTML='<div class="warning">Loading live market listings...</div>';if(summary)summary.textContent="Refreshing the live game market...";const q=document.getElementById("marketListingsSearch")?.value||"",limit=document.getElementById("marketListingsLimit")?.value||100,data=await getJson("/api/market/listings?limit="+encodeURIComponent(limit)+"&q="+encodeURIComponent(q),{timeoutMs:25000});renderMarketListings(data);return data;}catch(e){if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(e))+'</div>';if(summary)summary.textContent="Live market refresh failed.";return null;}}
 function refreshMarketListingsSoon(){clearTimeout(marketListingsTimer);marketListingsTimer=setTimeout(refreshMarketListings,350);}
 async function buyMarketListing(orderId){try{const ok=await appConfirm("Buy player listing","Buy player listing order "+orderId+", remove it from the market, and create the seller Solari payout?","Buy & Pay","Cancel");if(!ok)return;const data=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",timeoutMs:60000});showToast(data?.message||"Player listing bought and seller payout created.","success");await refreshMarketListings();await refreshMarketAutomator();}catch(e){showToast(betterError(e),"error");}}
 async function removeMarketListing(orderId){try{const ok=await appConfirm("Remove market listing","Remove selected listing order "+orderId+" from the market? This does not create a seller payout.","Remove","Cancel");if(!ok)return;await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/remove",{method:"POST",timeoutMs:60000});showToast("Listing removed.","success");await refreshMarketListings();await refreshMarketAutomator();}catch(e){showToast(betterError(e),"error");}}
@@ -26710,6 +27126,32 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === "/api/market-bot/exchanges" && req.method === "GET") {
+    try { await json(res, await marketBotExchanges()); }
+    catch (error) { await json(res, { ok: false, error: error.message, exchanges: [] }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/exchanges/arrakeen/preview" && req.method === "POST") {
+    try { await json(res, await previewArrakeenExchangeInitialization()); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/exchanges/arrakeen/apply" && req.method === "POST") {
+    try {
+      const body = await readJsonRequest(req);
+      const result = await runTrackedOperation("market-bot:arrakeen-init", "Initialize Arrakeen Exchange", async ({ update }) => {
+        update("Verifying recovery snapshot", "Re-checking the exact dry-run state before any database write.");
+        const applied = await applyArrakeenExchangeInitialization(body);
+        update("Arrakeen Exchange verified", "Exchange, inventory, and access point are ready; no listings were created.");
+        return applied;
+      }, { category: "market", detail: ARRAKEEN_EXCHANGE_NAME });
+      await json(res, result);
+    } catch (error) {
+      const failure = operationErrorResponse(error);
+      await json(res, failure.payload, failure.statusCode);
+    }
+    return;
+  }
   if (url.pathname === "/api/market-bot/items" && req.method === "PUT") {
     try { await json(res, await updateMarketBotOverrides(await readJsonRequest(req))); }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
@@ -26717,6 +27159,11 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/market-bot/category" && req.method === "PUT") {
     try { await json(res, await updateMarketBotCategory(await readJsonRequest(req))); }
+    catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/market-bot/exchange" && req.method === "PUT") {
+    try { await json(res, await updateMarketBotExchange(await readJsonRequest(req))); }
     catch (error) { await json(res, { ok: false, error: error.message }, 400); }
     return;
   }

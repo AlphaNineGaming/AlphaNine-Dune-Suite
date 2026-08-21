@@ -28,6 +28,17 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.1.0
+
+- Simplified **Clean Bot Market** and uninstall cleanup so they safely pause and drain the bot without the removed Migration Maintenance workflow.
+- Made the bot catalog and exact preview collapsible and clarified that catalog rows are planned inventory, not current in-game listings.
+- Added a read-only **Live In-Game Market Listings** tracker with search, row limits, seller type, price, stack, grade/tier, Exchange, and expiration details.
+- Added a validated **Bot Listing Exchange** selector for choosing where future bot listings appear.
+- Exchange changes pause and drain an active bot; existing listings remain at their original Exchange and are never silently moved.
+- Added a protected **Initialize Arrakeen Exchange** action for servers where the Arrakeen world partition exists but its Exchange records are missing.
+- Arrakeen initialization uses a recovery snapshot, typed confirmation, transactional state re-checks, and fail-closed conflict detection; it never creates, moves, edits, or deletes listings.
+- Kept the Market Bot runtime pinned to 1.0.98 because these changes improve Suite-side orchestration, inspection, and Exchange selection.
+
 ### 1.0.99
 
 - Fixed the dashboard sound toggle displaying corrupted emoji text.

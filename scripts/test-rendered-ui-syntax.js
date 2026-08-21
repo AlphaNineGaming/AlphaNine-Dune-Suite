@@ -76,6 +76,9 @@ function extractFunction(source, name) {
     assert(html.includes('id="repair"'), "Rendered Repair Inspector is missing.");
     assert(html.includes('id="dashboardSoundToggle" class="sound-toggle" type="button">Sounds OFF</button>'), "Dashboard sound toggle has invalid initial text.");
     assert(html.includes('id="landsraad"'), "Rendered Landsraad tier editor is missing.");
+    assert(html.includes('id="marketBotPreviewPanel"') && html.includes('Bot Catalog &amp; Exact Market Preview'), "Rendered Market Bot catalog is not collapsible or clearly labeled.");
+    assert(html.includes('id="liveMarketListingsPanel"') && html.includes('id="marketListingsSummary"'), "Rendered Market Automation view is missing live in-game listing tracking.");
+    assert(html.includes('id="marketBotExchange"') && html.includes('id="marketBotSaveExchangeButton"'), "Rendered Market Automation view is missing the Bot Listing Exchange selector.");
     assert(html.includes("Exactly five distinct thresholds"), "Rendered Landsraad policy is missing the exact-five requirement.");
     assert(/id="landsraadTierPreviewButton"[^>]*disabled/.test(html), "Rendered Landsraad preview button is not fail-closed by default.");
     assert(/id="landsraadTierConfirmText"[^>]*disabled/.test(html), "Rendered Landsraad confirmation input is not fail-closed by default.");

@@ -8,7 +8,7 @@ const { spawn } = require("child_process");
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const packageManifest = require(path.join(__dirname, "..", "package.json"));
 assert.doesNotMatch(serverSource, /Â·|â€¦|â€”|â€“|â†’|Ã—|âŒ„|â—|â—†|â—‡|âœ¦|â˜¼|âœ“|ðŸ/, "Suite source contains mojibake text");
-assert.equal(packageManifest.marketBotRuntimeVersion, "1.0.98", "UI hotfix unexpectedly changes the Market Bot runtime version.");
+assert.equal(packageManifest.marketBotRuntimeVersion, "1.0.99", "Suite and Market Bot runtime release versions are not pinned to the expected compatibility pair.");
 assert(serverSource.includes("expectedVersion: MARKET_BOT_RUNTIME_VERSION"), "Market Bot status is not pinned to its independent runtime version.");
 assert(!serverSource.includes("marketBotCatalog(), APP_VERSION"), "A Market Bot runtime path still inherits the Suite UI version.");
 

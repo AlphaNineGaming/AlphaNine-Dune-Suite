@@ -28,6 +28,18 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.1.1
+
+- Fixed Arrakeen Exchange initialization failing with `prompt() is not supported` in the Electron desktop app.
+- Fixed the Market Bot remaining in **Draining** when its database credential lookup crossed the VM's scoped `sudo kubectl` permission boundary.
+- Updated the bundled Market Bot runtime to 1.0.99 with clearer credential and planner diagnostics.
+- Added direct **Use Arrakeen** and **Use HarkoVillage** choices with one protected confirmation.
+- The Suite now repairs or updates the bot when needed, pauses and drains it, saves the selected Exchange, verifies a live preview, and resumes an active bot automatically.
+- Added live Exchange-switch progress with the current stage, percentage, elapsed time, and activity log.
+- Exchange controls remain locked while work is active, and the progress panel reconnects after refreshing or reopening Market Automation.
+- Arrakeen clearly displays **start map first** until its native Exchange has registered.
+- Existing listings remain at their original Exchange and player listings are never changed.
+
 ### 1.1.0
 
 - Simplified **Clean Bot Market** and uninstall cleanup so they safely pause and drain the bot without the removed Migration Maintenance workflow.

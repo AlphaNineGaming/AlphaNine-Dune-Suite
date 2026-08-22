@@ -9,7 +9,8 @@ const root = path.join(__dirname, "..");
 const source = path.join(root, "market-bot");
 const outputDir = path.join(root, "assets", "market-bot", "linux-amd64");
 const output = path.join(outputDir, "alphanine-market-bot");
-const version = require(path.join(root, "package.json")).version;
+const manifest = require(path.join(root, "package.json"));
+const version = String(manifest.marketBotRuntimeVersion || manifest.version);
 
 fs.mkdirSync(outputDir, { recursive: true });
 const result = spawnSync("go", [

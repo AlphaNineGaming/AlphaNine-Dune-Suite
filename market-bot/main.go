@@ -843,22 +843,33 @@ func reconcile(cfg Config, cycleID string, execute bool) (json.RawMessage, strin
 func executeSQL(cfg Config, sql string) (json.RawMessage, error) {
 	passwordContext, cancelPassword := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelPassword()
-	passwordCmd := exec.CommandContext(passwordContext, "sudo", "-n", "timeout", "-k", "5", "20", "kubectl", "exec", "-n", cfg.Namespace, cfg.DBPod, "--", "printenv", "POSTGRES_PASSWORD")
-	password, err := passwordCmd.Output()
+	// Keep timeout outside sudo. The Dune VM grants the service account scoped
+	// passwordless access to kubectl, not to an arbitrary root-owned timeout
+	// wrapper. Running `sudo timeout kubectl ...` therefore fails even though
+	// the same account can correctly run `sudo kubectl ...`.
+	passwordCmd := exec.CommandContext(passwordContext, "timeout", "-k", "5", "20", "sudo", "-n", "kubectl", "exec", "-n", cfg.Namespace, cfg.DBPod, "--", "printenv", "POSTGRES_PASSWORD")
+	password, err := passwordCmd.CombinedOutput()
 	if err != nil {
 		if errors.Is(passwordContext.Err(), context.DeadlineExceeded) {
 			return nil, errors.New("Waiting for Exchange: database credential lookup timed out while the DB pod was starting")
 		}
-		return nil, fmt.Errorf("Waiting for Exchange: could not read the database credential from the DB pod")
+		message := strings.TrimSpace(string(password))
+		if exitErr, ok := err.(*exec.ExitError); ok && (exitErr.ExitCode() == 124 || exitErr.ExitCode() == 143) {
+			return nil, errors.New("Waiting for Exchange: database credential lookup timed out while the DB pod was starting")
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		return nil, fmt.Errorf("Waiting for Exchange: could not read the database credential from the DB pod: %s", redact(message))
 	}
 	pw := strings.TrimSpace(string(password))
 	if pw == "" {
 		return nil, errors.New("Waiting for Exchange: database credential is unavailable")
 	}
-	args := []string{"-n", "timeout", "-k", "5", "120", "kubectl", "exec", "-i", "-n", cfg.Namespace, cfg.DBPod, "--", "env", "PGPASSWORD=" + pw, "psql", "-v", "ON_ERROR_STOP=1", "-h", cfg.DBService, "-p", "15432", "-U", "postgres", "-d", "dune", "-At", "-f", "-"}
+	args := []string{"-k", "5", "120", "sudo", "-n", "kubectl", "exec", "-i", "-n", cfg.Namespace, cfg.DBPod, "--", "env", "PGPASSWORD=" + pw, "psql", "-v", "ON_ERROR_STOP=1", "-h", cfg.DBService, "-p", "15432", "-U", "postgres", "-d", "dune", "-At", "-f", "-"}
 	plannerContext, cancelPlanner := context.WithTimeout(context.Background(), 130*time.Second)
 	defer cancelPlanner()
-	cmd := exec.CommandContext(plannerContext, "sudo", args...)
+	cmd := exec.CommandContext(plannerContext, "timeout", args...)
 	cmd.Stdin = strings.NewReader(sql)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -871,7 +882,7 @@ func executeSQL(cfg Config, sql string) (json.RawMessage, error) {
 		if message == "" {
 			message = err.Error()
 		}
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 143 {
+		if exitErr, ok := err.(*exec.ExitError); ok && (exitErr.ExitCode() == 124 || exitErr.ExitCode() == 143) {
 			return nil, errors.New("Waiting for Exchange: database planner timed out while the Exchange database was starting")
 		}
 		return nil, fmt.Errorf("database planner failed: %s", redact(message))

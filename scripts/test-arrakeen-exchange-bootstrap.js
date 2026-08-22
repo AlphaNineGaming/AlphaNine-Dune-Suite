@@ -16,11 +16,30 @@ includes('if (before.signature !== preview.signature || !before.canInitialize)',
 includes('Date.now() - preview.createdAt > ARRAKEEN_EXCHANGE_PREVIEW_TTL_MS', "Previews must expire.");
 includes('linkedInventoryCount > 1', "Ambiguous linked inventories must fail closed.");
 includes('access point attached to ${ARRAKEEN_EXCHANGE_NAME} is not named', "Unexpected access-point names must fail closed.");
+includes('const mapRuntimeAvailable = Boolean(inspect.mapServerId);', "Arrakeen initialization must require a live native map runtime.");
+includes('Start the Arrakeen map once, then click Refresh', "Offline Arrakeen must explain how to register its native Exchange.");
 includes('/api/market-bot/exchanges/arrakeen/preview', "The protected preview endpoint is missing.");
 includes('/api/market-bot/exchanges/arrakeen/apply', "The protected apply endpoint is missing.");
 includes('id="marketBotInitializeArrakeenButton"', "The Arrakeen initialization action is missing from Market Automation.");
-includes('Arrakeen · Exchange not initialized', "The selector must explain why Arrakeen is unavailable.");
+includes('Arrakeen · start map first', "The selector must explain how to make Arrakeen available.");
 includes('click Save Exchange when ready', "Initialization must not silently retarget the bot.");
+includes('id="suiteTypedConfirmDialog"', "The Electron-compatible typed-confirmation dialog is missing.");
+includes('id="suiteTypedConfirmInput"', "The typed-confirmation dialog needs an embedded input.");
+
+const initializeStart = source.indexOf("async function initializeArrakeenExchange");
+const initializeEnd = source.indexOf("async function saveMarketBotExchange", initializeStart);
+assert(initializeStart >= 0 && initializeEnd > initializeStart, "Could not isolate the Arrakeen UI initializer.");
+const initializeSource = source.slice(initializeStart, initializeEnd);
+assert(initializeSource.includes("await appTypedConfirm("), "Arrakeen initialization must use the Suite typed-confirmation dialog.");
+assert(!initializeSource.includes("window.prompt("), "Arrakeen initialization must not call Electron's unsupported native prompt.");
+assert(initializeSource.includes("if(typed!==required)"), "The exact confirmation phrase must still be verified client-side.");
+
+const typedConfirmStart = source.indexOf("function appTypedConfirm");
+const typedConfirmEnd = source.indexOf("async function appAlert", typedConfirmStart);
+assert(typedConfirmStart >= 0 && typedConfirmEnd > typedConfirmStart, "Could not isolate the typed-confirmation helper.");
+const typedConfirmSource = source.slice(typedConfirmStart, typedConfirmEnd);
+assert(typedConfirmSource.includes("ok.disabled=!matched"), "Apply must remain disabled until the phrase matches exactly.");
+assert(typedConfirmSource.includes("input.value===phrase"), "Typed confirmation must use exact matching.");
 
 const applyStart = source.indexOf("async function applyArrakeenExchangeInitialization");
 const applyEnd = source.indexOf("async function marketBotExchanges", applyStart);

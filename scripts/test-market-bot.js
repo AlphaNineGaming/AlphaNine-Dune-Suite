@@ -47,6 +47,9 @@ assert.match(serverSource, /remoteFailure = parseMarketBotJson\(result\.stdout\)
 const marketBotImport = serverSource.match(/const \{([\s\S]*?)\} = require\("\.\/lib\/market-bot"\);/)?.[1] || "";
 assert(marketBotImport.includes("VM_MARKET_BOT_PAUSE_MARKER") && marketBotImport.includes("VM_MARKET_BOT_CYCLE_LEASE"), "repair boundary constants must be imported into the server runtime");
 const goSource = fs.readFileSync(path.join(__dirname, "..", "market-bot", "main.go"), "utf8");
+assert(goSource.includes(`exec.CommandContext(passwordContext, "timeout", "-k", "5", "20", "sudo", "-n", "kubectl"`), "database credential lookup must apply timeout outside the scoped sudo kubectl command");
+assert(goSource.includes(`exec.CommandContext(plannerContext, "timeout", args...)`), "database planner timeout must wrap scoped sudo kubectl instead of running timeout as root");
+assert(!goSource.includes(`exec.CommandContext(passwordContext, "sudo", "-n", "timeout"`), "Market Bot must not request passwordless sudo access to the timeout wrapper");
 const runtimeBinary = fs.readFileSync(path.join(__dirname, "..", "assets", "market-bot", "linux-amd64", "alphanine-market-bot"));
 assert.equal(
   crypto.createHash("sha256").update(runtimeBinary).digest("hex"),
@@ -354,6 +357,17 @@ const testCategorySeed = {
   assert(serverSource.includes('id="marketBotListingCategory"') && serverSource.includes('"/api/market-bot/category"'), "persistent listing category control is missing");
   assert(serverSource.includes('id="marketBotExchange"') && serverSource.includes('"/api/market-bot/exchanges"') && serverSource.includes('"/api/market-bot/exchange"'), "live Exchange selection and persistence controls are missing");
   assert(serverSource.includes("await setMarketBotPaused(true, { strictEvidence: true })") && serverSource.includes("existingListingsMoved: false"), "Exchange changes must pause safely and explicitly leave existing listings in place");
+  const guidedExchangeWorkflow = serverSource.slice(serverSource.indexOf("async function updateMarketBotExchange"), serverSource.indexOf("async function restockMarketBot"));
+  assert.match(guidedExchangeWorkflow, /before\.updateRequired[\s\S]*repairMarketBotRuntime\(\{ confirmed: true \}\)[\s\S]*setMarketBotPaused\(true, \{ strictEvidence: true \}\)[\s\S]*buildMarketBotActionCommand\("preview"[\s\S]*setMarketBotPaused\(false, \{ strictEvidence: true \}\)/, "guided Exchange switching must repair, pause, verify, and resume in one protected workflow");
+  assert(serverSource.includes('id="marketBotExchangeChoices"') && serverSource.includes("chooseMarketBotExchange(this.dataset.exchange)") && serverSource.includes("Switch &amp; Run Selected Exchange"), "Arrakeen and HarkoVillage must expose a one-confirmation guided choice");
+  assert(serverSource.includes("Arrakeen · start map first"), "unavailable Arrakeen must give one clear prerequisite instead of exposing a failing action");
+  assert(serverSource.includes('operationRegistry.begin("market-bot:exchange"') && serverSource.includes('started: true, operation: startMarketBotExchangeSwitch(body)') && serverSource.includes("}, 202)"), "guided Exchange switching must run as a persistent background operation");
+  assert(serverSource.includes('id="marketBotExchangeProgress"') && serverSource.includes('id="marketBotExchangeProgressFill"') && serverSource.includes('id="marketBotExchangeProgressLog"'), "Exchange switching must expose visible stage, percentage, and live log progress");
+  assert(serverSource.includes('pollMarketBotExchangeOperation(data.operation.id)') && serverSource.includes('row.key==="market-bot:exchange"'), "Exchange progress must poll live operations and recover after refreshing the Market Bot view");
+  for (const stage of ["Validating Exchange", "Repairing Market Bot", "Pausing and Draining", "Market Bot Quiescent", "Saving Exchange", "Verifying Market Preview", "Resuming Market Bot", "Exchange Ready"]) {
+    assert(serverSource.includes(`report("${stage}"`), `guided Exchange progress is missing the ${stage} stage`);
+  }
+  assert(serverSource.includes("setMarketBotExchangeBusy(true)") && serverSource.includes('data-map-offline disabled'), "Exchange controls must stay locked while the Suite is busy without enabling an offline Arrakeen choice");
   assert(serverSource.includes("marketBotActivationPreviewFingerprint") && serverSource.includes('exchangeName: String(runtime.exchangeName || "")'), "activation confirmation must be bound to the selected Exchange");
   assert(serverSource.includes('id="marketBotRepairButton"') && serverSource.includes('"/api/market-bot/repair-runtime"'), "normal Market Bot UI must expose safe runtime repair");
   assert(serverSource.includes("if (!before.pauseProtocolCompatible)") && serverSource.includes("marketBotRepairBoundary(minimumGeneration, remoteFingerprint)"), "runtime repair must use only the compatible legacy pause protocol and an independent pause boundary");

@@ -27,6 +27,7 @@
     "test:repair-queue": "node scripts/test-repair-queue.js",
     "test:market-listings": "node scripts/test-market-listings.js",
     "test:market-bot": "node scripts/test-market-bot.js",
+    "test:market-bot-harko": "node scripts/test-market-bot-harko-exchange.js",
     "test:arrakeen-exchange": "node scripts/test-arrakeen-exchange-bootstrap.js",
     "test:market-automator": "node scripts/test-market-automator.js",
     "test:construction-sets": "node scripts/test-construction-set-catalog.js",

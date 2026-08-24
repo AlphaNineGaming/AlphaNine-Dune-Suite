@@ -4149,7 +4149,7 @@ async function prepareMarketBot(input = {}) {
   const current = localMarketBotConfig();
   if (current.activated) throw new Error("Market Bot is already activated. Use Preview Market to inspect the current plan.");
   const exchangeName = String(input.exchangeName ?? current.exchangeName ?? "").trim();
-  if (exchangeName) await requireUsableMarketBotExchange(exchangeName);
+  if (exchangeName) await requireUsableMarketBotExchange(exchangeName, { prepareInventory: true });
   const listingCategory = String(input.listingCategory ?? current.listingCategory ?? "").trim();
   if (listingCategory && !marketBotCategories().includes(listingCategory)) throw new Error(`Unknown market category: ${listingCategory}`);
   const stagedGeneration = nextMarketBotGeneration(current.configGeneration, current.pauseGeneration);
@@ -4235,7 +4235,7 @@ async function previewMarketBot(input = {}) {
   let status = await marketBotStatus();
   const current = localMarketBotConfig();
   const requestedExchange = String(input.exchangeName ?? current.exchangeName ?? "").trim();
-  if (requestedExchange) await requireUsableMarketBotExchange(requestedExchange);
+  if (requestedExchange) await requireUsableMarketBotExchange(requestedExchange, { prepareInventory: true });
   const requestedStyle = input.economyStyle || current.economyStyle;
   const requestedCategory = String(input.listingCategory ?? current.listingCategory ?? "").trim();
   if (requestedCategory && !marketBotCategories().includes(requestedCategory)) throw new Error(`Unknown market category: ${requestedCategory}`);
@@ -4660,7 +4660,7 @@ async function updateMarketBotExchange(input = {}, options = {}) {
   };
   const exchangeName = String(input.exchangeName || "").trim();
   report("Validating Exchange", `Checking that ${exchangeName || "the selected Exchange"} is live and usable.`, 5);
-  const selected = await requireUsableMarketBotExchange(exchangeName);
+  const selected = await requireUsableMarketBotExchange(exchangeName, { prepareInventory: true });
   let current = localMarketBotConfig();
   let before = await marketBotStatus({ strictEvidence: true });
   const guided = input.guided === true && input.confirmed === true;
@@ -17723,12 +17723,49 @@ async function applyArrakeenExchangeInitialization(input = {}) {
   return { ok: true, status: "initialized", result, inspect: readBack, backupPath: preview.backupPath, resultPath, message: "Arrakeen Exchange was initialized and verified. No listings were created or moved." };
 }
 
+function normalizeMarketBotExchangeRow(row = {}) {
+  const accessPointCount = Number(row.accessPointCount || 0) || 0;
+  const nameCount = Number(row.nameCount || 0) || 0;
+  const linkedInventoryCount = Number(row.linkedInventoryCount || 0) || 0;
+  const savedInventoryRowCount = Number(row.savedInventoryRowCount || 0) || 0;
+  const savedInventoryValid = Boolean(row.savedInventoryId)
+    && savedInventoryRowCount === 1
+    && (!row.savedInventoryExchangeId || row.savedInventoryExchangeId === row.id);
+  const repairable = row.name === "HarkoVillage_EX" && !row.savedInventoryId
+    && linkedInventoryCount <= 1 && accessPointCount > 0 && nameCount === 1;
+  const usable = savedInventoryValid && accessPointCount > 0 && nameCount === 1;
+  const selectable = usable || repairable;
+  let unavailableReason = "";
+  if (repairable) unavailableReason = linkedInventoryCount === 1 ? "Exchange inventory will be linked on use" : "Exchange inventory will be created on use";
+  else if (!row.savedInventoryId) unavailableReason = linkedInventoryCount > 1 ? "Multiple Exchange inventories" : "No Exchange inventory";
+  else if (!savedInventoryValid) unavailableReason = "Exchange inventory link is invalid";
+  else if (accessPointCount < 1) unavailableReason = "No Exchange access point";
+  else if (nameCount !== 1) unavailableReason = "Exchange name is not unique";
+  return {
+    id: row.id,
+    name: row.name,
+    inventoryId: row.savedInventoryId,
+    linkedInventoryId: row.linkedInventoryId,
+    linkedInventoryCount,
+    accessPointCount,
+    listingCount: Number(row.listingCount || 0) || 0,
+    usable,
+    repairable,
+    selectable,
+    unavailableReason
+  };
+}
+
 async function marketBotExchanges() {
   const sql = `
     select
       e.id::text,
       coalesce(e.exchange_name, ''),
       coalesce(e.inventory_id::text, ''),
+      coalesce((select min(i.id)::text from dune.inventories i where i.exchange_id = e.id), ''),
+      (select count(*)::text from dune.inventories i where i.exchange_id = e.id),
+      (select count(*)::text from dune.inventories i where i.id = e.inventory_id),
+      coalesce((select min(i.exchange_id)::text from dune.inventories i where i.id = e.inventory_id), ''),
       (select count(*)::text from dune.dune_exchange_accesspoints ap where ap.exchange_id = e.id),
       (select count(*)::text from dune.dune_exchange_orders o where o.exchange_id = e.id),
       count(*) over (partition by e.exchange_name)::text
@@ -17736,26 +17773,11 @@ async function marketBotExchanges() {
     where coalesce(btrim(e.exchange_name), '') <> ''
     order by case when e.exchange_name = 'Global' then 1 else 0 end, lower(e.exchange_name), e.id
   `;
-  const rows = parseDbRows(await dbQuery(sql, 20000), ["id", "name", "inventoryId", "accessPointCount", "listingCount", "nameCount"]);
-  const exchanges = rows.map((row) => {
-    const accessPointCount = Number(row.accessPointCount || 0) || 0;
-    const nameCount = Number(row.nameCount || 0) || 0;
-    const inventoryConfigured = Boolean(row.inventoryId);
-    const usable = inventoryConfigured && accessPointCount > 0 && nameCount === 1;
-    let unavailableReason = "";
-    if (!inventoryConfigured) unavailableReason = "No Exchange inventory";
-    else if (accessPointCount < 1) unavailableReason = "No Exchange access point";
-    else if (nameCount !== 1) unavailableReason = "Exchange name is not unique";
-    return {
-      id: row.id,
-      name: row.name,
-      inventoryId: row.inventoryId,
-      accessPointCount,
-      listingCount: Number(row.listingCount || 0) || 0,
-      usable,
-      unavailableReason
-    };
-  });
+  const rows = parseDbRows(await dbQuery(sql, 20000), [
+    "id", "name", "savedInventoryId", "linkedInventoryId", "linkedInventoryCount",
+    "savedInventoryRowCount", "savedInventoryExchangeId", "accessPointCount", "listingCount", "nameCount"
+  ]);
+  const exchanges = rows.map(normalizeMarketBotExchangeRow);
   const arrakeen = await inspectArrakeenExchange();
   return {
     ok: true,
@@ -17766,12 +17788,112 @@ async function marketBotExchanges() {
   };
 }
 
-async function requireUsableMarketBotExchange(exchangeName) {
+async function ensureMarketBotExchangeInventory(exchangeName) {
+  const requested = String(exchangeName || "").trim();
+  if (requested !== "HarkoVillage_EX") throw new Error("Automatic Exchange inventory setup is supported only for HarkoVillage_EX.");
+  const value = sqlString(requested);
+  const sql = `
+    begin;
+    lock table dune.dune_exchanges, dune.inventories in share row exclusive mode;
+    do $exchange_inventory$
+    begin
+      if (select count(*) from dune.dune_exchanges where exchange_name = ${value}) <> 1 then
+        raise exception 'Expected exactly one HarkoVillage_EX Exchange row.';
+      end if;
+      if not exists (
+        select 1 from dune.dune_exchange_accesspoints ap
+        where ap.exchange_id = (select id from dune.dune_exchanges where exchange_name = ${value})
+      ) then
+        raise exception 'HarkoVillage_EX has no Exchange access point.';
+      end if;
+      if exists (
+        select 1 from dune.dune_exchanges e
+        where e.exchange_name = ${value} and e.inventory_id is not null
+          and not exists (select 1 from dune.inventories i where i.id = e.inventory_id)
+      ) then
+        raise exception 'HarkoVillage_EX points to a missing inventory row.';
+      end if;
+      if exists (
+        select 1 from dune.dune_exchanges e
+        join dune.inventories i on i.id = e.inventory_id
+        where e.exchange_name = ${value} and i.exchange_id is not null and i.exchange_id <> e.id
+      ) then
+        raise exception 'HarkoVillage_EX inventory belongs to another Exchange.';
+      end if;
+      if exists (
+        select 1 from dune.dune_exchanges e
+        where e.exchange_name = ${value} and e.inventory_id is null
+          and (select count(*) from dune.inventories i where i.exchange_id = e.id) > 1
+      ) then
+        raise exception 'HarkoVillage_EX has multiple linked inventories.';
+      end if;
+    end $exchange_inventory$;
+
+    with target_exchange as materialized (
+      select id, inventory_id from dune.dune_exchanges where exchange_name = ${value}
+    ), existing_inventory as materialized (
+      select i.id
+      from dune.inventories i cross join target_exchange e
+      where i.id = e.inventory_id or (e.inventory_id is null and i.exchange_id = e.id)
+      order by case when i.id = e.inventory_id then 0 else 1 end, i.id
+      limit 1
+    ), inserted_inventory as (
+      insert into dune.inventories(exchange_id)
+      select e.id from target_exchange e
+      where not exists(select 1 from existing_inventory)
+      returning id
+    ), selected_inventory as materialized (
+      select id from existing_inventory
+      union all
+      select id from inserted_inventory
+      limit 1
+    ), linked_inventory as (
+      update dune.inventories i
+      set exchange_id = e.id
+      from target_exchange e, selected_inventory selected
+      where i.id = selected.id and i.exchange_id is null
+      returning i.id
+    ), updated_exchange as (
+      update dune.dune_exchanges e
+      set inventory_id = selected.id
+      from selected_inventory selected
+      where e.id = (select id from target_exchange) and e.inventory_id is distinct from selected.id
+      returning e.id
+    )
+    select json_build_object(
+      'ok', true,
+      'exchangeId', (select id::text from target_exchange),
+      'inventoryId', (select id::text from selected_inventory),
+      'createdInventory', exists(select 1 from inserted_inventory),
+      'linkedInventory', exists(select 1 from linked_inventory) or exists(select 1 from updated_exchange),
+      'movedListings', false
+    )::text;
+    commit;
+  `;
+  const result = parseMarketBotJson(await dbQueryStreamed(sql, 60000));
+  const verified = await marketBotExchanges();
+  const exchange = verified.exchanges.find((candidate) => candidate.name === requested);
+  if (!exchange?.usable) throw new Error("HarkoVillage_EX inventory setup completed but verification did not find a usable Exchange.");
+  appendAdminAudit("market_bot_exchange_inventory_prepared", {
+    exchangeName: requested,
+    exchangeId: exchange.id,
+    inventoryId: exchange.inventoryId,
+    createdInventory: result.createdInventory === true,
+    linkedInventory: result.linkedInventory === true,
+    movedListings: false
+  });
+  return exchange;
+}
+
+async function requireUsableMarketBotExchange(exchangeName, options = {}) {
   const requested = String(exchangeName || "").trim();
   if (!requested) throw new Error("Select an Exchange where the Market Bot should create future listings.");
   const result = await marketBotExchanges();
   const exchange = result.exchanges.find((candidate) => candidate.name === requested);
   if (!exchange) throw new Error(`Exchange not found in the live game database: ${requested}`);
+  if (!exchange.usable && exchange.repairable && options.prepareInventory === true) {
+    return ensureMarketBotExchangeInventory(requested);
+  }
   if (!exchange.usable) throw new Error(`${requested} cannot host Market Bot listings: ${exchange.unavailableReason || "Exchange is unavailable"}.`);
   return exchange;
 }
@@ -25048,7 +25170,7 @@ let marketBotStateData=null,marketBotPreviewData=null,marketBotItems=[],marketBo
 function marketBotDate(value){if(!value)return"--";const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString();}
 function marketBotNumber(value){const number=Number(value);return Number.isFinite(number)?number.toLocaleString():"0";}
 function marketBotStatusClass(value){const status=String(value||"").toLowerCase();return status==="running"?"ok":status==="error"?"bad":"warn";}
-function fillMarketBotExchange(local={}){const select=document.getElementById("marketBotExchange"),help=document.getElementById("marketBotExchangeHelp"),choices=document.getElementById("marketBotExchangeChoices"),initializeButton=document.getElementById("marketBotInitializeArrakeenButton"),arrakeenStatus=document.getElementById("marketBotArrakeenStatus");if(!select)return;const current=String(local.exchangeName||"");let options='<option value="">Select an Exchange...</option>';options+=marketBotExchangeData.map(exchange=>'<option value="'+esc(exchange.name)+'"'+(exchange.usable?'':' disabled')+'>'+esc(exchange.name)+' · '+marketBotNumber(exchange.listingCount)+' live'+(exchange.usable?'':' · '+esc(exchange.unavailableReason||'unavailable'))+'</option>').join('');if(marketBotArrakeenData&&!marketBotArrakeenData.ready&&!marketBotExchangeData.some(exchange=>exchange.name==="Arrakeen_EX"))options+='<option value="" disabled>Arrakeen · start map first</option>';if(current&&!marketBotExchangeData.some(exchange=>exchange.name===current))options+='<option value="'+esc(current)+'">'+esc(current)+' · saved</option>';select.innerHTML=options;select.value=current;const selected=marketBotExchangeData.find(exchange=>exchange.name===current);if(help)help.textContent=current?(current+' is saved for future bot listings'+(selected?' · '+marketBotNumber(selected.listingCount)+' currently live.':'.')):'Choose the in-game Exchange for future bot listings.';if(choices){const preferred=marketBotExchangeData.filter(exchange=>exchange.usable&&["Arrakeen_EX","HarkoVillage_EX"].includes(exchange.name));choices.innerHTML=preferred.map(exchange=>'<button type="button" class="'+(exchange.name===current?'primary':'')+'" data-exchange="'+esc(exchange.name)+'" onclick="chooseMarketBotExchange(this.dataset.exchange)">Use '+esc(exchange.name.replace(/_EX$/,''))+'</button>').join('')+(!marketBotArrakeenData?.ready&&!preferred.some(exchange=>exchange.name==="Arrakeen_EX")?'<button type="button" data-map-offline disabled title="Start the Arrakeen map, then Refresh">Arrakeen · start map first</button>':'');}if(initializeButton)initializeButton.classList.toggle("hidden",marketBotArrakeenData?.canInitialize!==true);if(arrakeenStatus)arrakeenStatus.textContent=marketBotArrakeenData?.ready?"Arrakeen Exchange is ready.":marketBotArrakeenData?.message||"";}
+function fillMarketBotExchange(local={}){const select=document.getElementById("marketBotExchange"),help=document.getElementById("marketBotExchangeHelp"),choices=document.getElementById("marketBotExchangeChoices"),initializeButton=document.getElementById("marketBotInitializeArrakeenButton"),arrakeenStatus=document.getElementById("marketBotArrakeenStatus");if(!select)return;const current=String(local.exchangeName||"");let options='<option value="">Select an Exchange...</option>';options+=marketBotExchangeData.map(exchange=>{const selectable=exchange.selectable===true;return '<option value="'+esc(exchange.name)+'"'+(selectable?'':' disabled')+'>'+esc(exchange.name)+' · '+marketBotNumber(exchange.listingCount)+' live'+(exchange.repairable?' · inventory prepared on use':selectable?'':' · '+esc(exchange.unavailableReason||'unavailable'))+'</option>';}).join('');if(marketBotArrakeenData&&!marketBotArrakeenData.ready&&!marketBotExchangeData.some(exchange=>exchange.name==="Arrakeen_EX"))options+='<option value="" disabled>Arrakeen · start map first</option>';if(current&&!marketBotExchangeData.some(exchange=>exchange.name===current))options+='<option value="'+esc(current)+'">'+esc(current)+' · saved</option>';select.innerHTML=options;select.value=current;const selected=marketBotExchangeData.find(exchange=>exchange.name===current);if(help)help.textContent=current?(current+' is saved for future bot listings'+(selected?' · '+marketBotNumber(selected.listingCount)+' currently live.':'.')):'Choose the in-game Exchange for future bot listings.';if(choices){const preferred=marketBotExchangeData.filter(exchange=>exchange.selectable===true&&["Arrakeen_EX","HarkoVillage_EX"].includes(exchange.name));choices.innerHTML=preferred.map(exchange=>'<button type="button" class="'+(exchange.name===current?'primary':'')+'" data-exchange="'+esc(exchange.name)+'" onclick="chooseMarketBotExchange(this.dataset.exchange)">Use '+esc(exchange.name.replace(/_EX$/,''))+'</button>').join('')+(!marketBotArrakeenData?.ready&&!preferred.some(exchange=>exchange.name==="Arrakeen_EX")?'<button type="button" data-map-offline disabled title="Start the Arrakeen map, then Refresh">Arrakeen · start map first</button>':'');}if(initializeButton)initializeButton.classList.toggle("hidden",marketBotArrakeenData?.canInitialize!==true);if(arrakeenStatus)arrakeenStatus.textContent=marketBotArrakeenData?.ready?"Arrakeen Exchange is ready.":marketBotArrakeenData?.message||"";}
 function chooseMarketBotExchange(exchangeName){if(marketBotExchangeOperationId)return;setValue("marketBotExchange",exchangeName);saveMarketBotExchange();}
 function setMarketBotExchangeBusy(busy){const ids=["marketBotExchange","marketBotSaveExchangeButton","marketBotRepairButton","marketBotPauseButton","marketBotPreviewButton","marketBotRestockButton"];for(const id of ids){const element=document.getElementById(id);if(element)element.disabled=Boolean(busy);}document.querySelectorAll("#marketBotExchangeChoices button").forEach(button=>button.disabled=Boolean(busy)||button.hasAttribute("data-map-offline"));}
 function renderMarketBotExchangeProgress(operation={}){const panel=document.getElementById("marketBotExchangeProgress");if(!panel)return;panel.classList.remove("hidden");const running=operation.status==="running"||operation.status==="pending",success=operation.status==="success",progress=Number.isFinite(Number(operation.progress))?Math.max(0,Math.min(100,Number(operation.progress))):(success?100:0);setText("marketBotExchangeProgressStage",operation.stage||"Starting Exchange switch");setText("marketBotExchangeProgressDetail",operation.detail||operation.error||(running?"The Suite is working.":"Exchange workflow finished."));setText("marketBotExchangeProgressText",Math.round(progress)+"% · "+serverUpdateElapsed(operation));const fill=document.getElementById("marketBotExchangeProgressFill");if(fill)fill.style.width=progress+"%";const state=document.getElementById("marketBotExchangeProgressState");if(state){state.textContent=success?"Completed":operation.status==="failed"?"Failed":"Suite Busy";state.className="badge "+(success?"ok":operation.status==="failed"?"bad":"warn");}const lines=Array.isArray(operation.logTail)?operation.logTail:[];setText("marketBotExchangeProgressLog",lines.length?lines.join("\n"):(operation.error||"Waiting for the first progress update..."));}

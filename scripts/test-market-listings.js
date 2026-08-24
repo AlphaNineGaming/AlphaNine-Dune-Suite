@@ -31,12 +31,17 @@ assert.ok(
   "The active-listing filter must apply even when no search text is provided."
 );
 
-const exchangeDiscoveryStart = server.indexOf("async function marketBotExchanges()");
+const exchangeDiscoveryStart = server.indexOf("function normalizeMarketBotExchangeRow");
 const exchangeDiscoveryEnd = server.indexOf("async function marketPostingStatus", exchangeDiscoveryStart);
 const exchangeDiscovery = server.slice(exchangeDiscoveryStart, exchangeDiscoveryEnd);
 assert.ok(exchangeDiscoveryStart >= 0 && exchangeDiscoveryEnd > exchangeDiscoveryStart, "Could not isolate Market Bot Exchange discovery.");
 assert.ok(exchangeDiscovery.includes("from dune.dune_exchanges e") && exchangeDiscovery.includes("dune.dune_exchange_accesspoints"), "Exchange choices must come from the live game database and verify access points.");
-assert.ok(exchangeDiscovery.includes("inventoryConfigured") && exchangeDiscovery.includes("nameCount === 1"), "Unusable or ambiguous Exchanges must not be selectable.");
+assert.ok(
+  exchangeDiscovery.includes("savedInventoryValid")
+    && exchangeDiscovery.includes("nameCount === 1")
+    && exchangeDiscovery.includes("linkedInventoryCount <= 1"),
+  "Unusable or ambiguous Exchanges must not be selectable."
+);
 
 const marketViewStart = server.indexOf('<section id="market" class="view">');
 const legacyViewStart = server.indexOf('<section id="legacy-market"', marketViewStart);

@@ -28,6 +28,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.1.6
+
+- Fixed HarkoVillage appearing in the Market Bot Exchange selector but remaining disabled when its native Exchange had no saved inventory link.
+- HarkoVillage is now selectable when its Exchange and access point are valid and the inventory is the only missing structure.
+- On first use, the Suite transactionally links the existing Harko inventory or creates an empty Exchange inventory and saves it to the Exchange.
+- Existing Harko and player listings are never moved or modified by this setup.
+- Ambiguous inventories, missing access points, duplicate Exchange names, and invalid inventory ownership remain blocked.
+
 ### 1.1.5
 
 - Added a player backpack inventory table to the Players view.

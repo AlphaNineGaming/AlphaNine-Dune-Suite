@@ -16549,6 +16549,205 @@ async function verifyLiveMapTeleport(payload) {
   };
 }
 
+function playerInventoryTargetCtes(playerRefValue) {
+  const playerRef = String(playerRefValue || "").trim();
+  if (!playerRef || playerRef.length > 200) throw new Error("Select a valid player before loading inventory.");
+  const value = sqlString(playerRef);
+  const predicate = [
+    `ps.account_id::text = ${value}`,
+    `ps.player_controller_id::text = ${value}`,
+    `ps.player_pawn_id::text = ${value}`,
+    `ps.player_state_id::text = ${value}`,
+    `ps.id::text = ${value}`,
+    `lower(coalesce(ps.character_name, '')) = lower(${value})`,
+    `lower(coalesce(ac."user", '')) = lower(${value})`
+  ].join("\n         or ");
+  return `
+    target_player as materialized (
+      select ps.account_id::text as account_id,
+             ps.player_pawn_id::text as actor_id,
+             coalesce(nullif(ps.character_name, ''), nullif(ac."user", ''), ps.account_id::text) as character_name,
+             coalesce(ps.online_status::text, 'unknown') as online_status
+      from dune.player_state ps
+      left join dune.accounts ac on ac.id = ps.account_id
+      where ${predicate}
+      order by case when ps.account_id::text = ${value} then 0 else 1 end,
+               ps.last_avatar_activity desc nulls last,
+               ps.player_state_id
+      limit 1
+    ),
+    preferred_player_inventory as materialized (
+      select inv.id,
+             inv.actor_id,
+             coalesce(inv.inventory_type, -1)::int as inventory_type,
+             coalesce(inv.max_item_count, 0)::int as max_item_count,
+             coalesce(inv.max_item_volume, 0)::int as max_item_volume
+      from dune.inventories inv
+      where inv.actor_id = (select actor_id::bigint from target_player limit 1)
+        and inv.inventory_type = 0
+      order by inv.id
+      limit 1
+    ),
+    fallback_player_inventory as materialized (
+      select inv.id,
+             inv.actor_id,
+             coalesce(inv.inventory_type, -1)::int as inventory_type,
+             coalesce(inv.max_item_count, 0)::int as max_item_count,
+             coalesce(inv.max_item_volume, 0)::int as max_item_volume
+      from dune.inventories inv
+      where inv.actor_id = (select actor_id::bigint from target_player limit 1)
+        and not exists(select 1 from preferred_player_inventory)
+      order by inv.id
+      limit 1
+    ),
+    selected_player_inventory as materialized (
+      select * from preferred_player_inventory
+      union all
+      select * from fallback_player_inventory
+      limit 1
+    )`;
+}
+
+function parsePlayerInventoryResult(output, label) {
+  for (const line of String(output || "").split(/\r?\n/).reverse()) {
+    const text = line.trim();
+    if (!text.startsWith("{") || !text.endsWith("}")) continue;
+    try { return JSON.parse(text); }
+    catch { /* Keep looking for the JSON result row. */ }
+  }
+  throw new Error(`${label} returned an unreadable database response.`);
+}
+
+async function adminPlayerInventory(playerRefValue) {
+  const targetCtes = playerInventoryTargetCtes(playerRefValue);
+  const output = await dbQuery(`
+    with ${targetCtes}
+    select json_build_object(
+      'ok', exists(select 1 from target_player) and exists(select 1 from selected_player_inventory),
+      'status', case
+        when not exists(select 1 from target_player) then 'player_not_found'
+        when not exists(select 1 from selected_player_inventory) then 'inventory_not_found'
+        else 'ready'
+      end,
+      'player', json_build_object(
+        'accountId', coalesce((select account_id from target_player limit 1), ''),
+        'actorId', coalesce((select actor_id from target_player limit 1), ''),
+        'characterName', coalesce((select character_name from target_player limit 1), ''),
+        'onlineStatus', coalesce((select online_status from target_player limit 1), 'unknown')
+      ),
+      'inventory', json_build_object(
+        'id', coalesce((select id::text from selected_player_inventory limit 1), ''),
+        'type', coalesce((select inventory_type from selected_player_inventory limit 1), -1),
+        'maxItemCount', coalesce((select max_item_count from selected_player_inventory limit 1), 0),
+        'maxItemVolume', coalesce((select max_item_volume from selected_player_inventory limit 1), 0),
+        'itemCount', (select count(*)::int from dune.items i where i.inventory_id = (select id from selected_player_inventory limit 1))
+      ),
+      'items', coalesce((
+        select json_agg(json_build_object(
+          'id', i.id::text,
+          'templateId', coalesce(i.template_id, ''),
+          'stackSize', coalesce(i.stack_size, 0),
+          'qualityLevel', coalesce(i.quality_level, 0),
+          'positionIndex', i.position_index,
+          'durability', case when jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}') = 'number' then (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric else null end,
+          'maximumDurability', case when jsonb_typeof(i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}') = 'number' then (i.stats #>> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')::numeric else null end,
+          'blueprintId', coalesce((select bb.id::text from dune.building_blueprints bb where bb.item_id = i.id order by bb.id limit 1), '')
+        ) order by i.position_index nulls last, i.id)
+        from dune.items i
+        where i.inventory_id = (select id from selected_player_inventory limit 1)
+      ), '[]'::json)
+    )::text
+  `, 20000);
+  const result = parsePlayerInventoryResult(output, "Player inventory lookup");
+  if (result.status === "player_not_found") throw new Error("The selected player was not found.");
+  if (result.status === "inventory_not_found") throw new Error(`No backpack inventory was found for ${result.player?.characterName || "the selected player"}.`);
+  if (result.status !== "ready") throw new Error(`Player inventory lookup failed: ${result.status || "unknown"}.`);
+  return result;
+}
+
+async function deleteAdminPlayerInventoryItem(payload = {}) {
+  const playerRef = String(payload.playerId || payload.playerRef || "").trim();
+  const itemId = requireInteger(payload.itemId, "item id", 1, 999999999999999);
+  const targetCtes = playerInventoryTargetCtes(playerRef);
+  const output = await dbQuery(`
+    begin;
+    set local search_path=dune,public;
+    with ${targetCtes}
+    select inv.id
+    from dune.inventories inv
+    where inv.id = (select id from selected_player_inventory limit 1)
+    for update;
+
+    create temp table player_inventory_delete_target on commit drop as
+      with ${targetCtes}
+      select i.id,
+             i.inventory_id,
+             coalesce(i.template_id, '') as template_id,
+             coalesce(i.stack_size, 0)::bigint as stack_size,
+             coalesce(i.quality_level, 0)::int as quality_level,
+             i.position_index,
+             coalesce((select json_agg(bb.id order by bb.id) from dune.building_blueprints bb where bb.item_id = i.id), '[]'::json) as blueprint_ids
+      from dune.items i
+      where i.id = ${itemId}
+        and i.inventory_id = (select id from selected_player_inventory limit 1)
+      limit 1;
+
+    delete from dune.building_blueprint_pentashields bp
+    using dune.building_blueprints bb, player_inventory_delete_target t
+    where bp.building_blueprint_id = bb.id and bb.item_id = t.id;
+    delete from dune.building_blueprint_placeables bp
+    using dune.building_blueprints bb, player_inventory_delete_target t
+    where bp.building_blueprint_id = bb.id and bb.item_id = t.id;
+    delete from dune.building_blueprint_instances bi
+    using dune.building_blueprints bb, player_inventory_delete_target t
+    where bi.building_blueprint_id = bb.id and bb.item_id = t.id;
+    delete from dune.building_blueprints bb
+    using player_inventory_delete_target t
+    where bb.item_id = t.id;
+
+    create temp table player_inventory_deleted on commit drop as
+      with deleted as (
+        delete from dune.items i
+        using player_inventory_delete_target t
+        where i.id = t.id and i.inventory_id = t.inventory_id
+        returning i.id
+      ) select * from deleted;
+
+    select json_build_object(
+      'ok', exists(select 1 from player_inventory_deleted),
+      'status', case when exists(select 1 from player_inventory_deleted) then 'deleted' else 'item_not_found' end,
+      'item', json_build_object(
+        'id', coalesce((select id::text from player_inventory_delete_target limit 1), ''),
+        'templateId', coalesce((select template_id from player_inventory_delete_target limit 1), ''),
+        'stackSize', coalesce((select stack_size from player_inventory_delete_target limit 1), 0),
+        'qualityLevel', coalesce((select quality_level from player_inventory_delete_target limit 1), 0),
+        'positionIndex', (select position_index from player_inventory_delete_target limit 1),
+        'blueprintIds', coalesce((select blueprint_ids from player_inventory_delete_target limit 1), '[]'::json)
+      ),
+      'remainingItemCount', (
+        with ${targetCtes}
+        select count(*)::int from dune.items i where i.inventory_id = (select id from selected_player_inventory limit 1)
+      )
+    )::text;
+    commit;
+  `, 30000);
+  const result = parsePlayerInventoryResult(output, "Player inventory deletion");
+  if (result.status !== "deleted") throw new Error("The selected item was not found in that player's backpack.");
+  appendAdminAudit("player_inventory_item_deleted", {
+    playerRef,
+    itemId: result.item?.id || String(itemId),
+    templateId: result.item?.templateId || "",
+    stackSize: Number(result.item?.stackSize || 0),
+    qualityLevel: Number(result.item?.qualityLevel || 0),
+    positionIndex: result.item?.positionIndex,
+    blueprintIds: result.item?.blueprintIds || []
+  });
+  return {
+    ...result,
+    message: `Deleted ${result.item?.templateId || `item ${itemId}`} from the player's backpack.`
+  };
+}
+
 function playerDiagnosticLines(diagnostics) {
   const lines = [
     `Server path: ${diagnostics.serverPath || "Not configured"}`,
@@ -22751,6 +22950,20 @@ function appPage() {
           </div>
         </div>
       </div>
+      <div class="panel pad mt">
+        <div class="panel-head">
+          <div><div class="label">Player Backpack Inventory</div><div id="playerInventorySummary" class="subtle">Select a player to load inventory.</div></div>
+          <button id="playerInventoryRefreshButton" type="button" onclick="refreshPlayerInventory()" disabled>Refresh Inventory</button>
+        </div>
+        <label class="mt">Search Inventory<input id="playerInventorySearch" type="search" placeholder="Search item name, template, item id, or slot" oninput="renderPlayerInventory()"></label>
+        <div id="playerInventoryStatus" class="empty mt">Select a player to inspect their backpack.</div>
+        <div class="table-wrap mt">
+          <table>
+            <thead><tr><th>Slot</th><th>Item</th><th>Stack</th><th>Grade</th><th>Durability</th><th>Item ID</th><th>Action</th></tr></thead>
+            <tbody id="playerInventoryRows"><tr><td colspan="7">No player selected.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <section id="blueprints" class="view">
@@ -24353,8 +24566,10 @@ async function pollMigrationJob(type,jobId){if(!jobId)return null;migrationActiv
 async function reconnectMigrationJob(){try{const active=await getJson("/api/server-migration/active-job",{timeoutMs:10000});if(!active.job){setMigrationControlsBusy(false);return;}renderAnyMigrationJob(active.type,active.job);if(active.active)pollMigrationJob(active.type,active.job.jobId);}catch(error){setText("migrationExportStage","No recent activity · unable to reconnect to migration job status\n"+betterError(error));setText("migrationImportStatus","No recent activity · unable to reconnect to migration job status\n"+betterError(error));setMigrationControlsBusy(true);}}
 async function startMigrationExport(){let started=false;try{if(migrationOperationBusy())throw new Error("A Server Migration operation is already active.");if(!migrationPreflightState?.ready){const checked=await runMigrationPreflight();if(!checked?.ready)return;}beginMigrationImmediateFeedback("migrationExportButton","migrationExportStage","migrationExportProgress","export");started=true;const job=await getJson("/api/server-migration/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(migrationPayload()),timeoutMs:30000});finishMigrationImmediateFeedback("migrationExportButton");renderMigrationExportJob(job);await pollMigrationJob("export",job.jobId);}catch(error){if(started)finishMigrationImmediateFeedback("migrationExportButton");renderMigrationExportJob({status:"failed",stage:"Export failed",error:"Export request was not accepted or could not be monitored. "+betterError(error),timeline:[],live:{state:"failed",elapsedMs:0,lastActivityAt:new Date().toISOString(),activity:{mode:"indeterminate",substep:"Export failed"}}});setMigrationControlsBusy(false);}}
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
-document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>setView(b.dataset.open)));
+tabs.forEach(t=>t.addEventListener("click",()=>{if(t.dataset.view==="players")setTimeout(()=>refreshPlayerInventory(),0);}));
+document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>{setView(b.dataset.open);if(b.dataset.open==="players")setTimeout(()=>refreshPlayerInventory(),0);}));
 let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],setDurabilityTo200:true,durabilityValue:200,notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],latestStorageDepositReceipt=null,storageDepositPollGeneration=0,latestGiveItemReceipt=null,giveItemReceiptPollGeneration=0,playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let playerInventoryState=null,playerInventoryRows=[],playerInventoryBusy=false;
 let operationsState={active:[],operations:[]};
 let databaseExplorerState={schemas:[],tables:[],metadata:null,rows:[],selectedTable:"",selectedRow:-1,offset:0,pageSize:50,hasMore:false,loading:false};
 let serverUpdateOperationId="",serverUpdateCheckState=null,serverUpdatePollTimer=null;
@@ -25156,7 +25371,14 @@ function renderPlayerSelect(){const select=document.getElementById("adminPlayer"
 async function refreshGivePlayersFast(force=false){const select=document.getElementById("adminPlayer");if(select&&!adminPlayers.length)select.innerHTML='<option value="">Loading players...</option>';try{const data=await loadSharedPlayerDirectory({force});renderSharedPlayerDirectory();addActivity(data.playerDirectory?.warning?"warn":"probe",data.playerDirectory?.warning?"Using last confirmed players":"Give Item players loaded",data.playerDirectory?.warning||adminPlayers.length+" players");return data;}catch(e){if(select&&!adminPlayers.length)select.innerHTML='<option value="">Player load failed</option>';addActivity("error","Give Item players failed",e.message);return null;}}
 async function refreshGiveItemsFast(){const status=document.getElementById("gearDiscoveryStatus");if(status&&!adminItems.length){status.className="warning mt";status.textContent="Loading bundled item catalog...";}try{const data=await getJson("/api/admin/items",{timeoutMs:20000});adminItems=data.items||[];adminItemReport=data.report||null;renderAdminItemFilters();renderAdminItems();renderSelectedGiveItem();renderGearDiscoveryStatus();tone("adminItemsFound",String(adminItems.length));addActivity("gear","Give Item catalog loaded",adminItems.length+" items");return data;}catch(e){renderAdminItems();if(status){status.className="warning mt";status.textContent=betterError(e);}addActivity("error","Give Item catalog failed",e.message);return null;}}
 function renderPermissionPlayerSelect(){const select=document.getElementById("permissionPlayer");if(!select)return;select.innerHTML=adminPlayers.length?adminPlayers.map(p=>'<option value="'+esc(p.id)+'">'+esc(playerLabel(p))+'</option>').join(""):'<option value="">No players found</option>';if(selectedPlayerId)select.value=selectedPlayerId;syncPermissionForms();}
-function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();}
+function playerInventoryCatalogItem(row){return adminItems.find(item=>String(item.id)===String(row?.templateId||""))||null;}
+function playerInventoryItemName(row){const item=playerInventoryCatalogItem(row);return item?.name||row?.templateId||("Item "+(row?.id||""));}
+function playerInventoryDurability(row){const current=row?.durability,max=row?.maximumDurability;if(current==null&&max==null)return"-";if(current!=null&&max!=null)return current+" / "+max;return String(current??max);}
+function syncPlayerInventoryControls(){const refresh=document.getElementById("playerInventoryRefreshButton");if(refresh)refresh.disabled=playerInventoryBusy||!selectedPlayer();document.querySelectorAll("[data-player-inventory-delete]").forEach(button=>button.disabled=playerInventoryBusy);}
+function renderPlayerInventory(){const body=document.getElementById("playerInventoryRows");const summary=document.getElementById("playerInventorySummary");const status=document.getElementById("playerInventoryStatus");if(!body)return;const selected=selectedPlayer();if(!selected){body.innerHTML='<tr><td colspan="7">No player selected.</td></tr>';if(summary)summary.textContent="Select a player to load inventory.";if(status){status.className="empty mt";status.textContent="Select a player to inspect their backpack.";}syncPlayerInventoryControls();return;}const inventory=playerInventoryState?.inventory||null;const query=String(document.getElementById("playerInventorySearch")?.value||"").trim().toLowerCase();const rows=query?playerInventoryRows.filter(row=>[playerInventoryItemName(row),row.templateId,row.id,row.positionIndex,row.stackSize,row.qualityLevel].join(" ").toLowerCase().includes(query)):playerInventoryRows;if(summary)summary.textContent=inventory?(playerInventoryRows.length+" item stack"+(playerInventoryRows.length===1?"":"s")+" / Inventory "+inventory.id+(inventory.maxItemCount>0?" / "+inventory.maxItemCount+" slots":"")):"Inventory not loaded.";if(!playerInventoryState){body.innerHTML='<tr><td colspan="7">Click Refresh Inventory to load this backpack.</td></tr>';syncPlayerInventoryControls();return;}if(!rows.length){body.innerHTML='<tr><td colspan="7">'+(query?"No inventory items match that search.":"The selected player backpack is empty.")+'</td></tr>';syncPlayerInventoryControls();return;}body.innerHTML=rows.map(row=>{const catalog=playerInventoryCatalogItem(row);const detail=row.blueprintId?("Blueprint "+row.blueprintId):(catalog?.category||row.templateId||"");return '<tr><td>'+esc(row.positionIndex??"-")+'</td><td><strong>'+esc(playerInventoryItemName(row))+'</strong><div class="subtle">'+esc(detail)+'</div></td><td>'+esc(row.stackSize??0)+'</td><td>'+esc("Grade "+(row.qualityLevel??0))+'</td><td>'+esc(playerInventoryDurability(row))+'</td><td>'+esc(row.id||"-")+'</td><td><button type="button" class="danger" data-player-inventory-delete="'+esc(row.id)+'">Delete</button></td></tr>';}).join("");body.querySelectorAll("[data-player-inventory-delete]").forEach(button=>button.addEventListener("click",()=>deletePlayerInventoryItem(button.dataset.playerInventoryDelete)));syncPlayerInventoryControls();}
+async function refreshPlayerInventory(){const player=selectedPlayer();if(!player){playerInventoryState=null;playerInventoryRows=[];renderPlayerInventory();return null;}playerInventoryBusy=true;syncPlayerInventoryControls();const status=document.getElementById("playerInventoryStatus");if(status){status.className="empty mt";status.textContent="Loading "+(player.name||player.character_name||"player")+" backpack...";}try{const data=await getJson("/api/admin/player-inventory?playerId="+encodeURIComponent(player.id),{timeoutMs:30000});playerInventoryState=data;playerInventoryRows=Array.isArray(data.items)?data.items:[];if(status){status.className="empty mt";status.textContent=playerInventoryRows.length?"Backpack loaded. Use Delete to remove an item stack.":"This backpack is empty.";}renderPlayerInventory();return data;}catch(error){playerInventoryState=null;playerInventoryRows=[];if(status){status.className="warning mt";status.textContent=betterError(error);}renderPlayerInventory();return null;}finally{playerInventoryBusy=false;syncPlayerInventoryControls();}}
+async function deletePlayerInventoryItem(itemId){const player=selectedPlayer();const row=playerInventoryRows.find(item=>String(item.id)===String(itemId));if(!player||!row)return;const name=playerInventoryItemName(row);const confirmed=await appConfirm("Delete Inventory Item","Delete "+name+" x"+(row.stackSize||0)+" from "+(player.name||player.character_name||"the selected player")+"'s backpack?","Delete","Cancel");if(!confirmed)return;playerInventoryBusy=true;syncPlayerInventoryControls();const status=document.getElementById("playerInventoryStatus");if(status){status.className="empty mt";status.textContent="Deleting "+name+"...";}try{const data=await getJson("/api/admin/player-inventory/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId:player.id,itemId:row.id}),timeoutMs:30000});showToast(data.message||"Inventory item deleted.","success");addActivity("players","Inventory item deleted",name+" / Item "+row.id);playUiSound("success");await refreshPlayerInventory();}catch(error){if(status){status.className="warning mt";status.textContent=betterError(error);}showToast(betterError(error),"error");addActivity("error","Inventory item delete failed",error.message);playUiSound("warning");}finally{playerInventoryBusy=false;syncPlayerInventoryControls();}}
+function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();syncPlayerInventoryControls();}
 function resetPlayerRename(hide=true){playerRenamePreviewState=null;const panel=document.getElementById("playerRenamePanel");const input=document.getElementById("playerRenameName");const apply=document.getElementById("playerRenameApplyButton");const preview=document.getElementById("playerRenamePreviewButton");const status=document.getElementById("playerRenameStatus");if(panel)panel.classList.toggle("hidden",hide);if(input)input.value="";if(apply)apply.disabled=true;if(preview)preview.disabled=false;if(status){status.className="empty mt";status.textContent="Preview checks that the player is offline and the new name is available.";}}
 function closePlayerRename(){resetPlayerRename(true);}
 function openPlayerRename(){const p=selectedPlayer();if(!p){showToast("Select a player first.","warning");return;}resetPlayerRename(false);const status=document.getElementById("playerRenameStatus");if(!p.player_state_row_id){if(status){status.className="warning mt";status.textContent="This player does not have an active encrypted player-state record. Refresh Players and try again.";}return;}const input=document.getElementById("playerRenameName");if(status){status.className=/^(offline|disconnected|inactive)$/i.test(String(p.online_status||""))?"empty mt":"warning mt";status.textContent=/^(offline|disconnected|inactive)$/i.test(String(p.online_status||""))?"Player is offline. Enter the new name and generate a protected preview.":"Player status is "+(p.online_status||"unknown")+". The rename preview will remain blocked until the player is offline.";}input?.focus();}
@@ -25164,7 +25386,7 @@ function invalidatePlayerRenamePreview(){playerRenamePreviewState=null;const app
 async function previewSelectedPlayerRename(){const p=selectedPlayer();const status=document.getElementById("playerRenameStatus");const previewButton=document.getElementById("playerRenamePreviewButton");const applyButton=document.getElementById("playerRenameApplyButton");try{if(!p)throw new Error("Select a player first.");if(!p.player_state_row_id)throw new Error("The selected player does not have an active player-state record.");const newName=document.getElementById("playerRenameName")?.value||"";playerRenamePreviewState=null;if(applyButton)applyButton.disabled=true;if(previewButton)previewButton.disabled=true;if(status){status.className="warning mt";status.textContent="Checking player status, name availability, and creating the encrypted-row backup...";}const data=await getJson("/api/admin/players/rename/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerStateRowId:p.player_state_row_id,newName}),timeoutMs:45000});playerRenamePreviewState=data;if(status){status.className="empty mt";status.textContent=(data.message||"Rename preview ready.")+"\nBackup: "+(data.backupPath||"created")+"\nPreview expires: "+new Date(data.expiresAt).toLocaleTimeString();}if(applyButton)applyButton.disabled=false;showToast("Player rename preview ready.","success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}showToast(betterError(e),"error");}finally{if(previewButton)previewButton.disabled=false;}}
 async function refreshPlayersAfterRename(accountId){const data=await loadSharedPlayerDirectory({force:true});const preferred=String(accountId||selectedPlayerId||"");selectedPlayerId=adminPlayers.some(row=>String(row.id)===preferred)?preferred:(adminPlayers[0]?.id||"");renderSharedPlayerDirectory();syncPermissionForms();progressionPlayerState=null;if(liveMap)refreshLiveMap().catch(()=>{});return data;}
 async function applySelectedPlayerRename(){const p=selectedPlayer();const preview=playerRenamePreviewState;const status=document.getElementById("playerRenameStatus");const applyButton=document.getElementById("playerRenameApplyButton");try{if(!p||!preview)throw new Error("Generate a rename preview first.");if(String(p.player_state_row_id)!==String(preview.playerStateRowId))throw new Error("The selected player changed. Generate a new rename preview.");const confirmed=await appConfirm("Rename Player","Rename "+preview.currentName+" to "+preview.newName+"?\n\nThe player must remain offline. Account ID, inventory, bases, guild, and progression IDs will not be changed.","Rename Player","Cancel");if(!confirmed)return;if(applyButton)applyButton.disabled=true;if(status){status.className="warning mt";status.textContent="Applying encrypted character-name update and verifying the database read-back...";}const data=await getJson("/api/admin/players/rename/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:preview.previewId,confirmed:true}),timeoutMs:45000});playerRenamePreviewState=null;if(status){status.className="empty mt";status.textContent=(data.message||"Player renamed.")+"\nBackup: "+(data.backupPath||"created")+"\nAudit: "+(data.auditLogPath||"admin-audit.log");}showToast(data.message||"Player renamed.","success");addActivity("players","Player renamed",data.previousName+" -> "+data.newName);try{await refreshPlayersAfterRename(data.accountId);closePlayerRename();}catch(refreshError){if(status){status.className="warning mt";status.textContent=(data.message||"Player renamed.")+"\nThe database update was verified, but the Players page could not refresh: "+betterError(refreshError)+"\nUse Refresh Players before making another change.";}showToast("Player renamed; refresh Players before continuing.","warning");}playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}if(applyButton)applyButton.disabled=!playerRenamePreviewState;showToast(betterError(e),"error");addActivity("error","Player rename failed",e.message);playUiSound("warning");}}
-function selectPlayer(id){selectedPlayerId=String(id||"");resetPlayerRename(true);const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function selectPlayer(id){selectedPlayerId=String(id||"");playerInventoryState=null;playerInventoryRows=[];resetPlayerRename(true);const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();renderPlayerInventory();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();if(document.querySelector("section#players.view")?.classList.contains("active"))refreshPlayerInventory();}
 function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;resetPlayerRename(true);const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;resetPlayerRename(true);const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");const renameButton=document.getElementById("playerRenameOpenButton");if(renameButton)renameButton.disabled=!p||!p.player_state_row_id;if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Connection</span><strong>'+esc(p.online_status||"unknown")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div>'+hydrationDetailRow(p.hydration)+'<div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
@@ -25583,7 +25805,7 @@ const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/battlegroups", "/api/battlegroups/selected", "/api/database/status", "/api/database/tunnel/status", "/api/database/backups",
   "/api/maps", "/api/world-map/metadata", "/api/live-map/markers", "/api/live-map/entities", "/api/live-map/players",
   "/api/live-map/vehicles", "/api/live-map/bases", "/api/live-map/teleport/presets", "/api/live-map/teleport/status", "/api/live-map/resource-areas/status",
-  "/api/admin/players", "/api/admin/repair/inspect", "/api/admin/repair/queue", "/api/players/feed", "/api/admin/items",
+  "/api/admin/players", "/api/admin/player-inventory", "/api/admin/repair/inspect", "/api/admin/repair/queue", "/api/players/feed", "/api/admin/items",
   "/api/give-items", "/api/gear-codex/items", "/api/item-database/items", "/api/items/catalog/status", "/api/give-items/capabilities",
   "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/progression/house-scrip", "/api/landsraad/tiers",
   "/api/landsraad/weekly-rewards/inspect", "/api/admin/skill-reputation", "/api/market-bot", "/api/market-bot/items", "/api/market-automator/overview",
@@ -26827,6 +27049,19 @@ async function route(req, res) {
       await json(res, result);
     }
     catch (error) { await json(res, { ok: false, players: [], error: error.message }, 500); }
+    return;
+  }
+  if (url.pathname === "/api/admin/player-inventory" && req.method === "GET") {
+    try { await json(res, await adminPlayerInventory(url.searchParams.get("playerId") || "")); }
+    catch (error) { await json(res, { ok: false, status: "blocked", error: error.message }, /not found/i.test(error.message) ? 404 : 400); }
+    return;
+  }
+  if (url.pathname === "/api/admin/player-inventory/delete" && req.method === "POST") {
+    try { await json(res, await deleteAdminPlayerInventoryItem(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) {
+      appendAdminAudit("player_inventory_item_delete_failed", { error: error.message });
+      await json(res, { ok: false, status: "blocked", error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/admin/players/rename/preview" && req.method === "POST") {

@@ -28,6 +28,15 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.1.5
+
+- Added a player backpack inventory table to the Players view.
+- Inventory rows show item names, templates, stacks, grades, durability, slots, and item IDs.
+- Added inventory search and refresh controls.
+- Added direct per-item deletion scoped to the selected player's exact backpack.
+- Blueprint-backed items remove their linked blueprint records when deleted.
+- Deletion has no backup, offline-player gate, preview, or typed confirmation.
+
 ### 1.1.1
 
 - Fixed Arrakeen Exchange initialization failing with `prompt() is not supported` in the Electron desktop app.

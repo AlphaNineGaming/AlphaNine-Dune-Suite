@@ -23,6 +23,9 @@ assert.match(backend, /inv\.actor_id = \(select actor_id::bigint from target_pla
 assert.match(backend, /inv\.inventory_type = 0/, "Backpack discovery must prefer inventory type 0.");
 assert.match(backend, /i\.id = \$\{itemId\}[\s\S]*i\.inventory_id = \(select id from selected_player_inventory limit 1\)/, "Delete target must require the exact item inside the selected player's backpack.");
 assert.match(backend, /delete from dune\.items i[\s\S]*using player_inventory_delete_target t[\s\S]*i\.id = t\.id and i\.inventory_id = t\.inventory_id/, "Delete must use the captured item and inventory identity.");
+assert.match(backend, /output = await dbQueryStreamed\(/, "Inventory deletion must stream its transaction instead of placing the full SQL payload on the SSH command line.");
+assert.doesNotMatch(backend, /select inv\.id[\s\S]*for update/, "Inventory deletion must not take a broad inventory-row lock that can stall behind the live game server.");
+assert.match(backend, /recoveredAfterTransportInterruption/, "Inventory deletion must verify the final state after an interrupted SSH response.");
 assert.match(backend, /appendAdminAudit\("player_inventory_item_deleted"/, "Successful deletes must be audited.");
 assert.doesNotMatch(backend, /backupPath|create.*backup|confirmed\s*!==/, "Simple inventory deletion must not require preview, backup, or a confirmation field.");
 

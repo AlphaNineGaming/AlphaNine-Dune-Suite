@@ -16669,14 +16669,13 @@ async function deleteAdminPlayerInventoryItem(payload = {}) {
   const playerRef = String(payload.playerId || payload.playerRef || "").trim();
   const itemId = requireInteger(payload.itemId, "item id", 1, 999999999999999);
   const targetCtes = playerInventoryTargetCtes(playerRef);
-  const output = await dbQuery(`
+  let output;
+  try {
+    output = await dbQueryStreamed(`
     begin;
     set local search_path=dune,public;
-    with ${targetCtes}
-    select inv.id
-    from dune.inventories inv
-    where inv.id = (select id from selected_player_inventory limit 1)
-    for update;
+    set local lock_timeout='15s';
+    set local statement_timeout='45s';
 
     create temp table player_inventory_delete_target on commit drop as
       with ${targetCtes}
@@ -16730,7 +16729,37 @@ async function deleteAdminPlayerInventoryItem(payload = {}) {
       )
     )::text;
     commit;
-  `, 30000);
+    `, 60000);
+  } catch (error) {
+    // The remote shell can disappear after PostgreSQL commits but before SSH
+    // returns the result. Verify the desired final state before reporting a
+    // failed deletion or tempting the operator to repeat the write.
+    try {
+      const inventory = await adminPlayerInventory(playerRef);
+      const itemStillExists = (inventory.items || []).some((item) => String(item.id) === String(itemId));
+      if (!itemStillExists) {
+        const result = {
+          ok: true,
+          status: "deleted",
+          item: { id: String(itemId) },
+          remainingItemCount: Number(inventory.inventory?.itemCount || 0),
+          recoveredAfterTransportInterruption: true,
+          message: `Deleted item ${itemId} from the player's backpack. The result was verified after the SSH response was interrupted.`
+        };
+        appendAdminAudit("player_inventory_item_deleted", {
+          playerRef,
+          itemId: String(itemId),
+          recoveredAfterTransportInterruption: true,
+          transportError: shortOutput(error.message, 1000)
+        });
+        return result;
+      }
+    } catch {
+      // Preserve the original transport/database error when verification is
+      // also unavailable so the UI shows the most useful root failure.
+    }
+    throw error;
+  }
   const result = parsePlayerInventoryResult(output, "Player inventory deletion");
   if (result.status !== "deleted") throw new Error("The selected item was not found in that player's backpack.");
   appendAdminAudit("player_inventory_item_deleted", {

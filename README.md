@@ -28,6 +28,13 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.1.7
+
+- Fixed player backpack item deletion failing with an SSH `Connection closed by host` error.
+- Inventory deletion now streams its database transaction instead of placing the full SQL payload on the SSH command line.
+- Removed an unnecessary inventory-row lock that could stall behind the live game server.
+- If SSH drops after the database commits, the Suite verifies the item is gone before reporting the result.
+
 ### 1.1.6
 
 - Fixed HarkoVillage appearing in the Market Bot Exchange selector but remaining disabled when its native Exchange had no saved inventory link.

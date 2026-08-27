@@ -469,7 +469,7 @@ func TestPausedDaemonDoesNotPublishRequestedBeforeProof(t *testing.T) {
 	}
 }
 
-func TestKubectlCallsHaveBoundedTimeouts(t *testing.T) {
+func TestKubectlCallsHaveBoundedTimeoutsOutsideScopedSudo(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("could not read bot source: %v", err)
@@ -477,12 +477,15 @@ func TestKubectlCallsHaveBoundedTimeouts(t *testing.T) {
 	text := string(source)
 	for _, expected := range []string{
 		"context.WithTimeout",
-		`"timeout", "-k", "5", "20", "kubectl"`,
-		`"timeout", "-k", "5", "120", "kubectl"`,
+		`"timeout", "-k", "5", "20", "sudo", "-n", "kubectl"`,
+		`[]string{"-k", "5", "120", "sudo", "-n", "kubectl"`,
 		"database planner timed out",
 	} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("bounded kubectl execution missing %q", expected)
 		}
+	}
+	if strings.Contains(text, `"sudo", "-n", "timeout"`) {
+		t.Fatal("timeout must remain outside the VM service account's scoped sudo kubectl permission")
 	}
 }

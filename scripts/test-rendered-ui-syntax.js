@@ -108,6 +108,9 @@ function extractFunction(source, name) {
     assert(serverSource.includes("serverManagementTimeoutMs(action)"), "Server management actions are not using operation-specific backend timeouts.");
     assert(html.includes('getJson("/api/action/start",{method:"POST",timeoutMs:960000})'), "Give Item server start can still let the browser fail before the backend start deadline.");
     assert(html.includes("loadSharedPlayerDirectory"), "Shared browser player directory is missing.");
+    assert(html.includes('if(name==="players")refreshPlayersPage()'), "Opening Players does not load the shared live player directory.");
+    assert(html.includes('onclick="refreshPlayersPage(true)">Refresh Players</button>'), "Refresh Players does not force-refresh the shared live player directory.");
+    assert(html.includes("async function refreshPlayersPage(force=false)") && html.includes("loadSharedPlayerDirectory({force})"), "Players does not reuse Give Item's shared player discovery loader.");
     assert(html.includes("PLAYER_DIRECTORY_REQUEST_TIMEOUT_MS=35000"), "Shared player request deadline is not aligned with backend work.");
     assert(html.includes("keeping the last confirmed directory"), "Player refresh failures do not preserve confirmed player data.");
     assert(!html.includes('getJson("/api/admin/players?limit=200&hydration=0",{timeoutMs:12000})'), "A legacy 12-second player loader remains in the UI.");

@@ -28,6 +28,12 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.1.8
+
+- Fixed **Players** remaining empty until **Give Item** was opened.
+- Opening **Players** now uses the same shared live-player discovery as Give Item.
+- **Refresh Players** forces a fresh lookup, while transient failures preserve the last confirmed player list.
+
 ### 1.1.7
 
 - Fixed player backpack item deletion failing with an SSH `Connection closed by host` error.

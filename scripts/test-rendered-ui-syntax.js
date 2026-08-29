@@ -15,7 +15,10 @@ assert(serverSource.includes("expectedVersion: MARKET_BOT_RUNTIME_VERSION"), "Ma
 assert(!serverSource.includes("marketBotCatalog(), APP_VERSION"), "A Market Bot runtime path still inherits the Suite UI version.");
 assert(electronMainSource.includes('path.join(root, "battlegroup.bat")'), "Desktop launcher does not resolve battlegroup.bat from a configured server root.");
 assert(electronMainSource.includes('ipcMain.handle("open-battlegroup-batch"'), "Desktop battlegroup.bat IPC handler is missing.");
-assert(electronPreloadSource.includes('openBattlegroupBatch: () => ipcRenderer.invoke("open-battlegroup-batch")'), "Desktop battlegroup.bat bridge is missing.");
+assert(electronPreloadSource.includes('openBattlegroupBatch: (configuredPaths = {}) => ipcRenderer.invoke("open-battlegroup-batch", configuredPaths)'), "Desktop battlegroup.bat Settings bridge is missing.");
+assert(electronMainSource.includes('["/d", "/s", "/k", `call ""${command}""`]'), "Desktop launcher does not keep the Battlegroup command console open with Windows-safe quoting.");
+assert(electronMainSource.includes("windowsVerbatimArguments: true"), "Desktop launcher does not preserve the quoted Battlegroup batch path for cmd.exe.");
+assert(electronMainSource.includes("persisted.serverInstallPath") && electronMainSource.includes("persisted.awakeningServerPath"), "Desktop launcher does not fall back to freshly persisted Settings paths.");
 assert(serverSource.includes('"/api/usergame-settings"') && serverSource.includes("updateLiveUserGameSettings"), "Live UserGame.ini API is missing.");
 assert(serverSource.includes('if (!remoteAccess.isLoopbackRequest(req))'), "Live UserGame.ini API is not protected by a local-only guard.");
 
@@ -164,6 +167,7 @@ function extractFunction(source, name) {
     for (const script of scripts) new Function(script);
     const suiteScript = scripts.join("\n");
     assert(suiteScript.includes("async function openBattlegroupBatch()"), "Server Control battlegroup.bat launcher is not wired.");
+    assert(suiteScript.includes('getJson("/api/config")') && suiteScript.includes("serverInstallPath:cfg.serverInstallPath"), "Server Control does not pass the saved Settings path to the desktop launcher.");
     assert(suiteScript.includes("async function loadLiveUserGameSettings(") && suiteScript.includes("async function saveLiveUserGameSettings()"), "Live UserGame.ini controls are not wired.");
     assert(suiteScript.includes('if(name==="usergame-settings"&&!liveUserGameState)loadLiveUserGameSettings()'), "Opening UserGame Settings does not load the live VM file.");
     const statusPollSource = extractFunction(suiteScript, "refreshStatusPoll");

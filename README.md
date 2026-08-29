@@ -28,6 +28,13 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.2.1
+
+- Includes the PostgreSQL backup-validation correction introduced for 1.2.0: normal Funcom ACL entries no longer prevent verified VM backups from being copied locally.
+- Fixed **Open Battlegroup.bat** for installed users by reading the saved server paths from Settings at click time.
+- The desktop app now starts the detected batch file through a persistent Windows command console with the server folder as its working directory.
+- Added Windows-safe quoting for configured paths containing spaces.
+
 ### 1.2.0
 
 - Fixed Funcom VM backups being rejected when their PostgreSQL archive contains normal ACL entries.

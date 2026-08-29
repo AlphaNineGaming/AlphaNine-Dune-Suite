@@ -355,10 +355,12 @@ function readAppConfig() {
   }
 }
 
-function battlegroupBatchPath(cfg = readAppConfig()) {
+function battlegroupBatchPath(cfg = readAppConfig(), persisted = readAppConfig()) {
   const roots = [
     cfg.serverInstallPath,
     cfg.awakeningServerPath,
+    persisted.serverInstallPath,
+    persisted.awakeningServerPath,
     process.env.DUNE_SERVER_INSTALL_PATH,
     process.env.DUNE_AWAKENING_SERVER_PATH
   ];
@@ -371,6 +373,29 @@ function battlegroupBatchPath(cfg = readAppConfig()) {
     } catch {}
   }
   return "";
+}
+
+function openBattlegroupBatchConsole(filePath) {
+  return new Promise((resolve, reject) => {
+    const command = String(filePath || "");
+    if (!command || path.basename(command).toLowerCase() !== "battlegroup.bat" || command.includes('"')) {
+      reject(new Error("The detected battlegroup.bat path is invalid."));
+      return;
+    }
+    const commandProcessor = String(process.env.ComSpec || "cmd.exe").trim() || "cmd.exe";
+    const child = spawn(commandProcessor, ["/d", "/s", "/k", `call ""${command}""`], {
+      cwd: path.dirname(command),
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+      windowsVerbatimArguments: true
+    });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
 }
 
 function generateReceiverToken() {
@@ -759,16 +784,26 @@ ipcMain.handle("open-path", async (_event, targetPath) => {
   return { ok: !error, error };
 });
 
-ipcMain.handle("open-battlegroup-batch", async () => {
-  const filePath = battlegroupBatchPath();
+ipcMain.handle("open-battlegroup-batch", async (_event, configuredPaths = {}) => {
+  const requested = configuredPaths && typeof configuredPaths === "object" ? configuredPaths : {};
+  const filePath = battlegroupBatchPath({
+    serverInstallPath: String(requested.serverInstallPath || "").trim(),
+    awakeningServerPath: String(requested.awakeningServerPath || "").trim()
+  });
   if (!filePath) {
     return {
       ok: false,
       error: "battlegroup.bat was not found in the configured Dune Self-Hosted Server folder. Check the server install path in Settings."
     };
   }
-  const error = await shell.openPath(filePath);
-  return { ok: !error, error, filePath };
+  try {
+    await openBattlegroupBatchConsole(filePath);
+    appendLog("desktop", `Opened battlegroup console from configured Settings path: ${filePath}`);
+    return { ok: true, error: "", filePath };
+  } catch (error) {
+    appendLog("desktop", `Could not open battlegroup console: ${error.message}`);
+    return { ok: false, error: error.message, filePath };
+  }
 });
 
 ipcMain.handle("self-update-install", async (_event, update) => {

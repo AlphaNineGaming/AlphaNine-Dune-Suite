@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld("alphaNineSuite", {
   chooseDatabaseBackupFolder: () => ipcRenderer.invoke("choose-database-backup-folder"),
   chooseDatabaseBackupFile: () => ipcRenderer.invoke("choose-database-backup-file"),
   openPath: (targetPath) => ipcRenderer.invoke("open-path", targetPath),
-  openBattlegroupBatch: () => ipcRenderer.invoke("open-battlegroup-batch"),
+  openBattlegroupBatch: (configuredPaths = {}) => ipcRenderer.invoke("open-battlegroup-batch", configuredPaths),
   installSelfUpdate: (update) => ipcRenderer.invoke("self-update-install", update),
   onSelfUpdateProgress: (callback) => {
     if (typeof callback !== "function") return () => {};

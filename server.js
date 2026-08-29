@@ -475,6 +475,10 @@ const MANAGER_CONFIG_PATH = path.join(MANAGER_DATA_DIR, "manager-config.json");
 const MANAGER_APPLIED_PROFILE_PATH = path.join(MANAGER_DATA_DIR, "applied-profile.json");
 const MANAGER_APPLIED_SETTINGS_PATH = path.join(MANAGER_DATA_DIR, "applied-server-settings.json");
 const DEFAULT_DATABASE_BACKUP_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "database-backups") : path.join(__dirname, "database-backups");
+// Funcom's vendor backup retains ACL entries. Its independently generated
+// schema inventory must use the same privilege boundary or ordinary ACL TOC
+// entries are misclassified as unexpected schema objects.
+const VENDOR_BACKUP_INVENTORY_DUMP_FLAGS = Object.freeze(["--format=custom", "--no-owner"]);
 const GIVE_QUEUE_PRESET_DIR = APPDATA_DIR ? path.join(APPDATA_DIR, "give-queue-presets") : path.join(__dirname, "give-queue-presets");
 
 const defaultConfig = {
@@ -8579,7 +8583,10 @@ async function verifyVendorBackup(parsed, operation) {
   const sha256 = String(hashResult.stdout || "").trim().match(/^([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() || "";
   if (!hashResult.ok || !sha256) throw new Error("The vendor backup SHA-256 could not be calculated.");
   const target = await databaseRuntimeTarget();
-  const expectedInventory = await createExpectedBackupInventory(target, { validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK });
+  const expectedInventory = await createExpectedBackupInventory(target, {
+    validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK,
+    dumpFlags: VENDOR_BACKUP_INVENTORY_DUMP_FLAGS
+  });
   const toc = await inspectRemoteBackupArchive(identity.path, target, expectedInventory);
   return { identity, size: stable.size, sha256, toc, stableChecks: "2" };
 }
@@ -9159,7 +9166,10 @@ async function checkVmBackupAvailable(source = {}) {
           const digest = String(hashResult.stdout || "").trim().match(/^([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() || "";
           if (!hashResult.ok || digest !== String(metadata.sha256).toLowerCase()) throw new Error("Remote payload SHA-256 changed after verification.");
           const target = await databaseRuntimeTarget();
-          await inspectRemoteBackupArchive(vmBackup.vmBackupPath, target, await createExpectedBackupInventory(target, { validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK }));
+          await inspectRemoteBackupArchive(vmBackup.vmBackupPath, target, await createExpectedBackupInventory(target, {
+            validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK,
+            dumpFlags: VENDOR_BACKUP_INVENTORY_DUMP_FLAGS
+          }));
         } catch (error) {
           available = false;
           verificationMessage = error.message;

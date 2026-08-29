@@ -158,7 +158,7 @@ async function main() {
   assert.throws(() => validateSchemaOnlyBackupToc(cleanDestinationSchema, { validationProfile: BACKUP_INVENTORY_PROFILES.MIGRATION_PACKAGE }), /outside dune \(COMMENT=2, EXTENSION=2, SCHEMA=1\)/, "migration-package validation must reject the exact clean-destination outside-dune descriptors");
   assert.throws(() => buildExpectedBackupInventory(cleanDestinationSchema.replace(`${tocLine(704, "EXTENSION", "- pgcrypto", null)}\n`, ""), cleanCatalog, { validationProfile: BACKUP_INVENTORY_PROFILES.DESTINATION_ROLLBACK }), /missing required extension objects: pgcrypto/);
   assert.throws(() => validateFullBackupToc(`${cleanFull}\n${tocLine(710, "TABLE DATA", "dune bootstrap_marker")}`, cleanInventory, { requiredAlphaTables: [] }), /duplicate TOC entries \(TABLE DATA=1\)/);
-  assert.throws(() => validateFullBackupToc(`${cleanFull}\n${tocLine(711, "TABLE", "public unexpected_table")}`, cleanInventory, { requiredAlphaTables: [] }), /unexpected schema object/);
+  assert.throws(() => validateFullBackupToc(`${cleanFull}\n${tocLine(711, "TABLE", "public unexpected_table")}`, cleanInventory, { requiredAlphaTables: [] }), /unexpected schema entries \(TABLE=1\)/);
 
   const parsed = parsePgRestoreToc(schema);
   assert(parsed.some((entry) => entry.descriptor === "CONSTRAINT" && entry.fields.includes("orders_pkey")));
@@ -282,6 +282,9 @@ async function main() {
   assert.match(vendorLocalCopy, /type:\s*"verified-database-backup"[\s\S]*localBackupPath:\s*finalPath[\s\S]*storage:\s*"vm\+local"/, "manual vendor backups must be listed and restorable as verified local payloads");
   const remoteVendorInspection = server.slice(server.indexOf("async function inspectRemoteBackupArchive"), server.indexOf("async function verifyVendorBackup"));
   assert.match(remoteVendorInspection, /requiredAlphaTables:\s*\[\]/, "real Funcom VM archives must be checked against their actual catalog without optional Suite-table requirements");
+  const vendorVerification = server.slice(server.indexOf("async function verifyVendorBackup"), server.indexOf("async function copyVerifiedVendorBackupToLocal"));
+  assert.match(vendorVerification, /dumpFlags:\s*VENDOR_BACKUP_INVENTORY_DUMP_FLAGS/, "Funcom VM archives must be inventoried with the vendor privilege boundary");
+  assert.match(server, /VENDOR_BACKUP_INVENTORY_DUMP_FLAGS\s*=\s*Object\.freeze\(\["--format=custom",\s*"--no-owner"\]\)/, "vendor inventory must retain ACL entries while ignoring ownership");
   const standardConnection = server.slice(server.indexOf("async function standardVmSshConnection"), server.indexOf("async function serverHealthRemoteCheck"));
   assert.doesNotMatch(standardConnection, /migration|known.?host|UserKnownHostsFile/i, "normal Suite SSH must not depend on migration-only pinned known-host files");
   const completeBackupFeature = server.slice(server.indexOf("async function databaseBackupSshConnection"), server.indexOf("function listDatabaseBackups"));

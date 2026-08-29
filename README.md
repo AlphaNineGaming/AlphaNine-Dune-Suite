@@ -28,6 +28,12 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.2.0
+
+- Fixed Funcom VM backups being rejected when their PostgreSQL archive contains normal ACL entries.
+- Vendor backup verification now generates its comparison inventory with the same privilege boundary as the Funcom dump.
+- Unexpected schema mismatches now identify their PostgreSQL TOC descriptor counts for faster diagnosis.
+
 ### 1.1.9
 
 - Added **UserGame Settings** as a dedicated child page under **Server Management**.

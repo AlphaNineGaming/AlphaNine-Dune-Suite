@@ -355,6 +355,24 @@ function readAppConfig() {
   }
 }
 
+function battlegroupBatchPath(cfg = readAppConfig()) {
+  const roots = [
+    cfg.serverInstallPath,
+    cfg.awakeningServerPath,
+    process.env.DUNE_SERVER_INSTALL_PATH,
+    process.env.DUNE_AWAKENING_SERVER_PATH
+  ];
+  for (const value of roots) {
+    const root = usableServerPath(value);
+    if (!root) continue;
+    const candidate = path.join(root, "battlegroup.bat");
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch {}
+  }
+  return "";
+}
+
 function generateReceiverToken() {
   return crypto.randomBytes(32).toString("base64url");
 }
@@ -739,6 +757,18 @@ ipcMain.handle("open-path", async (_event, targetPath) => {
   if (!value) return { ok: false, error: "Path is empty." };
   const error = await shell.openPath(value);
   return { ok: !error, error };
+});
+
+ipcMain.handle("open-battlegroup-batch", async () => {
+  const filePath = battlegroupBatchPath();
+  if (!filePath) {
+    return {
+      ok: false,
+      error: "battlegroup.bat was not found in the configured Dune Self-Hosted Server folder. Check the server install path in Settings."
+    };
+  }
+  const error = await shell.openPath(filePath);
+  return { ok: !error, error, filePath };
 });
 
 ipcMain.handle("self-update-install", async (_event, update) => {

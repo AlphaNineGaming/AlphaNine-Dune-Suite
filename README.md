@@ -28,6 +28,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.1.9
+
+- Added **UserGame Settings** as a dedicated child page under **Server Management**.
+- Added a safe live editor for 18 supported `UserGame.ini` settings, including player building limits, progression, harvesting, taxes, fees, and world behavior.
+- Saving creates a timestamped VM backup, changes only allowlisted fields, verifies the uploaded file, and applies the default user settings without restarting the battlegroup.
+- Added **Open Battlegroup.bat** to Server Control for direct access to the configured server launcher.
+- Live `UserGame.ini` editing remains local-only and rejects unknown or out-of-range settings.
+
 ### 1.1.8
 
 - Fixed **Players** remaining empty until **Give Item** was opened.

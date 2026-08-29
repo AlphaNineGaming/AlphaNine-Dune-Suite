@@ -91,6 +91,7 @@ const {
 } = require("./lib/server-update");
 const { createBlueprintService } = require("./lib/blueprints");
 const { createDatabaseBrowser } = require("./lib/database-browser");
+const { USER_GAME_SETTINGS_SCHEMA, parseUserGameIni, updateUserGameIni } = require("./lib/user-game-settings");
 const { createMarketAutomator } = require("./lib/market-automator");
 const {
   createMarketBotStore,
@@ -3433,6 +3434,83 @@ async function sshCommand(command, timeout = 180000, options = {}) {
   const args = [...connection.args, command];
   if (options.inputPath) return runWithStdin("ssh", args, options.inputPath, { timeout, maxBuffer: options.maxBuffer });
   return run("ssh", args, { timeout, maxBuffer: options.maxBuffer });
+}
+
+const USER_GAME_INI_PATH = "/home/dune/.dune/download/scripts/setup/config/UserGame.ini";
+
+async function readLiveUserGameSettings() {
+  const result = await sshCommand(`sudo -n cat -- ${shQuote(USER_GAME_INI_PATH)}`, 30000, { maxBuffer: 1024 * 1024 });
+  if (!result.ok) throw new Error(result.stderr || result.error || "Could not read UserGame.ini from the VM.");
+  const content = String(result.stdout || "");
+  const values = parseUserGameIni(content);
+  return {
+    ok: true,
+    path: USER_GAME_INI_PATH,
+    schema: USER_GAME_SETTINGS_SCHEMA,
+    values,
+    content,
+    missingKeys: USER_GAME_SETTINGS_SCHEMA.map((setting) => setting.key).filter((key) => values[key] === undefined || values[key] === null),
+    restartRequired: false
+  };
+}
+
+async function updateLiveUserGameSettings(requestedValues) {
+  const current = await readLiveUserGameSettings();
+  const updated = updateUserGameIni(current.content, requestedValues);
+  if (!updated.changedKeys.length) return { ...current, message: "UserGame.ini already has the requested values.", changedKeys: [], backupPath: "" };
+
+  const localTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-usergame-"));
+  const localTempPath = path.join(localTempDir, "UserGame.ini");
+  const token = crypto.randomUUID();
+  const remoteTempPath = `/tmp/alphanine-usergame-${token}.ini`;
+  const backupPath = `${USER_GAME_INI_PATH}.alphanine-${Date.now()}.bak`;
+  const expectedSha256 = crypto.createHash("sha256").update(updated.content, "utf8").digest("hex");
+  fs.writeFileSync(localTempPath, updated.content, "utf8");
+
+  try {
+    const uploaded = await sshCommand(`cat > ${shQuote(remoteTempPath)}`, 30000, { inputPath: localTempPath, maxBuffer: 1024 * 1024 });
+    if (!uploaded.ok) throw new Error(uploaded.stderr || uploaded.error || "Could not stage UserGame.ini in the VM.");
+
+    const command = [
+      "set -eu",
+      `target=${shQuote(USER_GAME_INI_PATH)}`,
+      `incoming=${shQuote(remoteTempPath)}`,
+      `backup=${shQuote(backupPath)}`,
+      `expected=${shQuote(expectedSha256)}`,
+      "sudo -n cp -- \"$target\" \"$backup\"",
+      "sudo -n cp -- \"$incoming\" \"$target\"",
+      "rm -f -- \"$incoming\"",
+      "actual=$(sudo -n sha256sum -- \"$target\" | awk '{print $1}')",
+      "if [ \"$actual\" != \"$expected\" ]; then sudo -n cp -- \"$backup\" \"$target\"; echo 'UserGame.ini verification failed; restored backup.' >&2; exit 41; fi",
+      "if ! /home/dune/.dune/bin/battlegroup apply-default-usersettings; then sudo -n cp -- \"$backup\" \"$target\"; echo 'Applying UserGame.ini failed; restored backup.' >&2; exit 42; fi",
+      "printf '__SHA256__%s\\n' \"$actual\""
+    ].join("; ");
+    const applied = await sshCommand(command, 120000, { maxBuffer: 1024 * 1024 * 4 });
+    if (!applied.ok) throw new Error(applied.stderr || applied.error || "Could not apply UserGame.ini in the VM.");
+
+    appendAdminAudit("usergame_settings_updated", {
+      path: USER_GAME_INI_PATH,
+      backupPath,
+      changedKeys: updated.changedKeys,
+      sha256: expectedSha256
+    });
+    return {
+      ok: true,
+      path: USER_GAME_INI_PATH,
+      schema: USER_GAME_SETTINGS_SCHEMA,
+      values: updated.values,
+      content: updated.content,
+      missingKeys: [],
+      changedKeys: updated.changedKeys,
+      backupPath,
+      sha256: expectedSha256,
+      message: "UserGame.ini was backed up, verified, and applied. Restart the battlegroup when players are prepared.",
+      restartRequired: true
+    };
+  } finally {
+    try { fs.rmSync(localTempDir, { recursive: true, force: true }); } catch {}
+    await sshCommand(`rm -f -- ${shQuote(remoteTempPath)}`, 10000, { maxBuffer: 1024 * 16 }).catch(() => {});
+  }
 }
 
 async function serverHealthRemoteCheck(command, timeout = 15000, maxBuffer = 1024 * 1024) {
@@ -20851,6 +20929,9 @@ function appPage() {
     .tab::before { content:""; flex:0 0 auto; width:8px; height:8px; border:1px solid currentColor; transform:rotate(45deg); box-shadow:0 0 8px currentColor; opacity:.72; }
     .tab.active, .tab:hover { color:var(--text); border-color:var(--line); background:rgba(246,202,135,.1); box-shadow:inset 0 0 22px rgba(246,202,135,.07), 0 0 14px rgba(224,173,99,.09); }
     .tab.active { font-size:12px; font-weight:850; }
+    .tab.child-active { color:var(--text); border-color:rgba(214,166,69,.26); background:rgba(246,202,135,.045); }
+    .tab-child { width:calc(100% - 18px); min-height:38px; margin-left:18px; padding-left:18px; border-left-color:rgba(214,166,69,.22); border-radius:10px; font-size:10.5px; }
+    .tab-child::before { width:6px; height:6px; opacity:.56; }
     .tab #operationsNavCount { margin-left:auto; min-width:20px; text-align:center; color:var(--gold-bright); font-size:10px; }
     .operation-row { display:grid; grid-template-columns:minmax(190px,1.2fr) minmax(150px,.8fr) minmax(220px,1.4fr) 110px; gap:12px; align-items:start; padding:10px 0; border-bottom:1px solid rgba(255,255,255,.07); }
     .operation-row:last-child { border-bottom:0; }
@@ -20862,6 +20943,7 @@ function appPage() {
     body.sidebar-collapsed .tab { width:46px; min-height:46px; justify-content:center; padding:0; gap:0; font-size:0; letter-spacing:0; }
     body.sidebar-collapsed .tab.active { font-size:0; }
     body.sidebar-collapsed .tab::before { margin:0; }
+    body.sidebar-collapsed .tab-child { width:46px; min-height:38px; margin-left:0; }
     .nav-group { display:grid; gap:5px; margin-bottom:8px; }
     body.sidebar-collapsed .nav-group { gap:8px; margin-bottom:4px; }
     .nav-group-title { display:flex; align-items:center; gap:9px; margin:8px 4px 2px; color:rgba(243,204,140,.72); font-size:9.5px; line-height:1; font-weight:900; text-transform:uppercase; letter-spacing:.18em; }
@@ -22632,6 +22714,7 @@ function appPage() {
         <button class="tab" data-view="server">Server Control</button>
         <button class="tab" data-view="scheduler">Backup & Restart Scheduler</button>
         <button class="tab" data-view="management">Server Management</button>
+        <button class="tab tab-child" data-view="usergame-settings" data-parent-view="management">UserGame Settings</button>
       </div>
       <div class="nav-group">
         <div class="nav-group-title">Players</div>
@@ -23977,6 +24060,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <button onclick="act('backup')">Backup</button>
           <button id="serverUpdateButton" onclick="checkServerUpdateNow()">Check Server Update</button>
           <button onclick="openDirector()">Open Director</button>
+          <button id="openBattlegroupBatchButton" onclick="openBattlegroupBatch()">Open Battlegroup.bat</button>
           <button onclick="act('logs-export')">Export Logs</button>
           <button onclick="act('operator-logs-export')">Export Operator Logs</button>
         </div>
@@ -24233,6 +24317,27 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div class="subtle mt">Opening embedded manager console.</div>
         </div>
         <iframe id="managerFrame" src="/manager/" title="AlphaNine Server Management" style="display:none" onload="handleManagerFrameLoad()"></iframe>
+      </div>
+    </section>
+
+    <section id="usergame-settings" class="view">
+      <div class="panel pad" id="liveUserGamePanel">
+        <div class="panel-head">
+          <div>
+            <div class="label">Live UserGame.ini</div>
+            <div class="subtle">Load and edit the exact supported settings from the VM. Saving creates a verified backup and applies defaults; it never restarts the battlegroup automatically.</div>
+          </div>
+          <div class="action-row">
+            <button id="userGameLoadButton" onclick="loadLiveUserGameSettings(true)">Load Live File</button>
+            <button id="userGameSaveButton" class="primary" onclick="saveLiveUserGameSettings()" disabled>Save UserGame.ini</button>
+          </div>
+        </div>
+        <div id="userGameStatus" class="empty mt">Open UserGame Settings to load UserGame.ini from the configured VM.</div>
+        <div id="userGameSettingsGrid" class="grid three mt"><div class="empty">Live settings have not been loaded.</div></div>
+        <details class="advanced-only mt">
+          <summary>Raw UserGame.ini preview</summary>
+          <pre id="userGameRawPreview" class="mt">Not loaded.</pre>
+        </details>
       </div>
     </section>
 
@@ -24664,6 +24769,7 @@ const viewCopy={
   scheduler:["Backup & Restart Scheduler","Persistent VM-resident backups and protected daily battlegroup restarts."],
   "live-map":["Live Map","Leaflet tactical map with server DB overlays."],
   management:["Server Management","Embedded server management console."],
+  "usergame-settings":["UserGame Settings","Edit supported settings in the live VM UserGame.ini with verified backup and apply safeguards."],
   "web-portal":["Web Portal","Open or copy the local and LAN Suite portal URLs."],
   codex:["Gear Codex","Item template reference and operations catalog."],
   "item-database":["Item Database","Bundled offline item catalog with search, grade, and spawn-code filters."],
@@ -24672,8 +24778,8 @@ const viewCopy={
   diagnostics:["Setup Doctor","Guided setup checks, safe defaults, and exact fixes."],
   settings:["Settings","App-level preferences and local runtime details."]
 };
-let managerFrameCheckTimer=null;
-function setView(name){if(name==="admin"||name==="server-migration")name="dashboard";tabs.forEach(t=>t.classList.toggle("active",t.dataset.view===name));views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="players")refreshPlayersPage();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){refreshMarketBot();refreshMarketListings();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();}
+let managerFrameCheckTimer=null,liveUserGameState=null;
+function setView(name){if(name==="admin"||name==="server-migration")name="dashboard";tabs.forEach(t=>{t.classList.toggle("active",t.dataset.view===name);t.classList.toggle("child-active",t.dataset.view==="management"&&name==="usergame-settings");});views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="players")refreshPlayersPage();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){refreshMarketBot();refreshMarketListings();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();if(name==="usergame-settings"&&!liveUserGameState)loadLiveUserGameSettings();}
 let migrationPreflightState=null,migrationExportPolling="";
 let migrationMaintenanceState=null;
 function renderMigrationMaintenance(state={}){migrationMaintenanceState=state;const active=state.active===true;const banner=document.getElementById("migrationMaintenanceBanner");if(banner)banner.classList.toggle("hidden",!active);tone("migrationMaintenanceBadge",active?(state.failClosed?"Recovery Hold":"Active"):"Inactive");const detail=document.getElementById("migrationMaintenanceDetail");if(detail){detail.className=(state.failClosed?"warning":"subtle")+" mt";detail.textContent=active?((state.banner||"Migration Maintenance Mode — Game Server Held Offline")+" · Generation "+(state.generation||"unknown")+(state.error?" · "+state.error:"")):"Inactive. Normal controls are available; exiting maintenance never starts the server.";}const enter=document.getElementById("migrationMaintenanceEnterButton"),exit=document.getElementById("migrationMaintenanceExitButton");if(enter)enter.disabled=active;if(exit)exit.disabled=!active||state.sideEffectFree===true;}
@@ -24825,7 +24931,7 @@ function showToast(message,kind="success"){const toast=document.getElementById("
 function buttonActionLabel(button){if(!button)return"";const explicit=button.getAttribute("aria-label")||button.getAttribute("title")||button.dataset.actionLabel;if(explicit)return explicit.trim();const open=button.dataset.open;if(open)return"Open "+open.replace(/-/g," ");const text=(button.textContent||"").replace(/\s+/g," ").trim();return text.slice(0,90);}
 let suiteTooltipEl=null,suiteTooltipTarget=null;
 const SUITE_VIEW_TOOLTIPS={dashboard:"Open the command overview with server health, activity, and quick actions.","server-health":"Run bounded read-only checks for the VM, Kubernetes workloads, storage, and Suite services.","live-map":"Open the live tactical map with players, bases, vehicles, locations, and teleport tools.",players:"Open player discovery and online population details.",give:"Open live item granting, item search, and give queue tools.",progression:"Inspect progression schema and carefully prepare supported player edits.",server:"Start, stop, restart, update, back up, and inspect the game server.",database:"Manage database tunnel, backups, restore/import, and safety backups.","server-migration":"Create and verify a portable export of the complete authoritative dune schema.","database-explorer":"Browse the selected battlegroup database locally with enforced read-only queries.",management:"Open the embedded server manager console.","web-portal":"Open or copy the local and LAN Suite portal URLs.","item-database":"Browse the bundled Dune item catalog and item metadata.",settings:"Open Suite configuration, battlegroup selection, and setup tools.",admin:"Open advanced admin tools for live give, permissions, access codes, and diagnostics.",env:"Inspect receiver environment and live give transport readiness.",logs:"Open recent Suite command output and operational logs.",diagnostics:"Run Setup Doctor for guided checks, safe defaults, paths, and service fixes."};
-const SUITE_ONCLICK_TOOLTIPS=[[/refreshAll\(/,"Refresh the dashboard, VM monitor, maps, players, receiver status, and admin data."],[/refreshLiveMap\(/,"Reload live map actors and location overlays from the server database."],[/executeLiveTeleport\(/,"Teleport the selected player to the prepared live map coordinates."],[/refreshAdmin\(/,"Refresh players, item catalog state, receiver readiness, and live give capability."],[/giveAdminItem\(/,"Send the selected item to the selected player using the active give transport."],[/giveQueuedItems\(/,"Send every item currently staged in the give queue."],[/refreshProgressionInspector\(/,"Scan progression tables, functions, and support metadata again."],[/lookupProgressionPlayer\(/,"Find a player in progression data using the current search value."],[/previewProgressionApply\(/,"Create a backup and preview the progression change before any live write."],[/applyProgressionLive\(/,"Apply the prepared progression change to the live database."],[/refresh\(/,"Refresh server status, players, resources, and recent activity."],[/act\('start'\)/,"Start the battlegroup server after checking VM and map readiness."],[/act\('restart'\)/,"Restart the battlegroup server."],[/act\('stop'\)/,"Stop the battlegroup server."],[/act\('backup'\)/,"Run the configured server backup action."],[/act\('update'\)/,"Run the configured server update action."],[/openDirector\(/,"Open the battlegroup director interface or management endpoint."],[/refreshVmStatus\(/,"Refresh VM power state, IP, uptime, ping, ports, and services."],[/runVmAction\('start'\)/,"Start the configured Hyper-V virtual machine."],[/runVmAction\('stop'\)/,"Stop the configured Hyper-V virtual machine."],[/deployMap\(/,"Read the selected map partitions, set replicas, and apply the requested memory limit."],[/stopSelectedMap\(/,"Scale the selected map down so it stops running."],[/refreshMaps\(/,"Reload map deployment status, available maps, memory limits, and partition readiness."],[/startDatabaseTunnel\(/,"Start or retry the SSH tunnel that exposes Postgres locally."],[/createDatabaseBackup\(/,"Create a database backup using the configured backup location."],[/restoreDatabaseBackup\(/,"Import the selected battlegroup backup into the database."],[/reloadManagerFrame\(/,"Reload the embedded server manager console."],[/refreshItemDatabase\(/,"Reload the bundled item database and filters."],[/refreshDiagnostics\(/,"Run Setup Doctor and refresh setup checks, fixes, logs, and runtime details."],[/openSetupWizard\(/,"Open the setup wizard to review or change core Suite configuration."],[/refreshBattlegroups\(/,"Reload battlegroups and selected battlegroup metadata."],[/useSelectedBattlegroup\(/,"Make the selected battlegroup the active target for Suite actions."],[/saveBattlegroupTitle\(/,"Save a friendly title for the selected battlegroup."],[/refreshReceiverStatus\(/,"Refresh receiver service status and reachability."],[/receiverAction\('start'\)/,"Start the live give receiver service."],[/receiverAction\('stop'\)/,"Stop the live give receiver service."],[/receiverAction\('restart'\)/,"Restart the live give receiver service."],[/saveSettings\(/,"Save the current Suite settings to config.json."],[/checkUpdates\(/,"Check the configured update source for a newer Suite release."],[/exportSettings\(/,"Export Suite settings to a file."],[/importSettings\(/,"Import Suite settings from a file."],[/openAboutDialog\(/,"Show Suite version, build, links, and project information."]];
+const SUITE_ONCLICK_TOOLTIPS=[[/refreshAll\(/,"Refresh the dashboard, VM monitor, maps, players, receiver status, and admin data."],[/refreshLiveMap\(/,"Reload live map actors and location overlays from the server database."],[/executeLiveTeleport\(/,"Teleport the selected player to the prepared live map coordinates."],[/refreshAdmin\(/,"Refresh players, item catalog state, receiver readiness, and live give capability."],[/giveAdminItem\(/,"Send the selected item to the selected player using the active give transport."],[/giveQueuedItems\(/,"Send every item currently staged in the give queue."],[/refreshProgressionInspector\(/,"Scan progression tables, functions, and support metadata again."],[/lookupProgressionPlayer\(/,"Find a player in progression data using the current search value."],[/previewProgressionApply\(/,"Create a backup and preview the progression change before any live write."],[/applyProgressionLive\(/,"Apply the prepared progression change to the live database."],[/refresh\(/,"Refresh server status, players, resources, and recent activity."],[/act\('start'\)/,"Start the battlegroup server after checking VM and map readiness."],[/act\('restart'\)/,"Restart the battlegroup server."],[/act\('stop'\)/,"Stop the battlegroup server."],[/act\('backup'\)/,"Run the configured server backup action."],[/act\('update'\)/,"Run the configured server update action."],[/openDirector\(/,"Open the battlegroup director interface or management endpoint."],[/openBattlegroupBatch\(/,"Open Funcom's battlegroup.bat management console from the configured server folder."],[/refreshVmStatus\(/,"Refresh VM power state, IP, uptime, ping, ports, and services."],[/runVmAction\('start'\)/,"Start the configured Hyper-V virtual machine."],[/runVmAction\('stop'\)/,"Stop the configured Hyper-V virtual machine."],[/deployMap\(/,"Read the selected map partitions, set replicas, and apply the requested memory limit."],[/stopSelectedMap\(/,"Scale the selected map down so it stops running."],[/refreshMaps\(/,"Reload map deployment status, available maps, memory limits, and partition readiness."],[/startDatabaseTunnel\(/,"Start or retry the SSH tunnel that exposes Postgres locally."],[/createDatabaseBackup\(/,"Create a database backup using the configured backup location."],[/restoreDatabaseBackup\(/,"Import the selected battlegroup backup into the database."],[/reloadManagerFrame\(/,"Reload the embedded server manager console."],[/refreshItemDatabase\(/,"Reload the bundled item database and filters."],[/refreshDiagnostics\(/,"Run Setup Doctor and refresh setup checks, fixes, logs, and runtime details."],[/openSetupWizard\(/,"Open the setup wizard to review or change core Suite configuration."],[/refreshBattlegroups\(/,"Reload battlegroups and selected battlegroup metadata."],[/useSelectedBattlegroup\(/,"Make the selected battlegroup the active target for Suite actions."],[/saveBattlegroupTitle\(/,"Save a friendly title for the selected battlegroup."],[/refreshReceiverStatus\(/,"Refresh receiver service status and reachability."],[/receiverAction\('start'\)/,"Start the live give receiver service."],[/receiverAction\('stop'\)/,"Stop the live give receiver service."],[/receiverAction\('restart'\)/,"Restart the live give receiver service."],[/saveSettings\(/,"Save the current Suite settings to config.json."],[/checkUpdates\(/,"Check the configured update source for a newer Suite release."],[/exportSettings\(/,"Export Suite settings to a file."],[/importSettings\(/,"Import Suite settings from a file."],[/openAboutDialog\(/,"Show Suite version, build, links, and project information."]];
 function suitePanelContext(button){const panel=button.closest(".panel,.map-deployment-panel,.setup-card,.suite-modal-card,.about-card");const label=panel?.querySelector(".label,h2,h3,strong")?.textContent;return label?String(label).replace(/\s+/g," ").trim():"";}
 function suiteDescriptiveTooltip(button){if(!button||button.dataset.tooltip==="false")return"";if(button.dataset.tooltip)return button.dataset.tooltip;if(button.classList.contains("tab"))return SUITE_VIEW_TOOLTIPS[button.dataset.view]||("Open the "+buttonActionLabel(button)+" workspace.");if(button.dataset.open)return SUITE_VIEW_TOOLTIPS[button.dataset.open]||("Open the "+button.dataset.open.replace(/-/g," ")+" panel.");const onclick=String(button.getAttribute("onclick")||"");for(const [pattern,text] of SUITE_ONCLICK_TOOLTIPS){if(pattern.test(onclick))return text;}if(button.classList.contains("player-card"))return"Select this player for details, item grants, permission tools, and related actions.";if(button.classList.contains("admin-item"))return"Select this item template for live giving or queue staging.";if(button.classList.contains("item-db-card"))return"Open this item record in the item database details panel.";const text=buttonActionLabel(button);const context=suitePanelContext(button);if(context&&text)return context+": "+text+". Click to run this action.";return text?("Click to run: "+text+"."):"";}
 function suiteTooltipText(button){const text=suiteDescriptiveTooltip(button);return String(text||"").replace(/\s+/g," ").trim().slice(0,180);}
@@ -25384,6 +25490,12 @@ async function runVmAction(action){const log=document.getElementById("vmControlL
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const actionTimeouts=${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)},data=await getJson("/api/action/"+action,{method:"POST",timeoutMs:actionTimeouts[action]||180000});let output=data.stdout||data.stderr||data.error||"Done.";if(action==="backup"&&data.ok){output="Actual VM backup copied and verified locally.\\nVM source: "+(data.vmBackupPath||data.vmPath||"--")+"\\nLocal copy: "+(data.localBackupPath||data.filePath||"--")+"\\nSHA-256: "+(data.sha256||"--")+"\\nSize: "+(data.size||data.file?.size||"--")+" bytes\\nMetadata: "+(data.localMetadataPath||"--");}if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
+async function openBattlegroupBatch(){const log=document.getElementById("serverLog");try{if(!window.alphaNineSuite?.openBattlegroupBatch)throw new Error("Battlegroup.bat can be opened only from the installed desktop Suite.");if(log)log.textContent="Opening battlegroup.bat...";const data=await window.alphaNineSuite.openBattlegroupBatch();if(!data?.ok)throw new Error(data?.error||"Could not open battlegroup.bat.");if(log)log.textContent="Opened "+(data.filePath||"battlegroup.bat")+".";syncLogs();addActivity("action","Opened battlegroup.bat",data.filePath||"");playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);syncLogs();addActivity("error","Battlegroup.bat launch failed",e.message);playUiSound("warning");}}
+function userGameSettingInput(setting,value){const id="usergame-"+setting.key;if(setting.type==="boolean")return '<label>'+esc(setting.label)+'<select id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'"><option value="true"'+(value===true?' selected':'')+'>True</option><option value="false"'+(value===false?' selected':'')+'>False</option></select><small>'+esc(setting.key)+'</small></label>';const current=value===undefined||value===null?'':String(value);return '<label>'+esc(setting.label)+'<input id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'" type="number" min="'+esc(setting.min)+'" max="'+esc(setting.max)+'" step="'+esc(setting.step||1)+'" value="'+esc(current)+'"><small>'+esc(setting.key)+(setting.unit?' · '+esc(setting.unit):'')+'</small></label>';}
+function renderLiveUserGameSettings(data){liveUserGameState=data;const grid=document.getElementById("userGameSettingsGrid"),preview=document.getElementById("userGameRawPreview"),save=document.getElementById("userGameSaveButton");const groups=[];for(const setting of data.schema||[]){let group=groups.find(row=>row.name===setting.group);if(!group){group={name:setting.group,settings:[]};groups.push(group);}group.settings.push(setting);}if(grid)grid.innerHTML=groups.map(group=>'<div class="panel pad"><div class="label">'+esc(group.name)+'</div><div class="field-grid mt">'+group.settings.map(setting=>userGameSettingInput(setting,data.values?.[setting.key])).join('')+'</div></div>').join('')||'<div class="empty">No supported UserGame.ini settings were returned.</div>';if(preview)preview.textContent=data.content||"";if(save)save.disabled=!data.ok;const missing=data.missingKeys||[];const status=document.getElementById("userGameStatus");if(status){status.className=(missing.length?'warning':'empty')+' mt';status.textContent=(data.path||"UserGame.ini")+(missing.length?' · Missing or invalid: '+missing.join(', '):' · '+(data.schema?.length||0)+' supported settings loaded.');}}
+async function loadLiveUserGameSettings(force=false){if(liveUserGameState&&!force){renderLiveUserGameSettings(liveUserGameState);return liveUserGameState;}const status=document.getElementById("userGameStatus"),load=document.getElementById("userGameLoadButton"),save=document.getElementById("userGameSaveButton");try{if(load)load.disabled=true;if(save)save.disabled=true;if(status){status.className="empty mt";status.textContent="Reading UserGame.ini from the VM...";}const data=await getJson("/api/usergame-settings",{timeoutMs:45000});renderLiveUserGameSettings(data);return data;}catch(error){liveUserGameState=null;if(status){status.className="warning mt";status.textContent=betterError(error);}return null;}finally{if(load)load.disabled=false;}}
+function liveUserGameValuesFromForm(){const values={};for(const setting of liveUserGameState?.schema||[]){const input=document.querySelector('[data-usergame-key="'+setting.key+'"]');if(!input||input.value==='')continue;values[setting.key]=setting.type==="boolean"?input.value==="true":Number(input.value);}return values;}
+async function saveLiveUserGameSettings(){const status=document.getElementById("userGameStatus"),save=document.getElementById("userGameSaveButton");try{if(!liveUserGameState?.ok)throw new Error("Load the live UserGame.ini before saving.");if(!(await appConfirm("Save live UserGame.ini","The Suite will back up the current VM file, update only the supported fields shown here, verify the saved file, and apply default user settings. The battlegroup will not restart automatically.","Back Up & Save","Cancel")))return;if(save)save.disabled=true;if(status){status.className="warning mt";status.textContent="Backing up, verifying, and applying UserGame.ini...";}const data=await getJson("/api/usergame-settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:liveUserGameValuesFromForm()}),timeoutMs:150000});renderLiveUserGameSettings(data);if(status){status.className="empty mt";status.textContent=(data.message||"UserGame.ini saved.")+(data.backupPath?' Backup: '+data.backupPath:'');}addActivity("server","UserGame.ini updated",(data.changedKeys||[]).join(', '));playUiSound("success");return data;}catch(error){if(status){status.className="warning mt";status.textContent=betterError(error);}playUiSound("warning");return null;}finally{if(save)save.disabled=!liveUserGameState?.ok;}}
 function updateMapMemoryInput(){const select=document.getElementById("mapSelect");const rows=window.mapDeploymentRows||[];const row=rows.find(m=>m.map===select?.value);tone("mapMemory",row?.memory||"Unset");}
 const MAP_MEMORY_LIMIT_PATTERN=/^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)(?:Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|k)?$/;
 function validMapMemoryLimitText(value){const text=String(value||"").trim();return Boolean(text)&&text.length<=32&&MAP_MEMORY_LIMIT_PATTERN.test(text);}
@@ -25948,6 +26060,7 @@ function isRemotePortalRequest(req) {
 
 const REMOTE_LOCAL_ONLY_PREFIXES = [
   "/api/config", "/api/setup/", "/api/test/", "/api/settings/", "/api/ssh-key/", "/api/server-install-path/",
+  "/api/usergame-settings",
   "/api/live-give/env", "/api/blueprints", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/", "/api/live-map/resource-areas/generate", "/api/live-map/resource-areas/game-folder",
   "/api/admin/probe", "/api/admin/tuned-channels", "/api/admin/permissions", "/api/gear/discovery", "/api/discovery",
   "/api/market-automator/logs", "/api/director", "/api/database-browser/", "/api/server-migration/", "/api/migration-maintenance", "/api/migration-offline", "/manager-api/"
@@ -27925,6 +28038,32 @@ async function route(req, res) {
       await json(res, deleteGiveQueuePreset(url.searchParams.get("name") || ""));
     } catch (error) {
       await json(res, { ok: false, error: error.message }, 404);
+    }
+    return;
+  }
+  if (url.pathname === "/api/usergame-settings" && req.method === "GET") {
+    if (!remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Live UserGame.ini editing is available only from the local Suite." }, 403);
+      return;
+    }
+    try {
+      await json(res, await readLiveUserGameSettings());
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 502);
+    }
+    return;
+  }
+  if (url.pathname === "/api/usergame-settings" && req.method === "POST") {
+    if (!remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Live UserGame.ini editing is available only from the local Suite." }, 403);
+      return;
+    }
+    try {
+      const body = JSON.parse(await readBody(req, 1024 * 64) || "{}");
+      await json(res, await updateLiveUserGameSettings(body.values));
+    } catch (error) {
+      appendAdminAudit("usergame_settings_update_failed", { error: error.message });
+      await json(res, { ok: false, error: error.message }, 400);
     }
     return;
   }

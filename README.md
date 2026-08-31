@@ -28,6 +28,13 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.2.2
+
+- Enabled authenticated **Operator** accounts to use Dry-Run and Live Give through the HTTPS and internet Web Portal.
+- Kept the **Viewer** role read-only and preserved the Owner-only boundary for unrelated administration endpoints.
+- Retained session authentication, CSRF protection, execution confirmation, and remote action auditing for Live Give requests.
+- Added regression coverage for both the new Operator permission and the remaining Owner-only administration boundary.
+
 ### 1.2.1
 
 - Includes the PostgreSQL backup-validation correction introduced for 1.2.0: normal Funcom ACL entries no longer prevent verified VM backups from being copied locally.
@@ -316,7 +323,7 @@ Remote security defaults:
 
 - The HTTPS Web Portal listens only on `127.0.0.1` until **Enable Private LAN Access** is selected locally. This prevents an unnecessary Windows Firewall prompt for local-only users.
 - New and upgraded installations default to the **Viewer** role, which exposes an explicit read-only API allowlist.
-- **Operator** permits limited server controls. **Owner** permits approved remote administration but requires password and authenticator reconfirmation every five minutes for writes.
+- **Operator** permits limited server controls and Live Give. **Owner** permits approved remote administration but requires password and authenticator reconfirmation every five minutes for writes.
 - Setup, credentials, configuration export, diagnostics, environment details, permissions, market automation configuration, and Server Manager remain local-only for every remote role.
 - Optional authenticator-app (TOTP) protection is configured only from the local Suite.
 - Remote logins, blocked requests, and write actions are recorded in the Suite admin audit log.

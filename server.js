@@ -26088,7 +26088,8 @@ const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/sietches", "/api/vm/status", "/api/updates/check"
 ]);
 const REMOTE_OPERATOR_POST_PATHS = new Set([
-  "/api/scheduler/action", "/api/receiver/start", "/api/receiver/stop", "/api/receiver/restart", "/api/maps/deploy", "/api/maps/memory"
+  "/api/scheduler/action", "/api/receiver/start", "/api/receiver/stop", "/api/receiver/restart", "/api/maps/deploy", "/api/maps/memory",
+  "/api/admin/give-item"
 ]);
 
 function remoteRoutePolicy(req, activeSession, url) {

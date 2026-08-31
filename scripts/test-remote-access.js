@@ -167,6 +167,31 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
     const logout = await request("https", "/api/auth/logout", { method: "POST", headers: { Cookie: cookieHeader, "X-CSRF-Token": csrf } });
     assert.strictEqual(logout.status, 200);
 
+    const operatorRole = await request("http", "/api/remote-access/role", { method: "POST", body: { role: "operator" } });
+    assert.strictEqual(operatorRole.status, 200);
+    assert.strictEqual(operatorRole.json.role, "operator");
+    const operatorLogin = await request("https", "/api/auth/login", {
+      method: "POST",
+      body: { username: "admin", password: "local-test-password-42" }
+    });
+    assert.strictEqual(operatorLogin.status, 200);
+    const operatorCookieHeader = operatorLogin.headers["set-cookie"].map((cookie) => cookie.split(";")[0]).join("; ");
+    const operatorCsrfCookie = operatorLogin.headers["set-cookie"].find((cookie) => cookie.startsWith("alphanine_csrf="));
+    const operatorCsrf = decodeURIComponent(operatorCsrfCookie.split(";")[0].split("=")[1]);
+    const operatorLiveGive = await request("https", "/api/admin/give-item", {
+      method: "POST",
+      headers: { Cookie: operatorCookieHeader, "X-CSRF-Token": operatorCsrf },
+      body: {}
+    });
+    assert.strictEqual(operatorLiveGive.status, 400, "Operator Live Give must reach payload validation instead of being blocked by remote permissions.");
+    assert.doesNotMatch(operatorLiveGive.json.error, /Remote Owner role|Remote Viewer access/i);
+    const operatorOwnerOnlyAction = await request("https", "/api/admin/permissions/set-rank", {
+      method: "POST",
+      headers: { Cookie: operatorCookieHeader, "X-CSRF-Token": operatorCsrf },
+      body: {}
+    });
+    assert.strictEqual(operatorOwnerOnlyAction.status, 403, "Unapproved administration actions must remain Owner-only.");
+
     const ownerRole = await request("http", "/api/remote-access/role", { method: "POST", body: { role: "owner" } });
     assert.strictEqual(ownerRole.status, 200);
     assert.strictEqual(ownerRole.json.role, "owner");
@@ -183,7 +208,7 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
     const ownerLocalConfigBlocked = await request("https", "/api/config", { headers: { Cookie: ownerCookies } });
     assert.strictEqual(ownerLocalConfigBlocked.status, 403);
 
-    console.log("Remote roles, viewer policy, owner 2FA, HTTPS/tunnel login, local-only setup, secure cookies, and CSRF checks passed.");
+    console.log("Remote roles, viewer policy, Operator Live Give, owner 2FA, HTTPS/tunnel login, local-only setup, secure cookies, and CSRF checks passed.");
   } finally {
     child.kill();
     fs.rmSync(temporary, { recursive: true, force: true });

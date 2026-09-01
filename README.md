@@ -28,6 +28,14 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.2.3
+
+- Fixed the optional Market Bot player-listing buyer so seller claim records store the listing's per-unit price instead of multiplying stacked payouts twice.
+- Seller Solari claims now use the game's non-expiring Exchange sentinel and cannot be purged like ordinary listings before collection.
+- Player purchases fail closed unless the dedicated Market Bot Exchange user exists and can be debited.
+- Changed the default player purchase chance from 10% to 50% per normal Market Bot cycle; existing saved policies remain explicit until updated.
+- Updated the bundled Market Bot runtime to 1.0.100 and added regression coverage for payout price, expiry, and buyer identity.
+
 ### 1.2.2
 
 - Enabled authenticated **Operator** accounts to use Dry-Run and Live Give through the HTTPS and internet Web Portal.

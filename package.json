@@ -1,7 +1,7 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.2.2",
-  "marketBotRuntimeVersion": "1.0.99",
+  "version": "1.2.3",
+  "marketBotRuntimeVersion": "1.0.100",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
   "main": "electron/main.js",
@@ -81,6 +81,7 @@
       "package.json",
       "package-lock.json",
       "README.md",
+      "RELEASE_NOTES_1.2.3.md",
       "RELEASE_NOTES_1.2.2.md",
       "RELEASE_NOTES_1.2.1.md",
       "RELEASE_NOTES_1.2.0.md",

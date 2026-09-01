@@ -80,7 +80,7 @@ const testCategorySeed = {
   assert.equal(config.economyStyle, "Expensive");
   assert.equal(config.listingCategory, "");
   assert.equal(config.playerBuying.enabled, false, "player buying must be opt-in");
-  assert.equal(config.playerBuying.chancePercent, 10);
+  assert.equal(config.playerBuying.chancePercent, 50);
   const policies = buildItemPolicies(catalog, config, testCategorySeed);
   assert.equal(policies.length, 3);
   assert.equal(policies[0].targetListings, 1);
@@ -401,6 +401,9 @@ const testCategorySeed = {
   assert(goSource.includes("not exists(select 1 from prior_cycle)"), "cycle idempotency gate is missing");
   assert(goSource.includes("extract(epoch from clock_timestamp())"), "database-clock fallback is missing");
   assert(goSource.includes("Only verified player-owned active sell listings are eligible for opt-in random purchases."), "player buyer safety warning is missing");
+  assert(goSource.includes("999999999,1.0,1.0,p.item_price,0,0,false"), "seller payout must use a non-expiring claim and per-unit item price");
+  assert(!goSource.includes("p.item_price*p.stack_size,0,0,false"), "seller payout must not store total cost as a per-unit price");
+  assert(goSource.includes("where id=(select id from bot_exchange_user)"), "player purchases must require the dedicated bot Exchange user debit path");
   assert(goSource.includes("p.category_mask,p.category_depth"), "listing inserts must use verified category metadata");
   assert(goSource.includes("o.category_mask>0 and o.category_depth>0"), "invisible listings must not count as active");
   assert(goSource.includes("o.category_mask<=0 or o.category_depth<=0"), "owned invisible listings must be repaired");

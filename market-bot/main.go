@@ -1374,12 +1374,18 @@ bot_actor as (
   where class='Duke' and owner_account_id is null
   order by id limit 1
 ),
+bot_exchange_user as (
+  select min(u.id) id
+  from dune.dune_exchange_users u
+  where u.owner_id=(select id from bot_actor)
+),
 cycle_gate as (
   select s.cycle_id
   from settings s,lock_state l,exchange_state e,game_clock g
   where l.acquired and e.exchange_count=1 and e.inventory_id is not null and g.game_now>0
     and (select access_point_count from selected_access_point)>=1
-    and exists(select 1 from bot_actor) and not exists(select 1 from prior_cycle)
+    and exists(select 1 from bot_actor) and exists(select 1 from bot_exchange_user where id is not null)
+    and not exists(select 1 from prior_cycle)
 ),
 invalid_tracking as (
   update public.alphanine_market_bot_listings m
@@ -1573,8 +1579,11 @@ player_payment_orders as (
     exchange_id,access_point_id,owner_id,template_id,expiration_time,
     durability_cur,durability_max,item_price,category_mask,category_depth,is_npc_order
   )
+  -- The game claims seller Solari as item_price * fulfilled.stack_size. Keep
+  -- item_price per-unit, and use the native far-future sentinel so an
+  -- unclaimed payout cannot be purged like an ordinary listing.
   select p.exchange_id,p.access_point_id,p.seller_actor_id,p.template_id,
-         (select game_now+1209600 from game_clock),1.0,1.0,p.item_price*p.stack_size,0,0,false
+         999999999,1.0,1.0,p.item_price,0,0,false
   from selected_player_listings p order by p.purchase_sequence
   returning id,owner_id,template_id,item_price
 ),
@@ -1591,7 +1600,7 @@ player_fulfillments as (
 player_buyer_debit as (
   update dune.dune_exchange_users
   set solari_balance=solari_balance-coalesce((select sum(item_price*stack_size) from selected_player_listings),0)
-  where id=(select min(id) from dune.dune_exchange_users where owner_id=(select id from bot_actor))
+  where id=(select id from bot_exchange_user)
     and exists(select 1 from selected_player_listings)
   returning id
 ),
@@ -1623,6 +1632,7 @@ generated_result as (
       when (select access_point_count from selected_access_point)<1 then 'waiting'
       when (select game_now from game_clock)<=0 then 'waiting'
       when not exists(select 1 from bot_actor) then 'waiting'
+      when not exists(select 1 from bot_exchange_user where id is not null) then 'waiting'
       else 'completed' end,
     'message',case
       when not (select acquired from lock_state) then 'Another Market Bot cycle holds the database lock.'
@@ -1631,6 +1641,7 @@ generated_result as (
       when (select access_point_count from selected_access_point)<1 then 'Waiting for an Exchange access point.'
       when (select game_now from game_clock)<=0 then 'Waiting for a verified Exchange clock.'
       when not exists(select 1 from bot_actor) then 'Waiting for the dedicated Market Bot actor.'
+      when not exists(select 1 from bot_exchange_user where id is not null) then 'Waiting for the dedicated Market Bot Exchange user.'
       else format('Restock completed: %%s created, %%s expired or invisible bot-owned listings removed, %%s player listings purchased.',
         (select count(*) from tracked),(select count(*) from retired_expired),(select count(*) from deleted_player_orders)) end,
     'cycleId',(select cycle_id from settings),

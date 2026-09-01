@@ -209,11 +209,19 @@ func TestExecuteIsOwnedLockedAndIdempotent(t *testing.T) {
 		"insert into dune.dune_exchange_fulfilled_orders",
 		"update dune.dune_exchange_users",
 		"owner_id=(select id from bot_actor)",
+		"where id=(select id from bot_exchange_user)",
+		"999999999,1.0,1.0,p.item_price,0,0,false",
 		"'player_listings_purchased'",
 	} {
 		if !strings.Contains(sql, expected) {
 			t.Fatalf("player buyer SQL missing %q", expected)
 		}
+	}
+	if strings.Contains(sql, "p.item_price*p.stack_size,0,0,false") {
+		t.Fatal("seller payment stores total cost as the per-unit item price")
+	}
+	if strings.Contains(sql, "game_now+1209600 from game_clock),1.0,1.0,p.item_price") {
+		t.Fatal("seller payment can expire before the seller claims it")
 	}
 }
 

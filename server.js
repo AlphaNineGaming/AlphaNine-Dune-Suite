@@ -22,6 +22,7 @@ const { inspectRecoveryArchive } = require("./lib/recovery-archive-transport");
 const { buildMaintenanceTransport, validateRemoteEvidence: validateRemoteMaintenanceEvidence } = require("./lib/maintenance-transport");
 const Coordinates = require("./assets/coordinate-system");
 const ExperimentalResourceAreas = require("./lib/experimental-resource-areas");
+const { generateInstalledGameItemCatalog } = require("./lib/installed-game-item-catalog");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError, operationsConflict } = require("./lib/operations");
@@ -448,6 +449,8 @@ const UI_OVERRIDE_CSS_PATH = path.join(DATA_DIR, "ui-overrides.css");
 const BUNDLED_DATA_DIR = packagedAssetPath("data");
 const BUNDLED_UI_OVERRIDE_CSS_PATH = path.join(BUNDLED_DATA_DIR, "ui-overrides.css");
 const DUNE_ITEMS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-items-catalog.json");
+const DUNE_INSTALLED_ITEMS_CATALOG_PATH = path.join(BUNDLED_DATA_DIR, "dune-installed-items-catalog.json");
+const LOCAL_INSTALLED_ITEMS_CATALOG_PATH = path.join(DATA_DIR, "installed-game-items.json");
 const DUNE_RESOURCE_SPAWN_LOCATIONS_PATH = path.join(BUNDLED_DATA_DIR, "dune-resource-spawn-locations.json");
 const EXPERIMENTAL_RESOURCE_AREA_CACHE_DIR = process.env.ALPHANINE_RESOURCE_AREA_CACHE || path.join(DATA_DIR, "experimental-resource-areas");
 const EXPERIMENTAL_RESOURCE_AREA_SETTINGS_PATH = path.join(DATA_DIR, "experimental-resource-areas.json");
@@ -460,6 +463,7 @@ const BUNDLED_GEAR_IMAGE_DIR = path.join(BUNDLED_DATA_DIR, "gear-images");
 const itemCatalogProvider = createItemCatalogProvider({
   bundledCatalogPath: DUNE_ITEMS_CATALOG_PATH,
   bundledImageDir: BUNDLED_GEAR_IMAGE_DIR,
+  installedGameCatalogPaths: [LOCAL_INSTALLED_ITEMS_CATALOG_PATH, DUNE_INSTALLED_ITEMS_CATALOG_PATH],
   managerCatalogPath: MANAGER_ITEM_CATALOG_PATH,
   learnedCatalogPath: SERVER_DISCOVERED_ITEMS_PATH,
   legacyCachePath: DUNE_ITEMS_CACHE_PATH
@@ -21568,6 +21572,22 @@ function appPage() {
     @media (max-width:560px) { .give-filter-row { grid-template-columns:1fr; } }
     .give-sidebar { grid-area:presets; position:sticky; top:92px; max-height:calc(100vh - 112px); overflow:auto; display:flex; flex-direction:column; }
     .give-primary-actions { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:stretch; }
+    .give-durability-card { grid-column:1/-1; display:grid; gap:10px; padding:13px; border:1px solid rgba(217,178,111,.28); background:rgba(255,255,255,.025); transition:border-color .18s ease, background .18s ease, box-shadow .18s ease; }
+    .give-durability-card.available { border-color:rgba(240,201,106,.58); background:linear-gradient(135deg,rgba(240,201,106,.10),rgba(255,255,255,.025)); }
+    .give-durability-card.selected { border-color:var(--good); background:rgba(91,211,143,.08); box-shadow:inset 3px 0 0 var(--good),0 0 22px rgba(91,211,143,.08); }
+    .give-durability-card.unavailable { opacity:.82; }
+    .give-durability-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+    .give-durability-head strong { display:block; color:var(--text); font-size:13px; text-transform:none; letter-spacing:0; }
+    .give-durability-head small { display:block; margin-top:2px; color:var(--muted); font-size:11.5px; text-transform:none; letter-spacing:0; }
+    .give-durability-badge { flex:0 0 auto; padding:4px 8px; border:1px solid rgba(217,178,111,.28); color:var(--muted); background:rgba(0,0,0,.2); font-size:10px; font-weight:900; line-height:1; letter-spacing:.06em; text-transform:uppercase; }
+    .give-durability-card.available .give-durability-badge { color:var(--gold-bright); border-color:rgba(240,201,106,.55); }
+    .give-durability-card.selected .give-durability-badge { color:var(--good); border-color:rgba(91,211,143,.65); }
+    .give-durability-choice { display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px; align-items:center; min-width:0; padding:10px; border:1px solid rgba(217,178,111,.22); background:rgba(0,0,0,.16); cursor:pointer; color:var(--text); text-transform:none; letter-spacing:0; }
+    .give-durability-choice input { width:20px; height:20px; min-height:0; margin:0; accent-color:var(--good); }
+    .give-durability-choice strong { display:block; color:var(--gold-bright); font-size:13px; line-height:1.25; }
+    .give-durability-choice small { display:block; margin-top:3px; color:var(--muted); font-size:11.5px; line-height:1.35; }
+    .give-durability-choice:has(input:disabled) { cursor:not-allowed; opacity:.62; }
+    .give-durability-status { padding:0; color:var(--muted); font-size:11.5px; line-height:1.4; }
     .give-result { min-height:46px; display:flex; align-items:center; overflow-wrap:anywhere; }
     .give-diagnostics { margin-top:10px; border-top:1px solid rgba(214,166,69,.16); padding-top:8px; }
     .give-diagnostics summary { cursor:pointer; color:var(--sand); text-transform:uppercase; letter-spacing:.08em; font-size:11px; font-weight:900; }
@@ -23261,7 +23281,17 @@ function appPage() {
             <label>Quantity<input id="adminQty" type="number" min="1" max="50000" value="1" oninput="updateGiveTargetSummary()"></label>
             <label id="adminQualityWrap">Grade<input id="adminQuality" type="number" min="0" max="5" value="0" oninput="syncQualityWarning()"></label>
             <label>Mode<select id="liveGiveMode" onchange="syncLiveGiveMode()"><option value="dry-run">Dry-Run</option><option value="execute" selected>Live Give</option></select></label>
-            <label id="giveDurabilityWrap" style="grid-column:1/-1"><span><input id="adminSetDurability200" type="checkbox" onchange="syncGiveDurabilityOption()"> Set Durability to 200</span><span id="giveDurabilityStatus" class="subtle">Select an item to check durability applicability.</span></label>
+            <div id="giveDurabilityWrap" class="give-durability-card unavailable">
+              <div class="give-durability-head">
+                <span><strong>Item Condition</strong><small>Optional for weapons, armor, durable tools, and vehicle equipment.</small></span>
+                <span id="giveDurabilityBadge" class="give-durability-badge">Choose an item</span>
+              </div>
+              <label class="give-durability-choice">
+                <input id="adminSetDurability200" type="checkbox" aria-describedby="giveDurabilityStatus" onchange="syncGiveDurabilityOption()">
+                <span><strong>Give at full durability — 200 / 200</strong><small>Sets both current durability and maximum durability to 200 on the new item.</small></span>
+              </label>
+              <div id="giveDurabilityStatus" class="give-durability-status" role="status">Choose an item to see whether full durability is available.</div>
+            </div>
             <div id="giveStorageFields" class="hidden" style="grid-column:1/-1">
               <div class="field-grid">
                 <label>Storage Search<input id="giveStorageSearch" placeholder="Type, actor, map, or inventory" oninput="renderGiveStorageTargets()"></label>
@@ -24451,9 +24481,9 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel-head">
           <div>
             <div class="label">Item Database</div>
-            <div class="subtle mt">Bundled offline item catalog used by Give Items. No server scan or internet connection required.</div>
+            <div class="subtle mt">Organized offline catalog collected from your installed game. No wiki or internet connection required.</div>
           </div>
-          <button onclick="refreshItemDatabase()">Refresh Items</button>
+          <div class="action-row"><button onclick="scanInstalledGameItems()">Scan Installed Game</button><button onclick="refreshItemDatabase()">Refresh Items</button></div>
         </div>
         <div class="field-grid mt">
           <label>Search<input id="itemDbSearch" placeholder="Search name, spawn code, category, stats" oninput="renderItemDatabase(true)"></label>
@@ -25601,8 +25631,8 @@ async function pollStorageDeposit(receiptId){const generation=++storageDepositPo
 async function confirmStorageDepositVisibility(){const receipt=latestStorageDepositReceipt;if(!receipt)return;try{if(!(await appConfirm("Confirm Storage Visibility","Confirm that you reopened the selected container and can see the deposited item in game. This does not perform another grant.","Confirm Visible","Cancel")))return;const data=await getJson("/api/admin/storage-deposits/confirm-visible",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({receiptId:receipt.receiptId}),timeoutMs:15000});storageDepositPollGeneration+=1;renderStorageDepositReceipt(data.receipt);showToast(data.message||"Storage visibility confirmed.","success");}catch(e){showToast(betterError(e),"error");}}
 async function protectedStorageBattlegroupRefresh(){const receipt=latestStorageDepositReceipt;if(!receipt)return;await refreshScheduler();if(!schedulerState?.installed){await appAlert("Protected refresh unavailable","Install and verify the Backup & Restart Scheduler first. The Suite will not use a raw pod deletion or restart the VM.");return;}const status=document.getElementById("storageDepositStatus");if(status){status.className="warning mt";status.textContent="The protected workflow will block on online players, verify a recent backup, restart only the selected battlegroup, and wait for health checks.";}await runSchedulerAction("restart-now");}
 function syncGiveDestination(){const storage=document.getElementById("giveDestination")?.value==="storage";document.getElementById("giveStorageFields")?.classList.toggle("hidden",!storage);if(storage&&!giveStorageTargets.length)refreshGiveStorageTargets();syncQualityWarning();syncGiveItemControls();updateGiveTargetSummary();}
-function selectedGiveDurability(){const applicable=Boolean(selectedAdminItem?.durability?.applicable);const checked=Boolean(document.getElementById("adminSetDurability200")?.checked);return{applicable,checked,applied:applicable&&checked,display:applicable?(checked?"200 current / 200 maximum durability":"Eligible; option not selected"):"Durability not applicable",reason:selectedAdminItem?.durability?.reason||"The exact template is not proven to support durability."};}
-function syncGiveDurabilityOption(){const input=document.getElementById("adminSetDurability200");const status=document.getElementById("giveDurabilityStatus");const wrap=document.getElementById("giveDurabilityWrap");const applicable=Boolean(selectedAdminItem?.durability?.applicable);if(input){input.disabled=!applicable;if(!applicable)input.checked=false;}const durability=selectedGiveDurability();if(status)status.textContent=durability.display+". "+durability.reason;if(wrap)wrap.classList.toggle("unsupported-control",!applicable);updateGiveTargetSummary();syncGiveItemControls();}
+function selectedGiveDurability(){const applicable=Boolean(selectedAdminItem?.durability?.applicable);const checked=Boolean(document.getElementById("adminSetDurability200")?.checked);return{applicable,checked,applied:applicable&&checked,display:applicable?(checked?"Full durability ON: 200 current / 200 maximum":"Default durability: not forced"):"Durability not used for this item",reason:selectedAdminItem?.durability?.reason||"Choose an item to check whether durability is supported."};}
+function syncGiveDurabilityOption(){const input=document.getElementById("adminSetDurability200");const status=document.getElementById("giveDurabilityStatus");const badge=document.getElementById("giveDurabilityBadge");const wrap=document.getElementById("giveDurabilityWrap");const hasItem=Boolean(selectedAdminItem?.id);const applicable=Boolean(selectedAdminItem?.durability?.applicable);if(input){input.disabled=!applicable;if(!applicable)input.checked=false;}const durability=selectedGiveDurability();if(status){status.textContent=!hasItem?"Choose an item to see whether full durability is available.":(applicable?(durability.applied?"Full durability is enabled. This grant will write exactly 200 current and 200 maximum durability; a player relog may be required.":"Default is selected. The Suite will not force a durability value. Check the option above to give this item at full 200 / 200 condition."):durability.reason);}if(badge)badge.textContent=!hasItem?"Choose an item":(applicable?(durability.applied?"200 / 200 ON":"Optional — OFF"):"Not available");if(wrap){wrap.classList.toggle("available",applicable&&!durability.applied);wrap.classList.toggle("selected",durability.applied);wrap.classList.toggle("unavailable",!applicable);}updateGiveTargetSummary();syncGiveItemControls();}
 function updateGiveTargetSummary(){const el=document.getElementById("giveTargetSummary");if(!el)return;const player=selectedPlayer();const item=selectedAdminItem;const qty=Math.max(1,Number(document.getElementById("adminQty")?.value||1)||1);const mode=document.getElementById("liveGiveMode")?.value==="execute"?"Live Give":"Dry-Run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const storage=selectedGiveStorage();if(!player||!item||(storageMode&&!storage)){el.innerHTML='<strong>Select '+(storageMode?'player, storage, and item':'player and item')+'</strong><span>Choose the required target, item, quantity, and mode before sending.</span>';return;}const kind=giveItemGrantKind(item);const target=storageMode?(storage.name+" / Actor "+storage.actorId):(kind==="Research Blueprint Unlock"?"Research Tree":(kind==="Crafting Recipe Unlock"?"Crafting Recipes":"Inventory"));const durability=selectedGiveDurability();el.innerHTML='<strong>'+esc(playerLabel(player))+' → '+esc(qty)+' × '+esc(item.name||item.id)+'</strong><span>Mode: '+esc(mode)+' / Target: '+esc(target)+' / Template: '+esc(item.id||"--")+' / '+esc(durability.display)+'</span>';}
 function progressionPlayerLookupValue(p){if(p?.player_controller_id)return"controller:"+p.player_controller_id;if(p?.player_state_row_id)return"row:"+p.player_state_row_id;if(p?.account_id||p?.id)return"account:"+(p.account_id||p.id);return String(p?.character_id||p?.player_pawn_id||p?.character_name||p?.name||"").trim();}
 function renderProgressionPlayerSelect(){const select=document.getElementById("progressionPlayerSelect");if(!select)return;const current=select.value;const options=adminPlayers.map(p=>{const value=progressionPlayerLookupValue(p);const meta=[p.player_controller_id&&("controller "+p.player_controller_id),p.character_id&&("character "+p.character_id),p.online_status||p.status].filter(Boolean).join(" / ");return value?'<option value="'+esc(value)+'">'+esc(playerLabel(p)+(meta?" / "+meta:""))+'</option>':"";}).filter(Boolean).join("");select.innerHTML='<option value="">Choose detected player...</option>'+(options||'<option value="" disabled>No detected players</option>');if(current&&[...select.options].some(option=>option.value===current))select.value=current;}
@@ -25831,7 +25861,8 @@ function filteredItemDatabaseItems(){const q=(document.getElementById("itemDbSea
 function renderItemDatabaseDetails(item){const detail=document.getElementById("itemDbDetails");if(!detail)return;if(!item){detail.className="empty mt";detail.textContent="Select an item to inspect spawn data, grade, category, and stats.";return;}const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const rows={"Name":item.name||item.id,"Spawn Code":item.spawnCode||item.itemCode||item.id,"Category":normalizeUiItemCategory(item.category)||"Unknown","Subcategory":item.subtype||item.type||"--","Grade":itemGrade,"Tier":item.tier||"--","Max Stack":item.maxStack||"--","Spawnable":item.spawnable===false?"No":"Yes"};const stats=item.stats&&typeof item.stats==="object"?Object.entries(item.stats).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join(""):"";detail.className="mt";detail.innerHTML='<div class="detail-list">'+Object.entries(rows).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value)+'</strong></div>').join("")+'</div>'+(item.description?'<div class="empty mt">'+esc(item.description)+'</div>':'')+(stats?'<div class="label mt">Stats</div><div class="detail-list">'+stats+'</div>':'');}
 function loadMoreItemDatabaseItems(){itemDatabaseDisplayLimit+=120;renderItemDatabase();}
 function renderItemDatabase(resetLimit=false){if(resetLimit)itemDatabaseDisplayLimit=120;const filter=normalizeUiItemCategory(document.getElementById("itemDbCategory")?.value||"");const sort=document.getElementById("itemDbSort")?.value||"smart";const rows=sortCatalogRows(filteredItemDatabaseItems(),filter,sort);const duplicateNames=duplicatedItemNameSet(rows);const visible=rows.slice(0,itemDatabaseDisplayLimit);const list=document.getElementById("itemDbList");const count=document.getElementById("itemDbCount");if(count)count.textContent=visible.length+" shown / "+rows.length+" matching / "+itemDatabaseItems.length+" loaded";if(!selectedItemDatabaseId&&rows[0])selectedItemDatabaseId=rows[0].id;if(list){let previousGroup="";const cards=visible.map(item=>{const itemCategory=normalizeUiItemCategory(item.category);const itemGrade=normalizeUiGrade(item.grade||item.rarity||item.quality||item.tier||item.itemGrade||item.itemRarity);const itemKind=schematicCatalogKind(item)||itemCategory||"Unknown";const group=catalogGroupLabel(item,filter);const heading=sort==="smart"&&group!==previousGroup?'<div class="catalog-group-heading">'+esc(group)+'</div>':"";previousGroup=group;return heading+'<button type="button" class="item-db-card '+(selectedItemDatabaseId===item.id?'active':'')+'" data-item-db-id="'+esc(item.id)+'">'+itemDbIcon(item)+'<span><strong>'+esc(itemListTitle(item,duplicateNames))+'</strong><span class="item-db-meta"><span class="item-grade-badge">'+esc(itemGrade)+'</span><span>'+esc(itemKind)+'</span><span>'+esc(item.subtype||item.type||"")+'</span><span>'+esc(item.tier||"")+'</span></span><span class="subtle env-path-value">'+esc(item.id||"")+'</span></span></button>';}).join("");list.innerHTML=cards+(rows.length>visible.length?'<button type="button" onclick="loadMoreItemDatabaseItems()">Load 120 more ('+esc(String(rows.length-visible.length))+' remaining)</button>':'')||'<div class="empty">No items match the current filters.</div>';list.querySelectorAll("[data-item-db-id]").forEach(el=>el.addEventListener("click",()=>{selectedItemDatabaseId=el.dataset.itemDbId;renderItemDatabase();}));}renderItemDatabaseDetails(itemDatabaseItems.find(item=>item.id===selectedItemDatabaseId)||rows[0]);}
-async function refreshItemDatabase(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Loading the Give Item catalog...";}const data=await getJson("/api/give-items?grade=all");itemDatabaseItems=data.items||[];if(!selectedItemDatabaseId&&itemDatabaseItems[0])selectedItemDatabaseId=itemDatabaseItems[0].id;fillItemDbFilters();renderItemDatabase();if(status){status.className=data.ok?"empty mt":"warning mt";status.innerHTML='<strong>'+esc(itemDatabaseItems.length)+' items loaded.</strong><div class="subtle">Source: the same giveable-item catalog used by Give Item.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
+async function refreshItemDatabase(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Loading the Give Item catalog...";}const data=await getJson("/api/give-items?grade=all");itemDatabaseItems=data.items||[];if(!selectedItemDatabaseId&&itemDatabaseItems[0])selectedItemDatabaseId=itemDatabaseItems[0].id;fillItemDbFilters();renderItemDatabase();if(status){const installed=Number(data.report?.installedGameCatalogItems||0),schematics=Number(data.report?.installedGameCatalogSchematics||0);status.className=data.ok?"empty mt":"warning mt";status.innerHTML='<strong>'+esc(itemDatabaseItems.length)+' unique items loaded.</strong><div class="subtle">Installed game: '+esc(installed)+' items / '+esc(schematics)+' schematics. Categories and duplicate IDs are normalized automatically.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
+async function scanInstalledGameItems(){const status=document.getElementById("itemDbStatus");try{if(status){status.className="warning mt";status.textContent="Reading item tables from the installed game. This normally takes a few seconds...";}const data=await getJson("/api/items/catalog/scan-installed-game",{method:"POST",timeoutMs:300000});if(!data.ok)throw new Error(data.error||"Installed-game item scan failed.");await refreshItemDatabase();if(status){status.className="empty mt";status.innerHTML='<strong>Installed-game scan complete.</strong><div class="subtle">'+esc(data.items)+' items / '+esc(data.schematics)+' schematics / '+esc(data.tables)+' organized tables / no duplicate IDs.</div>';}}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}}}
 function schematicRecipeCandidates(template){const raw=String(template||"").trim();const out=[];const add=value=>{const recipeId=String(value||"").trim();if(recipeId&&/^[A-Za-z0-9_().+\\-]+$/.test(recipeId)&&!out.includes(recipeId))out.push(recipeId);};if(/^recipe:/i.test(raw))add(raw.replace(/^recipe:/i,""));if(raw==="NPE_ScrapMetalKnife_Schematic")add("ScrapMetalKnifeRecipe");if(/_Schematic$/i.test(raw)){const base=raw.replace(/_Schematic$/i,"");add(base+"_Recipe");add(base+"_recipe");}if(/Schematic$/i.test(raw)){const base=raw.replace(/Schematic$/i,"");add(base+"Recipe");add(base+"recipe");}if(/^Schematic_/i.test(raw)){const base=raw.replace(/^Schematic_/i,"");add(base+"Recipe");add(base+"recipe");}return out;}
 function techKnowledgeKeyFromTemplate(template){const raw=String(template||"").trim();return /^tech:/i.test(raw)?raw.replace(/^tech:/i,""):"";}
 function isRecipeSchematicItem(item){const id=String(item?.id||"").trim();const source=String(item?.source||"").trim().toLowerCase();return /^recipe:/i.test(id)||source==="live db known recipes";}
@@ -26070,7 +26101,7 @@ function isRemotePortalRequest(req) {
 
 const REMOTE_LOCAL_ONLY_PREFIXES = [
   "/api/config", "/api/setup/", "/api/test/", "/api/settings/", "/api/ssh-key/", "/api/server-install-path/",
-  "/api/usergame-settings",
+  "/api/usergame-settings", "/api/items/catalog/scan-installed-game",
   "/api/live-give/env", "/api/blueprints", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/", "/api/live-map/resource-areas/generate", "/api/live-map/resource-areas/game-folder",
   "/api/admin/probe", "/api/admin/tuned-channels", "/api/admin/permissions", "/api/gear/discovery", "/api/discovery",
   "/api/market-automator/logs", "/api/director", "/api/database-browser/", "/api/server-migration/", "/api/migration-maintenance", "/api/migration-offline", "/manager-api/"
@@ -27430,6 +27461,28 @@ async function route(req, res) {
     const cache = loadDuneItemsCache();
     const items = cache.items || [];
     await json(res, { ok: cache.ok !== false, offlineReady: true, generatedAt: cache.generatedAt || "", totalItems: items.length, cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, learnedCatalogPath: SERVER_DISCOVERED_ITEMS_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, gradeCounts: itemGradeCounts(items), tierCounts: itemTierCounts(items), report: { ...(cache.report || {}), startupValidation: ITEM_CATALOG_STARTUP_REPORT } });
+    return;
+  }
+  if (url.pathname === "/api/items/catalog/scan-installed-game" && req.method === "POST") {
+    try {
+      const document = generateInstalledGameItemCatalog({
+        appDir: __dirname,
+        knownCatalogPaths: [DUNE_ITEMS_CATALOG_PATH, MANAGER_ITEM_CATALOG_PATH],
+        outputPath: LOCAL_INSTALLED_ITEMS_CATALOG_PATH
+      });
+      const refreshed = itemCatalogProvider.snapshot({ refresh: true });
+      await json(res, {
+        ok: true,
+        gameBuildId: document.gameBuildId,
+        tables: document.tables.length,
+        items: document.totalItems,
+        schematics: document.items.filter((item) => item.category === "Schematics").length,
+        uniqueCatalogItems: refreshed.items.length,
+        outputPath: LOCAL_INSTALLED_ITEMS_CATALOG_PATH
+      });
+    } catch (error) {
+      await json(res, { ok: false, error: error.message }, 400);
+    }
     return;
   }
   if (url.pathname === "/api/give-items/capabilities" && req.method === "GET") {

@@ -34,6 +34,12 @@ const physicalSchematicFromAnyCatalog = {
   ...physicalSchematic,
   source: "bundled"
 };
+const installedGameSchematic = {
+  ...physicalSchematic,
+  id: "B1C4_Unique_SMG2_Schematic",
+  name: "Spitting Cobra Schematic",
+  source: "installed-game"
+};
 const matchingRecipeUnlock = {
   id: "recipe:SandcrawlerSpiceContainer_Unique_Capacity_6_Recipe",
   recipeId: "SandcrawlerSpiceContainer_Unique_Capacity_6_Recipe",
@@ -57,6 +63,7 @@ const researchUnlock = {
 
 assert.equal(context.routing.isRecipeSchematicItem(physicalSchematic), false, "Manager schematic must use inventory Live Give.");
 assert.equal(context.routing.isRecipeSchematicItem(physicalSchematicFromAnyCatalog), false, "A physical _Schematic template must not be inferred as a database command.");
+assert.equal(context.routing.isRecipeSchematicItem(installedGameSchematic), false, "An installed-game schematic must use inventory Live Give.");
 assert.equal(context.routing.isRecipeSchematicItem(matchingRecipeUnlock), true, "Explicit recipe: records must remain database unlocks.");
 
 const visible = context.routing.dynamicGiveItemsWithoutSpawnableSchematicDuplicates(

@@ -11,13 +11,17 @@ const { catalogIntegrity, GENERIC_ICON_PATHS } = require("../lib/item-catalog-pr
 
 const root = path.resolve(__dirname, "..");
 const catalogPath = path.join(root, "data", "dune-items-catalog.json");
+const installedCatalogPath = path.join(root, "data", "dune-installed-items-catalog.json");
 const imageDir = path.join(root, "data", "gear-images");
 const report = catalogIntegrity(catalogPath, { required: true, imageDir });
+const installedReport = catalogIntegrity(installedCatalogPath, { required: true });
 
 assert.equal(report.present, true, "Bundled item catalog is missing.");
 assert.equal(report.valid, true, report.errors.join("\n"));
 assert.ok(report.items.length > 0, "Bundled item catalog is empty.");
 assert.equal(report.missingImages, 0, `${report.missingImages} bundled item images are missing.`);
+assert.equal(installedReport.valid, true, installedReport.errors.join("\n"));
+assert.ok(installedReport.items.length > 0, "Installed-game item catalog is empty.");
 
 for (const iconPath of Object.values(GENERIC_ICON_PATHS)) {
   const localPath = path.join(root, ...iconPath.replace(/^\//, "").split("/"));
@@ -33,6 +37,8 @@ console.log(JSON.stringify({
   mode: "offline-validation-only",
   catalogPath,
   items: report.items.length,
+  installedGameItems: installedReport.items.length,
+  installedGameSchematics: installedReport.items.filter((item) => item.category === "Schematics").length,
   imageReferences: report.imageReferences,
   missingImages: report.missingImages,
   duplicateIdentifiers: report.duplicateIdentifiers,

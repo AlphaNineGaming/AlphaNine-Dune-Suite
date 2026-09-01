@@ -14,13 +14,14 @@ const {
 
 const weapon = { id: "LongRifle_Unique_Poison_06", category: "Weapons", type: "Spitdart" };
 const armor = { id: "Combat_Heavy_Unique_Reinforced_Boots_06", category: "Garment", type: "Feet" };
+const installedGameClothing = { id: "Atreides_Heavy_Armor", category: "Clothing", type: "" };
 const tool = { id: "DewReaper_1h_Tier6", category: "Utility", type: "Watertools" };
 const equipment = { id: "OrnithopterMediumEngine_6", category: "Vehicles", type: "Engine" };
 const resource = { id: "Silicone", category: "Misc", type: "Refinedresources" };
 const consumable = { id: "healthpack_channeled", category: "Utility", type: "Healkit" };
 const schematic = { id: "Schematic_UniquePincushionHands", category: "Schematics", type: "Contract" };
 
-for (const [item, kind] of [[weapon, "weapon"], [armor, "armor"], [tool, "tool"], [equipment, "equipment"]]) {
+for (const [item, kind] of [[weapon, "weapon"], [armor, "armor"], [installedGameClothing, "armor"], [tool, "tool"], [equipment, "equipment"]]) {
   const eligible = durabilityEligibility(item);
   assert.equal(eligible.applicable, true, `${item.id} must be eligible`);
   assert.equal(eligible.kind, kind);
@@ -78,7 +79,10 @@ assert.match(server, /function verifyGiveItemReceipt[\s\S]*read-back-mismatch/);
 assert.match(server, /function verifyStorageDepositReceipt[\s\S]*classifyDurabilityReadBack/);
 assert.match(server, /pollGiveItemReceipt[\s\S]*delays=\[2000,3000,10000,15000\]/);
 assert.match(server, /pollStorageDeposit[\s\S]*delays=\[2000,3000,10000,15000\]/);
-assert.match(server, /id="adminSetDurability200"[\s\S]*Set Durability to 200/);
+assert.match(server, /id="giveDurabilityWrap" class="give-durability-card unavailable"[\s\S]*id="adminSetDurability200"[\s\S]*Give at full durability — 200 \/ 200/);
+assert.match(server, /id="giveDurabilityBadge"[\s\S]*Choose an item/);
+assert.match(server, /Full durability is enabled[\s\S]*200 current and 200 maximum durability/);
+assert.ok(!/wrap\.classList\.toggle\("unsupported-control",!applicable\)/.test(server), "Durability guidance must remain visible in Simple mode.");
 assert.match(server, /Durability not applicable/);
 assert.match(server, /\/api\/admin\/give-item-receipts\/recheck/);
 assert.match(server, /storage_item_deposited[\s\S]*durabilityEvidence[\s\S]*durabilityVerification/);

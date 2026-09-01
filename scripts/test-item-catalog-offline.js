@@ -31,12 +31,14 @@ const root = path.resolve(__dirname, "..");
 const bundledCatalogPath = path.join(root, "data", "dune-items-catalog.json");
 const bundledImageDir = path.join(root, "data", "gear-images");
 const managerCatalogPath = path.join(root, "manager", "dune-item-catalog.json");
+const installedGameCatalogPath = path.join(root, "data", "dune-installed-items-catalog.json");
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-offline-items-"));
 
 function provider(name, legacyCachePath = path.join(temporaryRoot, name, "dune-items-cache.json")) {
   return createItemCatalogProvider({
     bundledCatalogPath,
     bundledImageDir,
+    installedGameCatalogPath,
     managerCatalogPath,
     learnedCatalogPath: path.join(temporaryRoot, name, "server-discovered-items.json"),
     legacyCachePath
@@ -49,6 +51,17 @@ try {
   const cleanSnapshot = clean.snapshot();
   assert.equal(cleanSnapshot.ok, true);
   assert.ok(cleanSnapshot.items.length >= 1747);
+  assert.ok(cleanSnapshot.report.installedGameCatalogItems >= 3500);
+  assert.ok(cleanSnapshot.report.installedGameCatalogSchematics >= 1200);
+  const spittingCobra = clean.resolve("B1C4_Unique_SMG2_Schematic");
+  assert.equal(spittingCobra.name, "Spitting Cobra Schematic");
+  assert.equal(spittingCobra.source, "installed-game");
+  const itemIds = cleanSnapshot.items.map((item) => item.id.toLowerCase());
+  assert.equal(new Set(itemIds).size, itemIds.length, "Merged catalog contains duplicate item identifiers.");
+  const categories = [...new Set(cleanSnapshot.items.map((item) => item.category).filter(Boolean))];
+  const categoryKeys = categories.map((category) => category.replace(/[\s_-]+/g, "").toLowerCase());
+  assert.equal(new Set(categoryKeys).size, categoryKeys.length, "Category menu contains duplicate spelling variants.");
+  assert.ok(!categories.includes("Clothes") && !categories.includes("Meleeweapons") && !categories.includes("Rangedweapons") && !categories.includes("Vehicle"));
   assert.equal(cleanSnapshot.report.recoveredFromBundled, true);
   assert.equal(fs.existsSync(path.join(temporaryRoot, "clean", "dune-items-cache.json")), false);
 
@@ -123,7 +136,7 @@ try {
   }
 
   // Runtime/provider source must not contain a removed catalog domain or network importer.
-  for (const relative of ["server.js", "lib/item-catalog-provider.js", "lib/item-server-discovery.js", "scripts/build-item-catalog.js"]) {
+  for (const relative of ["server.js", "lib/item-catalog-provider.js", "lib/installed-game-item-catalog.js", "lib/item-server-discovery.js", "scripts/build-item-catalog.js"]) {
     const source = fs.readFileSync(path.join(root, relative), "utf8");
     assert.ok(!/gaming\.tools|awakening\.wiki/i.test(source), `${relative} still references a removed item-catalog domain.`);
   }

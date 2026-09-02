@@ -399,6 +399,10 @@ const testCategorySeed = {
   assert(goSource.includes("class='Duke' and owner_account_id is null"), "Market Bot must use a native clean Duke actor");
   assert(goSource.includes("set owner_id=(select id from selected_duke)"), "tracked legacy Market Bot orders must migrate to the native actor");
   assert(goSource.includes("not exists(select 1 from prior_cycle)"), "cycle idempotency gate is missing");
+  assert(goSource.includes("from dune.farm_variables"), "authoritative universe-clock source is missing");
+  assert(goSource.includes("coalesce(down_time_accumulation,0)::numeric/1000000"), "universe-clock downtime offset is missing");
+  assert(goSource.includes("'farm-variables'"), "universe-clock diagnostics are missing");
+  assert(!goSource.includes("inferred_now between d.database_now"), "game time must not be compared with Unix epoch time");
   assert(goSource.includes("extract(epoch from clock_timestamp())"), "database-clock fallback is missing");
   assert(goSource.includes("Only verified player-owned active sell listings are eligible for opt-in random purchases."), "player buyer safety warning is missing");
   assert(goSource.includes("999999999,1.0,1.0,p.item_price,0,0,false"), "seller payout must use a non-expiring claim and per-unit item price");

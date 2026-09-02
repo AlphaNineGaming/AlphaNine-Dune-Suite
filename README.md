@@ -28,6 +28,17 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.2.6
+
+- Fixed Live Market Listings falsely labeling active player listings as expired by using the authoritative Dune universe clock.
+- Includes the Market Bot 1.0.101 player-buying clock correction from 1.2.5.
+
+### 1.2.5
+
+- Fixed the Market Bot player-listing buyer on HarkoVillage and other private servers whose Exchange timestamps use Dune universe time instead of Unix epoch time.
+- Preview and execution now derive the authoritative clock from `dune.farm_variables`, including the stored downtime offset, while retaining a fail-safe database-clock fallback.
+- Updated the bundled Market Bot runtime to 1.0.101 and added regression coverage preventing universe-time listings from being rejected as expired.
+
 ### 1.2.3
 
 - Fixed the optional Market Bot player-listing buyer so seller claim records store the listing's per-unit price instead of multiplying stacked payouts twice.

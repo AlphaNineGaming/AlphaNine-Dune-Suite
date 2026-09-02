@@ -5,6 +5,20 @@ const fs = require("fs");
 const path = require("path");
 
 const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const clockStart = server.indexOf("async function marketListingGameNow()");
+const clockEnd = server.indexOf("async function marketListingExpiryTime", clockStart);
+assert.ok(clockStart >= 0 && clockEnd > clockStart, "Could not isolate the live market-listings clock.");
+const clockBlock = server.slice(clockStart, clockEnd);
+assert.ok(
+  clockBlock.includes("from dune.farm_variables")
+    && clockBlock.includes("universe_time_timestamp")
+    && clockBlock.includes("down_time_accumulation"),
+  "Live Market Listings must use the authoritative Dune universe clock."
+);
+assert.ok(
+  !clockBlock.includes("max(expiration_time)") && !clockBlock.includes("player_clock"),
+  "Live Market Listings must not infer game time from player listing expiration."
+);
 const start = server.indexOf("async function marketListings(payload = {})");
 const end = server.indexOf("async function buyMarketListingAsAdmin", start);
 assert.ok(start >= 0 && end > start, "Could not isolate the live market-listings query.");
@@ -77,4 +91,4 @@ const renderBlock = server.slice(renderStart, renderEnd);
 assert.ok(renderBlock.includes("tracking-only") && renderBlock.includes("Seller / Type"), "Live listings must render the read-only tracking columns.");
 assert.ok(!renderBlock.includes("Buy & Pay") && !renderBlock.includes("Remove</button>"), "Live listings rows must not expose destructive actions.");
 
-console.log("Live market listings exclude claim, payout, history, and empty-item rows.");
+console.log("Live market listings use the Dune universe clock and exclude claim, payout, history, and empty-item rows.");

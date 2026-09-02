@@ -17491,22 +17491,20 @@ async function marketListingGameNow() {
       with database_clock as (
         select floor(extract(epoch from clock_timestamp()))::bigint as database_now
       ),
-      player_clock as (
-        select max(expiration_time) - ${14 * 24 * 3600} as inferred_now
-        from dune.dune_exchange_orders
-        where is_npc_order = false
-          and item_id is not null
-          and expiration_time between ${14 * 24 * 3600 + 1} and 999999999
+      farm_clock as (
+        select floor(
+                 extract(epoch from ((clock_timestamp() at time zone 'UTC') - universe_time_timestamp))
+                 + coalesce(down_time_accumulation, 0)::numeric / 1000000
+               )::bigint as game_now
+        from dune.farm_variables
+        where one_row = true
+          and universe_time_timestamp is not null
+        limit 1
       )
-      select (
-        case
-          when p.inferred_now between d.database_now - ${30 * 24 * 3600} and d.database_now + ${30 * 24 * 3600}
-            then p.inferred_now
-          else d.database_now
-        end
+      select coalesce(
+        (select game_now from farm_clock),
+        (select database_now from database_clock)
       )::text
-      from player_clock p
-      cross join database_clock d
     `;
     const row = parseDbRows(await dbQuery(sql, 12000), ["expirationTime"])[0] || {};
     return Number(row.expirationTime || 0) || 0;

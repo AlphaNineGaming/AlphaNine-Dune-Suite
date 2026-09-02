@@ -433,7 +433,7 @@ async function waitForUi() {
     assert(html.includes("No resource types selected."), "Packaged UI is missing the empty selection state for Resource Areas.");
     assert(html.includes("Select Game Folder"), "Packaged UI is missing the Resource Areas game-folder recovery action.");
     assert(html.includes("Protected Battlegroup Refresh"), "Packaged Give Item UI is missing protected storage refresh.");
-    assert(html.includes("Set Durability to 200"), "Packaged desktop/web Give Item UI is missing Set Durability to 200.");
+    assert(html.includes("Give at full durability — 200 / 200"), "Packaged desktop/web Give Item UI is missing the full-durability option.");
     assert(html.includes("Durability not applicable"), "Packaged desktop/web Give Item UI is missing the non-durable state.");
     assert(html.includes('getJson("/api/admin/give-item-receipts/recheck"'), "Packaged UI is missing player-inventory delayed durability rechecks.");
     assert(html.includes('getJson("/api/admin/storage-deposits/recheck"'), "Packaged UI is missing storage receipt rechecks.");

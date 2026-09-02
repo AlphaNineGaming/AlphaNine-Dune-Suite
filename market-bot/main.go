@@ -1177,24 +1177,28 @@ selected_access_point as (
   from dune.dune_exchange_accesspoints
   where exchange_id=(select exchange_id from exchange_state)
 ),
-player_clock as (
-  select max(expiration_time) - 1209600 inferred_now
-  from dune.dune_exchange_orders
-  where is_npc_order=false and expiration_time between 1209601 and 999999999
+farm_clock as (
+  select floor(
+           extract(epoch from ((clock_timestamp() at time zone 'UTC') - universe_time_timestamp))
+           + coalesce(down_time_accumulation,0)::numeric/1000000
+         )::bigint farm_now
+  from dune.farm_variables
+  where one_row=true and universe_time_timestamp is not null
+  limit 1
 ),
 database_clock as (
   select floor(extract(epoch from clock_timestamp()))::bigint database_now
 ),
 game_clock as (
   select case
-           when p.inferred_now between d.database_now-2592000 and d.database_now+2592000 then p.inferred_now
+           when coalesce(f.farm_now,0)>0 then f.farm_now
            else d.database_now
          end game_now,
          case
-           when p.inferred_now between d.database_now-2592000 and d.database_now+2592000 then 'player-listing'
+           when coalesce(f.farm_now,0)>0 then 'farm-variables'
            else 'database-clock'
          end clock_source
-  from player_clock p cross join database_clock d
+  from database_clock d left join farm_clock f on true
 ),
 bot_actor as (
   select id from dune.actors
@@ -1350,24 +1354,28 @@ selected_access_point as (
   from dune.dune_exchange_accesspoints
   where exchange_id=(select exchange_id from exchange_state)
 ),
-player_clock as (
-  select max(expiration_time)-1209600 inferred_now
-  from dune.dune_exchange_orders
-  where is_npc_order=false and expiration_time between 1209601 and 999999999
+farm_clock as (
+  select floor(
+           extract(epoch from ((clock_timestamp() at time zone 'UTC') - universe_time_timestamp))
+           + coalesce(down_time_accumulation,0)::numeric/1000000
+         )::bigint farm_now
+  from dune.farm_variables
+  where one_row=true and universe_time_timestamp is not null
+  limit 1
 ),
 database_clock as (
   select floor(extract(epoch from clock_timestamp()))::bigint database_now
 ),
 game_clock as (
   select case
-           when p.inferred_now between d.database_now-2592000 and d.database_now+2592000 then p.inferred_now
+           when coalesce(f.farm_now,0)>0 then f.farm_now
            else d.database_now
          end game_now,
          case
-           when p.inferred_now between d.database_now-2592000 and d.database_now+2592000 then 'player-listing'
+           when coalesce(f.farm_now,0)>0 then 'farm-variables'
            else 'database-clock'
          end clock_source
-  from player_clock p cross join database_clock d
+  from database_clock d left join farm_clock f on true
 ),
 bot_actor as (
   select id from dune.actors

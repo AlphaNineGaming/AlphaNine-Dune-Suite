@@ -10,7 +10,7 @@ const electronMainSource = fs.readFileSync(path.join(__dirname, "..", "electron"
 const electronPreloadSource = fs.readFileSync(path.join(__dirname, "..", "electron", "preload.js"), "utf8");
 const packageManifest = require(path.join(__dirname, "..", "package.json"));
 assert.doesNotMatch(serverSource, /Â·|â€¦|â€”|â€“|â†’|Ã—|âŒ„|â—|â—†|â—‡|âœ¦|â˜¼|âœ“|ðŸ/, "Suite source contains mojibake text");
-assert.equal(packageManifest.marketBotRuntimeVersion, "1.0.100", "Suite and Market Bot runtime release versions are not pinned to the expected compatibility pair.");
+assert.equal(packageManifest.marketBotRuntimeVersion, "1.0.101", "Suite and Market Bot runtime release versions are not pinned to the expected compatibility pair.");
 assert(serverSource.includes("expectedVersion: MARKET_BOT_RUNTIME_VERSION"), "Market Bot status is not pinned to its independent runtime version.");
 assert(!serverSource.includes("marketBotCatalog(), APP_VERSION"), "A Market Bot runtime path still inherits the Suite UI version.");
 assert(electronMainSource.includes('path.join(root, "battlegroup.bat")'), "Desktop launcher does not resolve battlegroup.bat from a configured server root.");

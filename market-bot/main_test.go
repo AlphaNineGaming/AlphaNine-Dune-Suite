@@ -157,6 +157,10 @@ func TestPreviewUsesReadOnlyProductionPlanner(t *testing.T) {
 		"pg_try_advisory_xact_lock",
 		"public.alphanine_market_bot_listings",
 		"target_count-coalesce(a.active,0)",
+		"from dune.farm_variables",
+		"universe_time_timestamp",
+		"coalesce(down_time_accumulation,0)::numeric/1000000",
+		"'farm-variables'",
 		"extract(epoch from clock_timestamp())",
 		"'database-clock'",
 		"'clockSource'",
@@ -182,6 +186,10 @@ func TestExecuteIsOwnedLockedAndIdempotent(t *testing.T) {
 		"prior_cycle",
 		"on conflict do nothing",
 		"class='Duke' and owner_account_id is null",
+		"from dune.farm_variables",
+		"universe_time_timestamp",
+		"coalesce(down_time_accumulation,0)::numeric/1000000",
+		"'farm-variables'",
 		"extract(epoch from clock_timestamp())",
 		"from public.alphanine_market_bot_listings",
 		"o.is_npc_order=true",
@@ -196,6 +204,9 @@ func TestExecuteIsOwnedLockedAndIdempotent(t *testing.T) {
 		if !strings.Contains(sql, expected) {
 			t.Fatalf("execution SQL missing %q", expected)
 		}
+	}
+	if strings.Contains(sql, "inferred_now between d.database_now") {
+		t.Fatal("execution SQL still compares the game clock with Unix epoch time")
 	}
 	for _, expected := range []string{
 		"player_buying_enabled and (random()*100)<player_buy_chance",

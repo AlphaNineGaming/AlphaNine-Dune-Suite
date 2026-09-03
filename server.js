@@ -17035,6 +17035,17 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
       from dune.items i
       where i.inventory_id = (select inventory_id::bigint from chosen_inventory limit 1)
     ),
+    free_slot_count as (
+      select count(*)::int as free_slots
+      from chosen_inventory inv
+      cross join lateral generate_series(0, greatest(inv.max_item_count-1, 0)) free_slot(position_index)
+      where inv.max_item_count > 0
+        and not exists (
+          select 1 from dune.items occupied
+          where occupied.inventory_id = inv.inventory_id::bigint
+            and occupied.position_index = free_slot.position_index
+        )
+    ),
     next_position as (
       select coalesce(max(i.position_index), -1) + 1 as position_index
       from dune.items i
@@ -17048,7 +17059,7 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
         when not exists(select 1 from target) then 'player_not_found'
         when not exists(select 1 from chosen_inventory) then 'inventory_not_found'
         when (select max_item_count from chosen_inventory limit 1) > 0
-          and (select item_count from current_count) + ${stackCount} > (select max_item_count from chosen_inventory limit 1) then 'inventory_full'
+          and coalesce((select free_slots from free_slot_count), 0) < ${stackCount} then 'inventory_full'
         else 'ready'
       end,
       coalesce((select account_id from target limit 1), ''),
@@ -17118,14 +17129,6 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
       limit 1;
     do $$ begin
       if not exists(select 1 from player_grant_target) then raise exception 'Player inventory destination changed before item grant'; end if;
-      if exists(select 1 from dune.items i join player_grant_target t on t.inventory_id=i.inventory_id
-                where i.position_index is null or i.position_index<0 or (t.max_item_count>0 and i.position_index>=t.max_item_count)) then
-        raise exception 'Player inventory contains invalid occupied slot positions';
-      end if;
-      if exists(select 1 from dune.items i join player_grant_target t on t.inventory_id=i.inventory_id
-                group by i.position_index having count(*)>1) then
-        raise exception 'Player inventory contains duplicate occupied slot positions';
-      end if;
     end $$;
     create temp table player_grant_slots on commit drop as
       select candidate.position_index, row_number() over(order by candidate.position_index)::int slot_number
@@ -17161,13 +17164,16 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
       if not coalesce((select count(*)=${stackCount}
                               and coalesce(sum(i.stack_size),0)=${qty}
                               and count(distinct i.position_index)=count(*)
+                              and bool_and(i.position_index>=0 and (t.max_item_count<=0 or i.position_index<t.max_item_count))
+                              and bool_and((select count(*) from dune.items occupied where occupied.inventory_id=i.inventory_id and occupied.position_index=i.position_index)=1)
                               and bool_and(i.inventory_id=${requireInteger(inventory.id, "inventory_id", 1)})
                               and bool_and(i.template_id=${sqlString(template)})
                               and bool_and(i.quality_level=${grade})
                               and bool_and(${durability.applied
                                 ? `jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE} and jsonb_typeof(i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE}`
                                 : `i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is null and i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}' is null`})
-                         from player_grant_inserted i),false) then
+                         from player_grant_inserted i cross join player_grant_target t
+                         group by t.max_item_count),false) then
         raise exception 'Player item grant failed transactional identity, quantity, slot, grade, or durability verification';
       end if;
     end $$;

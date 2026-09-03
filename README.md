@@ -28,6 +28,12 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.2.7
+
+- Fixed grade 1–5 player-inventory grants being blocked by unrelated legacy or game-managed slot positions.
+- Player inventory capacity now uses the actual free normal slots rather than the total number of stored rows.
+- Transactional verification remains strict for every newly granted item, including slot uniqueness, grade, quantity, and durability.
+
 ### 1.2.6
 
 - Fixed Live Market Listings falsely labeling active player listings as expired by using the authoritative Dune universe clock.

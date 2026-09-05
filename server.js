@@ -16713,11 +16713,17 @@ async function dungeonDifficultySchemaInspect() {
     where table_schema = 'dune'
       and table_name in ('dungeon_completion', 'dungeon_completion_players')
     union all
-    select 'function', p.proname, pg_get_function_identity_arguments(p.oid)
+    select 'function', p.proname, oidvectortypes(p.proargtypes)
     from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'dune'
       and p.proname = 'record_dungeon_completion'
+    union all
+    select 'generated', table_name, column_name
+    from information_schema.columns
+    where table_schema = 'dune' and table_name = 'dungeon_completion'
+      and column_name = 'completion_id'
+      and (is_identity = 'YES' or column_default like 'nextval(%')
     order by 1, 2, 3;
   `, 12000);
   const rows = parseDbRows(output, ["kind", "name", "detail"]);
@@ -16728,11 +16734,13 @@ async function dungeonDifficultySchemaInspect() {
     "dungeon_completion.duration_ms", "dungeon_completion.players_num",
     "dungeon_completion_players.player_id", "dungeon_completion_players.completion_id"
   ];
-  const functionDetected = functions.some((row) => /in_dungeon_id\s+text|text/i.test(row.detail) && /integer/i.test(row.detail) && /bigint\[\]/i.test(row.detail));
+  const functionDetected = functions.some((row) => row.detail === "text, integer, integer, bigint[]");
+  const directDetected = rows.some((row) => row.kind === "generated");
   const missingColumns = requiredColumns.filter((column) => !columns.has(column));
   return {
-    ok: missingColumns.length === 0 && functionDetected,
-    status: missingColumns.length === 0 && functionDetected ? "detected" : "unsupported",
+    ok: missingColumns.length === 0,
+    status: missingColumns.length === 0 ? "detected" : "unsupported",
+    writeMethod: functionDetected ? "function" : directDetected ? "direct" : null,
     tables: ["dune.dungeon_completion", "dune.dungeon_completion_players"],
     missingColumns,
     recordFunctionDetected: functionDetected,
@@ -16798,7 +16806,7 @@ async function dungeonDifficultyResolve(queryValue, options = {}) {
 
 async function dungeonDifficultyInspect(queryValue, dungeonIdValue = "") {
   const schema = await dungeonDifficultySchemaInspect();
-  if (!schema.ok) return { ok: false, status: "unsupported", schema, reason: "The required dungeon completion tables or record function were not detected." };
+  if (!schema.ok) return { ok: false, status: "unsupported", schema, reason: "Missing dungeon columns: " + schema.missingColumns.join(", ") };
   const resolved = await dungeonDifficultyResolve(queryValue);
   const dungeonId = String(dungeonIdValue || "").trim();
   if (dungeonId) DungeonDifficulty.normalizeDungeonId(dungeonId);
@@ -16830,7 +16838,8 @@ async function dungeonDifficultyPreview(payload = {}) {
   const dungeonId = DungeonDifficulty.normalizeDungeonId(payload.dungeonId);
   const targetSelectableDifficulty = DungeonDifficulty.normalizeTargetDifficulty(payload.targetSelectableDifficulty);
   const schema = await dungeonDifficultySchemaInspect();
-  if (!schema.ok) throw new Error("The required dungeon completion schema/function support was not detected.");
+  if (!schema.ok) throw new Error("Missing dungeon columns: " + schema.missingColumns.join(", "));
+  if (!schema.writeMethod) throw new Error("Dungeon history is readable, but safe writing requires a compatible record function or an identity/sequence-generated completion_id. No records were changed.");
   const resolved = await dungeonDifficultyResolve(payload.query || payload.playerId, { requireOffline: true });
   const records = await dungeonDifficultyRows(resolved.playerId, dungeonId);
   const plan = DungeonDifficulty.planChange(records, targetSelectableDifficulty);
@@ -16870,9 +16879,10 @@ async function dungeonDifficultyPreview(payload = {}) {
     plan,
     records,
     snapshotFingerprint: DungeonDifficulty.snapshotFingerprint(records),
+    writeMethod: schema.writeMethod,
     databaseBackupPath: snapshot.databaseBackupPath,
     snapshotPath,
-    sqlPreview: DungeonDifficulty.buildApplySql({ playerId: resolved.playerId, dungeonId, targetSelectableDifficulty })
+    sqlPreview: DungeonDifficulty.buildApplySql({ playerId: resolved.playerId, dungeonId, targetSelectableDifficulty, writeMethod: schema.writeMethod })
   };
   dungeonDifficultyPreviews.set(previewId, preview);
   progressionAudit("dungeon_difficulty_preview_created", { experimental: true, player: preview.player, playerId: preview.playerId, dungeonId, targetSelectableDifficulty, plan, databaseBackupPath: preview.databaseBackupPath, snapshotPath });
@@ -16890,6 +16900,8 @@ async function dungeonDifficultyApply(payload = {}) {
     throw new Error("Dungeon difficulty preview expired. Generate a new preview and backup.");
   }
   const resolved = await dungeonDifficultyResolve(preview.query, { requireOffline: true });
+  const schema = await dungeonDifficultySchemaInspect();
+  if (!schema.ok || schema.writeMethod !== preview.writeMethod) throw new Error("Dungeon write support changed. Generate a new preview and backup.");
   if (resolved.playerId !== preview.playerId) throw new Error("The selected player identity changed. Generate a new preview.");
   const before = await dungeonDifficultyRows(preview.playerId, preview.dungeonId);
   if (DungeonDifficulty.snapshotFingerprint(before) !== preview.snapshotFingerprint) throw new Error("Dungeon completion history changed after the preview. Generate a new preview and backup.");

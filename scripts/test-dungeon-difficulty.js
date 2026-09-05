@@ -35,7 +35,16 @@ assert.match(raiseSql, /commit;$/i);
 
 const resetSql = DungeonDifficulty.buildApplySql({ playerId: 42, dungeonId: "DA_Dgn_Test", targetSelectableDifficulty: 3 });
 assert.doesNotMatch(resetSql, /record_dungeon_completion/);
-assert.match(resetSql, /and true;/);
+assert.match(resetSql, /and true\s+returning/);
+const directSql = DungeonDifficulty.buildApplySql({playerId:42, dungeonId:"DA_Dgn_Test", targetSelectableDifficulty:10, writeMethod:"direct"});
+assert.doesNotMatch(directSql, /record_dungeon_completion/);
+assert.match(directSql, /insert into dune\.dungeon_completion \(dungeon_id, difficulty, duration_ms, players_num\)/);
+assert.match(directSql, /returning completion_id/);
+assert.match(directSql, /select 42, completion_id from created/);
+assert.match(directSql, /lock table .*share row exclusive mode/);
+assert.match(directSql, /dc\.completion_id in \(select completion_id from removed\)/);
+assert.match(directSql, /dcp\.player_id <> 42/);
+assert.throws(() => DungeonDifficulty.buildApplySql({writeMethod:"unknown"}), /Unsupported/);
 
 assert.equal(DungeonDifficulty.snapshotFingerprint(records), DungeonDifficulty.snapshotFingerprint([...records].reverse()));
 

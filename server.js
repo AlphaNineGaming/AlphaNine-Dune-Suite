@@ -94,6 +94,7 @@ const {
 const { createBlueprintService } = require("./lib/blueprints");
 const { createDatabaseBrowser } = require("./lib/database-browser");
 const DungeonDifficulty = require("./lib/dungeon-difficulty");
+const MarketManualPurchase = require("./lib/market-manual-purchase");
 const { USER_GAME_SETTINGS_SCHEMA, parseUserGameIni, updateUserGameIni } = require("./lib/user-game-settings");
 const { createMarketAutomator } = require("./lib/market-automator");
 const {
@@ -6542,7 +6543,7 @@ const marketAutomator = createMarketAutomator({
   inspect: () => marketPostingStatus(),
   list: (payload) => marketListings(payload),
   publish: (payload) => postMarketListing(payload),
-  purchase: (orderId) => buyMarketListingAsAdmin(orderId),
+  purchase: async () => { throw new Error("Legacy automated buying is disabled. Use a confirmed Buy & Pay purchase or the persistent Market Bot."); },
   catalog: () => gearCatalog()
     .filter((item) => item?.id && item.spawnable !== false && !isTechKnowledgeItem(item) && !isRecipeSchematicItem(item)),
   battlegroup: () => {
@@ -17716,14 +17717,12 @@ function normalizeMarketPricingAudit(value, template, finalPrice) {
 
 async function marketListingGameNow() {
   try {
+    // Fetch the server's universe-relative clock on every call. Adding persisted
+    // downtime here double-counts the offset and falsely expires active orders.
     const sql = `
-      with database_clock as (
-        select floor(extract(epoch from clock_timestamp()))::bigint as database_now
-      ),
-      farm_clock as (
+      with farm_clock as (
         select floor(
                  extract(epoch from ((clock_timestamp() at time zone 'UTC') - universe_time_timestamp))
-                 + coalesce(down_time_accumulation, 0)::numeric / 1000000
                )::bigint as game_now
         from dune.farm_variables
         where one_row = true
@@ -17731,12 +17730,13 @@ async function marketListingGameNow() {
         limit 1
       )
       select coalesce(
-        (select game_now from farm_clock),
-        (select database_now from database_clock)
+        (select game_now from farm_clock where game_now > 0),
+        0
       )::text
     `;
     const row = parseDbRows(await dbQuery(sql, 12000), ["expirationTime"])[0] || {};
-    return Number(row.expirationTime || 0) || 0;
+    const gameNow = Number(row.expirationTime || 0);
+    return Number.isSafeInteger(gameNow) && gameNow > 0 ? gameNow : 0;
   } catch {
     return 0;
   }
@@ -17744,7 +17744,8 @@ async function marketListingGameNow() {
 
 async function marketListingExpiryTime(expiryDays) {
   const gameNow = await marketListingGameNow();
-  return Math.max(0, gameNow) + expiryDays * 24 * 3600;
+  if (gameNow <= 0) throw new Error("Server game clock is unavailable. No market listing was created.");
+  return gameNow + expiryDays * 24 * 3600;
 }
 
 async function cleanupExpiredMarketListings(options = {}) {
@@ -18336,7 +18337,8 @@ async function marketListings(payload = {}) {
       coalesce(a.class, ''),
       coalesce(o.owner_id::text, ''),
       coalesce(o.expiration_time::text, ''),
-      coalesce(o.item_id::text, '')
+      coalesce(o.item_id::text, ''),
+      (a.owner_account_id is not null)::text
     from dune.dune_exchange_orders o
     join dune.dune_exchange_sell_orders s on s.order_id = o.id
     join dune.items i on i.id = o.item_id
@@ -18348,7 +18350,7 @@ async function marketListings(payload = {}) {
   `;
   const catalog = gearCatalog();
   const byId = new Map(catalog.map((item) => [item.id, item]));
-  const rows = parseDbRows(await dbQuery(sql, 20000), ["orderId", "exchangeName", "template", "stackSize", "quality", "price", "initialStackSize", "normalizedPrice", "isNpcOrder", "ownerClass", "ownerId", "expirationTime", "itemId"]);
+  const rows = parseDbRows(await dbQuery(sql, 20000), ["orderId", "exchangeName", "template", "stackSize", "quality", "price", "initialStackSize", "normalizedPrice", "isNpcOrder", "ownerClass", "ownerId", "expirationTime", "itemId", "playerOwned"]);
   const listings = rows.map((row) => {
     const item = byId.get(row.template);
     const quality = Number(row.quality || 0) || 0;
@@ -18369,6 +18371,7 @@ async function marketListings(payload = {}) {
       price: Number(row.price || row.normalizedPrice || 0) || 0,
       initialStackSize: Number(row.initialStackSize || row.stackSize || 0) || 0,
       isNpcOrder: row.isNpcOrder === "t" || row.isNpcOrder === "true",
+      playerOwned: row.playerOwned === "t" || row.playerOwned === "true",
       ownerClass: row.ownerClass || "",
       ownerId: row.ownerId,
       expirationTime: row.expirationTime
@@ -18377,158 +18380,52 @@ async function marketListings(payload = {}) {
   return { ok: true, listings, count: listings.length, gameNow, expiredCleanup, durationMs: Date.now() - started };
 }
 
-async function buyMarketListingAsAdmin(orderIdValue) {
-  throw new Error("Legacy automated buying is disabled. Configure the persistent Market Bot player buyer instead.");
-  /*
+const marketPurchasePreviews = new Map();
+const MARKET_PURCHASE_PREVIEW_TTL_MS = 5 * 60 * 1000;
+function marketPurchaseTargetKey(target) {
+  return JSON.stringify([target.namespace, target.dbPod, target.dbSvc]);
+}
+
+async function previewMarketListingPurchase(orderIdValue) {
+  const orderId = MarketManualPurchase.positiveId(orderIdValue);
+  for (const [id, preview] of marketPurchasePreviews) if (Date.now() > preview.expiresAt) marketPurchasePreviews.delete(id);
+  if (marketPurchasePreviews.size >= 100) throw new Error("Too many pending purchase previews. Wait for existing previews to expire.");
+  const target = await cachedDatabaseRuntimeTarget();
+  const output = await dbQuery(MarketManualPurchase.buildInspectSql(orderId), 12000, target);
+  if (!output.trim()) throw new Error("Listing is unavailable, expired, or not an eligible player listing; the server game clock must also be available.");
+  const expected = JSON.parse(output.trim());
+  const previewId = crypto.randomUUID();
+  const expiresAt = Date.now() + MARKET_PURCHASE_PREVIEW_TTL_MS;
+  marketPurchasePreviews.set(previewId, { expected, targetKey: marketPurchaseTargetKey(target), expiresAt });
+  return { ok: true, previewId, expiresAt, ...expected, itemName: gearCatalog().find(item => item.id === expected.template)?.name || expected.template };
+}
+
+async function buyMarketListingAsAdmin(orderIdValue, payload = {}) {
+  const orderId = MarketManualPurchase.positiveId(orderIdValue);
+  if (payload.confirmText !== MarketManualPurchase.CONFIRM_TEXT) throw new Error("Explicit Buy & Pay confirmation is required.");
+  const preview = marketPurchasePreviews.get(String(payload.previewId || ""));
+  if (!preview || preview.expected.orderId !== orderId) throw new Error("Generate a fresh purchase preview first.");
+  if (Date.now() > preview.expiresAt) {
+    marketPurchasePreviews.delete(payload.previewId);
+    throw new Error("Purchase preview expired. Refresh and confirm again.");
+  }
+  const target = await cachedDatabaseRuntimeTarget();
+  if (marketPurchaseTargetKey(target) !== preview.targetKey) throw new Error("Selected database changed. Generate a new purchase preview.");
+  // Consume before any write: double-clicks and ambiguous network retries cannot reuse this approval.
+  if (marketPurchasePreviews.get(payload.previewId) !== preview) throw new Error("This purchase is already being processed.");
+  marketPurchasePreviews.delete(payload.previewId);
   const started = Date.now();
-  const orderId = requireInteger(orderIdValue, "order id", 1, 999999999999);
-  const expiryTime = await marketListingExpiryTime(14);
-  const sql = `
-    with target as materialized (
-      select
-        o.id as order_id,
-        o.exchange_id,
-        coalesce(o.access_point_id, 1) as access_point_id,
-        o.owner_id as seller_actor_id,
-        o.template_id,
-        o.item_id,
-        o.item_price,
-        coalesce(i.stack_size, s.initial_stack_size, 1) as stack_size,
-        coalesce(o.quality_level, 0) as quality_level
-      from dune.dune_exchange_orders o
-      join dune.dune_exchange_sell_orders s on s.order_id = o.id
-      left join dune.items i on i.id = o.item_id
-      where o.id = ${orderId}
-        and o.is_npc_order = false
-      limit 1
-    ),
-    selected_partition as (
-      select partition_id
-      from dune.world_partition
-      order by partition_id
-      limit 1
-    ),
-    existing_actor as (
-      select id
-      from dune.actors
-      where class = 'AlphaNineMarket'
-      order by id
-      limit 1
-    ),
-    created_actor as (
-      insert into dune.actors (class, serial, gas_attributes, properties, dimension_index, partition_id)
-      select 'AlphaNineMarket', 0, '{}', '{}', 0, (select partition_id from selected_partition)
-      where exists (select 1 from target)
-        and not exists (select 1 from existing_actor)
-      returning id
-    ),
-    market_actor as (
-      select id from existing_actor
-      union all
-      select id from created_actor
-      limit 1
-    ),
-    exchange_user as (
-      insert into dune.dune_exchange_users (owner_id)
-      select id from market_actor
-      where exists (select 1 from target)
-      on conflict do nothing
-      returning id as user_id
-    ),
-    market_user as (
-      select user_id from exchange_user
-      union all
-      select id as user_id
-      from dune.dune_exchange_users
-      where owner_id = (select id from market_actor)
-      limit 1
-    ),
-    payment_order as (
-      insert into dune.dune_exchange_orders
-        (exchange_id, access_point_id, owner_id, template_id, expiration_time,
-         durability_cur, durability_max, item_price, category_mask, category_depth, is_npc_order)
-      select
-        exchange_id,
-        access_point_id,
-        seller_actor_id,
-        template_id,
-        ${expiryTime},
-        1.0,
-        1.0,
-        item_price * stack_size,
-        0,
-        0,
-        false
-      from target
-      returning id
-    ),
-    fulfilled as (
-      insert into dune.dune_exchange_fulfilled_orders
-        (order_id, source_order_id, completion_type, stack_size, original_order_id)
-      select
-        (select id from payment_order),
-        null,
-        4,
-        stack_size,
-        order_id
-      from target
-      returning order_id
-    ),
-    buyer_debit as (
-      update dune.dune_exchange_users
-      set solari_balance = solari_balance - (select item_price * stack_size from target)
-      where id = (select user_id from market_user)
-      returning owner_id, id as user_id
-    ),
-    deleted_sell as (
-      delete from dune.dune_exchange_sell_orders
-      where order_id = (select order_id from target)
-      returning order_id
-    ),
-    deleted_order as (
-      delete from dune.dune_exchange_orders
-      where id = (select order_id from target)
-      returning id
-    ),
-    deleted_item as (
-      delete from dune.items
-      where id = (select item_id from target)
-        and (select item_id from target) is not null
-      returning id
-    )
-    select
-      coalesce((select order_id::text from target), ''),
-      coalesce((select template_id from target), ''),
-      coalesce((select seller_actor_id::text from target), ''),
-      coalesce((select item_price::text from target), ''),
-      coalesce((select stack_size::text from target), ''),
-      coalesce((select (item_price * stack_size)::text from target), ''),
-      coalesce((select id::text from payment_order), ''),
-      coalesce((select owner_id::text from buyer_debit), ''),
-      coalesce((select user_id::text from buyer_debit), ''),
-      coalesce((select id::text from deleted_item), '')
-  `;
-  const row = parseDbRows(await dbQuery(sql, 45000), ["orderId", "template", "sellerActorId", "price", "stackSize", "totalPaid", "paymentOrderId", "buyerActorId", "buyerExchangeUserId", "deletedItemId"])[0] || {};
-  if (!row.orderId) throw new Error(`Player market listing ${orderId} was not found or is not a player sell listing.`);
-  const result = {
-    ok: true,
-    status: "bought",
-    orderId,
-    template: row.template,
-    sellerActorId: row.sellerActorId,
-    price: Number(row.price || 0) || 0,
-    stackSize: Number(row.stackSize || 0) || 0,
-    totalPaid: Number(row.totalPaid || 0) || 0,
-    paymentOrderId: row.paymentOrderId,
-    buyerActorId: row.buyerActorId,
-    buyerExchangeUserId: row.buyerExchangeUserId,
-    deletedItemId: row.deletedItemId,
-    durationMs: Date.now() - started,
-    message: `Bought player listing ${orderId} and created seller payout for ${row.totalPaid || 0} Solari.`
-  };
-  appendAdminAudit("market_listing_bought_by_admin", result);
-  return result;
-  */
+  try {
+    const output = await dbQuery(MarketManualPurchase.buildApplySql(preview.expected), 30000, target);
+    const receipt = MarketManualPurchase.parseReceipt(output);
+    const result = { ok: true, status: "bought", ...receipt, durationMs: Date.now() - started,
+      message: "Bought listing " + orderId + ". Seller can claim " + receipt.totalPaid + " Solari in the game Exchange. The listed item was removed." };
+    appendAdminAudit("market_listing_bought_by_admin", result);
+    return result;
+  } catch (error) {
+    appendAdminAudit("market_listing_admin_purchase_failed", { orderId, error: error.message });
+    throw error;
+  }
 }
 
 async function removeMarketListingAsAdmin(orderIdValue) {
@@ -23748,7 +23645,7 @@ function appPage() {
         <div class="panel-head">
           <div>
             <div class="label">Live In-Game Market Listings</div>
-            <div class="subtle">Read-only tracking of current Exchange sell orders from the live game database.</div>
+            <div class="subtle">Current Exchange sell orders from the live game database. Buy &amp; Pay purchases the full player stack with admin funding; the seller claims Solari in-game and the item is removed, not delivered to you.</div>
           </div>
           <button type="button" onclick="refreshMarketListings()">Refresh Listings</button>
         </div>
@@ -23758,6 +23655,7 @@ function appPage() {
         </div>
         <div id="marketListingsSummary" class="subtle mt">Live listings have not been loaded.</div>
         <div id="marketListings" class="mt"><div class="empty">Open Market Automation or click Refresh Listings to load the live market.</div></div>
+        <div id="marketManualPurchaseLog" class="subtle mt" role="status"></div>
       </div>
       <details class="panel pad mt">
         <summary>Legacy Market Automator migration</summary>
@@ -26225,10 +26123,38 @@ async function refreshMarketStatus(){const status=document.getElementById("marke
 function syncMarketListingSelection(){const el=document.getElementById("marketListingsSelection");if(el)el.textContent=selectedMarketListingIds.size+" selected.";}
 function toggleMarketListingSelection(orderId,checked){orderId=Number(orderId)||0;if(!orderId)return;if(checked)selectedMarketListingIds.add(orderId);else selectedMarketListingIds.delete(orderId);syncMarketListingSelection();}
 function formatMarketListingExpiry(expirationTime,gameNow){const expiry=Number(expirationTime||0);const now=Number(gameNow||0);if(!Number.isFinite(expiry)||expiry<=0)return{label:"No expiration",detail:"No valid game-clock expiry",expired:true};if(!Number.isFinite(now)||now<=0)return{label:"Expiry unavailable",detail:"Game time "+Math.floor(expiry).toLocaleString(),expired:false};const remaining=Math.floor(expiry-now);if(remaining<=0)return{label:"Expired",detail:"0 seconds remaining",expired:true};const days=Math.floor(remaining/86400);const hours=Math.floor((remaining%86400)/3600);const minutes=Math.max(1,Math.floor((remaining%3600)/60));const label=days>0?(days+"d "+hours+"h remaining"):(hours>0?(hours+"h "+minutes+"m remaining"):(minutes+"m remaining"));return{label,detail:"Game expiry "+Math.floor(expiry).toLocaleString(),expired:false};}
-function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[],gameNow=Number(data?.gameNow||0),summary=document.getElementById("marketListingsSummary");marketListingRows=listings;if(summary)summary.textContent="Showing "+listings.length+" live listing(s) · updated "+new Date().toLocaleTimeString()+".";const header='<div class="market-listing-header tracking-only"><span>Item</span><span>Grade</span><span>Tier</span><span>Stack</span><span>Seller / Type</span><span>Price</span><span>Expiration</span></div>';const rows=listings.map(row=>{const grade=row.gradeLabel||("Grade "+(row.quality||0)),tier=row.tier||"--",owner=row.ownerClass||("Owner "+(row.ownerId||"-")),type=row.isNpcOrder?"NPC / bot":"Player listing",expiry=formatMarketListingExpiry(row.expirationTime,gameNow);return '<div class="market-listing-row tracking-only"><div class="market-listing-cell market-listing-item"><strong>'+esc(row.name||row.template)+'</strong><span class="subtle env-path-value">'+esc(row.template)+'</span><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+(row.category?' / '+esc(row.category):'')+'</span></div><div class="market-listing-cell"><span class="item-grade-badge">'+esc(grade)+'</span></div><div class="market-listing-cell"><strong>'+esc(tier)+'</strong></div><div class="market-listing-cell"><strong>'+esc(row.stackSize||row.initialStackSize||0)+'</strong></div><div class="market-listing-cell"><strong>'+esc(owner)+'</strong><span class="subtle">'+esc(type)+'</span></div><div class="market-listing-cell"><strong class="market-listing-price">'+esc(row.price)+' Solari</strong></div><div class="market-listing-cell market-listing-expiry '+(expiry.expired?'expired':'')+'"><strong>'+esc(expiry.label)+'</strong><span class="subtle">'+esc(expiry.detail)+'</span></div></div>';}).join('');wrap.innerHTML=listings.length?'<div class="market-listing-grid tracking-only">'+header+rows+'</div>':'<div class="empty">No live market listings found.</div>';}
+const marketManualPurchasesBusy=new Set();
+function marketListingPurchaseAction(row,gameNow){
+  if(row.isNpcOrder||row.playerOwned!==true||Number(gameNow)<=0||Number(row.expirationTime)<=Number(gameNow)||Number(row.price)<=0||Number(row.stackSize)<=0||Number(row.price)*Number(row.stackSize)>999999999)return "";
+  return '<span class="market-listing-actions"><button type="button" data-market-buy="'+esc(row.orderId)+'" '+(marketManualPurchasesBusy.has(String(row.orderId))?'disabled':'')+'>Buy &amp; Pay</button></span>';
+}
+function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[],gameNow=Number(data?.gameNow||0),summary=document.getElementById("marketListingsSummary");marketListingRows=listings;if(summary)summary.textContent="Showing "+listings.length+" live listing(s) · updated "+new Date().toLocaleTimeString()+".";const header='<div class="market-listing-header tracking-only"><span>Item</span><span>Grade</span><span>Tier</span><span>Stack</span><span>Seller / Type</span><span>Price</span><span>Expiration</span></div>';const rows=listings.map(row=>{const grade=row.gradeLabel||("Grade "+(row.quality||0)),tier=row.tier||"--",owner=row.ownerClass||("Owner "+(row.ownerId||"-")),type=row.isNpcOrder?"NPC / bot":"Player listing",expiry=formatMarketListingExpiry(row.expirationTime,gameNow);return '<div class="market-listing-row tracking-only"><div class="market-listing-cell market-listing-item"><strong>'+esc(row.name||row.template)+'</strong><span class="subtle env-path-value">'+esc(row.template)+'</span><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+(row.category?' / '+esc(row.category):'')+'</span></div><div class="market-listing-cell"><span class="item-grade-badge">'+esc(grade)+'</span></div><div class="market-listing-cell"><strong>'+esc(tier)+'</strong></div><div class="market-listing-cell"><strong>'+esc(row.stackSize||row.initialStackSize||0)+'</strong></div><div class="market-listing-cell"><strong>'+esc(owner)+'</strong><span class="subtle">'+esc(type)+'</span></div><div class="market-listing-cell"><strong class="market-listing-price">'+esc(row.price)+' Solari</strong></div><div class="market-listing-cell market-listing-expiry '+(expiry.expired?'expired':'')+'"><strong>'+esc(expiry.label)+'</strong><span class="subtle">'+esc(expiry.detail)+'</span>'+marketListingPurchaseAction(row,gameNow)+'</div></div>';}).join('');wrap.innerHTML=listings.length?'<div class="market-listing-grid tracking-only">'+header+rows+'</div>':'<div class="empty">No live market listings found.</div>';wrap.querySelectorAll('[data-market-buy]').forEach(button=>button.addEventListener('click',()=>buyMarketListing(button.dataset.marketBuy)));}
 async function refreshMarketListings(){const wrap=document.getElementById("marketListings"),summary=document.getElementById("marketListingsSummary");try{if(wrap)wrap.innerHTML='<div class="warning">Loading live market listings...</div>';if(summary)summary.textContent="Refreshing the live game market...";const q=document.getElementById("marketListingsSearch")?.value||"",limit=document.getElementById("marketListingsLimit")?.value||100,data=await getJson("/api/market/listings?limit="+encodeURIComponent(limit)+"&q="+encodeURIComponent(q),{timeoutMs:25000});renderMarketListings(data);return data;}catch(e){if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(e))+'</div>';if(summary)summary.textContent="Live market refresh failed.";return null;}}
 function refreshMarketListingsSoon(){clearTimeout(marketListingsTimer);marketListingsTimer=setTimeout(refreshMarketListings,350);}
-async function buyMarketListing(orderId){try{const ok=await appConfirm("Buy player listing","Buy player listing order "+orderId+", remove it from the market, and create the seller Solari payout?","Buy & Pay","Cancel");if(!ok)return;const data=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",timeoutMs:60000});showToast(data?.message||"Player listing bought and seller payout created.","success");await refreshMarketListings();await refreshMarketAutomator();}catch(e){showToast(betterError(e),"error");}}
+async function buyMarketListing(orderId){
+  orderId=String(orderId);
+  if(marketManualPurchasesBusy.has(orderId))return;
+  marketManualPurchasesBusy.add(orderId);
+  document.querySelectorAll("[data-market-buy]").forEach(button=>{if(button.dataset.marketBuy===orderId)button.disabled=true;});
+  try{
+    setText("marketManualPurchaseLog","Checking the selected player listing...");
+    const preview=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/purchase-preview",{timeoutMs:20000});
+    const message=preview.itemName+" × "+preview.stackSize+"\\nUnit price: "+Number(preview.unitPrice).toLocaleString()+" Solari\\nTotal seller payout: "+Number(preview.totalPaid).toLocaleString()+" Solari\\nSeller actor: "+preview.sellerActorId+" / Order "+orderId+"\\n\\nAdmin-funded purchase of the full stack. The seller claims payment in the game Exchange. The item is removed permanently and is NOT delivered to you.";
+    const confirmed=await appConfirm("Buy & Pay — Player Listing",message,"Buy & Pay","Cancel");
+    if(!confirmed){setText("marketManualPurchaseLog","Purchase cancelled. No changes made.");return;}
+    const data=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:preview.previewId,confirmText:"BUY AND PAY"}),timeoutMs:45000});
+    setText("marketManualPurchaseLog",data.message+" Payment receipt: "+data.paymentOrderId+".");
+    addActivity("market","Player listing purchased",data.message);
+    showToast("Purchased — seller payout created","success");
+    await refreshMarketListings();
+  }catch(error){
+    setText("marketManualPurchaseLog",betterError(error)+" Refresh listings and check seller claims before retrying if the connection was interrupted.");
+    showToast(betterError(error),"error");
+  }finally{
+    marketManualPurchasesBusy.delete(orderId);
+    document.querySelectorAll("[data-market-buy]").forEach(button=>{if(button.dataset.marketBuy===orderId)button.disabled=false;});
+  }
+}
 async function removeMarketListing(orderId){try{const ok=await appConfirm("Remove market listing","Remove selected listing order "+orderId+" from the market? This does not create a seller payout.","Remove","Cancel");if(!ok)return;await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/remove",{method:"POST",timeoutMs:60000});showToast("Listing removed.","success");await refreshMarketListings();await refreshMarketAutomator();}catch(e){showToast(betterError(e),"error");}}
 function selectVisibleNpcMarketListings(){for(const row of marketListingRows){const id=Number(row.orderId)||0;if(id)selectedMarketListingIds.add(id);}renderMarketListings({listings:marketListingRows});}
 function clearSelectedMarketListings(){selectedMarketListingIds.clear();renderMarketListings({listings:marketListingRows});}
@@ -26377,6 +26303,7 @@ const STARTUP_TASKS=[
   {key:"maps",label:"Maps",detail:"Loading map deployments.",run:refreshMaps},
   {key:"admin",label:"Players / Items",detail:"Loading players, item catalog, and admin capabilities.",run:refreshAdmin},
   {key:"feed",label:"Player Feed",detail:"Loading live player feed.",run:refreshPlayerFeed},
+  {key:"market",label:"Market Clock",detail:"Fetching server game time and current market listings.",run:refreshMarketListings},
   {key:"receiver",label:"Receiver",detail:"Checking live receiver and give transport.",run:refreshReceiverStatus}
 ];
 function mountStartupProgressPopup(){const overlay=document.getElementById("startupProgressOverlay");const panel=document.getElementById("startupProgress");if(!overlay||!panel)return{overlay,panel};if(overlay.parentElement!==document.body)document.body.appendChild(overlay);Object.assign(overlay.style,{position:"fixed",inset:"0",zIndex:"9999",display:startupProgressState?.hidden?"none":"grid",placeItems:"center",padding:"18px",background:"rgba(8,6,4,.52)",backdropFilter:"blur(8px)"});Object.assign(panel.style,{width:"min(560px, calc(100vw - 36px))",maxWidth:"100%",margin:"0"});return{overlay,panel};}
@@ -26385,7 +26312,7 @@ function updateStartupTask(key,status,message){if(!startupProgressState)return;c
 function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>resolve({timedOut:true,label}),ms));}
 async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
 async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
-function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
+function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();refreshMarketListings();}
 renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadDashboardHeroCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
@@ -28387,10 +28314,17 @@ async function route(req, res) {
     return;
   }
   {
+    const purchasePreviewMatch = url.pathname.match(/^\/api\/market\/listing\/(\d+)\/purchase-preview$/);
+    if (purchasePreviewMatch && req.method === "GET") {
+      try { await json(res, await previewMarketListingPurchase(purchasePreviewMatch[1])); }
+      catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+      return;
+    }
     const buyMatch = url.pathname.match(/^\/api\/market\/listing\/(\d+)\/buy$/);
     if (buyMatch && req.method === "POST") {
       try {
-        await json(res, await buyMarketListingAsAdmin(buyMatch[1]));
+        const payload = JSON.parse(await readBody(req) || "{}");
+        await json(res, await buyMarketListingAsAdmin(buyMatch[1], payload));
       } catch (err) {
         await json(res, { ok: false, error: err.message }, 500);
       }

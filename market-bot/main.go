@@ -1180,25 +1180,21 @@ selected_access_point as (
 farm_clock as (
   select floor(
            extract(epoch from ((clock_timestamp() at time zone 'UTC') - universe_time_timestamp))
-           + coalesce(down_time_accumulation,0)::numeric/1000000
          )::bigint farm_now
   from dune.farm_variables
   where one_row=true and universe_time_timestamp is not null
   limit 1
 ),
-database_clock as (
-  select floor(extract(epoch from clock_timestamp()))::bigint database_now
-),
 game_clock as (
   select case
            when coalesce(f.farm_now,0)>0 then f.farm_now
-           else d.database_now
+           else 0
          end game_now,
          case
            when coalesce(f.farm_now,0)>0 then 'farm-variables'
-           else 'database-clock'
+           else 'unavailable'
          end clock_source
-  from database_clock d left join farm_clock f on true
+  from (select 1) anchor left join farm_clock f on true
 ),
 bot_actor as (
   select id from dune.actors
@@ -1357,25 +1353,21 @@ selected_access_point as (
 farm_clock as (
   select floor(
            extract(epoch from ((clock_timestamp() at time zone 'UTC') - universe_time_timestamp))
-           + coalesce(down_time_accumulation,0)::numeric/1000000
          )::bigint farm_now
   from dune.farm_variables
   where one_row=true and universe_time_timestamp is not null
   limit 1
 ),
-database_clock as (
-  select floor(extract(epoch from clock_timestamp()))::bigint database_now
-),
 game_clock as (
   select case
            when coalesce(f.farm_now,0)>0 then f.farm_now
-           else d.database_now
+           else 0
          end game_now,
          case
            when coalesce(f.farm_now,0)>0 then 'farm-variables'
-           else 'database-clock'
+           else 'unavailable'
          end clock_source
-  from database_clock d left join farm_clock f on true
+  from (select 1) anchor left join farm_clock f on true
 ),
 bot_actor as (
   select id from dune.actors

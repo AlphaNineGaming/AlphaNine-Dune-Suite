@@ -29,6 +29,17 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.2.9 — server clock and manual player purchases
+
+- Fetch market game time from the connected database at Suite startup and on every listing refresh, with no extra downtime adjustment or Unix-clock fallback.
+- Correct the falsely shortened 14-day countdown and false expired status on active player listings.
+- Show expiry as unavailable when the server clock cannot be read, and block listing creation until it is available.
+- Market Bot runtime 1.0.102 uses the same corrected clock and waits without trading when it is unavailable. Existing expiration records are not rewritten.
+- Added **Buy & Pay** on eligible player listings in Market Automation. The local Suite user or remote Owner can purchase the entire stack with admin funding; no player buyer wallet is charged and Market Bot need not be running.
+- The confirmation shows the item, quantity, unit price, total payout, and seller actor ID. The seller claims the normal Solari payout in the game Exchange; the item is removed permanently, not delivered to the Suite user.
+- Purchases require a fresh five-minute preview bound to the selected database. NPC, expired, changed, empty, and already-purchased listings are rejected. The Suite caps a purchase at 999,999,999 Solari.
+- Seller payout and item/order removal occur atomically. Row locks and one-use approvals protect against duplicate clicks; failures roll back the transaction. No standalone removal button is enabled.
+
 ### 1.2.8
 
 - Added an experimental Dungeon Difficulty Unlocks panel under Progression.

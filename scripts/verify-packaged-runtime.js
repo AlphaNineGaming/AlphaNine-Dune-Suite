@@ -51,6 +51,7 @@ const requiredRuntimeFiles = [
   "lib/experimental-resource-areas.js",
   "lib/give-item-durability.js",
   "lib/dungeon-difficulty.js",
+  "lib/market-manual-purchase.js",
   "lib/installed-game-dungeon-catalog.js",
   "data/dune-resource-spawn-locations.json",
   "electron/main.js",
@@ -68,6 +69,7 @@ const requiredRuntimeFiles = [
   "scripts/test-vm-scheduler.js",
   "scripts/test-give-item-durability.js",
   "scripts/test-dungeon-difficulty.js",
+  "scripts/test-market-manual-purchase.js",
   "scripts/test-installed-game-dungeon-catalog.js",
   `RELEASE_NOTES_${rootPackage.version}.md`
 ];

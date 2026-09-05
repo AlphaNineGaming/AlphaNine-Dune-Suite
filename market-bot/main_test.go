@@ -151,6 +151,31 @@ func TestCanonicalConfigFingerprintMatchesSuiteGolden(t *testing.T) {
 	}
 }
 
+func TestMarketClockUsesServerEpochAndFailsClosed(t *testing.T) {
+	for _, execute := range []bool{false, true} {
+		sql := reconciliationSQL(testConfig(), "clock-test", execute)
+		start := strings.Index(sql, "farm_clock as (")
+		end := strings.Index(sql[start:], "bot_actor as (") + start
+		clock := sql[start:end]
+		for _, forbidden := range []string{"down_time_accumulation", "database_clock", "extract(epoch from clock_timestamp())"} {
+			if strings.Contains(clock, forbidden) {
+				t.Fatalf("execute=%v: clock contains %q", execute, forbidden)
+			}
+		}
+		for _, expected := range []string{"(clock_timestamp() at time zone 'UTC') - universe_time_timestamp", "else 0", "else 'unavailable'", "from (select 1) anchor left join farm_clock f on true"} {
+			if !strings.Contains(clock, expected) {
+				t.Fatalf("execute=%v: clock missing %q", execute, expected)
+			}
+		}
+		if !strings.Contains(sql, "when (select game_now from game_clock)<=0 then 'waiting'") {
+			t.Fatal("missing-clock cycles must wait")
+		}
+		if execute && !strings.Contains(sql, "e.inventory_id is not null and g.game_now>0") {
+			t.Fatal("the write gate must require an available server game clock")
+		}
+	}
+}
+
 func TestPreviewUsesReadOnlyProductionPlanner(t *testing.T) {
 	sql := reconciliationSQL(testConfig(), "preview-test", false)
 	for _, expected := range []string{
@@ -159,10 +184,8 @@ func TestPreviewUsesReadOnlyProductionPlanner(t *testing.T) {
 		"target_count-coalesce(a.active,0)",
 		"from dune.farm_variables",
 		"universe_time_timestamp",
-		"coalesce(down_time_accumulation,0)::numeric/1000000",
 		"'farm-variables'",
-		"extract(epoch from clock_timestamp())",
-		"'database-clock'",
+		"'unavailable'",
 		"'clockSource'",
 		"'warning','Only category-verified listings count as active",
 		"o.category_mask>0 and o.category_depth>0",
@@ -188,9 +211,8 @@ func TestExecuteIsOwnedLockedAndIdempotent(t *testing.T) {
 		"class='Duke' and owner_account_id is null",
 		"from dune.farm_variables",
 		"universe_time_timestamp",
-		"coalesce(down_time_accumulation,0)::numeric/1000000",
 		"'farm-variables'",
-		"extract(epoch from clock_timestamp())",
+		"'unavailable'",
 		"from public.alphanine_market_bot_listings",
 		"o.is_npc_order=true",
 		"insert into dune.items",

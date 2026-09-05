@@ -50,6 +50,8 @@ const requiredRuntimeFiles = [
   "lib/teleport-request-mode.js",
   "lib/experimental-resource-areas.js",
   "lib/give-item-durability.js",
+  "lib/dungeon-difficulty.js",
+  "lib/installed-game-dungeon-catalog.js",
   "data/dune-resource-spawn-locations.json",
   "electron/main.js",
   "scripts/test-live-map-resources.js",
@@ -65,6 +67,8 @@ const requiredRuntimeFiles = [
   "scripts/test-server-health.js",
   "scripts/test-vm-scheduler.js",
   "scripts/test-give-item-durability.js",
+  "scripts/test-dungeon-difficulty.js",
+  "scripts/test-installed-game-dungeon-catalog.js",
   `RELEASE_NOTES_${rootPackage.version}.md`
 ];
 const missing = requiredRuntimeFiles.filter((entry) => !packaged.has(entry));
@@ -110,6 +114,14 @@ const packagedServerUpdate = asar.extractFile(archive, "lib/server-update.js").t
 const packagedServerHealth = asar.extractFile(archive, "lib/server-health.js").toString("utf8");
 const packagedBattlegroupControl = asar.extractFile(archive, "lib/battlegroup-control.js").toString("utf8");
 const packagedExperimentalResources = asar.extractFile(archive, "lib/experimental-resource-areas.js").toString("utf8");
+const packagedDungeonDifficulty = asar.extractFile(archive, "lib/dungeon-difficulty.js").toString("utf8");
+if (!packagedDungeonDifficulty.includes("record_dungeon_completion") || !packagedDungeonDifficulty.includes("snapshotFingerprint")) {
+  throw new Error("Packaged experimental dungeon difficulty module is incomplete.");
+}
+const packagedDungeonCatalog = asar.extractFile(archive, "lib/installed-game-dungeon-catalog.js").toString("utf8");
+if (!packagedDungeonCatalog.includes("Dungeons.pak") || !packagedDungeonCatalog.includes("DungeonDataAsset")) {
+  throw new Error("Packaged installed-game dungeon scanner is incomplete.");
+}
 if (/https?:\/\//i.test(packagedExperimentalResources)) {
   throw new Error("Packaged Experimental Resource Areas code contains an external URL.");
 }

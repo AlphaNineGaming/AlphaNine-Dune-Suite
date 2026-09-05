@@ -25,8 +25,22 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - Diagnostics tab with log viewer
 - Settings export and import
 - GitHub update check
+- Experimental guarded dungeon difficulty unlock editor with player-offline enforcement, exact dungeon ID discovery, verified full backups, stale-preview detection, shared-party preservation, and post-write verification
 
 ## Release Notes
+
+### 1.2.8
+
+- Added an experimental Dungeon Difficulty Unlocks panel under Progression.
+- Reworked Progression Inspector into four focused choices: Progression, Skills, House Scrip, and Dungeon Difficulties. Only the selected editor is displayed.
+- Added an experimental installed-game dungeon scanner that reads production `DungeonDataAsset` identifiers directly from the local `Dungeons.pak`.
+- The scanner discovers the five numbered laboratory dungeons and the Pit without requiring any player to finish them first, while excluding demo assets.
+- Scanner results show whether an ID is confirmed by existing server history or is currently supported only by the installed game asset.
+- Server owners can inspect a player's saved dungeon completions and test a maximum selectable difficulty from 3 through 30. Game-asset-only IDs are experimental candidates, not confirmed database mappings; 30 is the Suite's test limit, not a verified game maximum.
+- Every preview requires the player to be offline and creates a verified full database backup plus an exact affected-row snapshot before Apply is enabled.
+- Applies are confirmation-gated, transactional, reject stale previews, preserve other party members' completion links, and verify the resulting highest completion.
+- The panel warns that the edit changes completion history, can create synthetic best-run statistics, does not grant loot, and does not select the active run.
+- See [the 1.2.8 release guide](RELEASE_NOTES_1.2.8.md) for setup, examples, safeguards, and in-game testing limits.
 
 ### 1.2.7
 

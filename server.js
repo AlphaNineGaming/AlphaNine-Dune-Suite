@@ -23,6 +23,7 @@ const { buildMaintenanceTransport, validateRemoteEvidence: validateRemoteMainten
 const Coordinates = require("./assets/coordinate-system");
 const ExperimentalResourceAreas = require("./lib/experimental-resource-areas");
 const { generateInstalledGameItemCatalog } = require("./lib/installed-game-item-catalog");
+const { scanInstalledGameDungeons } = require("./lib/installed-game-dungeon-catalog");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError, operationsConflict } = require("./lib/operations");
@@ -92,6 +93,7 @@ const {
 } = require("./lib/server-update");
 const { createBlueprintService } = require("./lib/blueprints");
 const { createDatabaseBrowser } = require("./lib/database-browser");
+const DungeonDifficulty = require("./lib/dungeon-difficulty");
 const { USER_GAME_SETTINGS_SCHEMA, parseUserGameIni, updateUserGameIni } = require("./lib/user-game-settings");
 const { createMarketAutomator } = require("./lib/market-automator");
 const {
@@ -12759,6 +12761,9 @@ async function progressionTechKnowledgeScan(actorIds) {
 
 const progressionPreviews = new Map();
 const PROGRESSION_CONFIRM_TEXT = "APPLY PROGRESSION";
+const dungeonDifficultyPreviews = new Map();
+const DUNGEON_DIFFICULTY_CONFIRM_TEXT = "APPLY DUNGEON EXPERIMENT";
+const DUNGEON_DIFFICULTY_PREVIEW_TTL_MS = 15 * 60 * 1000;
 const landsraadWeeklyPatchPreviews = new Map();
 const LANDSRAAD_WEEKLY_CONFIRM_TEXT = "APPLY LANDSRAAD";
 const landsraadTierPreviews = new Map();
@@ -16698,6 +16703,224 @@ function playerInventoryTargetCtes(playerRefValue) {
       select * from fallback_player_inventory
       limit 1
     )`;
+}
+
+async function dungeonDifficultySchemaInspect() {
+  const output = await dbQuery(`
+    select 'column', table_name, column_name
+    from information_schema.columns
+    where table_schema = 'dune'
+      and table_name in ('dungeon_completion', 'dungeon_completion_players')
+    union all
+    select 'function', p.proname, pg_get_function_identity_arguments(p.oid)
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'dune'
+      and p.proname = 'record_dungeon_completion'
+    order by 1, 2, 3;
+  `, 12000);
+  const rows = parseDbRows(output, ["kind", "name", "detail"]);
+  const columns = new Set(rows.filter((row) => row.kind === "column").map((row) => `${row.name}.${row.detail}`));
+  const functions = rows.filter((row) => row.kind === "function");
+  const requiredColumns = [
+    "dungeon_completion.completion_id", "dungeon_completion.dungeon_id", "dungeon_completion.difficulty",
+    "dungeon_completion.duration_ms", "dungeon_completion.players_num",
+    "dungeon_completion_players.player_id", "dungeon_completion_players.completion_id"
+  ];
+  const functionDetected = functions.some((row) => /in_dungeon_id\s+text|text/i.test(row.detail) && /integer/i.test(row.detail) && /bigint\[\]/i.test(row.detail));
+  const missingColumns = requiredColumns.filter((column) => !columns.has(column));
+  return {
+    ok: missingColumns.length === 0 && functionDetected,
+    status: missingColumns.length === 0 && functionDetected ? "detected" : "unsupported",
+    tables: ["dune.dungeon_completion", "dune.dungeon_completion_players"],
+    missingColumns,
+    recordFunctionDetected: functionDetected,
+    functions,
+    experimentalMaximum: DungeonDifficulty.MAX_EXPERIMENTAL_DIFFICULTY
+  };
+}
+
+async function dungeonDifficultyPlayerId(playerData) {
+  const preferred = [
+    playerData?.player?.player_controller_id,
+    playerData?.player?.actor_id,
+    playerData?.player?.character_actor_id,
+    playerData?.player?.player_pawn_id
+  ].map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0);
+  const candidates = [...new Set(preferred)];
+  if (!candidates.length) throw new Error("The selected player has no usable actor id.");
+  const output = await dbQuery(`select id::text from dune.actors where id in (${candidates.join(", ")}) order by array_position(array[${candidates.join(", ")} ]::bigint[], id);`, 12000);
+  const detected = String(output || "").split(/\r?\n/).map((value) => Number(value.trim())).filter((value) => Number.isSafeInteger(value) && value > 0);
+  if (!detected.length) throw new Error("None of the selected player's resolved ids exist in dune.actors.");
+  return detected[0];
+}
+
+async function dungeonDifficultyRows(playerIdValue, dungeonIdValue = "") {
+  const playerId = DungeonDifficulty.normalizePlayerId(playerIdValue);
+  const dungeonId = String(dungeonIdValue || "").trim();
+  const sql = dungeonId ? DungeonDifficulty.buildSnapshotSql(playerId, dungeonId) : `
+    select dc.completion_id::text,
+           dc.dungeon_id,
+           dc.difficulty::text,
+           dc.duration_ms::text,
+           dc.players_num::text,
+           (select count(*) from dune.dungeon_completion_players links where links.completion_id = dc.completion_id)::text as party_links
+    from dune.dungeon_completion_players dcp
+    join dune.dungeon_completion dc on dc.completion_id = dcp.completion_id
+    where dcp.player_id = ${playerId}
+    order by dc.dungeon_id, dc.difficulty, dc.completion_id
+    limit 500;
+  `;
+  return parseDbRows(await dbQuery(sql, 20000), ["completion_id", "dungeon_id", "difficulty", "duration_ms", "players_num", "party_links"]);
+}
+
+async function dungeonDifficultyKnownDungeons() {
+  const output = await dbQuery(`
+    select dungeon_id, max(difficulty)::text, count(*)::text
+    from dune.dungeon_completion
+    group by dungeon_id
+    order by dungeon_id
+    limit 500;
+  `, 15000);
+  return parseDbRows(output, ["dungeon_id", "highest_difficulty", "completion_count"]);
+}
+
+async function dungeonDifficultyResolve(queryValue, options = {}) {
+  const query = String(queryValue || "").trim();
+  const playerData = await progressionPlayerLookup(query);
+  if (!playerData.ok) throw new Error(playerData.reason || playerData.error || "Player lookup failed.");
+  const playerOnline = String(playerData.player?.online_status || "").toLowerCase().includes("online");
+  if (options.requireOffline && playerOnline) throw new Error("Dungeon difficulty editing requires the selected player to be offline.");
+  const playerId = await dungeonDifficultyPlayerId(playerData);
+  return { query, playerData, playerId, playerOnline };
+}
+
+async function dungeonDifficultyInspect(queryValue, dungeonIdValue = "") {
+  const schema = await dungeonDifficultySchemaInspect();
+  if (!schema.ok) return { ok: false, status: "unsupported", schema, reason: "The required dungeon completion tables or record function were not detected." };
+  const resolved = await dungeonDifficultyResolve(queryValue);
+  const dungeonId = String(dungeonIdValue || "").trim();
+  if (dungeonId) DungeonDifficulty.normalizeDungeonId(dungeonId);
+  const [records, knownDungeons] = await Promise.all([
+    dungeonDifficultyRows(resolved.playerId, dungeonId),
+    dungeonDifficultyKnownDungeons()
+  ]);
+  const highestByDungeon = {};
+  for (const row of records) highestByDungeon[row.dungeon_id] = Math.max(Number(highestByDungeon[row.dungeon_id] || 0), Number(row.difficulty || 0));
+  return {
+    ok: true,
+    status: "experimental",
+    experimental: true,
+    schema,
+    player: resolved.playerData.player,
+    playerId: String(resolved.playerId),
+    playerOffline: !resolved.playerOnline,
+    dungeonId,
+    records,
+    knownDungeons,
+    highestByDungeon,
+    warning: "Experimental: this rewrites completion history used by the difficulty selector and may create synthetic best-run statistics. It does not set the active run or grant loot."
+  };
+}
+
+async function dungeonDifficultyPreview(payload = {}) {
+  const configValue = loadConfig();
+  if (!configValue.progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+  const dungeonId = DungeonDifficulty.normalizeDungeonId(payload.dungeonId);
+  const targetSelectableDifficulty = DungeonDifficulty.normalizeTargetDifficulty(payload.targetSelectableDifficulty);
+  const schema = await dungeonDifficultySchemaInspect();
+  if (!schema.ok) throw new Error("The required dungeon completion schema/function support was not detected.");
+  const resolved = await dungeonDifficultyResolve(payload.query || payload.playerId, { requireOffline: true });
+  const records = await dungeonDifficultyRows(resolved.playerId, dungeonId);
+  const plan = DungeonDifficulty.planChange(records, targetSelectableDifficulty);
+  if (!plan.changesRequired) throw new Error(`This player's saved unlock for ${dungeonId} already resolves to selectable difficulty ${targetSelectableDifficulty}.`);
+
+  const databaseBackup = await createDatabaseBackup({
+    safety: true,
+    method: "native",
+    prefix: "pre-dungeon-difficulty",
+    timeout: 240000
+  });
+  if (!databaseBackup?.ok || databaseBackup.verified !== true) throw new Error(databaseBackup?.error || "A verified full database backup could not be created; preview was cancelled.");
+
+  const previewId = crypto.randomBytes(16).toString("hex");
+  const snapshotPath = progressionBackupPath(resolved.playerId, "dungeon_difficulty", previewId);
+  const snapshot = {
+    createdAt: new Date().toISOString(),
+    experimental: true,
+    player: resolved.playerData.player,
+    playerId: String(resolved.playerId),
+    dungeonId,
+    targetSelectableDifficulty,
+    plan,
+    records,
+    databaseBackupPath: databaseBackup.localBackupPath || databaseBackup.filePath || ""
+  };
+  fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2), "utf8");
+  const preview = {
+    previewId,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + DUNGEON_DIFFICULTY_PREVIEW_TTL_MS,
+    query: resolved.query,
+    player: resolved.playerData.player,
+    playerId: resolved.playerId,
+    dungeonId,
+    targetSelectableDifficulty,
+    plan,
+    records,
+    snapshotFingerprint: DungeonDifficulty.snapshotFingerprint(records),
+    databaseBackupPath: snapshot.databaseBackupPath,
+    snapshotPath,
+    sqlPreview: DungeonDifficulty.buildApplySql({ playerId: resolved.playerId, dungeonId, targetSelectableDifficulty })
+  };
+  dungeonDifficultyPreviews.set(previewId, preview);
+  progressionAudit("dungeon_difficulty_preview_created", { experimental: true, player: preview.player, playerId: preview.playerId, dungeonId, targetSelectableDifficulty, plan, databaseBackupPath: preview.databaseBackupPath, snapshotPath });
+  return { ok: true, status: "preview", experimental: true, ...preview, auditLogPath: PROGRESSION_AUDIT_LOG, confirmText: DUNGEON_DIFFICULTY_CONFIRM_TEXT };
+}
+
+async function dungeonDifficultyApply(payload = {}) {
+  const previewId = String(payload.previewId || "").trim();
+  const preview = dungeonDifficultyPreviews.get(previewId);
+  if (!preview) throw new Error("Dungeon difficulty preview was not found. Generate a new preview and backup.");
+  if (String(payload.confirmText || "") !== DUNGEON_DIFFICULTY_CONFIRM_TEXT) throw new Error(`Type ${DUNGEON_DIFFICULTY_CONFIRM_TEXT} exactly.`);
+  if (!loadConfig().progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+  if (Date.now() > preview.expiresAt) {
+    dungeonDifficultyPreviews.delete(previewId);
+    throw new Error("Dungeon difficulty preview expired. Generate a new preview and backup.");
+  }
+  const resolved = await dungeonDifficultyResolve(preview.query, { requireOffline: true });
+  if (resolved.playerId !== preview.playerId) throw new Error("The selected player identity changed. Generate a new preview.");
+  const before = await dungeonDifficultyRows(preview.playerId, preview.dungeonId);
+  if (DungeonDifficulty.snapshotFingerprint(before) !== preview.snapshotFingerprint) throw new Error("Dungeon completion history changed after the preview. Generate a new preview and backup.");
+
+  const sql = DungeonDifficulty.buildApplySql(preview);
+  await dbQuery(sql, 30000);
+  const after = await dungeonDifficultyRows(preview.playerId, preview.dungeonId);
+  const requiredDifficulty = DungeonDifficulty.requiredCompletionDifficulty(preview.targetSelectableDifficulty);
+  const highest = after.reduce((value, row) => Math.max(value, Number(row.difficulty || 0)), 0);
+  const exactRequiredFound = requiredDifficulty === 0 ? after.length === 0 : after.some((row) => Number(row.difficulty) === requiredDifficulty);
+  if (highest !== requiredDifficulty || !exactRequiredFound) {
+    progressionAudit("dungeon_difficulty_apply_verification_failed", { experimental: true, player: preview.player, playerId: preview.playerId, dungeonId: preview.dungeonId, targetSelectableDifficulty: preview.targetSelectableDifficulty, before, after, databaseBackupPath: preview.databaseBackupPath, snapshotPath: preview.snapshotPath });
+    throw new Error("The database write completed, but dungeon difficulty read-back did not match the requested unlock. Restore the verified backup before retrying.");
+  }
+  dungeonDifficultyPreviews.delete(previewId);
+  progressionAudit("dungeon_difficulty_apply_success", { experimental: true, player: preview.player, playerId: preview.playerId, dungeonId: preview.dungeonId, targetSelectableDifficulty: preview.targetSelectableDifficulty, before, after, databaseBackupPath: preview.databaseBackupPath, snapshotPath: preview.snapshotPath });
+  return {
+    ok: true,
+    status: "applied",
+    experimental: true,
+    player: preview.player,
+    playerId: String(preview.playerId),
+    dungeonId: preview.dungeonId,
+    targetSelectableDifficulty: preview.targetSelectableDifficulty,
+    requiredCompletionDifficulty: requiredDifficulty,
+    before,
+    after,
+    databaseBackupPath: preview.databaseBackupPath,
+    snapshotPath: preview.snapshotPath,
+    auditLogPath: PROGRESSION_AUDIT_LOG,
+    warning: "Relog before testing. The in-game slider still selects the active difficulty; this edit changes only saved completion history."
+  };
 }
 
 function parsePlayerInventoryResult(output, label) {
@@ -21892,6 +22115,15 @@ function appPage() {
     .progression-meter span { display:block; height:100%; width:var(--pct,35%); background:linear-gradient(90deg, var(--sand), var(--gold-bright)); box-shadow:0 0 18px rgba(240,201,106,.22); }
     .progression-main-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(320px,.75fr); gap:var(--panel-gap); align-items:start; }
     .progression-stack { display:grid; gap:var(--panel-gap); }
+    .progression-category-picker { padding:18px; border:1px solid rgba(224,173,99,.34); border-radius:22px; background:linear-gradient(135deg, rgba(18,14,10,.94), rgba(10,8,5,.82)); }
+    .progression-category-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-top:12px; }
+    .progression-category-button { min-height:98px; display:grid; align-content:center; justify-items:start; gap:7px; padding:16px; border-radius:18px; text-align:left; }
+    .progression-category-button strong { color:var(--text); font-size:17px; }
+    .progression-category-button span { color:var(--muted); font-size:12px; line-height:1.35; }
+    .progression-category-button.active { border-color:var(--gold-bright); background:linear-gradient(135deg, rgba(214,166,69,.24), rgba(74,48,16,.35)); box-shadow:0 0 0 2px rgba(240,201,106,.12), 0 16px 36px rgba(0,0,0,.22); }
+    [data-progression-category-panel][hidden] { display:none !important; }
+    .dungeon-game-scan { border:1px solid rgba(240,201,106,.26); border-radius:16px; padding:14px; background:rgba(240,201,106,.045); }
+    .dungeon-game-scan table button { min-width:76px; }
     .progression-fold { border:1px solid rgba(224,173,99,.34); border-radius:22px; background:linear-gradient(180deg, rgba(18,14,10,.91), rgba(6,5,3,.76)); box-shadow:0 20px 60px rgba(0,0,0,.18); overflow:hidden; }
     .progression-fold > summary { list-style:none; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 18px; color:var(--text); font-size:19px; font-weight:850; }
     .progression-fold > summary::-webkit-details-marker { display:none; }
@@ -21908,7 +22140,8 @@ function appPage() {
     .progression-skill-rank { min-width:112px; }
     .progression-currency-balance { min-width:0; max-width:100%; justify-self:end; font-size:clamp(14px,1.5vw,20px); line-height:1.15; color:var(--gold-bright); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; text-align:right; }
     .progression-compact-support { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:12px; }
-    @media (max-width:1050px) { .progression-main-grid,.progression-profile-card{grid-template-columns:1fr}.progression-bars,.progression-editor-grid,.progression-compact-support{grid-template-columns:1fr}.progression-hero{align-items:flex-start;flex-direction:column}.progression-avatar{width:88px;height:88px;font-size:44px} }
+    @media (max-width:1050px) { .progression-main-grid,.progression-profile-card{grid-template-columns:1fr}.progression-category-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.progression-bars,.progression-editor-grid,.progression-compact-support{grid-template-columns:1fr}.progression-hero{align-items:flex-start;flex-direction:column}.progression-avatar{width:88px;height:88px;font-size:44px} }
+    @media (max-width:620px) { .progression-category-grid{grid-template-columns:1fr}.progression-category-button{min-height:78px} }
     .ping-graph { display:flex; align-items:end; gap:3px; min-height:70px; margin-top:10px; padding:8px; border:1px solid rgba(214,166,69,.16); background:rgba(0,0,0,.22); }
     .ping-bar { flex:1; min-width:3px; max-width:9px; height:8px; background:var(--bad); opacity:.78; }
     .ping-bar.ok { background:var(--good); }
@@ -23856,8 +24089,8 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="progression-hero">
           <div>
             <div class="kicker">Player Progression</div>
-            <h2>Progression</h2>
-            <div class="subtle">Large player identity first, then focused foldable panels for lookup, XP, skill points, and diagnostics.</div>
+            <h2>Progression Inspector</h2>
+            <div class="subtle">Load a player once, then choose the one progression tool you want to use.</div>
           </div>
           <button type="button" class="primary" onclick="refreshProgressionInspector()">Refresh Inspector</button>
         </div>
@@ -23882,6 +24115,17 @@ DUNE_RECEIVER_SSH_KEY</pre>
         </div>
 
         <div id="progressionUnavailable" class="warning hidden">Progression database unavailable</div>
+
+        <div class="progression-category-picker">
+          <div class="label">Choose a Progression Tool</div>
+          <div class="subtle">Only the selected editor opens. Player lookup stays available for every tool.</div>
+          <div class="progression-category-grid" role="tablist" aria-label="Progression tools">
+            <button type="button" class="progression-category-button active" data-progression-category="progression" role="tab" aria-selected="true" onclick="selectProgressionCategory('progression')"><strong>Progression</strong><span>XP, skill points, specialization, and reputation</span></button>
+            <button type="button" class="progression-category-button" data-progression-category="skills" role="tab" aria-selected="false" onclick="selectProgressionCategory('skills')"><strong>Skills</strong><span>Search skills and grant selected ranks</span></button>
+            <button type="button" class="progression-category-button" data-progression-category="house-scrip" role="tab" aria-selected="false" onclick="selectProgressionCategory('house-scrip')"><strong>House Scrip</strong><span>Read the balance and make a protected grant</span></button>
+            <button type="button" class="progression-category-button" data-progression-category="dungeons" role="tab" aria-selected="false" onclick="selectProgressionCategory('dungeons')"><strong>Dungeon Difficulties</strong><span>Scan game IDs and test selectable difficulty</span></button>
+          </div>
+        </div>
 
         <div class="progression-main-grid">
           <div class="progression-stack">
@@ -23916,7 +24160,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
               </div>
             </details>
 
-            <details class="progression-fold danger-zone" open>
+            <details class="progression-fold danger-zone" data-progression-category-panel="progression" open>
               <summary>Progression Editing</summary>
               <div class="progression-fold-body">
                 <div class="warning">Live progression editing can corrupt player data. Generate Preview creates a backup first, then Apply requires confirmation.</div>
@@ -23942,7 +24186,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
               </div>
             </details>
 
-            <details class="progression-fold">
+            <details class="progression-fold" data-progression-category-panel="skills" hidden>
               <summary>Skill Ranks</summary>
               <div class="progression-fold-body">
                 <div class="warning">Choose a target rank for every selected skill. Grants only raise ranks, use cumulative per-rank costs, create an automatic backup, and require the player to be offline.</div>
@@ -23967,7 +24211,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
               </div>
             </details>
 
-            <details class="progression-fold">
+            <details class="progression-fold" data-progression-category-panel="house-scrip" hidden>
               <summary>House Scrip</summary>
               <div class="progression-fold-body">
                 <div class="warning">House Scrip is virtual currency, not an inventory item. Grants create an automatic backup, use the game database adjustment function, verify the exact new balance, and require the player to be offline.</div>
@@ -23985,7 +24229,45 @@ DUNE_RECEIVER_SSH_KEY</pre>
               </div>
             </details>
 
-            <details class="progression-fold">
+            <details class="progression-fold danger-zone" data-progression-category-panel="dungeons" hidden>
+              <summary>Dungeon Difficulty Unlocks <span class="badge warn">Experimental</span></summary>
+              <div class="progression-fold-body">
+                <div class="warning"><strong>Experimental database test.</strong> This changes saved completion history, not the active dungeon run. It may create a synthetic best-run entry, does not grant loot, and requires the player to be offline. A verified full database backup is created before Apply is enabled.</div>
+                <div class="dungeon-game-scan mt">
+                  <div class="panel-head">
+                    <div><div class="label">Installed Game Dungeon IDs</div><div class="subtle">Reads production DungeonDataAsset entries directly from your local Dungeons.pak. No first completion is required.</div></div>
+                    <button type="button" onclick="scanInstalledGameDungeonIds()">Scan Installed Game</button>
+                  </div>
+                  <div id="dungeonGameScanStatus" class="empty mt">Run the installed-game scan to discover dungeon IDs without completing a dungeon.</div>
+                  <table class="mt">
+                    <thead><tr><th>Dungeon</th><th>Game Asset ID</th><th>Database Validation</th><th></th></tr></thead>
+                    <tbody id="dungeonGameScanRows"><tr><td colspan="4">No installed-game scan has run.</td></tr></tbody>
+                  </table>
+                </div>
+                <div id="dungeonDifficultyStatus" class="empty mt">Load a player to inspect dungeon completion history.</div>
+                <div class="field-grid mt">
+                  <label>Dungeon Database ID<input id="dungeonDifficultyId" list="dungeonDifficultyKnownIds" placeholder="Choose a game scan result or saved server ID" oninput="invalidateDungeonDifficultyPreview()"></label>
+                  <datalist id="dungeonDifficultyKnownIds"></datalist>
+                  <label>Maximum Selectable Difficulty<input id="dungeonDifficultyTarget" type="number" min="3" max="30" step="1" value="4" oninput="invalidateDungeonDifficultyPreview()"></label>
+                  <button type="button" onclick="refreshDungeonDifficulty()">Refresh History</button>
+                  <button type="button" onclick="previewDungeonDifficulty()">Generate Preview + Verified Backup</button>
+                </div>
+                <div class="action-row mt">
+                  <label>Type APPLY DUNGEON EXPERIMENT<input id="dungeonDifficultyConfirm" placeholder="APPLY DUNGEON EXPERIMENT" oninput="syncDungeonDifficultyApplyButton()"></label>
+                  <button id="dungeonDifficultyApplyButton" type="button" class="danger" onclick="applyDungeonDifficulty()" disabled>Apply Experimental Unlock</button>
+                </div>
+                <table class="mt">
+                  <thead><tr><th>Dungeon ID</th><th>Completed Difficulty</th><th>Duration</th><th>Party</th><th>Shared Links</th></tr></thead>
+                  <tbody id="dungeonDifficultyRows"><tr><td colspan="5">No dungeon history loaded.</td></tr></tbody>
+                </table>
+                <details class="vm-details mt">
+                  <summary>Experimental Preview, Backup, and Apply Log</summary>
+                  <pre id="dungeonDifficultyLog" class="mt">No experimental dungeon preview generated.</pre>
+                </details>
+              </div>
+            </details>
+
+            <details class="progression-fold" data-progression-category-panel="progression">
               <summary>Specialization and Reputation</summary>
               <div class="progression-fold-body">
                 <div class="layout-2">
@@ -24869,7 +25151,7 @@ async function startMigrationExport(){let started=false;try{if(migrationOperatio
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 tabs.forEach(t=>t.addEventListener("click",()=>{if(t.dataset.view==="players")setTimeout(()=>refreshPlayerInventory(),0);}));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>{setView(b.dataset.open);if(b.dataset.open==="players")setTimeout(()=>refreshPlayerInventory(),0);}));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],setDurabilityTo200:true,durabilityValue:200,notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],latestStorageDepositReceipt=null,storageDepositPollGeneration=0,latestGiveItemReceipt=null,giveItemReceiptPollGeneration=0,playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],setDurabilityTo200:true,durabilityValue:200,notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],latestStorageDepositReceipt=null,storageDepositPollGeneration=0,latestGiveItemReceipt=null,giveItemReceiptPollGeneration=0,playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionCategory="progression",progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,dungeonDifficultyState=null,dungeonDifficultyPreviewState=null,installedGameDungeonState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let playerInventoryState=null,playerInventoryRows=[],playerInventoryBusy=false;
 let operationsState={active:[],operations:[]};
 let databaseExplorerState={schemas:[],tables:[],metadata:null,rows:[],selectedTable:"",selectedRow:-1,offset:0,pageSize:50,hasMore:false,loading:false};
@@ -25715,6 +25997,18 @@ function progressionSupportDetails(item){const details=item?.details;if(!details
 function progressionStatusBadge(id,text,kind="warn"){const el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+kind;}
 function progressionMeterPct(value,max){const n=Number(value);if(!Number.isFinite(n)||n<=0)return"0%";return Math.max(8,Math.min(100,Math.round((n/max)*100)))+"%";}
 function pushProgressionRecent(title,detail,kind="3M"){const wrap=document.getElementById("progressionRecentChanges");if(!wrap)return;const item='<div class="progression-recent-item"><div class="progression-recent-time">'+esc(kind)+'</div><div><strong>'+esc(title)+'</strong><span>'+esc(detail||"")+'</span></div></div>';wrap.innerHTML=item+wrap.innerHTML.replace(/<div class="progression-recent-item"><div class="progression-recent-time">--<\/div>[\s\S]*?<\/div><\/div>/,"");}
+function selectProgressionCategory(value){
+  const allowed=new Set(["progression","skills","house-scrip","dungeons"]);
+  progressionCategory=allowed.has(value)?value:"progression";
+  document.querySelectorAll("[data-progression-category]").forEach(button=>{const selected=button.dataset.progressionCategory===progressionCategory;button.classList.toggle("active",selected);button.setAttribute("aria-selected",selected?"true":"false");});
+  const panels=[...document.querySelectorAll("[data-progression-category-panel]")];
+  let selectedPanel=null;
+  panels.forEach(panel=>{const selected=panel.dataset.progressionCategoryPanel===progressionCategory;panel.hidden=!selected;if(selected&&!selectedPanel){panel.open=true;selectedPanel=panel;}});
+  if(selectedPanel)requestAnimationFrame(()=>selectedPanel.scrollIntoView({behavior:"smooth",block:"start"}));
+  if(progressionCategory==="skills"&&!progressionSkillCatalog.length)refreshProgressionSkillCatalog();
+  if(progressionPlayerState?.ok&&progressionCategory==="house-scrip")refreshProgressionHouseScrip();
+  if(progressionPlayerState?.ok&&progressionCategory==="dungeons")refreshDungeonDifficulty();
+}
 function renderProgressionInspector(data){
   const unavailable=document.getElementById("progressionUnavailable");
   if(unavailable)unavailable.classList.toggle("hidden",data?.status!=="unavailable");
@@ -25753,7 +26047,18 @@ async function unlockSelectedProgressionSkills(){try{if(!progressionPlayerState?
 function progressionPlayerLookupId(){return progressionPlayerState?.player?.player_controller_id||progressionPlayerState?.player?.actor_id||progressionPlayerState?.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";}
 async function refreshProgressionHouseScrip(){const balance=document.getElementById("progressionHouseScripBalance");try{if(!progressionPlayerState?.ok)throw new Error("Lookup a player before loading House Scrip.");if(balance)balance.textContent="Loading...";const data=await getJson("/api/progression/house-scrip?query="+encodeURIComponent(progressionPlayerLookupId()),{timeoutMs:45000});if(!data.ok)throw new Error(data.reason||data.error||"House Scrip balance unavailable.");progressionHouseScripState=data;if(balance)balance.textContent=Number(data.balance||0).toLocaleString();setText("progressionHouseScripLog","Current balance loaded for "+(data.player?.character_name||"the selected player")+": "+Number(data.balance||0).toLocaleString()+" House Scrip.\\nCurrency ID: "+data.currencyId+"\\nPlayer: "+(data.playerOffline?"offline":"online"));return data;}catch(e){progressionHouseScripState=null;if(balance)balance.textContent="--";setText("progressionHouseScripLog",betterError(e));return null;}}
 async function grantProgressionHouseScrip(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before giving House Scrip.");const amount=Number(document.getElementById("progressionHouseScripAmount")?.value||0);if(!Number.isInteger(amount)||amount<1||amount>1000000000)throw new Error("House Scrip amount must be a whole number from 1 to 1,000,000,000.");const confirmText=document.getElementById("progressionHouseScripConfirm")?.value||"";if(confirmText!=="GIVE HOUSE SCRIP")throw new Error("Type GIVE HOUSE SCRIP exactly.");if(!(await appConfirm("Give House Scrip","Add "+amount.toLocaleString()+" House Scrip to "+(progressionPlayerState.player?.character_name||"the selected player")+"?\\n\\nAn automatic backup and exact read-back verification will be created. The player must be offline.","Give House Scrip","Cancel")))return;setText("progressionHouseScripLog","Creating backup and granting House Scrip...");const data=await getJson("/api/progression/house-scrip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:progressionPlayerLookupId(),amount,confirmText}),timeoutMs:90000});if(!data.ok)throw new Error((data.message||data.reason||data.error||"House Scrip grant failed")+"\\n"+JSON.stringify(data.timings||{},null,2));progressionHouseScripState=data;setText("progressionHouseScripBalance",Number(data.balance||0).toLocaleString());setValue("progressionHouseScripConfirm","");setText("progressionHouseScripLog","House Scrip grant completed.\\nAdded: "+Number(data.amount||0).toLocaleString()+"\\nPrevious balance: "+Number(data.beforeBalance||0).toLocaleString()+"\\nVerified balance: "+Number(data.balance||0).toLocaleString()+"\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||""));pushProgressionRecent("House Scrip granted",Number(data.amount||0).toLocaleString()+" added","NOW");addActivity("progression","House Scrip granted",String(data.amount||0));playUiSound("success");}catch(e){setText("progressionHouseScripLog",betterError(e));pushProgressionRecent("House Scrip grant failed",betterError(e),"ERR");addActivity("error","House Scrip grant failed",e.message);playUiSound("warning");}}
-async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(!progressionSkillCatalog.length)refreshProgressionSkillCatalog();if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});if(!progressionSkillCatalog.length)refreshProgressionSkillCatalog();addActivity("warn","Progression database unavailable",e.message);}}
+function dungeonDifficultySelectedId(){return String(document.getElementById("dungeonDifficultyId")?.value||"").trim();}
+function dungeonDifficultyFilteredRows(){const dungeonId=dungeonDifficultySelectedId();return (dungeonDifficultyState?.records||[]).filter(row=>!dungeonId||String(row.dungeon_id)===dungeonId);}
+function syncDungeonDifficultyApplyButton(){const button=document.getElementById("dungeonDifficultyApplyButton");if(button)button.disabled=!dungeonDifficultyPreviewState||String(document.getElementById("dungeonDifficultyConfirm")?.value||"")!=="APPLY DUNGEON EXPERIMENT";}
+function renderDungeonDifficulty(data){dungeonDifficultyState=data?.ok?data:null;const known=document.getElementById("dungeonDifficultyKnownIds");if(known)known.innerHTML=(data?.knownDungeons||[]).map(row=>'<option value="'+esc(row.dungeon_id)+'">Highest completion '+esc(row.highest_difficulty)+' / '+esc(row.completion_count)+' records</option>').join("");const input=document.getElementById("dungeonDifficultyId");if(input&&!input.value){const own=(data?.records||[])[0]?.dungeon_id||"";if(own)input.value=own;}const rows=document.getElementById("dungeonDifficultyRows");const filtered=dungeonDifficultyFilteredRows();if(rows)rows.innerHTML=filtered.length?filtered.map(row=>'<tr><td>'+esc(row.dungeon_id)+'</td><td>'+esc(row.difficulty)+'</td><td>'+esc(row.duration_ms)+' ms</td><td>'+esc(row.players_num)+'</td><td>'+esc(row.party_links)+'</td></tr>').join(""):'<tr><td colspan="5">No saved completion rows for this player'+(dungeonDifficultySelectedId()?' and dungeon id.':'.')+'</td></tr>';const status=document.getElementById("dungeonDifficultyStatus");if(status){status.className=data?.ok?(data.playerOffline?"empty mt":"warning mt"):"warning mt";status.textContent=data?.ok?((data.playerOffline?"Offline and ready for an experimental preview. ":"Player is online; preview and apply are blocked. ")+(data.knownDungeons||[]).length+" known dungeon id(s), "+(data.records||[]).length+" saved completion link(s)."):(data?.reason||data?.error||"Dungeon difficulty inspection failed.");}}
+function renderInstalledGameDungeonIds(data){installedGameDungeonState=data?.ok?data:null;const status=document.getElementById("dungeonGameScanStatus");const rows=document.getElementById("dungeonGameScanRows");if(status){status.className=data?.ok&&data.databaseVerified===data.totalDungeons?"empty mt":"warning mt";status.textContent=data?.ok?(data.totalDungeons+" production dungeon IDs read from Dungeons.pak. "+data.databaseVerified+" match server history. Build "+data.gameBuildId+". Unmatched IDs remain experimental."):(data?.error||"Installed-game dungeon scan failed.");}if(rows){const dungeons=data?.dungeons||[];rows.innerHTML=dungeons.length?dungeons.map(row=>'<tr><td><strong>'+esc(row.name)+'</strong></td><td><span class="env-path-value">'+esc(row.databaseId)+'</span></td><td><span class="badge '+(row.databaseVerified?'ok':'warn')+'">'+esc(row.databaseVerified?'Database verified':'Game asset')+'</span></td><td><button type="button" data-dungeon-game-id="'+esc(row.databaseId)+'">Use ID</button></td></tr>').join(""):'<tr><td colspan="4">No production dungeon IDs were found.</td></tr>';rows.querySelectorAll("[data-dungeon-game-id]").forEach(button=>button.addEventListener("click",()=>useInstalledGameDungeonId(button.dataset.dungeonGameId)));}const known=document.getElementById("dungeonDifficultyKnownIds");if(known&&data?.ok){const existing=known.innerHTML;const additions=(data.dungeons||[]).filter(row=>!existing.includes('value="'+esc(row.databaseId)+'"')).map(row=>'<option value="'+esc(row.databaseId)+'">Installed game · '+esc(row.name)+(row.databaseVerified?' · database verified':' · experimental')+'</option>').join("");known.innerHTML=existing+additions;}}
+function useInstalledGameDungeonId(value){setValue("dungeonDifficultyId",value);invalidateDungeonDifficultyPreview();setText("dungeonDifficultyLog","Installed-game dungeon ID selected: "+value+"\nGenerate a verified preview before applying any database change.");if(progressionPlayerState?.ok)refreshDungeonDifficulty(true);}
+async function scanInstalledGameDungeonIds(){const status=document.getElementById("dungeonGameScanStatus");try{if(status){status.className="warning mt";status.textContent="Reading DungeonDataAsset entries from the installed Dungeons.pak...";}const data=await getJson("/api/progression/dungeon-difficulty/scan-installed-game",{timeoutMs:300000});if(!data.ok)throw new Error(data.error||"Installed-game dungeon scan failed.");renderInstalledGameDungeonIds(data);setText("dungeonDifficultyLog",data.warning+"\n\nSource: "+data.sourcePak+"\nProduction dungeons found: "+data.totalDungeons+"\nDatabase-verified IDs: "+data.databaseVerified);addActivity("progression","Installed dungeon IDs scanned",data.totalDungeons+" production IDs");playUiSound("success");}catch(e){installedGameDungeonState=null;renderInstalledGameDungeonIds({ok:false,error:betterError(e)});playUiSound("warning");}}
+function invalidateDungeonDifficultyPreview(){dungeonDifficultyPreviewState=null;setValue("dungeonDifficultyConfirm","");syncDungeonDifficultyApplyButton();if(dungeonDifficultyState)renderDungeonDifficulty(dungeonDifficultyState);setText("dungeonDifficultyLog","Selection changed. Generate a new experimental preview and verified backup before applying.");}
+async function refreshDungeonDifficulty(preserveLog=false){try{if(!progressionPlayerState?.ok)throw new Error("Lookup a player before inspecting dungeon completion history.");dungeonDifficultyPreviewState=null;setValue("dungeonDifficultyConfirm","");syncDungeonDifficultyApplyButton();setText("dungeonDifficultyStatus","Inspecting experimental dungeon completion data...");const dungeonId=dungeonDifficultySelectedId();const url="/api/progression/dungeon-difficulty?query="+encodeURIComponent(progressionPlayerLookupId())+(dungeonId?"&dungeonId="+encodeURIComponent(dungeonId):"");const data=await getJson(url,{timeoutMs:60000});renderDungeonDifficulty(data);if(!preserveLog)setText("dungeonDifficultyLog",data.warning+"\n\nPlayer actor id: "+data.playerId+"\nExact dungeon ids must come from real server completion history. Maximum test value: "+data.schema.experimentalMaximum+".");return data;}catch(e){dungeonDifficultyState=null;renderDungeonDifficulty({ok:false,error:betterError(e)});if(!preserveLog)setText("dungeonDifficultyLog",betterError(e));return null;}}
+async function previewDungeonDifficulty(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before generating a dungeon difficulty preview.");const dungeonId=dungeonDifficultySelectedId();const target=Number(document.getElementById("dungeonDifficultyTarget")?.value||0);if(!dungeonId)throw new Error("Enter or choose an exact dungeon database id.");if(!Number.isInteger(target)||target<3||target>30)throw new Error("Maximum selectable difficulty must be a whole number from 3 to 30.");const confirmed=await appConfirm("Experimental Dungeon Unlock","Prepare selectable difficulty "+target+" for "+dungeonId+" and "+(progressionPlayerState.player?.character_name||"the selected player")+"?\n\nThis rewrites that player's completion links and may create a synthetic best-run entry. It does not grant loot or select the active run. The player must remain offline. A verified full database backup will be created first.","Create Preview + Backup","Cancel");if(!confirmed)return;setText("dungeonDifficultyLog","Creating a verified full database backup, then preparing the experimental preview. This can take several minutes...");const data=await getJson("/api/progression/dungeon-difficulty/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:progressionPlayerLookupId(),dungeonId,targetSelectableDifficulty:target}),timeoutMs:300000});dungeonDifficultyPreviewState=data;setValue("dungeonDifficultyConfirm","");syncDungeonDifficultyApplyButton();setText("dungeonDifficultyLog","Experimental preview ready.\nVerified full backup: "+data.databaseBackupPath+"\nExact row snapshot: "+data.snapshotPath+"\nExpires: "+new Date(data.expiresAt).toLocaleString()+"\n\nPlan:\n"+JSON.stringify(data.plan,null,2)+"\n\nDatabase operation:\n"+data.sqlPreview+"\n\nType APPLY DUNGEON EXPERIMENT exactly to enable Apply.");pushProgressionRecent("Dungeon unlock preview",dungeonId+" -> selectable "+target,"EXP");addActivity("progression","Experimental dungeon preview created",dungeonId+" / "+target);playUiSound("success");}catch(e){dungeonDifficultyPreviewState=null;syncDungeonDifficultyApplyButton();setText("dungeonDifficultyLog",betterError(e));pushProgressionRecent("Dungeon preview failed",betterError(e),"ERR");playUiSound("warning");}}
+async function applyDungeonDifficulty(){try{if(!dungeonDifficultyPreviewState)throw new Error("Generate an experimental preview and verified backup first.");if(String(document.getElementById("dungeonDifficultyConfirm")?.value||"")!=="APPLY DUNGEON EXPERIMENT")throw new Error("Type APPLY DUNGEON EXPERIMENT exactly.");const confirmed=await appConfirm("Apply Experimental Dungeon Unlock","Apply selectable difficulty "+dungeonDifficultyPreviewState.targetSelectableDifficulty+" for "+dungeonDifficultyPreviewState.dungeonId+"?\n\nThe Suite will recheck the offline player and completion fingerprint, apply one transaction, and verify the highest completion read-back.","Apply Experiment","Cancel");if(!confirmed)return;const data=await getJson("/api/progression/dungeon-difficulty/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:dungeonDifficultyPreviewState.previewId,confirmText:document.getElementById("dungeonDifficultyConfirm").value}),timeoutMs:60000});setText("dungeonDifficultyLog","Experimental dungeon unlock applied and verified.\nDungeon: "+data.dungeonId+"\nMaximum selectable difficulty: "+data.targetSelectableDifficulty+"\nSaved completion difficulty: "+data.requiredCompletionDifficulty+"\nVerified full backup: "+data.databaseBackupPath+"\nSnapshot: "+data.snapshotPath+"\n\n"+data.warning+"\n\nRead-back:\n"+JSON.stringify(data.after,null,2));pushProgressionRecent("Dungeon unlock applied",data.dungeonId+" -> selectable "+data.targetSelectableDifficulty,"EXP");addActivity("progression","Experimental dungeon unlock applied",data.dungeonId+" / "+data.targetSelectableDifficulty);dungeonDifficultyPreviewState=null;setValue("dungeonDifficultyConfirm","");syncDungeonDifficultyApplyButton();await refreshDungeonDifficulty(true);playUiSound("success");}catch(e){setText("dungeonDifficultyLog",betterError(e));pushProgressionRecent("Dungeon apply failed",betterError(e),"ERR");playUiSound("warning");}}
+async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});addActivity("warn","Progression database unavailable",e.message);}}
 function detailRows(rows){return Object.entries(rows||{}).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value||"--")+'</strong></div>').join("");}
 function renderProgressionPlayer(data){
   progressionPlayerState=data?.ok?data:null;
@@ -25762,10 +26067,17 @@ function renderProgressionPlayer(data){
   progressionSpecializationPreviewState=null;
   progressionSkillPreviewState=null;
   progressionHouseScripState=null;
+  dungeonDifficultyState=null;
+  dungeonDifficultyPreviewState=null;
   setText("progressionHouseScripBalance","--");
   setText("progressionHouseScripLog",data?.ok?"Loading House Scrip balance...":"Load a player to read the House Scrip balance.");
   setValue("progressionHouseScripConfirm","");
   setValue("progressionSpecializationConfirmText","");
+  setValue("dungeonDifficultyConfirm","");
+  setText("dungeonDifficultyStatus",data?.ok?"Loading experimental dungeon completion history...":"Load a player to inspect dungeon completion history.");
+  setText("dungeonDifficultyLog","No experimental dungeon preview generated.");
+  const dungeonRows=document.getElementById("dungeonDifficultyRows");if(dungeonRows)dungeonRows.innerHTML='<tr><td colspan="5">No dungeon history loaded.</td></tr>';
+  syncDungeonDifficultyApplyButton();
   const status=document.getElementById("progressionPlayerStatus");
   if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Current values loaded into the guarded editor.":(data?.reason||data?.error||"Progression player lookup failed.");}
   const p=data?.player||{};
@@ -25793,7 +26105,8 @@ function renderProgressionPlayer(data){
   const factions=document.getElementById("progressionFactionRows");
   if(factions){const groups=progressionFactionGroups(data);factions.innerHTML=data?.ok?(groups.length?groups.map(row=>'<tr><td>'+esc(progressionFactionLabel(row))+'<div class="subtle">Targets: '+esc(row.actorIds.join(", "))+'</div></td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';}
   renderProgressionFactionEditor(data);
-  if(data?.ok)refreshProgressionHouseScrip();
+  if(data?.ok&&progressionCategory==="house-scrip")refreshProgressionHouseScrip();
+  if(data?.ok&&progressionCategory==="dungeons")refreshDungeonDifficulty();
 }
 function progressionSpecializationRow(track){return (progressionPlayerState?.specializationTracks||[]).find(row=>String(row.track_type||"").toLowerCase()===String(track||"").toLowerCase())||null;}
 function renderProgressionSpecializationEditor(data){const select=document.getElementById("progressionSpecializationTrack");if(!select)return;const current=select.value||"Crafting";const known=["Crafting","Gathering","Exploration","Combat","Sabotage"];const detected=(data?.specializationTracks||[]).map(row=>String(row.track_type||"").trim()).filter(Boolean);const tracks=[...new Set([...known,...detected])];select.innerHTML=tracks.map(track=>'<option value="'+esc(track)+'">'+esc(track)+'</option>').join("");select.value=tracks.includes(current)?current:tracks[0];syncProgressionSpecializationEditor();}
@@ -26117,7 +26430,7 @@ const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/live-map/vehicles", "/api/live-map/bases", "/api/live-map/teleport/presets", "/api/live-map/teleport/status", "/api/live-map/resource-areas/status",
   "/api/admin/players", "/api/admin/player-inventory", "/api/admin/repair/inspect", "/api/admin/repair/queue", "/api/players/feed", "/api/admin/items",
   "/api/give-items", "/api/gear-codex/items", "/api/item-database/items", "/api/items/catalog/status", "/api/give-items/capabilities",
-  "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/progression/house-scrip", "/api/landsraad/tiers",
+  "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/progression/house-scrip", "/api/progression/dungeon-difficulty", "/api/landsraad/tiers",
   "/api/landsraad/weekly-rewards/inspect", "/api/admin/skill-reputation", "/api/market-bot", "/api/market-bot/items", "/api/market-automator/overview",
   "/api/market/status", "/api/market/listings", "/api/live-give/queue-presets", "/api/live-give/queue-presets/get",
   "/api/sietches", "/api/vm/status", "/api/updates/check"
@@ -27788,6 +28101,49 @@ async function route(req, res) {
       await json(res, { ok: true, config: publicMarketBotLocal(config), items: buildMarketBotItemPolicies(marketBotCatalog(), config) });
     } catch (error) {
       await json(res, { ok: false, error: error.message, items: [] }, 500);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/dungeon-difficulty/scan-installed-game" && req.method === "GET") {
+    try {
+      const knownDungeons = await dungeonDifficultyKnownDungeons().catch(() => []);
+      const result = scanInstalledGameDungeons({
+        appDir: __dirname,
+        repakExe: process.env.ALPHANINE_REPAK_EXE || "",
+        knownDungeons
+      });
+      await json(res, result);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", experimental: true, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/dungeon-difficulty" && req.method === "GET") {
+    try {
+      const result = await dungeonDifficultyInspect(url.searchParams.get("query"), url.searchParams.get("dungeonId"));
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", experimental: true, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/dungeon-difficulty/preview" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await dungeonDifficultyPreview(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", experimental: true, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/dungeon-difficulty/apply" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await dungeonDifficultyApply(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "failed", experimental: true, error: error.message }, 400);
     }
     return;
   }

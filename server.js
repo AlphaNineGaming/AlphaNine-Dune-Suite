@@ -3449,6 +3449,11 @@ async function sshCommand(command, timeout = 180000, options = {}) {
 
 const USER_GAME_INI_PATH = "/home/dune/.dune/download/scripts/setup/config/UserGame.ini";
 
+const userGameRecovery = require('./lib/user-game-recovery').createUserGameRecovery({
+  directory: path.join(APPDATA_DIR || DATA_DIR, 'ini-backups'), sshCommand, quote: shQuote,
+  target: () => String(config.sshHost || config.vmIp || '') + ':' + String(config.sshUser || '')
+});
+
 async function readLiveUserGameSettings() {
   const result = await sshCommand(`sudo -n cat -- ${shQuote(USER_GAME_INI_PATH)}`, 30000, { maxBuffer: 1024 * 1024 });
   if (!result.ok) throw new Error(result.stderr || result.error || "Could not read UserGame.ini from the VM.");
@@ -3465,63 +3470,11 @@ async function readLiveUserGameSettings() {
   };
 }
 
-async function updateLiveUserGameSettings(requestedValues) {
+async function updateLiveUserGameSettings(requestedValues, expectedContent) {
+  const result = await userGameRecovery.save(requestedValues, expectedContent);
   const current = await readLiveUserGameSettings();
-  const updated = updateUserGameIni(current.content, requestedValues);
-  if (!updated.changedKeys.length) return { ...current, message: "UserGame.ini already has the requested values.", changedKeys: [], backupPath: "" };
-
-  const localTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-usergame-"));
-  const localTempPath = path.join(localTempDir, "UserGame.ini");
-  const token = crypto.randomUUID();
-  const remoteTempPath = `/tmp/alphanine-usergame-${token}.ini`;
-  const backupPath = `${USER_GAME_INI_PATH}.alphanine-${Date.now()}.bak`;
-  const expectedSha256 = crypto.createHash("sha256").update(updated.content, "utf8").digest("hex");
-  fs.writeFileSync(localTempPath, updated.content, "utf8");
-
-  try {
-    const uploaded = await sshCommand(`cat > ${shQuote(remoteTempPath)}`, 30000, { inputPath: localTempPath, maxBuffer: 1024 * 1024 });
-    if (!uploaded.ok) throw new Error(uploaded.stderr || uploaded.error || "Could not stage UserGame.ini in the VM.");
-
-    const command = [
-      "set -eu",
-      `target=${shQuote(USER_GAME_INI_PATH)}`,
-      `incoming=${shQuote(remoteTempPath)}`,
-      `backup=${shQuote(backupPath)}`,
-      `expected=${shQuote(expectedSha256)}`,
-      "sudo -n cp -- \"$target\" \"$backup\"",
-      "sudo -n cp -- \"$incoming\" \"$target\"",
-      "rm -f -- \"$incoming\"",
-      "actual=$(sudo -n sha256sum -- \"$target\" | awk '{print $1}')",
-      "if [ \"$actual\" != \"$expected\" ]; then sudo -n cp -- \"$backup\" \"$target\"; echo 'UserGame.ini verification failed; restored backup.' >&2; exit 41; fi",
-      "if ! /home/dune/.dune/bin/battlegroup apply-default-usersettings; then sudo -n cp -- \"$backup\" \"$target\"; echo 'Applying UserGame.ini failed; restored backup.' >&2; exit 42; fi",
-      "printf '__SHA256__%s\\n' \"$actual\""
-    ].join("; ");
-    const applied = await sshCommand(command, 120000, { maxBuffer: 1024 * 1024 * 4 });
-    if (!applied.ok) throw new Error(applied.stderr || applied.error || "Could not apply UserGame.ini in the VM.");
-
-    appendAdminAudit("usergame_settings_updated", {
-      path: USER_GAME_INI_PATH,
-      backupPath,
-      changedKeys: updated.changedKeys,
-      sha256: expectedSha256
-    });
-    return {
-      ok: true,
-      path: USER_GAME_INI_PATH,
-      schema: USER_GAME_SETTINGS_SCHEMA,
-      values: updated.values,
-      content: updated.content,
-      missingKeys: [],
-      changedKeys: updated.changedKeys,
-      backupPath,
-      sha256: expectedSha256,
-      message: "UserGame.ini was backed up, verified, and applied. Restart the battlegroup when players are prepared.",
-      restartRequired: true
-    };
-  } finally {
-    try { fs.rmSync(localTempDir, { recursive: true, force: true }); } catch {}
-    await sshCommand(`rm -f -- ${shQuote(remoteTempPath)}`, 10000, { maxBuffer: 1024 * 16 }).catch(() => {});
-  }
+  appendAdminAudit('usergame_settings_updated', result);
+  return { ...current, ...result, message: result.changedFiles.length ? 'UserGame.ini settings saved and verified. Restart the battlegroup when ready.' : 'The requested settings are already saved.', restartRequired: result.changedFiles.length > 0 };
 }
 
 async function serverHealthRemoteCheck(command, timeout = 15000, maxBuffer = 1024 * 1024) {
@@ -24561,7 +24514,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel-head">
           <div>
             <div class="label">Live UserGame.ini</div>
-            <div class="subtle">Load and edit the exact supported settings from the VM. Saving creates a verified backup and applies defaults; it never restarts the battlegroup automatically.</div>
+            <div class="subtle">Load and edit the exact supported settings from the VM. Saving updates only supported fields in template and active UserGame.ini files. Both INI files are backed up on this computer. Restart the battlegroup when ready.</div>
           </div>
           <div class="action-row">
             <button id="userGameLoadButton" onclick="loadLiveUserGameSettings(true)">Load Live File</button>
@@ -24569,6 +24522,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           </div>
         </div>
         <div id="userGameStatus" class="empty mt">Open UserGame Settings to load UserGame.ini from the configured VM.</div>
+        <details class="mt" ontoggle="if(this.open)loadIniBackups()"><summary>INI backups and recovery</summary><div id="iniBackupList" class="mt">Loading backups...</div></details>
         <div id="userGameSettingsGrid" class="grid three mt"><div class="empty">Live settings have not been loaded.</div></div>
         <details class="advanced-only mt">
           <summary>Raw UserGame.ini preview</summary>
@@ -25727,11 +25681,13 @@ async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson(
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const actionTimeouts=${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)},data=await getJson("/api/action/"+action,{method:"POST",timeoutMs:actionTimeouts[action]||180000});let output=data.stdout||data.stderr||data.error||"Done.";if(action==="backup"&&data.ok){output="Actual VM backup copied and verified locally.\\nVM source: "+(data.vmBackupPath||data.vmPath||"--")+"\\nLocal copy: "+(data.localBackupPath||data.filePath||"--")+"\\nSHA-256: "+(data.sha256||"--")+"\\nSize: "+(data.size||data.file?.size||"--")+" bytes\\nMetadata: "+(data.localMetadataPath||"--");}if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
 async function openBattlegroupBatch(){const log=document.getElementById("serverLog");try{if(!window.alphaNineSuite?.openBattlegroupBatch)throw new Error("Battlegroup.bat can be opened only from the installed desktop Suite.");if(log)log.textContent="Reading the saved server folder from Settings...";const cfg=await getJson("/api/config");if(log)log.textContent="Opening battlegroup.bat from the configured server folder...";const data=await window.alphaNineSuite.openBattlegroupBatch({serverInstallPath:cfg.serverInstallPath||"",awakeningServerPath:cfg.awakeningServerPath||""});if(!data?.ok)throw new Error(data?.error||"Could not open battlegroup.bat.");if(log)log.textContent="Opened "+(data.filePath||"battlegroup.bat")+" in a Windows command console.";syncLogs();addActivity("action","Opened battlegroup.bat",data.filePath||"");playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);syncLogs();addActivity("error","Battlegroup.bat launch failed",e.message);playUiSound("warning");}}
-function userGameSettingInput(setting,value){const id="usergame-"+setting.key;if(setting.type==="boolean")return '<label>'+esc(setting.label)+'<select id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'"><option value="true"'+(value===true?' selected':'')+'>True</option><option value="false"'+(value===false?' selected':'')+'>False</option></select><small>'+esc(setting.key)+'</small></label>';const current=value===undefined||value===null?'':String(value);return '<label>'+esc(setting.label)+'<input id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'" type="number" min="'+esc(setting.min)+'" max="'+esc(setting.max)+'" step="'+esc(setting.step||1)+'" value="'+esc(current)+'"><small>'+esc(setting.key)+(setting.unit?' · '+esc(setting.unit):'')+'</small></label>';}
+function userGameSettingInput(setting,value){const id="usergame-"+setting.key;if(setting.type==="boolean")return '<label>'+esc(setting.label)+'<select id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'"><option value="true"'+(value===true?' selected':'')+'>True</option><option value="false"'+(value===false?' selected':'')+'>False</option></select><small>'+esc(setting.key)+'</small></label>';const current=value===undefined||value===null?'':String(value);return '<label>'+esc(setting.label)+'<input id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'" type="number" min="'+esc(setting.min)+'" max="'+esc(setting.max)+'" step="'+esc(setting.step||1)+'" value="'+esc(current)+'"><small>'+esc(setting.key)+(setting.unit?' · '+esc(setting.unit):'')+(setting.note?' · '+esc(setting.note):'')+'</small></label>';}
 function renderLiveUserGameSettings(data){liveUserGameState=data;const grid=document.getElementById("userGameSettingsGrid"),preview=document.getElementById("userGameRawPreview"),save=document.getElementById("userGameSaveButton");const groups=[];for(const setting of data.schema||[]){let group=groups.find(row=>row.name===setting.group);if(!group){group={name:setting.group,settings:[]};groups.push(group);}group.settings.push(setting);}if(grid)grid.innerHTML=groups.map(group=>'<div class="panel pad"><div class="label">'+esc(group.name)+'</div><div class="field-grid mt">'+group.settings.map(setting=>userGameSettingInput(setting,data.values?.[setting.key])).join('')+'</div></div>').join('')||'<div class="empty">No supported UserGame.ini settings were returned.</div>';if(preview)preview.textContent=data.content||"";if(save)save.disabled=!data.ok;const missing=data.missingKeys||[];const status=document.getElementById("userGameStatus");if(status){status.className=(missing.length?'warning':'empty')+' mt';status.textContent=(data.path||"UserGame.ini")+(missing.length?' · Missing or invalid: '+missing.join(', '):' · '+(data.schema?.length||0)+' supported settings loaded.');}}
 async function loadLiveUserGameSettings(force=false){if(liveUserGameState&&!force){renderLiveUserGameSettings(liveUserGameState);return liveUserGameState;}const status=document.getElementById("userGameStatus"),load=document.getElementById("userGameLoadButton"),save=document.getElementById("userGameSaveButton");try{if(load)load.disabled=true;if(save)save.disabled=true;if(status){status.className="empty mt";status.textContent="Reading UserGame.ini from the VM...";}const data=await getJson("/api/usergame-settings",{timeoutMs:45000});renderLiveUserGameSettings(data);return data;}catch(error){liveUserGameState=null;if(status){status.className="warning mt";status.textContent=betterError(error);}return null;}finally{if(load)load.disabled=false;}}
+async function loadIniBackups(){const el=document.getElementById('iniBackupList');try{const data=await getJson('/api/usergame-backups');el.innerHTML='<div>'+esc(data.directory)+'</div>'+data.backups.map(b=>'<div class="panel pad mt"><strong>'+esc(b.createdAt)+'</strong><div>'+b.files.map((file,index)=>'<div><a href="/api/usergame-backups?id='+encodeURIComponent(b.id)+'&download=1&file='+index+'">Download '+esc(file)+'</a></div>').join('')+'</div><a href="/api/usergame-backups?id='+encodeURIComponent(b.id)+'&download=1">Download backup</a> <button onclick="restoreIniBackup(\''+b.id+'\',\'UserGame.ini\')">Restore UserGame.ini</button> <button onclick="restoreIniBackup(\''+b.id+'\',\'UserEngine.ini\')">Restore UserEngine.ini</button></div>').join('')+(data.backups.length?'':'<div>No backups yet. Backups appear here after saving.</div>');}catch(error){el.textContent=betterError(error);}}
+async function restoreIniBackup(id,filename){if(!(await appConfirm('Restore '+filename,'Restore every '+filename+' in this backup to the configured VM? Current INIs will be backed up first. Restart the battlegroup when ready.','Back Up & Restore','Cancel')))return;try{await getJson('/api/usergame-backups',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,filename}),timeoutMs:150000});await loadLiveUserGameSettings(true);await loadIniBackups();document.getElementById('userGameStatus').textContent=filename+' restored and verified. Restart the battlegroup when ready.';}catch(error){document.getElementById('userGameStatus').textContent=betterError(error);}}
 function liveUserGameValuesFromForm(){const values={};for(const setting of liveUserGameState?.schema||[]){const input=document.querySelector('[data-usergame-key="'+setting.key+'"]');if(!input||input.value==='')continue;values[setting.key]=setting.type==="boolean"?input.value==="true":Number(input.value);}return values;}
-async function saveLiveUserGameSettings(){const status=document.getElementById("userGameStatus"),save=document.getElementById("userGameSaveButton");try{if(!liveUserGameState?.ok)throw new Error("Load the live UserGame.ini before saving.");if(!(await appConfirm("Save live UserGame.ini","The Suite will back up the current VM file, update only the supported fields shown here, verify the saved file, and apply default user settings. The battlegroup will not restart automatically.","Back Up & Save","Cancel")))return;if(save)save.disabled=true;if(status){status.className="warning mt";status.textContent="Backing up, verifying, and applying UserGame.ini...";}const data=await getJson("/api/usergame-settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:liveUserGameValuesFromForm()}),timeoutMs:150000});renderLiveUserGameSettings(data);if(status){status.className="empty mt";status.textContent=(data.message||"UserGame.ini saved.")+(data.backupPath?' Backup: '+data.backupPath:'');}addActivity("server","UserGame.ini updated",(data.changedKeys||[]).join(', '));playUiSound("success");return data;}catch(error){if(status){status.className="warning mt";status.textContent=betterError(error);}playUiSound("warning");return null;}finally{if(save)save.disabled=!liveUserGameState?.ok;}}
+async function saveLiveUserGameSettings(){const status=document.getElementById("userGameStatus"),save=document.getElementById("userGameSaveButton");try{if(!liveUserGameState?.ok)throw new Error("Load the live UserGame.ini before saving.");if(!(await appConfirm("Save live UserGame.ini","The Suite will back up template and active UserGame.ini and UserEngine.ini files on this computer, then update only supported UserGame.ini fields. UserEngine.ini and its ports remain unchanged. The battlegroup will not restart automatically.","Back Up & Save","Cancel")))return;if(save)save.disabled=true;if(status){status.className="warning mt";status.textContent="Backing up INIs to this computer and saving UserGame.ini...";}const data=await getJson("/api/usergame-settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:liveUserGameValuesFromForm(),expectedContent:liveUserGameState.content}),timeoutMs:150000});renderLiveUserGameSettings(data);if(status){status.className="empty mt";status.textContent=(data.message||"UserGame.ini saved.")+(data.backupPath?' Backup: '+data.backupPath:'');}addActivity("server","UserGame.ini updated",(data.changedKeys||[]).join(', '));playUiSound("success");return data;}catch(error){if(status){status.className="warning mt";status.textContent=betterError(error);}playUiSound("warning");return null;}finally{if(save)save.disabled=!liveUserGameState?.ok;}}
 function updateMapMemoryInput(){const select=document.getElementById("mapSelect");const rows=window.mapDeploymentRows||[];const row=rows.find(m=>m.map===select?.value);tone("mapMemory",row?.memory||"Unset");}
 const MAP_MEMORY_LIMIT_PATTERN=/^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)(?:Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|k)?$/;
 function validMapMemoryLimitText(value){const text=String(value||"").trim();return Boolean(text)&&text.length<=32&&MAP_MEMORY_LIMIT_PATTERN.test(text);}
@@ -26357,7 +26313,7 @@ function isRemotePortalRequest(req) {
 
 const REMOTE_LOCAL_ONLY_PREFIXES = [
   "/api/config", "/api/setup/", "/api/test/", "/api/settings/", "/api/ssh-key/", "/api/server-install-path/",
-  "/api/usergame-settings", "/api/items/catalog/scan-installed-game",
+  "/api/usergame-settings", "/api/usergame-backups", "/api/items/catalog/scan-installed-game",
   "/api/live-give/env", "/api/blueprints", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/", "/api/live-map/resource-areas/generate", "/api/live-map/resource-areas/game-folder",
   "/api/admin/probe", "/api/admin/tuned-channels", "/api/admin/permissions", "/api/gear/discovery", "/api/discovery",
   "/api/market-automator/logs", "/api/director", "/api/database-browser/", "/api/server-migration/", "/api/migration-maintenance", "/api/migration-offline", "/manager-api/"
@@ -28411,6 +28367,32 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === '/api/usergame-backups') {
+    if (!remoteAccess.isLoopbackRequest(req)) { await json(res, {ok:false,error:'INI recovery is available only from the local Suite.'},403); return; }
+    try {
+      if (req.method === 'GET') {
+        if (url.searchParams.get('download') === '1') {
+          const record=userGameRecovery.read(url.searchParams.get('id') || '');
+          if (url.searchParams.has('file')) {
+            const index=Number(url.searchParams.get('file'));
+            if(!Number.isInteger(index)||index<0||!record.files[index]) throw Error('Invalid backup file.');
+            const entry=record.files[index];
+            res.setHeader('Content-Type','application/octet-stream');
+            res.setHeader('Content-Disposition','attachment; filename="'+path.posix.basename(entry.path)+'"');
+            res.end(Buffer.from(entry.content,'base64')); return;
+          }
+          res.setHeader('Content-Disposition','attachment; filename="ini-backup-'+record.id+'.json"');
+          await json(res,record);
+        } else await json(res,{ok:true,directory:userGameRecovery.directory,backups:userGameRecovery.list()});
+      } else if (req.method === 'POST') {
+        const body=JSON.parse(await readBody(req,65536)||'{}');
+        const result=await userGameRecovery.restore(body.id,body.filename);
+        appendAdminAudit('ini_backup_restored',{id:body.id,filename:body.filename,...result});
+        await json(res,{ok:true,...result});
+      } else await json(res,{ok:false,error:'Method not allowed'},405);
+    } catch(error) { await json(res,{ok:false,error:error.message},400); }
+    return;
+  }
   if (url.pathname === "/api/usergame-settings" && req.method === "GET") {
     if (!remoteAccess.isLoopbackRequest(req)) {
       await json(res, { ok: false, error: "Live UserGame.ini editing is available only from the local Suite." }, 403);
@@ -28430,7 +28412,7 @@ async function route(req, res) {
     }
     try {
       const body = JSON.parse(await readBody(req, 1024 * 64) || "{}");
-      await json(res, await updateLiveUserGameSettings(body.values));
+      await json(res, await updateLiveUserGameSettings(body.values, body.expectedContent));
     } catch (error) {
       appendAdminAudit("usergame_settings_update_failed", { error: error.message });
       await json(res, { ok: false, error: error.message }, 400);

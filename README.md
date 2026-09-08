@@ -29,6 +29,13 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 ## Release Notes
 
+### 1.3.2 — clearer dungeon selection and progress
+
+- A proper dropdown lists known server dungeon IDs and installed-game scan results together, without automatically choosing a dungeon.
+- Manual ID entry is a separate option; scanned IDs and the selected dungeon survive history refreshes.
+- Visible elapsed-time feedback during preview/backup and apply, with duplicate-click protection and clearer timeout guidance.
+- Dungeon editing remains experimental. See [the 1.3.2 release guide](RELEASE_NOTES_1.3.2.md).
+
 ### 1.3.0 — experimental database-backed dungeon unlocks
 
 - Read saved dungeon IDs and player completion history without requiring the dungeon recording function.

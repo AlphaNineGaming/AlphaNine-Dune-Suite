@@ -65,7 +65,7 @@ const requiredRuntimeFiles = [
   "scripts/test-server-health.js",
   "scripts/test-vm-scheduler.js",
   "scripts/test-give-item-durability.js",
-  `RELEASE_NOTES_${rootPackage.version}.md`
+  `docs/releases/RELEASE_NOTES_${rootPackage.version}.md`
 ];
 const missing = requiredRuntimeFiles.filter((entry) => !packaged.has(entry));
 

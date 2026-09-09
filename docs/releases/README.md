@@ -1,7 +1,14 @@
 # Release notes
 
-Version-specific notes are preserved below, newest first. Gaps in this list reflect the files available in the repository. Additional versions are covered in the [historical README summary](HISTORY.md).
+Version-specific notes, newest first. Additional older versions are covered in the [historical README summary](HISTORY.md).
 
+- [1.3.3](RELEASE_NOTES_1.3.3.md)
+- [1.3.2](RELEASE_NOTES_1.3.2.md)
+- [1.3.1](RELEASE_NOTES_1.3.1.md)
+- [1.3.0](RELEASE_NOTES_1.3.0.md)
+- [1.2.9](RELEASE_NOTES_1.2.9.md)
+- [1.2.8](RELEASE_NOTES_1.2.8.md)
+- [1.2.7](RELEASE_NOTES_1.2.7.md)
 - [1.2.6](RELEASE_NOTES_1.2.6.md)
 - [1.2.5](RELEASE_NOTES_1.2.5.md)
 - [1.2.4](RELEASE_NOTES_1.2.4.md)

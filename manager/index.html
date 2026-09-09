@@ -1260,6 +1260,35 @@
       .toast { left: 9px; right: 9px; bottom: 9px; max-width: none; }
     }
   </style>
+<style id="visual-only-polish">
+/* Layout only: original settings, values, controls and save handlers remain intact. */
+body { font-family:"Segoe UI",system-ui,sans-serif; font-size:14px; }
+body .layout { grid-template-columns:180px minmax(0,1fr); gap:18px; }
+body .summary { grid-column:1/-1; position:static; min-width:0; }
+body .summary-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+.rail,.panel,.summary { border-radius:12px; box-shadow:none; }
+body .setting,body .setting-head { grid-template-columns:minmax(130px,1.3fr) minmax(130px,1fr) minmax(80px,.6fr) minmax(80px,.6fr)!important; gap:12px!important; }
+.setting .label { min-width:0; }
+.setting .label span { overflow-wrap:anywhere; line-height:1.5; }
+.btn,.chip { white-space:normal; border-radius:8px; letter-spacing:0; text-transform:none; flex-shrink:0; }
+body .setting .value { width:auto; min-width:0!important; white-space:normal!important; overflow-wrap:anywhere; font-size:13px!important; }
+body .range-control { grid-template-columns:minmax(45px,1fr) 72px; }
+button:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--gold-bright,#ffe1a2); outline-offset:3px; }
+@media(max-width:1000px) {
+  body .setting { grid-template-columns:1fr 1fr!important; }
+  body .setting-head { display:none; }
+  .setting>.label,.setting>div:nth-child(2) { grid-column:1/-1; }
+  .value.current::before { content:'Current: '; margin-right:4px; }
+  .value.modified::before { content:'Modified: '; margin-right:4px; }
+}
+@media(max-width:760px) {
+  body .layout,body .summary-grid { grid-template-columns:1fr; }
+  .rail { position:static; }
+  .nav { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .topbar,.actions { flex-wrap:wrap; }
+}
+
+</style>
 </head>
 <body>
   <main class="wrap">
@@ -1400,7 +1429,7 @@
         settings: [
           { key: "harvestMultiplier", label: "Harvest yield", help: "Raw materials gathered per node.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
           { key: "spiceYieldMultiplier", label: "Vehicle mining yield", help: "Writes Dune.GlobalVehicleMiningOutputMultiplier.", type: "range", min: 0.25, max: 5, step: 0.25, value: 1, unit: "x" },
-          { key: "globalHarvestAmountMultiplier", label: "Harvest amount", help: "Writes UserGame.ini m_GlobalHarvestAmountMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
+          { key: "globalHarvestAmountMultiplier", label: "Harvest amount (effect unverified)", help: "Writes UserGame.ini m_GlobalHarvestAmountMultiplier; its gameplay effect is unverified. Hand and vehicle mining use separate UserEngine.ini multipliers.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
           { key: "globalHarvestHealthMultiplier", label: "Harvest node health", help: "Writes UserGame.ini m_GlobalHarvestHealthMultiplier.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
           { key: "cutterayHemMultiplierPerNodeTierTable", label: "Cutteray HEM/node tier", help: "Writes UserGame.ini CutterayHemMultiplierPerNodeTierTable.", type: "range", min: 0, max: 5, step: 0.05, value: 1, unit: "x" },
           { key: "minimumAugmentableItemQuality", label: "Minimum augment quality", help: "Writes UserGame.ini m_MinimumAugmentableItemQuality.", type: "range", min: 0, max: 10, step: 1, value: 0, unit: "" },

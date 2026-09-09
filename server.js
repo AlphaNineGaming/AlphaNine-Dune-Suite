@@ -23,6 +23,7 @@ const { buildMaintenanceTransport, validateRemoteEvidence: validateRemoteMainten
 const Coordinates = require("./assets/coordinate-system");
 const ExperimentalResourceAreas = require("./lib/experimental-resource-areas");
 const { generateInstalledGameItemCatalog } = require("./lib/installed-game-item-catalog");
+const { scanInstalledGameDungeons } = require("./lib/installed-game-dungeon-catalog");
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError, operationsConflict } = require("./lib/operations");
@@ -92,6 +93,8 @@ const {
 } = require("./lib/server-update");
 const { createBlueprintService } = require("./lib/blueprints");
 const { createDatabaseBrowser } = require("./lib/database-browser");
+const DungeonDifficulty = require("./lib/dungeon-difficulty");
+const MarketManualPurchase = require("./lib/market-manual-purchase");
 const { USER_GAME_SETTINGS_SCHEMA, parseUserGameIni, updateUserGameIni } = require("./lib/user-game-settings");
 const { createMarketAutomator } = require("./lib/market-automator");
 const {
@@ -3446,6 +3449,11 @@ async function sshCommand(command, timeout = 180000, options = {}) {
 
 const USER_GAME_INI_PATH = "/home/dune/.dune/download/scripts/setup/config/UserGame.ini";
 
+const userGameRecovery = require('./lib/user-game-recovery').createUserGameRecovery({
+  directory: path.join(APPDATA_DIR || DATA_DIR, 'ini-backups'), sshCommand, quote: shQuote,
+  target: () => String(config.sshHost || config.vmIp || '') + ':' + String(config.sshUser || '')
+});
+
 async function readLiveUserGameSettings() {
   const result = await sshCommand(`sudo -n cat -- ${shQuote(USER_GAME_INI_PATH)}`, 30000, { maxBuffer: 1024 * 1024 });
   if (!result.ok) throw new Error(result.stderr || result.error || "Could not read UserGame.ini from the VM.");
@@ -3462,63 +3470,11 @@ async function readLiveUserGameSettings() {
   };
 }
 
-async function updateLiveUserGameSettings(requestedValues) {
+async function updateLiveUserGameSettings(requestedValues, expectedContent) {
+  const result = await userGameRecovery.save(requestedValues, expectedContent);
   const current = await readLiveUserGameSettings();
-  const updated = updateUserGameIni(current.content, requestedValues);
-  if (!updated.changedKeys.length) return { ...current, message: "UserGame.ini already has the requested values.", changedKeys: [], backupPath: "" };
-
-  const localTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphanine-usergame-"));
-  const localTempPath = path.join(localTempDir, "UserGame.ini");
-  const token = crypto.randomUUID();
-  const remoteTempPath = `/tmp/alphanine-usergame-${token}.ini`;
-  const backupPath = `${USER_GAME_INI_PATH}.alphanine-${Date.now()}.bak`;
-  const expectedSha256 = crypto.createHash("sha256").update(updated.content, "utf8").digest("hex");
-  fs.writeFileSync(localTempPath, updated.content, "utf8");
-
-  try {
-    const uploaded = await sshCommand(`cat > ${shQuote(remoteTempPath)}`, 30000, { inputPath: localTempPath, maxBuffer: 1024 * 1024 });
-    if (!uploaded.ok) throw new Error(uploaded.stderr || uploaded.error || "Could not stage UserGame.ini in the VM.");
-
-    const command = [
-      "set -eu",
-      `target=${shQuote(USER_GAME_INI_PATH)}`,
-      `incoming=${shQuote(remoteTempPath)}`,
-      `backup=${shQuote(backupPath)}`,
-      `expected=${shQuote(expectedSha256)}`,
-      "sudo -n cp -- \"$target\" \"$backup\"",
-      "sudo -n cp -- \"$incoming\" \"$target\"",
-      "rm -f -- \"$incoming\"",
-      "actual=$(sudo -n sha256sum -- \"$target\" | awk '{print $1}')",
-      "if [ \"$actual\" != \"$expected\" ]; then sudo -n cp -- \"$backup\" \"$target\"; echo 'UserGame.ini verification failed; restored backup.' >&2; exit 41; fi",
-      "if ! /home/dune/.dune/bin/battlegroup apply-default-usersettings; then sudo -n cp -- \"$backup\" \"$target\"; echo 'Applying UserGame.ini failed; restored backup.' >&2; exit 42; fi",
-      "printf '__SHA256__%s\\n' \"$actual\""
-    ].join("; ");
-    const applied = await sshCommand(command, 120000, { maxBuffer: 1024 * 1024 * 4 });
-    if (!applied.ok) throw new Error(applied.stderr || applied.error || "Could not apply UserGame.ini in the VM.");
-
-    appendAdminAudit("usergame_settings_updated", {
-      path: USER_GAME_INI_PATH,
-      backupPath,
-      changedKeys: updated.changedKeys,
-      sha256: expectedSha256
-    });
-    return {
-      ok: true,
-      path: USER_GAME_INI_PATH,
-      schema: USER_GAME_SETTINGS_SCHEMA,
-      values: updated.values,
-      content: updated.content,
-      missingKeys: [],
-      changedKeys: updated.changedKeys,
-      backupPath,
-      sha256: expectedSha256,
-      message: "UserGame.ini was backed up, verified, and applied. Restart the battlegroup when players are prepared.",
-      restartRequired: true
-    };
-  } finally {
-    try { fs.rmSync(localTempDir, { recursive: true, force: true }); } catch {}
-    await sshCommand(`rm -f -- ${shQuote(remoteTempPath)}`, 10000, { maxBuffer: 1024 * 16 }).catch(() => {});
-  }
+  appendAdminAudit('usergame_settings_updated', result);
+  return { ...current, ...result, message: result.changedFiles.length ? 'UserGame.ini settings saved and verified. Restart the battlegroup when ready.' : 'The requested settings are already saved.', restartRequired: result.changedFiles.length > 0 };
 }
 
 async function serverHealthRemoteCheck(command, timeout = 15000, maxBuffer = 1024 * 1024) {
@@ -6540,7 +6496,7 @@ const marketAutomator = createMarketAutomator({
   inspect: () => marketPostingStatus(),
   list: (payload) => marketListings(payload),
   publish: (payload) => postMarketListing(payload),
-  purchase: (orderId) => buyMarketListingAsAdmin(orderId),
+  purchase: async () => { throw new Error("Legacy automated buying is disabled. Use a confirmed Buy & Pay purchase or the persistent Market Bot."); },
   catalog: () => gearCatalog()
     .filter((item) => item?.id && item.spawnable !== false && !isTechKnowledgeItem(item) && !isRecipeSchematicItem(item)),
   battlegroup: () => {
@@ -12759,6 +12715,9 @@ async function progressionTechKnowledgeScan(actorIds) {
 
 const progressionPreviews = new Map();
 const PROGRESSION_CONFIRM_TEXT = "APPLY PROGRESSION";
+const dungeonDifficultyPreviews = new Map();
+const DUNGEON_DIFFICULTY_CONFIRM_TEXT = "APPLY DUNGEON EXPERIMENT";
+const DUNGEON_DIFFICULTY_PREVIEW_TTL_MS = 15 * 60 * 1000;
 const landsraadWeeklyPatchPreviews = new Map();
 const LANDSRAAD_WEEKLY_CONFIRM_TEXT = "APPLY LANDSRAAD";
 const landsraadTierPreviews = new Map();
@@ -16700,6 +16659,236 @@ function playerInventoryTargetCtes(playerRefValue) {
     )`;
 }
 
+async function dungeonDifficultySchemaInspect() {
+  const output = await dbQuery(`
+    select 'column', table_name, column_name
+    from information_schema.columns
+    where table_schema = 'dune'
+      and table_name in ('dungeon_completion', 'dungeon_completion_players')
+    union all
+    select 'function', p.proname, oidvectortypes(p.proargtypes)
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'dune'
+      and p.proname = 'record_dungeon_completion'
+    union all
+    select 'generated', table_name, column_name
+    from information_schema.columns
+    where table_schema = 'dune' and table_name = 'dungeon_completion'
+      and column_name = 'completion_id'
+      and (is_identity = 'YES' or column_default like 'nextval(%')
+    order by 1, 2, 3;
+  `, 12000);
+  const rows = parseDbRows(output, ["kind", "name", "detail"]);
+  const columns = new Set(rows.filter((row) => row.kind === "column").map((row) => `${row.name}.${row.detail}`));
+  const functions = rows.filter((row) => row.kind === "function");
+  const requiredColumns = [
+    "dungeon_completion.completion_id", "dungeon_completion.dungeon_id", "dungeon_completion.difficulty",
+    "dungeon_completion.duration_ms", "dungeon_completion.players_num",
+    "dungeon_completion_players.player_id", "dungeon_completion_players.completion_id"
+  ];
+  const functionDetected = functions.some((row) => row.detail === "text, integer, integer, bigint[]");
+  const directDetected = rows.some((row) => row.kind === "generated");
+  const missingColumns = requiredColumns.filter((column) => !columns.has(column));
+  return {
+    ok: missingColumns.length === 0,
+    status: missingColumns.length === 0 ? "detected" : "unsupported",
+    writeMethod: functionDetected ? "function" : directDetected ? "direct" : null,
+    tables: ["dune.dungeon_completion", "dune.dungeon_completion_players"],
+    missingColumns,
+    recordFunctionDetected: functionDetected,
+    functions,
+    experimentalMaximum: DungeonDifficulty.MAX_EXPERIMENTAL_DIFFICULTY
+  };
+}
+
+async function dungeonDifficultyPlayerId(playerData) {
+  const preferred = [
+    playerData?.player?.player_controller_id,
+    playerData?.player?.actor_id,
+    playerData?.player?.character_actor_id,
+    playerData?.player?.player_pawn_id
+  ].map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0);
+  const candidates = [...new Set(preferred)];
+  if (!candidates.length) throw new Error("The selected player has no usable actor id.");
+  const output = await dbQuery(`select id::text from dune.actors where id in (${candidates.join(", ")}) order by array_position(array[${candidates.join(", ")} ]::bigint[], id);`, 12000);
+  const detected = String(output || "").split(/\r?\n/).map((value) => Number(value.trim())).filter((value) => Number.isSafeInteger(value) && value > 0);
+  if (!detected.length) throw new Error("None of the selected player's resolved ids exist in dune.actors.");
+  return detected[0];
+}
+
+async function dungeonDifficultyRows(playerIdValue, dungeonIdValue = "") {
+  const playerId = DungeonDifficulty.normalizePlayerId(playerIdValue);
+  const dungeonId = String(dungeonIdValue || "").trim();
+  const sql = dungeonId ? DungeonDifficulty.buildSnapshotSql(playerId, dungeonId) : `
+    select dc.completion_id::text,
+           dc.dungeon_id,
+           dc.difficulty::text,
+           dc.duration_ms::text,
+           dc.players_num::text,
+           (select count(*) from dune.dungeon_completion_players links where links.completion_id = dc.completion_id)::text as party_links
+    from dune.dungeon_completion_players dcp
+    join dune.dungeon_completion dc on dc.completion_id = dcp.completion_id
+    where dcp.player_id = ${playerId}
+    order by dc.dungeon_id, dc.difficulty, dc.completion_id
+    limit 500;
+  `;
+  return parseDbRows(await dbQuery(sql, 20000), ["completion_id", "dungeon_id", "difficulty", "duration_ms", "players_num", "party_links"]);
+}
+
+async function dungeonDifficultyKnownDungeons() {
+  const output = await dbQuery(`
+    select dungeon_id, max(difficulty)::text, count(*)::text
+    from dune.dungeon_completion
+    group by dungeon_id
+    order by dungeon_id
+    limit 500;
+  `, 15000);
+  return parseDbRows(output, ["dungeon_id", "highest_difficulty", "completion_count"]);
+}
+
+async function dungeonDifficultyResolve(queryValue, options = {}) {
+  const query = String(queryValue || "").trim();
+  const playerData = await progressionPlayerLookup(query);
+  if (!playerData.ok) throw new Error(playerData.reason || playerData.error || "Player lookup failed.");
+  const playerOnline = String(playerData.player?.online_status || "").toLowerCase().includes("online");
+  if (options.requireOffline && playerOnline) throw new Error("Dungeon difficulty editing requires the selected player to be offline.");
+  const playerId = await dungeonDifficultyPlayerId(playerData);
+  return { query, playerData, playerId, playerOnline };
+}
+
+async function dungeonDifficultyInspect(queryValue, dungeonIdValue = "") {
+  const schema = await dungeonDifficultySchemaInspect();
+  if (!schema.ok) return { ok: false, status: "unsupported", schema, reason: "Missing dungeon columns: " + schema.missingColumns.join(", ") };
+  const resolved = await dungeonDifficultyResolve(queryValue);
+  const dungeonId = String(dungeonIdValue || "").trim();
+  if (dungeonId) DungeonDifficulty.normalizeDungeonId(dungeonId);
+  const [records, knownDungeons] = await Promise.all([
+    dungeonDifficultyRows(resolved.playerId, dungeonId),
+    dungeonDifficultyKnownDungeons()
+  ]);
+  const highestByDungeon = {};
+  for (const row of records) highestByDungeon[row.dungeon_id] = Math.max(Number(highestByDungeon[row.dungeon_id] || 0), Number(row.difficulty || 0));
+  return {
+    ok: true,
+    status: "experimental",
+    experimental: true,
+    schema,
+    player: resolved.playerData.player,
+    playerId: String(resolved.playerId),
+    playerOffline: !resolved.playerOnline,
+    dungeonId,
+    records,
+    knownDungeons,
+    highestByDungeon,
+    warning: "Experimental: this rewrites completion history used by the difficulty selector and may create synthetic best-run statistics. It does not set the active run or grant loot."
+  };
+}
+
+async function dungeonDifficultyPreview(payload = {}) {
+  const configValue = loadConfig();
+  if (!configValue.progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+  const dungeonId = DungeonDifficulty.normalizeDungeonId(payload.dungeonId);
+  const targetSelectableDifficulty = DungeonDifficulty.normalizeTargetDifficulty(payload.targetSelectableDifficulty);
+  const schema = await dungeonDifficultySchemaInspect();
+  if (!schema.ok) throw new Error("Missing dungeon columns: " + schema.missingColumns.join(", "));
+  if (!schema.writeMethod) throw new Error("Dungeon history is readable, but safe writing requires a compatible record function or an identity/sequence-generated completion_id. No records were changed.");
+  const resolved = await dungeonDifficultyResolve(payload.query || payload.playerId, { requireOffline: true });
+  const records = await dungeonDifficultyRows(resolved.playerId, dungeonId);
+  const plan = DungeonDifficulty.planChange(records, targetSelectableDifficulty);
+  if (!plan.changesRequired) throw new Error(`This player's saved unlock for ${dungeonId} already resolves to selectable difficulty ${targetSelectableDifficulty}.`);
+
+  const databaseBackup = await createDatabaseBackup({
+    safety: true,
+    method: "native",
+    prefix: "pre-dungeon-difficulty",
+    timeout: 240000
+  });
+  if (!databaseBackup?.ok || databaseBackup.verified !== true) throw new Error(databaseBackup?.error || "A verified full database backup could not be created; preview was cancelled.");
+
+  const previewId = crypto.randomBytes(16).toString("hex");
+  const snapshotPath = progressionBackupPath(resolved.playerId, "dungeon_difficulty", previewId);
+  const snapshot = {
+    createdAt: new Date().toISOString(),
+    experimental: true,
+    player: resolved.playerData.player,
+    playerId: String(resolved.playerId),
+    dungeonId,
+    targetSelectableDifficulty,
+    plan,
+    records,
+    databaseBackupPath: databaseBackup.localBackupPath || databaseBackup.filePath || ""
+  };
+  fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2), "utf8");
+  const preview = {
+    previewId,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + DUNGEON_DIFFICULTY_PREVIEW_TTL_MS,
+    query: resolved.query,
+    player: resolved.playerData.player,
+    playerId: resolved.playerId,
+    dungeonId,
+    targetSelectableDifficulty,
+    plan,
+    records,
+    snapshotFingerprint: DungeonDifficulty.snapshotFingerprint(records),
+    writeMethod: schema.writeMethod,
+    databaseBackupPath: snapshot.databaseBackupPath,
+    snapshotPath,
+    sqlPreview: DungeonDifficulty.buildApplySql({ playerId: resolved.playerId, dungeonId, targetSelectableDifficulty, writeMethod: schema.writeMethod })
+  };
+  dungeonDifficultyPreviews.set(previewId, preview);
+  progressionAudit("dungeon_difficulty_preview_created", { experimental: true, player: preview.player, playerId: preview.playerId, dungeonId, targetSelectableDifficulty, plan, databaseBackupPath: preview.databaseBackupPath, snapshotPath });
+  return { ok: true, status: "preview", experimental: true, ...preview, auditLogPath: PROGRESSION_AUDIT_LOG, confirmText: DUNGEON_DIFFICULTY_CONFIRM_TEXT };
+}
+
+async function dungeonDifficultyApply(payload = {}) {
+  const previewId = String(payload.previewId || "").trim();
+  const preview = dungeonDifficultyPreviews.get(previewId);
+  if (!preview) throw new Error("Dungeon difficulty preview was not found. Generate a new preview and backup.");
+  if (String(payload.confirmText || "") !== DUNGEON_DIFFICULTY_CONFIRM_TEXT) throw new Error(`Type ${DUNGEON_DIFFICULTY_CONFIRM_TEXT} exactly.`);
+  if (!loadConfig().progressionEditingEnabled) throw new Error("Enable Progression Editing is OFF.");
+  if (Date.now() > preview.expiresAt) {
+    dungeonDifficultyPreviews.delete(previewId);
+    throw new Error("Dungeon difficulty preview expired. Generate a new preview and backup.");
+  }
+  const resolved = await dungeonDifficultyResolve(preview.query, { requireOffline: true });
+  const schema = await dungeonDifficultySchemaInspect();
+  if (!schema.ok || schema.writeMethod !== preview.writeMethod) throw new Error("Dungeon write support changed. Generate a new preview and backup.");
+  if (resolved.playerId !== preview.playerId) throw new Error("The selected player identity changed. Generate a new preview.");
+  const before = await dungeonDifficultyRows(preview.playerId, preview.dungeonId);
+  if (DungeonDifficulty.snapshotFingerprint(before) !== preview.snapshotFingerprint) throw new Error("Dungeon completion history changed after the preview. Generate a new preview and backup.");
+
+  const sql = DungeonDifficulty.buildApplySql(preview);
+  await dbQuery(sql, 30000);
+  const after = await dungeonDifficultyRows(preview.playerId, preview.dungeonId);
+  const requiredDifficulty = DungeonDifficulty.requiredCompletionDifficulty(preview.targetSelectableDifficulty);
+  const highest = after.reduce((value, row) => Math.max(value, Number(row.difficulty || 0)), 0);
+  const exactRequiredFound = requiredDifficulty === 0 ? after.length === 0 : after.some((row) => Number(row.difficulty) === requiredDifficulty);
+  if (highest !== requiredDifficulty || !exactRequiredFound) {
+    progressionAudit("dungeon_difficulty_apply_verification_failed", { experimental: true, player: preview.player, playerId: preview.playerId, dungeonId: preview.dungeonId, targetSelectableDifficulty: preview.targetSelectableDifficulty, before, after, databaseBackupPath: preview.databaseBackupPath, snapshotPath: preview.snapshotPath });
+    throw new Error("The database write completed, but dungeon difficulty read-back did not match the requested unlock. Restore the verified backup before retrying.");
+  }
+  dungeonDifficultyPreviews.delete(previewId);
+  progressionAudit("dungeon_difficulty_apply_success", { experimental: true, player: preview.player, playerId: preview.playerId, dungeonId: preview.dungeonId, targetSelectableDifficulty: preview.targetSelectableDifficulty, before, after, databaseBackupPath: preview.databaseBackupPath, snapshotPath: preview.snapshotPath });
+  return {
+    ok: true,
+    status: "applied",
+    experimental: true,
+    player: preview.player,
+    playerId: String(preview.playerId),
+    dungeonId: preview.dungeonId,
+    targetSelectableDifficulty: preview.targetSelectableDifficulty,
+    requiredCompletionDifficulty: requiredDifficulty,
+    before,
+    after,
+    databaseBackupPath: preview.databaseBackupPath,
+    snapshotPath: preview.snapshotPath,
+    auditLogPath: PROGRESSION_AUDIT_LOG,
+    warning: "Relog before testing. The in-game slider still selects the active difficulty; this edit changes only saved completion history."
+  };
+}
+
 function parsePlayerInventoryResult(output, label) {
   for (const line of String(output || "").split(/\r?\n/).reverse()) {
     const text = line.trim();
@@ -17035,6 +17224,17 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
       from dune.items i
       where i.inventory_id = (select inventory_id::bigint from chosen_inventory limit 1)
     ),
+    free_slot_count as (
+      select count(*)::int as free_slots
+      from chosen_inventory inv
+      cross join lateral generate_series(0, greatest(inv.max_item_count-1, 0)) free_slot(position_index)
+      where inv.max_item_count > 0
+        and not exists (
+          select 1 from dune.items occupied
+          where occupied.inventory_id = inv.inventory_id::bigint
+            and occupied.position_index = free_slot.position_index
+        )
+    ),
     next_position as (
       select coalesce(max(i.position_index), -1) + 1 as position_index
       from dune.items i
@@ -17048,7 +17248,7 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
         when not exists(select 1 from target) then 'player_not_found'
         when not exists(select 1 from chosen_inventory) then 'inventory_not_found'
         when (select max_item_count from chosen_inventory limit 1) > 0
-          and (select item_count from current_count) + ${stackCount} > (select max_item_count from chosen_inventory limit 1) then 'inventory_full'
+          and coalesce((select free_slots from free_slot_count), 0) < ${stackCount} then 'inventory_full'
         else 'ready'
       end,
       coalesce((select account_id from target limit 1), ''),
@@ -17118,14 +17318,6 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
       limit 1;
     do $$ begin
       if not exists(select 1 from player_grant_target) then raise exception 'Player inventory destination changed before item grant'; end if;
-      if exists(select 1 from dune.items i join player_grant_target t on t.inventory_id=i.inventory_id
-                where i.position_index is null or i.position_index<0 or (t.max_item_count>0 and i.position_index>=t.max_item_count)) then
-        raise exception 'Player inventory contains invalid occupied slot positions';
-      end if;
-      if exists(select 1 from dune.items i join player_grant_target t on t.inventory_id=i.inventory_id
-                group by i.position_index having count(*)>1) then
-        raise exception 'Player inventory contains duplicate occupied slot positions';
-      end if;
     end $$;
     create temp table player_grant_slots on commit drop as
       select candidate.position_index, row_number() over(order by candidate.position_index)::int slot_number
@@ -17161,13 +17353,16 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
       if not coalesce((select count(*)=${stackCount}
                               and coalesce(sum(i.stack_size),0)=${qty}
                               and count(distinct i.position_index)=count(*)
+                              and bool_and(i.position_index>=0 and (t.max_item_count<=0 or i.position_index<t.max_item_count))
+                              and bool_and((select count(*) from dune.items occupied where occupied.inventory_id=i.inventory_id and occupied.position_index=i.position_index)=1)
                               and bool_and(i.inventory_id=${requireInteger(inventory.id, "inventory_id", 1)})
                               and bool_and(i.template_id=${sqlString(template)})
                               and bool_and(i.quality_level=${grade})
                               and bool_and(${durability.applied
                                 ? `jsonb_typeof(i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE} and jsonb_typeof(i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')='number' and (i.stats #>> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}')::numeric=${GIVE_ITEM_DURABILITY_VALUE}`
                                 : `i.stats #> '${GIVE_ITEM_DURABILITY_SQL_PATH}' is null and i.stats #> '${GIVE_ITEM_MAXIMUM_DURABILITY_SQL_PATH}' is null`})
-                         from player_grant_inserted i),false) then
+                         from player_grant_inserted i cross join player_grant_target t
+                         group by t.max_item_count),false) then
         raise exception 'Player item grant failed transactional identity, quantity, slot, grade, or durability verification';
       end if;
     end $$;
@@ -17487,14 +17682,12 @@ function normalizeMarketPricingAudit(value, template, finalPrice) {
 
 async function marketListingGameNow() {
   try {
+    // Fetch the server's universe-relative clock on every call. Adding persisted
+    // downtime here double-counts the offset and falsely expires active orders.
     const sql = `
-      with database_clock as (
-        select floor(extract(epoch from clock_timestamp()))::bigint as database_now
-      ),
-      farm_clock as (
+      with farm_clock as (
         select floor(
                  extract(epoch from ((clock_timestamp() at time zone 'UTC') - universe_time_timestamp))
-                 + coalesce(down_time_accumulation, 0)::numeric / 1000000
                )::bigint as game_now
         from dune.farm_variables
         where one_row = true
@@ -17502,12 +17695,13 @@ async function marketListingGameNow() {
         limit 1
       )
       select coalesce(
-        (select game_now from farm_clock),
-        (select database_now from database_clock)
+        (select game_now from farm_clock where game_now > 0),
+        0
       )::text
     `;
     const row = parseDbRows(await dbQuery(sql, 12000), ["expirationTime"])[0] || {};
-    return Number(row.expirationTime || 0) || 0;
+    const gameNow = Number(row.expirationTime || 0);
+    return Number.isSafeInteger(gameNow) && gameNow > 0 ? gameNow : 0;
   } catch {
     return 0;
   }
@@ -17515,7 +17709,8 @@ async function marketListingGameNow() {
 
 async function marketListingExpiryTime(expiryDays) {
   const gameNow = await marketListingGameNow();
-  return Math.max(0, gameNow) + expiryDays * 24 * 3600;
+  if (gameNow <= 0) throw new Error("Server game clock is unavailable. No market listing was created.");
+  return gameNow + expiryDays * 24 * 3600;
 }
 
 async function cleanupExpiredMarketListings(options = {}) {
@@ -18107,7 +18302,8 @@ async function marketListings(payload = {}) {
       coalesce(a.class, ''),
       coalesce(o.owner_id::text, ''),
       coalesce(o.expiration_time::text, ''),
-      coalesce(o.item_id::text, '')
+      coalesce(o.item_id::text, ''),
+      (a.owner_account_id is not null)::text
     from dune.dune_exchange_orders o
     join dune.dune_exchange_sell_orders s on s.order_id = o.id
     join dune.items i on i.id = o.item_id
@@ -18119,7 +18315,7 @@ async function marketListings(payload = {}) {
   `;
   const catalog = gearCatalog();
   const byId = new Map(catalog.map((item) => [item.id, item]));
-  const rows = parseDbRows(await dbQuery(sql, 20000), ["orderId", "exchangeName", "template", "stackSize", "quality", "price", "initialStackSize", "normalizedPrice", "isNpcOrder", "ownerClass", "ownerId", "expirationTime", "itemId"]);
+  const rows = parseDbRows(await dbQuery(sql, 20000), ["orderId", "exchangeName", "template", "stackSize", "quality", "price", "initialStackSize", "normalizedPrice", "isNpcOrder", "ownerClass", "ownerId", "expirationTime", "itemId", "playerOwned"]);
   const listings = rows.map((row) => {
     const item = byId.get(row.template);
     const quality = Number(row.quality || 0) || 0;
@@ -18140,6 +18336,7 @@ async function marketListings(payload = {}) {
       price: Number(row.price || row.normalizedPrice || 0) || 0,
       initialStackSize: Number(row.initialStackSize || row.stackSize || 0) || 0,
       isNpcOrder: row.isNpcOrder === "t" || row.isNpcOrder === "true",
+      playerOwned: row.playerOwned === "t" || row.playerOwned === "true",
       ownerClass: row.ownerClass || "",
       ownerId: row.ownerId,
       expirationTime: row.expirationTime
@@ -18148,158 +18345,52 @@ async function marketListings(payload = {}) {
   return { ok: true, listings, count: listings.length, gameNow, expiredCleanup, durationMs: Date.now() - started };
 }
 
-async function buyMarketListingAsAdmin(orderIdValue) {
-  throw new Error("Legacy automated buying is disabled. Configure the persistent Market Bot player buyer instead.");
-  /*
+const marketPurchasePreviews = new Map();
+const MARKET_PURCHASE_PREVIEW_TTL_MS = 5 * 60 * 1000;
+function marketPurchaseTargetKey(target) {
+  return JSON.stringify([target.namespace, target.dbPod, target.dbSvc]);
+}
+
+async function previewMarketListingPurchase(orderIdValue) {
+  const orderId = MarketManualPurchase.positiveId(orderIdValue);
+  for (const [id, preview] of marketPurchasePreviews) if (Date.now() > preview.expiresAt) marketPurchasePreviews.delete(id);
+  if (marketPurchasePreviews.size >= 100) throw new Error("Too many pending purchase previews. Wait for existing previews to expire.");
+  const target = await cachedDatabaseRuntimeTarget();
+  const output = await dbQuery(MarketManualPurchase.buildInspectSql(orderId), 12000, target);
+  if (!output.trim()) throw new Error("Listing is unavailable, expired, or not an eligible player listing; the server game clock must also be available.");
+  const expected = JSON.parse(output.trim());
+  const previewId = crypto.randomUUID();
+  const expiresAt = Date.now() + MARKET_PURCHASE_PREVIEW_TTL_MS;
+  marketPurchasePreviews.set(previewId, { expected, targetKey: marketPurchaseTargetKey(target), expiresAt });
+  return { ok: true, previewId, expiresAt, ...expected, itemName: gearCatalog().find(item => item.id === expected.template)?.name || expected.template };
+}
+
+async function buyMarketListingAsAdmin(orderIdValue, payload = {}) {
+  const orderId = MarketManualPurchase.positiveId(orderIdValue);
+  if (payload.confirmText !== MarketManualPurchase.CONFIRM_TEXT) throw new Error("Explicit Buy & Pay confirmation is required.");
+  const preview = marketPurchasePreviews.get(String(payload.previewId || ""));
+  if (!preview || preview.expected.orderId !== orderId) throw new Error("Generate a fresh purchase preview first.");
+  if (Date.now() > preview.expiresAt) {
+    marketPurchasePreviews.delete(payload.previewId);
+    throw new Error("Purchase preview expired. Refresh and confirm again.");
+  }
+  const target = await cachedDatabaseRuntimeTarget();
+  if (marketPurchaseTargetKey(target) !== preview.targetKey) throw new Error("Selected database changed. Generate a new purchase preview.");
+  // Consume before any write: double-clicks and ambiguous network retries cannot reuse this approval.
+  if (marketPurchasePreviews.get(payload.previewId) !== preview) throw new Error("This purchase is already being processed.");
+  marketPurchasePreviews.delete(payload.previewId);
   const started = Date.now();
-  const orderId = requireInteger(orderIdValue, "order id", 1, 999999999999);
-  const expiryTime = await marketListingExpiryTime(14);
-  const sql = `
-    with target as materialized (
-      select
-        o.id as order_id,
-        o.exchange_id,
-        coalesce(o.access_point_id, 1) as access_point_id,
-        o.owner_id as seller_actor_id,
-        o.template_id,
-        o.item_id,
-        o.item_price,
-        coalesce(i.stack_size, s.initial_stack_size, 1) as stack_size,
-        coalesce(o.quality_level, 0) as quality_level
-      from dune.dune_exchange_orders o
-      join dune.dune_exchange_sell_orders s on s.order_id = o.id
-      left join dune.items i on i.id = o.item_id
-      where o.id = ${orderId}
-        and o.is_npc_order = false
-      limit 1
-    ),
-    selected_partition as (
-      select partition_id
-      from dune.world_partition
-      order by partition_id
-      limit 1
-    ),
-    existing_actor as (
-      select id
-      from dune.actors
-      where class = 'AlphaNineMarket'
-      order by id
-      limit 1
-    ),
-    created_actor as (
-      insert into dune.actors (class, serial, gas_attributes, properties, dimension_index, partition_id)
-      select 'AlphaNineMarket', 0, '{}', '{}', 0, (select partition_id from selected_partition)
-      where exists (select 1 from target)
-        and not exists (select 1 from existing_actor)
-      returning id
-    ),
-    market_actor as (
-      select id from existing_actor
-      union all
-      select id from created_actor
-      limit 1
-    ),
-    exchange_user as (
-      insert into dune.dune_exchange_users (owner_id)
-      select id from market_actor
-      where exists (select 1 from target)
-      on conflict do nothing
-      returning id as user_id
-    ),
-    market_user as (
-      select user_id from exchange_user
-      union all
-      select id as user_id
-      from dune.dune_exchange_users
-      where owner_id = (select id from market_actor)
-      limit 1
-    ),
-    payment_order as (
-      insert into dune.dune_exchange_orders
-        (exchange_id, access_point_id, owner_id, template_id, expiration_time,
-         durability_cur, durability_max, item_price, category_mask, category_depth, is_npc_order)
-      select
-        exchange_id,
-        access_point_id,
-        seller_actor_id,
-        template_id,
-        ${expiryTime},
-        1.0,
-        1.0,
-        item_price * stack_size,
-        0,
-        0,
-        false
-      from target
-      returning id
-    ),
-    fulfilled as (
-      insert into dune.dune_exchange_fulfilled_orders
-        (order_id, source_order_id, completion_type, stack_size, original_order_id)
-      select
-        (select id from payment_order),
-        null,
-        4,
-        stack_size,
-        order_id
-      from target
-      returning order_id
-    ),
-    buyer_debit as (
-      update dune.dune_exchange_users
-      set solari_balance = solari_balance - (select item_price * stack_size from target)
-      where id = (select user_id from market_user)
-      returning owner_id, id as user_id
-    ),
-    deleted_sell as (
-      delete from dune.dune_exchange_sell_orders
-      where order_id = (select order_id from target)
-      returning order_id
-    ),
-    deleted_order as (
-      delete from dune.dune_exchange_orders
-      where id = (select order_id from target)
-      returning id
-    ),
-    deleted_item as (
-      delete from dune.items
-      where id = (select item_id from target)
-        and (select item_id from target) is not null
-      returning id
-    )
-    select
-      coalesce((select order_id::text from target), ''),
-      coalesce((select template_id from target), ''),
-      coalesce((select seller_actor_id::text from target), ''),
-      coalesce((select item_price::text from target), ''),
-      coalesce((select stack_size::text from target), ''),
-      coalesce((select (item_price * stack_size)::text from target), ''),
-      coalesce((select id::text from payment_order), ''),
-      coalesce((select owner_id::text from buyer_debit), ''),
-      coalesce((select user_id::text from buyer_debit), ''),
-      coalesce((select id::text from deleted_item), '')
-  `;
-  const row = parseDbRows(await dbQuery(sql, 45000), ["orderId", "template", "sellerActorId", "price", "stackSize", "totalPaid", "paymentOrderId", "buyerActorId", "buyerExchangeUserId", "deletedItemId"])[0] || {};
-  if (!row.orderId) throw new Error(`Player market listing ${orderId} was not found or is not a player sell listing.`);
-  const result = {
-    ok: true,
-    status: "bought",
-    orderId,
-    template: row.template,
-    sellerActorId: row.sellerActorId,
-    price: Number(row.price || 0) || 0,
-    stackSize: Number(row.stackSize || 0) || 0,
-    totalPaid: Number(row.totalPaid || 0) || 0,
-    paymentOrderId: row.paymentOrderId,
-    buyerActorId: row.buyerActorId,
-    buyerExchangeUserId: row.buyerExchangeUserId,
-    deletedItemId: row.deletedItemId,
-    durationMs: Date.now() - started,
-    message: `Bought player listing ${orderId} and created seller payout for ${row.totalPaid || 0} Solari.`
-  };
-  appendAdminAudit("market_listing_bought_by_admin", result);
-  return result;
-  */
+  try {
+    const output = await dbQuery(MarketManualPurchase.buildApplySql(preview.expected), 30000, target);
+    const receipt = MarketManualPurchase.parseReceipt(output);
+    const result = { ok: true, status: "bought", ...receipt, durationMs: Date.now() - started,
+      message: "Bought listing " + orderId + ". Seller can claim " + receipt.totalPaid + " Solari in the game Exchange. The listed item was removed." };
+    appendAdminAudit("market_listing_bought_by_admin", result);
+    return result;
+  } catch (error) {
+    appendAdminAudit("market_listing_admin_purchase_failed", { orderId, error: error.message });
+    throw error;
+  }
 }
 
 async function removeMarketListingAsAdmin(orderIdValue) {
@@ -21886,6 +21977,16 @@ function appPage() {
     .progression-meter span { display:block; height:100%; width:var(--pct,35%); background:linear-gradient(90deg, var(--sand), var(--gold-bright)); box-shadow:0 0 18px rgba(240,201,106,.22); }
     .progression-main-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(320px,.75fr); gap:var(--panel-gap); align-items:start; }
     .progression-stack { display:grid; gap:var(--panel-gap); }
+    .progression-category-picker { padding:18px; border:1px solid rgba(224,173,99,.34); border-radius:22px; background:linear-gradient(135deg, rgba(18,14,10,.94), rgba(10,8,5,.82)); }
+    .progression-category-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-top:12px; }
+    .progression-category-button { min-height:98px; display:grid; align-content:center; justify-items:start; gap:7px; padding:16px; border-radius:18px; text-align:left; }
+    .progression-category-button strong { color:var(--text); font-size:17px; }
+    .progression-category-button span { color:var(--muted); font-size:12px; line-height:1.35; }
+    .progression-category-button.active { border-color:var(--gold-bright); background:linear-gradient(135deg, rgba(214,166,69,.24), rgba(74,48,16,.35)); box-shadow:0 0 0 2px rgba(240,201,106,.12), 0 16px 36px rgba(0,0,0,.22); }
+    [data-progression-category-panel][hidden] { display:none !important; }
+    #dungeonDifficultyManualLabel[hidden] { display:none !important; }
+    .dungeon-game-scan { border:1px solid rgba(240,201,106,.26); border-radius:16px; padding:14px; background:rgba(240,201,106,.045); }
+    .dungeon-game-scan table button { min-width:76px; }
     .progression-fold { border:1px solid rgba(224,173,99,.34); border-radius:22px; background:linear-gradient(180deg, rgba(18,14,10,.91), rgba(6,5,3,.76)); box-shadow:0 20px 60px rgba(0,0,0,.18); overflow:hidden; }
     .progression-fold > summary { list-style:none; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 18px; color:var(--text); font-size:19px; font-weight:850; }
     .progression-fold > summary::-webkit-details-marker { display:none; }
@@ -21902,7 +22003,8 @@ function appPage() {
     .progression-skill-rank { min-width:112px; }
     .progression-currency-balance { min-width:0; max-width:100%; justify-self:end; font-size:clamp(14px,1.5vw,20px); line-height:1.15; color:var(--gold-bright); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; text-align:right; }
     .progression-compact-support { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:12px; }
-    @media (max-width:1050px) { .progression-main-grid,.progression-profile-card{grid-template-columns:1fr}.progression-bars,.progression-editor-grid,.progression-compact-support{grid-template-columns:1fr}.progression-hero{align-items:flex-start;flex-direction:column}.progression-avatar{width:88px;height:88px;font-size:44px} }
+    @media (max-width:1050px) { .progression-main-grid,.progression-profile-card{grid-template-columns:1fr}.progression-category-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.progression-bars,.progression-editor-grid,.progression-compact-support{grid-template-columns:1fr}.progression-hero{align-items:flex-start;flex-direction:column}.progression-avatar{width:88px;height:88px;font-size:44px} }
+    @media (max-width:620px) { .progression-category-grid{grid-template-columns:1fr}.progression-category-button{min-height:78px} }
     .ping-graph { display:flex; align-items:end; gap:3px; min-height:70px; margin-top:10px; padding:8px; border:1px solid rgba(214,166,69,.16); background:rgba(0,0,0,.22); }
     .ping-bar { flex:1; min-width:3px; max-width:9px; height:8px; background:var(--bad); opacity:.78; }
     .ping-bar.ok { background:var(--good); }
@@ -22508,6 +22610,83 @@ function appPage() {
     }
   </style>
   <link rel="stylesheet" href="/assets/ui-overrides.css">
+<style id="visual-only-polish">
+/* Visual polish for the unchanged 1.3.2 interface. */
+:root { --font-panel-body:14px; --font-panel-subtle:13px; --font-panel-label:12px; --font-button:13px; --font-table:13px; --panel-gap:16px; --panel-pad:18px; }
+body { font-family:"Segoe UI",system-ui,sans-serif; }
+.shell { grid-template-columns:240px minmax(0,1fr); }
+.sidebar { padding:16px 12px; }
+.sidebar .brand { margin-bottom:14px; box-shadow:none; }
+.sidebar .brand h1 { font-size:22px; line-height:1.2; letter-spacing:.035em; }
+.nav-group-title { font-size:11px; letter-spacing:.08em; }
+.tab { min-height:40px; padding:10px 12px; font-size:13px; text-transform:none; letter-spacing:0; border-radius:8px; clip-path:none; box-shadow:none; }
+.tab.active,.tab.child-active { box-shadow:none; background:var(--panel-2); }
+.content,.panel,.field-grid>* { min-width:0; }
+.topbar { grid-template-columns:minmax(180px,1fr) auto; gap:16px; align-items:start; box-shadow:none; }
+.title h2 { font-size:24px; letter-spacing:.02em; text-transform:none; }
+.title p { font-size:12px; line-height:1.5; letter-spacing:0; text-transform:none; }
+.topbar-actions { gap:8px; flex-wrap:wrap; max-width:540px; }
+.status-strip { flex-wrap:wrap; }
+.badge { font-size:11px; text-transform:none; letter-spacing:0; }
+.panel { box-shadow:none; border-radius:12px; }
+.label { font-size:12px; text-transform:none; letter-spacing:.02em; }
+.subtle,.empty,.warning { font-size:13px; line-height:1.5; }
+button { border-radius:8px; clip-path:none; box-shadow:none; overflow-wrap:normal; word-break:normal; }
+button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--gold-bright); outline-offset:3px; }
+input,select { font-size:14px; }
+.action-row { flex-wrap:wrap; gap:8px; }
+.action-row button { flex-shrink:0; }
+.panel-head { flex-wrap:wrap; align-items:flex-start; gap:12px; }
+.panel-head>:first-child { min-width:0; flex:1 1 210px; }
+#dashboard>.grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.suite-action-center { top:auto; bottom:20px; right:20px; width:min(380px,calc(100vw - 40px)); }
+#dashboard .dashboard-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+#dashboard .dashboard-activity { grid-column:auto; grid-row:auto; }
+#dashboard .vm-monitor,#dashboard .dashboard-grid>.panel:last-child { grid-column:1/-1; grid-row:auto; }
+#dashboard .dashboard-grid>.panel:last-child { width:100%; max-width:none; }
+#dashboard .activity { max-height:260px; }
+#item-database>.panel>.field-grid { grid-template-columns:minmax(180px,2fr) repeat(4,minmax(100px,1fr)); align-items:end; }
+#item-database>.panel>.field-grid .check-row { grid-column:1/-1; }
+.item-db-card { border-radius:8px; clip-path:none; text-transform:none; letter-spacing:0; }
+.item-db-card strong { font-size:14px; }
+.item-db-meta,.item-db-card .env-path-value { font-size:11px; }
+#market>.grid .value { font-size:20px; }
+.progression-hero { padding:18px; }
+.progression-hero h2 { font-size:26px; line-height:1.25; }
+.progression-profile-card { padding:14px; gap:16px; }
+.progression-profile-card h3 { font-size:20px; }
+.progression-avatar { width:60px; height:60px; font-size:32px; }
+.progression-category-button { min-height:68px; padding:12px; }
+.progression-category-button strong { font-size:14px; }
+.progression-category-button span { font-size:11px; }
+#logs pre { font-family:Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; line-height:1.6; max-height:55vh; overflow:auto; }
+.health-card p { font-size:13px; line-height:1.5; }
+#diagnostics .test-grid { grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); }
+#live-map .live-experimental-help { font-size:12px; line-height:1.5; }
+@media(max-width:1200px) {
+  .topbar { grid-template-columns:1fr; }
+  .topbar-actions,.status-strip { justify-content:flex-start; max-width:none; }
+  #item-database>.panel>.field-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  #item-database>.panel>.field-grid>label:first-child { grid-column:1/-1; }
+}
+@media(min-width:761px) and (max-width:1050px) {
+  .shell { grid-template-columns:212px minmax(0,1fr); }
+  .sidebar { position:sticky; top:0; height:100vh; }
+  #dashboard .dashboard-grid { grid-template-columns:1fr; }
+}
+@media(max-width:760px) {
+  .shell { grid-template-columns:1fr; }
+  .sidebar { position:relative; height:auto; max-height:360px; }
+  #dashboard .dashboard-grid { grid-template-columns:1fr; }
+  #dashboard>.grid { grid-template-columns:1fr; }
+  #item-database>.panel>.field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .topbar-actions { max-width:100%; }
+}
+@media(prefers-reduced-motion:reduce) {
+  *,*::before,*::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; }
+}
+
+</style>
 </head>
 <body class="simple-mode">
 <div id="aboutDialog" class="about-overlay hidden" role="dialog" aria-modal="true" aria-label="About AlphaNine Dune Suite">
@@ -23509,7 +23688,7 @@ function appPage() {
         <div class="panel-head">
           <div>
             <div class="label">Live In-Game Market Listings</div>
-            <div class="subtle">Read-only tracking of current Exchange sell orders from the live game database.</div>
+            <div class="subtle">Current Exchange sell orders from the live game database. Buy &amp; Pay purchases the full player stack with admin funding; the seller claims Solari in-game and the item is removed, not delivered to you.</div>
           </div>
           <button type="button" onclick="refreshMarketListings()">Refresh Listings</button>
         </div>
@@ -23519,6 +23698,7 @@ function appPage() {
         </div>
         <div id="marketListingsSummary" class="subtle mt">Live listings have not been loaded.</div>
         <div id="marketListings" class="mt"><div class="empty">Open Market Automation or click Refresh Listings to load the live market.</div></div>
+        <div id="marketManualPurchaseLog" class="subtle mt" role="status"></div>
       </div>
       <details class="panel pad mt">
         <summary>Legacy Market Automator migration</summary>
@@ -23850,8 +24030,8 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="progression-hero">
           <div>
             <div class="kicker">Player Progression</div>
-            <h2>Progression</h2>
-            <div class="subtle">Large player identity first, then focused foldable panels for lookup, XP, skill points, and diagnostics.</div>
+            <h2>Progression Inspector</h2>
+            <div class="subtle">Load a player once, then choose the one progression tool you want to use.</div>
           </div>
           <button type="button" class="primary" onclick="refreshProgressionInspector()">Refresh Inspector</button>
         </div>
@@ -23876,6 +24056,17 @@ DUNE_RECEIVER_SSH_KEY</pre>
         </div>
 
         <div id="progressionUnavailable" class="warning hidden">Progression database unavailable</div>
+
+        <div class="progression-category-picker">
+          <div class="label">Choose a Progression Tool</div>
+          <div class="subtle">Only the selected editor opens. Player lookup stays available for every tool.</div>
+          <div class="progression-category-grid" role="tablist" aria-label="Progression tools">
+            <button type="button" class="progression-category-button active" data-progression-category="progression" role="tab" aria-selected="true" onclick="selectProgressionCategory('progression')"><strong>Progression</strong><span>XP, skill points, specialization, and reputation</span></button>
+            <button type="button" class="progression-category-button" data-progression-category="skills" role="tab" aria-selected="false" onclick="selectProgressionCategory('skills')"><strong>Skills</strong><span>Search skills and grant selected ranks</span></button>
+            <button type="button" class="progression-category-button" data-progression-category="house-scrip" role="tab" aria-selected="false" onclick="selectProgressionCategory('house-scrip')"><strong>House Scrip</strong><span>Read the balance and make a protected grant</span></button>
+            <button type="button" class="progression-category-button" data-progression-category="dungeons" role="tab" aria-selected="false" onclick="selectProgressionCategory('dungeons')"><strong>Dungeon Difficulties</strong><span>Scan game IDs and test selectable difficulty</span></button>
+          </div>
+        </div>
 
         <div class="progression-main-grid">
           <div class="progression-stack">
@@ -23910,7 +24101,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
               </div>
             </details>
 
-            <details class="progression-fold danger-zone" open>
+            <details class="progression-fold danger-zone" data-progression-category-panel="progression" open>
               <summary>Progression Editing</summary>
               <div class="progression-fold-body">
                 <div class="warning">Live progression editing can corrupt player data. Generate Preview creates a backup first, then Apply requires confirmation.</div>
@@ -23936,7 +24127,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
               </div>
             </details>
 
-            <details class="progression-fold">
+            <details class="progression-fold" data-progression-category-panel="skills" hidden>
               <summary>Skill Ranks</summary>
               <div class="progression-fold-body">
                 <div class="warning">Choose a target rank for every selected skill. Grants only raise ranks, use cumulative per-rank costs, create an automatic backup, and require the player to be offline.</div>
@@ -23961,7 +24152,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
               </div>
             </details>
 
-            <details class="progression-fold">
+            <details class="progression-fold" data-progression-category-panel="house-scrip" hidden>
               <summary>House Scrip</summary>
               <div class="progression-fold-body">
                 <div class="warning">House Scrip is virtual currency, not an inventory item. Grants create an automatic backup, use the game database adjustment function, verify the exact new balance, and require the player to be offline.</div>
@@ -23979,7 +24170,47 @@ DUNE_RECEIVER_SSH_KEY</pre>
               </div>
             </details>
 
-            <details class="progression-fold">
+            <details class="progression-fold danger-zone" data-progression-category-panel="dungeons" hidden>
+              <summary>Dungeon Difficulty Unlocks <span class="badge warn">Experimental</span></summary>
+              <div class="progression-fold-body">
+                <div class="warning"><strong>Experimental database test.</strong> This changes saved completion history, not the active dungeon run. It may create a synthetic best-run entry, does not grant loot, and requires the player to be offline. A verified full database backup is created before Apply is enabled.</div>
+                <div class="dungeon-game-scan mt">
+                  <div class="panel-head">
+                    <div><div class="label">Installed Game Dungeon IDs</div><div class="subtle">Reads production DungeonDataAsset entries directly from your local Dungeons.pak. No first completion is required.</div></div>
+                    <button type="button" onclick="scanInstalledGameDungeonIds()">Scan Installed Game</button>
+                  </div>
+                  <div id="dungeonGameScanStatus" class="empty mt">Run the installed-game scan to discover dungeon IDs without completing a dungeon.</div>
+                  <table class="mt">
+                    <thead><tr><th>Dungeon</th><th>Game Asset ID</th><th>Database Validation</th><th></th></tr></thead>
+                    <tbody id="dungeonGameScanRows"><tr><td colspan="4">No installed-game scan has run.</td></tr></tbody>
+                  </table>
+                </div>
+                <div id="dungeonDifficultyStatus" class="empty mt">Load a player to inspect dungeon completion history.</div>
+                <div class="field-grid mt">
+                  <label>Dungeon<select id="dungeonDifficultyId" onchange="changeDungeonDifficultySelection()"><option value="">Choose a dungeon...</option><option value="__manual__">Enter an exact dungeon ID manually...</option></select></label>
+                  <label id="dungeonDifficultyManualLabel" hidden>Manual Dungeon Database ID<input id="dungeonDifficultyManualId" placeholder="For example: DA_Dgn_024_Darkness" oninput="invalidateDungeonDifficultyPreview()"></label>
+                  <div class="empty">The list includes saved server IDs and installed-game scan results. Use manual entry only if you know the exact ID.</div>
+                  <label>Maximum Selectable Difficulty<input id="dungeonDifficultyTarget" type="number" min="3" max="30" step="1" value="4" oninput="invalidateDungeonDifficultyPreview()"></label>
+                  <button type="button" onclick="refreshDungeonDifficulty()">Refresh History</button>
+                  <button type="button" onclick="previewDungeonDifficulty()">Generate Preview + Verified Backup</button>
+                </div>
+                <div class="action-row mt">
+                  <label>Type APPLY DUNGEON EXPERIMENT<input id="dungeonDifficultyConfirm" placeholder="APPLY DUNGEON EXPERIMENT" oninput="syncDungeonDifficultyApplyButton()"></label>
+                  <button id="dungeonDifficultyApplyButton" type="button" class="danger" onclick="applyDungeonDifficulty()" disabled>Apply Experimental Unlock</button>
+                </div>
+                <div id="dungeonDifficultyProgress" class="empty mt" role="status" aria-live="polite">Choose a dungeon, then generate a preview and verified backup.</div>
+                <table class="mt">
+                  <thead><tr><th>Dungeon ID</th><th>Completed Difficulty</th><th>Duration</th><th>Party</th><th>Shared Links</th></tr></thead>
+                  <tbody id="dungeonDifficultyRows"><tr><td colspan="5">No dungeon history loaded.</td></tr></tbody>
+                </table>
+                <details class="vm-details mt">
+                  <summary>Experimental Preview, Backup, and Apply Log</summary>
+                  <pre id="dungeonDifficultyLog" class="mt">No experimental dungeon preview generated.</pre>
+                </details>
+              </div>
+            </details>
+
+            <details class="progression-fold" data-progression-category-panel="progression">
               <summary>Specialization and Reputation</summary>
               <div class="progression-fold-body">
                 <div class="layout-2">
@@ -24363,7 +24594,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel-head">
           <div>
             <div class="label">Live UserGame.ini</div>
-            <div class="subtle">Load and edit the exact supported settings from the VM. Saving creates a verified backup and applies defaults; it never restarts the battlegroup automatically.</div>
+            <div class="subtle">Load and edit the exact supported settings from the VM. Saving updates only supported fields in template and active UserGame.ini files. Both INI files are backed up on this computer. Restart the battlegroup when ready.</div>
           </div>
           <div class="action-row">
             <button id="userGameLoadButton" onclick="loadLiveUserGameSettings(true)">Load Live File</button>
@@ -24371,6 +24602,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           </div>
         </div>
         <div id="userGameStatus" class="empty mt">Open UserGame Settings to load UserGame.ini from the configured VM.</div>
+        <details class="mt" ontoggle="if(this.open)loadIniBackups()"><summary>INI backups and recovery</summary><div id="iniBackupList" class="mt">Loading backups...</div></details>
         <div id="userGameSettingsGrid" class="grid three mt"><div class="empty">Live settings have not been loaded.</div></div>
         <details class="advanced-only mt">
           <summary>Raw UserGame.ini preview</summary>
@@ -24863,7 +25095,7 @@ async function startMigrationExport(){let started=false;try{if(migrationOperatio
 tabs.forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 tabs.forEach(t=>t.addEventListener("click",()=>{if(t.dataset.view==="players")setTimeout(()=>refreshPlayerInventory(),0);}));
 document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",()=>{setView(b.dataset.open);if(b.dataset.open==="players")setTimeout(()=>refreshPlayerInventory(),0);}));
-let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],setDurabilityTo200:true,durabilityValue:200,notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],latestStorageDepositReceipt=null,storageDepositPollGeneration=0,latestGiveItemReceipt=null,giveItemReceiptPollGeneration=0,playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
+let adminItems=[],adminItemReport=null,selectedAdminItem=null,adminItemDisplayLimit=120,selectedMarketItem=null,marketPostingBusy=false,marketListingsTimer=null,selectedMarketListingIds=new Set(),marketListingRows=[],itemDatabaseItems=[],selectedItemDatabaseId="",itemDatabaseDisplayLimit=120,giveItemCapabilities={quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],setDurabilityTo200:true,durabilityValue:200,notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]},adminLiveGiveAvailable=false,adminPlayers=[],playerDirectoryRequest=null,playerDirectoryLoadedAt=0,playerDirectoryLastError="",selectedPlayerId="",giveStorageTargets=[],latestStorageDepositReceipt=null,storageDepositPollGeneration=0,latestGiveItemReceipt=null,giveItemReceiptPollGeneration=0,playerRenamePreviewState=null,repairInspectorState=null,repairPreviewState=null,repairQueueState=null,permissionState=null,baseCleanupState=null,landsraadTierState=null,landsraadTierPreviewState=null,schedulerState=null,schedulerDirty=false,skillRepState=null,activity=[],blueprintRows=[],blueprintSelectedIds=new Set(),blueprintFiles=[],blueprintBusy=false,liveGiveBusy=false,liveGiveServerOnline=false,liveGiveServerChecking=false,liveGiveServerStarting=false,liveGiveTransport=null,liveGiveUnavailableMessage="",liveGiveEnvDiagnostics=null,giveQueue=[],giveQueuePresets=[],lastGiveQueueFailedItems=[],liveMap=null,liveMapData=null,liveMapLayerGroup=null,liveSelectedCoordinates=null,liveMapSelectedEntity=null,liveMapSelectedMarkerKey="",liveMarkerCount=0,liveMapClickTeleportBusy=false,liveMapTeleportDestinationMarker=null,liveTeleportReady=false,liveTeleportPreviewSignature="",liveTeleportPreviewExecutable=false,liveTeleportElevationSource="unknown",liveTeleportElevationConfirmed=false,liveTeleportPresetName="",liveTeleportTargetActorId="",liveTeleportTargetActorType="",liveTeleportPending=null,liveTeleportFinalPayload=null,liveTeleportResolutionDiagnostics=null,liveTeleportVerificationResult=null,liveTeleportPresets=[],setupStep=0,setupWizardMode="simple",setupAutoRunning=false,setupDatabaseTestSignature="",appConfig=null,uiMode="simple",uiTheme="gold",diagnosticsData=null,progressionCategory="progression",progressionPlayerState=null,progressionPreviewState=null,progressionFactionPreviewState=null,progressionSpecializationPreviewState=null,progressionSkillCatalog=[],progressionSkillSelectedIds=new Set(),progressionSkillTargetLevels=new Map(),progressionSkillPreviewState=null,progressionHouseScripState=null,dungeonDifficultyState=null,dungeonDifficultyPreviewState=null,installedGameDungeonState=null,databaseImportReadiness=null,databaseImportRunning=false,battlegroupData={battlegroups:[],selectedBattlegroup:null};
 let playerInventoryState=null,playerInventoryRows=[],playerInventoryBusy=false;
 let operationsState={active:[],operations:[]};
 let databaseExplorerState={schemas:[],tables:[],metadata:null,rows:[],selectedTable:"",selectedRow:-1,offset:0,pageSize:50,hasMore:false,loading:false};
@@ -25450,7 +25682,7 @@ function openAdvancedSetupWizard(){setupWizardMode="advanced";setupStep=1;applyS
 function closeSetupWizard(){document.getElementById("setupWizard")?.classList.add("hidden");}
 function openAboutDialog(){document.getElementById("aboutDialog")?.classList.remove("hidden");playUiSound("click");}
 function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.add("hidden");playUiSound("click");}
-function openSupportDiscord(){window.open("https://discord.gg/HVKkwAYte","_blank","noopener");playUiSound("click");}
+function openSupportDiscord(){window.open("https://discord.gg/kutj6MyR2","_blank","noopener");playUiSound("click");}
 function openSupportKofi(){window.open("https://ko-fi.com/E1W220NMPA","_blank","noopener");playUiSound("click");}
 function applyDetectedVmIpToSetup(ip){if(!ip)return;setValue("setupVmIp",ip);setValue("setupSshHost",ip);setValue("setupReceiverSshHost",ip);setValue("settingsVmIp",ip);setValue("settingsSshHost",ip);setValue("settingsReceiverSshHost",ip);syncConnectionHostLocks("setup");syncConnectionHostLocks("settings");invalidateSetupDatabaseTest();}
 async function checkVmIpChangeOnStartup(){try{const data=await getJson("/api/setup/vm-ip-check",{timeoutMs:12000});if(!data?.changed||!data.detectedIp)return;const key="vm-ip-change:"+String(data.vmName||"")+":"+data.detectedIp+":"+String((data.savedIps||[]).join(","));if(sessionStorage.getItem(key)==="shown")return;sessionStorage.setItem(key,"shown");const message="Hyper-V reports a different VM IP than the Suite has saved.\\n\\nSaved: "+(data.savedIps||[]).join(", ")+"\\nDetected: "+data.detectedIp+"\\n\\nOpen Setup Wizard, review the connection settings, then test and save setup again.";const open=await appConfirm("VM IP changed",message,"Open Setup","Later");if(open){applyDetectedVmIpToSetup(data.detectedIp);openSetupWizard();}else{addActivity("warn","VM IP changed",data.message||("Detected "+data.detectedIp));}}catch(e){addActivity("warn","VM IP check skipped",betterError(e));}}
@@ -25529,11 +25761,13 @@ async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson(
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const actionTimeouts=${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)},data=await getJson("/api/action/"+action,{method:"POST",timeoutMs:actionTimeouts[action]||180000});let output=data.stdout||data.stderr||data.error||"Done.";if(action==="backup"&&data.ok){output="Actual VM backup copied and verified locally.\\nVM source: "+(data.vmBackupPath||data.vmPath||"--")+"\\nLocal copy: "+(data.localBackupPath||data.filePath||"--")+"\\nSHA-256: "+(data.sha256||"--")+"\\nSize: "+(data.size||data.file?.size||"--")+" bytes\\nMetadata: "+(data.localMetadataPath||"--");}if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
 async function openBattlegroupBatch(){const log=document.getElementById("serverLog");try{if(!window.alphaNineSuite?.openBattlegroupBatch)throw new Error("Battlegroup.bat can be opened only from the installed desktop Suite.");if(log)log.textContent="Reading the saved server folder from Settings...";const cfg=await getJson("/api/config");if(log)log.textContent="Opening battlegroup.bat from the configured server folder...";const data=await window.alphaNineSuite.openBattlegroupBatch({serverInstallPath:cfg.serverInstallPath||"",awakeningServerPath:cfg.awakeningServerPath||""});if(!data?.ok)throw new Error(data?.error||"Could not open battlegroup.bat.");if(log)log.textContent="Opened "+(data.filePath||"battlegroup.bat")+" in a Windows command console.";syncLogs();addActivity("action","Opened battlegroup.bat",data.filePath||"");playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);syncLogs();addActivity("error","Battlegroup.bat launch failed",e.message);playUiSound("warning");}}
-function userGameSettingInput(setting,value){const id="usergame-"+setting.key;if(setting.type==="boolean")return '<label>'+esc(setting.label)+'<select id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'"><option value="true"'+(value===true?' selected':'')+'>True</option><option value="false"'+(value===false?' selected':'')+'>False</option></select><small>'+esc(setting.key)+'</small></label>';const current=value===undefined||value===null?'':String(value);return '<label>'+esc(setting.label)+'<input id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'" type="number" min="'+esc(setting.min)+'" max="'+esc(setting.max)+'" step="'+esc(setting.step||1)+'" value="'+esc(current)+'"><small>'+esc(setting.key)+(setting.unit?' · '+esc(setting.unit):'')+'</small></label>';}
+function userGameSettingInput(setting,value){const id="usergame-"+setting.key;if(setting.type==="boolean")return '<label>'+esc(setting.label)+'<select id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'"><option value="true"'+(value===true?' selected':'')+'>True</option><option value="false"'+(value===false?' selected':'')+'>False</option></select><small>'+esc(setting.key)+'</small></label>';const current=value===undefined||value===null?'':String(value);return '<label>'+esc(setting.label)+'<input id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'" type="number" min="'+esc(setting.min)+'" max="'+esc(setting.max)+'" step="'+esc(setting.step||1)+'" value="'+esc(current)+'"><small>'+esc(setting.key)+(setting.unit?' · '+esc(setting.unit):'')+(setting.note?' · '+esc(setting.note):'')+'</small></label>';}
 function renderLiveUserGameSettings(data){liveUserGameState=data;const grid=document.getElementById("userGameSettingsGrid"),preview=document.getElementById("userGameRawPreview"),save=document.getElementById("userGameSaveButton");const groups=[];for(const setting of data.schema||[]){let group=groups.find(row=>row.name===setting.group);if(!group){group={name:setting.group,settings:[]};groups.push(group);}group.settings.push(setting);}if(grid)grid.innerHTML=groups.map(group=>'<div class="panel pad"><div class="label">'+esc(group.name)+'</div><div class="field-grid mt">'+group.settings.map(setting=>userGameSettingInput(setting,data.values?.[setting.key])).join('')+'</div></div>').join('')||'<div class="empty">No supported UserGame.ini settings were returned.</div>';if(preview)preview.textContent=data.content||"";if(save)save.disabled=!data.ok;const missing=data.missingKeys||[];const status=document.getElementById("userGameStatus");if(status){status.className=(missing.length?'warning':'empty')+' mt';status.textContent=(data.path||"UserGame.ini")+(missing.length?' · Missing or invalid: '+missing.join(', '):' · '+(data.schema?.length||0)+' supported settings loaded.');}}
 async function loadLiveUserGameSettings(force=false){if(liveUserGameState&&!force){renderLiveUserGameSettings(liveUserGameState);return liveUserGameState;}const status=document.getElementById("userGameStatus"),load=document.getElementById("userGameLoadButton"),save=document.getElementById("userGameSaveButton");try{if(load)load.disabled=true;if(save)save.disabled=true;if(status){status.className="empty mt";status.textContent="Reading UserGame.ini from the VM...";}const data=await getJson("/api/usergame-settings",{timeoutMs:45000});renderLiveUserGameSettings(data);return data;}catch(error){liveUserGameState=null;if(status){status.className="warning mt";status.textContent=betterError(error);}return null;}finally{if(load)load.disabled=false;}}
+async function loadIniBackups(){const el=document.getElementById('iniBackupList');try{const data=await getJson('/api/usergame-backups');el.innerHTML='<div>'+esc(data.directory)+'</div>'+data.backups.map(b=>'<div class="panel pad mt"><strong>'+esc(b.createdAt)+'</strong><div>'+b.files.map((file,index)=>'<div><a href="/api/usergame-backups?id='+encodeURIComponent(b.id)+'&download=1&file='+index+'">Download '+esc(file)+'</a></div>').join('')+'</div><a href="/api/usergame-backups?id='+encodeURIComponent(b.id)+'&download=1">Download backup</a> <button onclick="restoreIniBackup(\''+b.id+'\',\'UserGame.ini\')">Restore UserGame.ini</button> <button onclick="restoreIniBackup(\''+b.id+'\',\'UserEngine.ini\')">Restore UserEngine.ini</button></div>').join('')+(data.backups.length?'':'<div>No backups yet. Backups appear here after saving.</div>');}catch(error){el.textContent=betterError(error);}}
+async function restoreIniBackup(id,filename){if(!(await appConfirm('Restore '+filename,'Restore every '+filename+' in this backup to the configured VM? Current INIs will be backed up first. Restart the battlegroup when ready.','Back Up & Restore','Cancel')))return;try{await getJson('/api/usergame-backups',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,filename}),timeoutMs:150000});await loadLiveUserGameSettings(true);await loadIniBackups();document.getElementById('userGameStatus').textContent=filename+' restored and verified. Restart the battlegroup when ready.';}catch(error){document.getElementById('userGameStatus').textContent=betterError(error);}}
 function liveUserGameValuesFromForm(){const values={};for(const setting of liveUserGameState?.schema||[]){const input=document.querySelector('[data-usergame-key="'+setting.key+'"]');if(!input||input.value==='')continue;values[setting.key]=setting.type==="boolean"?input.value==="true":Number(input.value);}return values;}
-async function saveLiveUserGameSettings(){const status=document.getElementById("userGameStatus"),save=document.getElementById("userGameSaveButton");try{if(!liveUserGameState?.ok)throw new Error("Load the live UserGame.ini before saving.");if(!(await appConfirm("Save live UserGame.ini","The Suite will back up the current VM file, update only the supported fields shown here, verify the saved file, and apply default user settings. The battlegroup will not restart automatically.","Back Up & Save","Cancel")))return;if(save)save.disabled=true;if(status){status.className="warning mt";status.textContent="Backing up, verifying, and applying UserGame.ini...";}const data=await getJson("/api/usergame-settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:liveUserGameValuesFromForm()}),timeoutMs:150000});renderLiveUserGameSettings(data);if(status){status.className="empty mt";status.textContent=(data.message||"UserGame.ini saved.")+(data.backupPath?' Backup: '+data.backupPath:'');}addActivity("server","UserGame.ini updated",(data.changedKeys||[]).join(', '));playUiSound("success");return data;}catch(error){if(status){status.className="warning mt";status.textContent=betterError(error);}playUiSound("warning");return null;}finally{if(save)save.disabled=!liveUserGameState?.ok;}}
+async function saveLiveUserGameSettings(){const status=document.getElementById("userGameStatus"),save=document.getElementById("userGameSaveButton");try{if(!liveUserGameState?.ok)throw new Error("Load the live UserGame.ini before saving.");if(!(await appConfirm("Save live UserGame.ini","The Suite will back up template and active UserGame.ini and UserEngine.ini files on this computer, then update only supported UserGame.ini fields. UserEngine.ini and its ports remain unchanged. The battlegroup will not restart automatically.","Back Up & Save","Cancel")))return;if(save)save.disabled=true;if(status){status.className="warning mt";status.textContent="Backing up INIs to this computer and saving UserGame.ini...";}const data=await getJson("/api/usergame-settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:liveUserGameValuesFromForm(),expectedContent:liveUserGameState.content}),timeoutMs:150000});renderLiveUserGameSettings(data);if(status){status.className="empty mt";status.textContent=(data.message||"UserGame.ini saved.")+(data.backupPath?' Backup: '+data.backupPath:'');}addActivity("server","UserGame.ini updated",(data.changedKeys||[]).join(', '));playUiSound("success");return data;}catch(error){if(status){status.className="warning mt";status.textContent=betterError(error);}playUiSound("warning");return null;}finally{if(save)save.disabled=!liveUserGameState?.ok;}}
 function updateMapMemoryInput(){const select=document.getElementById("mapSelect");const rows=window.mapDeploymentRows||[];const row=rows.find(m=>m.map===select?.value);tone("mapMemory",row?.memory||"Unset");}
 const MAP_MEMORY_LIMIT_PATTERN=/^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)(?:Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|k)?$/;
 function validMapMemoryLimitText(value){const text=String(value||"").trim();return Boolean(text)&&text.length<=32&&MAP_MEMORY_LIMIT_PATTERN.test(text);}
@@ -25709,6 +25943,18 @@ function progressionSupportDetails(item){const details=item?.details;if(!details
 function progressionStatusBadge(id,text,kind="warn"){const el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+kind;}
 function progressionMeterPct(value,max){const n=Number(value);if(!Number.isFinite(n)||n<=0)return"0%";return Math.max(8,Math.min(100,Math.round((n/max)*100)))+"%";}
 function pushProgressionRecent(title,detail,kind="3M"){const wrap=document.getElementById("progressionRecentChanges");if(!wrap)return;const item='<div class="progression-recent-item"><div class="progression-recent-time">'+esc(kind)+'</div><div><strong>'+esc(title)+'</strong><span>'+esc(detail||"")+'</span></div></div>';wrap.innerHTML=item+wrap.innerHTML.replace(/<div class="progression-recent-item"><div class="progression-recent-time">--<\/div>[\s\S]*?<\/div><\/div>/,"");}
+function selectProgressionCategory(value){
+  const allowed=new Set(["progression","skills","house-scrip","dungeons"]);
+  progressionCategory=allowed.has(value)?value:"progression";
+  document.querySelectorAll("[data-progression-category]").forEach(button=>{const selected=button.dataset.progressionCategory===progressionCategory;button.classList.toggle("active",selected);button.setAttribute("aria-selected",selected?"true":"false");});
+  const panels=[...document.querySelectorAll("[data-progression-category-panel]")];
+  let selectedPanel=null;
+  panels.forEach(panel=>{const selected=panel.dataset.progressionCategoryPanel===progressionCategory;panel.hidden=!selected;if(selected&&!selectedPanel){panel.open=true;selectedPanel=panel;}});
+  if(selectedPanel)requestAnimationFrame(()=>selectedPanel.scrollIntoView({behavior:"smooth",block:"start"}));
+  if(progressionCategory==="skills"&&!progressionSkillCatalog.length)refreshProgressionSkillCatalog();
+  if(progressionPlayerState?.ok&&progressionCategory==="house-scrip")refreshProgressionHouseScrip();
+  if(progressionPlayerState?.ok&&progressionCategory==="dungeons")refreshDungeonDifficulty();
+}
 function renderProgressionInspector(data){
   const unavailable=document.getElementById("progressionUnavailable");
   if(unavailable)unavailable.classList.toggle("hidden",data?.status!=="unavailable");
@@ -25747,7 +25993,36 @@ async function unlockSelectedProgressionSkills(){try{if(!progressionPlayerState?
 function progressionPlayerLookupId(){return progressionPlayerState?.player?.player_controller_id||progressionPlayerState?.player?.actor_id||progressionPlayerState?.player?.player_id||document.getElementById("progressionPlayerQuery")?.value||"";}
 async function refreshProgressionHouseScrip(){const balance=document.getElementById("progressionHouseScripBalance");try{if(!progressionPlayerState?.ok)throw new Error("Lookup a player before loading House Scrip.");if(balance)balance.textContent="Loading...";const data=await getJson("/api/progression/house-scrip?query="+encodeURIComponent(progressionPlayerLookupId()),{timeoutMs:45000});if(!data.ok)throw new Error(data.reason||data.error||"House Scrip balance unavailable.");progressionHouseScripState=data;if(balance)balance.textContent=Number(data.balance||0).toLocaleString();setText("progressionHouseScripLog","Current balance loaded for "+(data.player?.character_name||"the selected player")+": "+Number(data.balance||0).toLocaleString()+" House Scrip.\\nCurrency ID: "+data.currencyId+"\\nPlayer: "+(data.playerOffline?"offline":"online"));return data;}catch(e){progressionHouseScripState=null;if(balance)balance.textContent="--";setText("progressionHouseScripLog",betterError(e));return null;}}
 async function grantProgressionHouseScrip(){try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before giving House Scrip.");const amount=Number(document.getElementById("progressionHouseScripAmount")?.value||0);if(!Number.isInteger(amount)||amount<1||amount>1000000000)throw new Error("House Scrip amount must be a whole number from 1 to 1,000,000,000.");const confirmText=document.getElementById("progressionHouseScripConfirm")?.value||"";if(confirmText!=="GIVE HOUSE SCRIP")throw new Error("Type GIVE HOUSE SCRIP exactly.");if(!(await appConfirm("Give House Scrip","Add "+amount.toLocaleString()+" House Scrip to "+(progressionPlayerState.player?.character_name||"the selected player")+"?\\n\\nAn automatic backup and exact read-back verification will be created. The player must be offline.","Give House Scrip","Cancel")))return;setText("progressionHouseScripLog","Creating backup and granting House Scrip...");const data=await getJson("/api/progression/house-scrip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:progressionPlayerLookupId(),amount,confirmText}),timeoutMs:90000});if(!data.ok)throw new Error((data.message||data.reason||data.error||"House Scrip grant failed")+"\\n"+JSON.stringify(data.timings||{},null,2));progressionHouseScripState=data;setText("progressionHouseScripBalance",Number(data.balance||0).toLocaleString());setValue("progressionHouseScripConfirm","");setText("progressionHouseScripLog","House Scrip grant completed.\\nAdded: "+Number(data.amount||0).toLocaleString()+"\\nPrevious balance: "+Number(data.beforeBalance||0).toLocaleString()+"\\nVerified balance: "+Number(data.balance||0).toLocaleString()+"\\nBackup: "+data.backupPath+"\\nAudit log: "+(data.auditLogPath||""));pushProgressionRecent("House Scrip granted",Number(data.amount||0).toLocaleString()+" added","NOW");addActivity("progression","House Scrip granted",String(data.amount||0));playUiSound("success");}catch(e){setText("progressionHouseScripLog",betterError(e));pushProgressionRecent("House Scrip grant failed",betterError(e),"ERR");addActivity("error","House Scrip grant failed",e.message);playUiSound("warning");}}
-async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(!progressionSkillCatalog.length)refreshProgressionSkillCatalog();if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});if(!progressionSkillCatalog.length)refreshProgressionSkillCatalog();addActivity("warn","Progression database unavailable",e.message);}}
+let dungeonDifficultyBusy=false,dungeonDifficultyProgressTimer=null;
+function dungeonDifficultySelectedId(){const value=String(document.getElementById("dungeonDifficultyId")?.value||"");return (value==="__manual__"?String(document.getElementById("dungeonDifficultyManualId")?.value||""):value).trim();}
+function renderDungeonDifficultyChoices(){
+ const select=document.getElementById("dungeonDifficultyId");if(!select)return;
+ const selected=select.value;const ids=new Map();
+ for(const row of dungeonDifficultyState?.knownDungeons||[])ids.set(row.dungeon_id,row.dungeon_id+" — server history");
+ for(const row of installedGameDungeonState?.dungeons||[])if(!ids.has(row.databaseId))ids.set(row.databaseId,row.databaseId+" — "+row.name+" (game scan)");
+ if(selected&&selected!=="__manual__"&&!ids.has(selected))ids.set(selected,selected+" — previous selection; verify ID");
+ select.innerHTML='<option value="">Choose a dungeon ('+ids.size+' available)...</option>'+Array.from(ids).sort((a,b)=>a[0].localeCompare(b[0])).map(([id,label])=>'<option value="'+esc(id)+'">'+esc(label)+'</option>').join("")+'<option value="__manual__">Enter an exact dungeon ID manually...</option>';
+ select.value=selected||"";
+}
+function changeDungeonDifficultySelection(){const label=document.getElementById("dungeonDifficultyManualLabel");if(label)label.hidden=document.getElementById("dungeonDifficultyId").value!=="__manual__";invalidateDungeonDifficultyPreview();}
+function setDungeonDifficultyBusy(busy,message){
+ dungeonDifficultyBusy=busy;clearInterval(dungeonDifficultyProgressTimer);dungeonDifficultyProgressTimer=null;
+ const panel=document.getElementById("dungeonDifficultyId")?.closest(".progression-fold-body");
+ if(panel){panel.setAttribute("aria-busy",String(busy));panel.querySelectorAll("input,select,button").forEach(control=>{if(busy){if(control.dataset.dungeonWasDisabled===undefined)control.dataset.dungeonWasDisabled=String(control.disabled);control.disabled=true;}else if(control.dataset.dungeonWasDisabled!==undefined){control.disabled=control.dataset.dungeonWasDisabled==="true";delete control.dataset.dungeonWasDisabled;}});}
+ setText("dungeonDifficultyProgress",message);syncDungeonDifficultyApplyButton();
+ if(busy){const started=Date.now();dungeonDifficultyProgressTimer=setInterval(()=>setText("dungeonDifficultyProgress",message+" Elapsed: "+Math.floor((Date.now()-started)/1000)+"s."),1000);}
+}
+function dungeonDifficultyFilteredRows(){const dungeonId=dungeonDifficultySelectedId();return (dungeonDifficultyState?.records||[]).filter(row=>!dungeonId||String(row.dungeon_id)===dungeonId);}
+function syncDungeonDifficultyApplyButton(){const button=document.getElementById("dungeonDifficultyApplyButton");if(button)button.disabled=dungeonDifficultyBusy||!dungeonDifficultyPreviewState||String(document.getElementById("dungeonDifficultyConfirm")?.value||"")!=="APPLY DUNGEON EXPERIMENT";}
+function renderDungeonDifficulty(data){dungeonDifficultyState=data?.ok?data:null;renderDungeonDifficultyChoices();const rows=document.getElementById("dungeonDifficultyRows");const filtered=dungeonDifficultyFilteredRows();if(rows)rows.innerHTML=filtered.length?filtered.map(row=>'<tr><td>'+esc(row.dungeon_id)+'</td><td>'+esc(row.difficulty)+'</td><td>'+esc(row.duration_ms)+' ms</td><td>'+esc(row.players_num)+'</td><td>'+esc(row.party_links)+'</td></tr>').join(""):'<tr><td colspan="5">No saved completion rows for this player'+(dungeonDifficultySelectedId()?' and dungeon id.':'.')+'</td></tr>';const status=document.getElementById("dungeonDifficultyStatus");if(status){status.className=data?.ok?(data.playerOffline?"empty mt":"warning mt"):"warning mt";status.textContent=data?.ok?((data.playerOffline?"Offline and ready for an experimental preview. ":"Player is online; preview and apply are blocked. ")+(data.knownDungeons||[]).length+" known dungeon id(s), "+(data.records||[]).length+" saved completion link(s)."):(data?.reason||data?.error||"Dungeon difficulty inspection failed.");}}
+function renderInstalledGameDungeonIds(data){installedGameDungeonState=data?.ok?data:null;const status=document.getElementById("dungeonGameScanStatus");const rows=document.getElementById("dungeonGameScanRows");if(status){status.className=data?.ok&&data.databaseVerified===data.totalDungeons?"empty mt":"warning mt";status.textContent=data?.ok?(data.totalDungeons+" production dungeon IDs read from Dungeons.pak. "+data.databaseVerified+" match server history. Build "+data.gameBuildId+". Unmatched IDs remain experimental."):(data?.error||"Installed-game dungeon scan failed.");}if(rows){const dungeons=data?.dungeons||[];rows.innerHTML=dungeons.length?dungeons.map(row=>'<tr><td><strong>'+esc(row.name)+'</strong></td><td><span class="env-path-value">'+esc(row.databaseId)+'</span></td><td><span class="badge '+(row.databaseVerified?'ok':'warn')+'">'+esc(row.databaseVerified?'Database verified':'Game asset')+'</span></td><td><button type="button" data-dungeon-game-id="'+esc(row.databaseId)+'">Use ID</button></td></tr>').join(""):'<tr><td colspan="4">No production dungeon IDs were found.</td></tr>';rows.querySelectorAll("[data-dungeon-game-id]").forEach(button=>button.addEventListener("click",()=>useInstalledGameDungeonId(button.dataset.dungeonGameId)));}renderDungeonDifficultyChoices();}
+function useInstalledGameDungeonId(value){if(dungeonDifficultyBusy)return;renderDungeonDifficultyChoices();setValue("dungeonDifficultyId",value);changeDungeonDifficultySelection();invalidateDungeonDifficultyPreview();setText("dungeonDifficultyLog","Installed-game dungeon ID selected: "+value+"\nGenerate a verified preview before applying any database change.");if(progressionPlayerState?.ok)refreshDungeonDifficulty(true);}
+async function scanInstalledGameDungeonIds(){const status=document.getElementById("dungeonGameScanStatus");try{if(status){status.className="warning mt";status.textContent="Reading DungeonDataAsset entries from the installed Dungeons.pak...";}const data=await getJson("/api/progression/dungeon-difficulty/scan-installed-game",{timeoutMs:300000});if(!data.ok)throw new Error(data.error||"Installed-game dungeon scan failed.");renderInstalledGameDungeonIds(data);setText("dungeonDifficultyLog",data.warning+"\n\nSource: "+data.sourcePak+"\nProduction dungeons found: "+data.totalDungeons+"\nDatabase-verified IDs: "+data.databaseVerified);addActivity("progression","Installed dungeon IDs scanned",data.totalDungeons+" production IDs");playUiSound("success");}catch(e){installedGameDungeonState=null;renderInstalledGameDungeonIds({ok:false,error:betterError(e)});playUiSound("warning");}}
+function invalidateDungeonDifficultyPreview(){dungeonDifficultyPreviewState=null;setValue("dungeonDifficultyConfirm","");syncDungeonDifficultyApplyButton();if(dungeonDifficultyState)renderDungeonDifficulty(dungeonDifficultyState);setText("dungeonDifficultyLog","Selection changed. Generate a new experimental preview and verified backup before applying.");}
+async function refreshDungeonDifficulty(preserveLog=false){try{if(!progressionPlayerState?.ok)throw new Error("Lookup a player before inspecting dungeon completion history.");dungeonDifficultyPreviewState=null;setValue("dungeonDifficultyConfirm","");syncDungeonDifficultyApplyButton();setText("dungeonDifficultyStatus","Inspecting experimental dungeon completion data...");const url="/api/progression/dungeon-difficulty?query="+encodeURIComponent(progressionPlayerLookupId());const data=await getJson(url,{timeoutMs:60000});renderDungeonDifficulty(data);if(!preserveLog)setText("dungeonDifficultyLog",data.warning+"\n\nPlayer actor id: "+data.playerId+"\nChoose an exact ID from server history or an installed-game scan. Maximum test value: "+data.schema.experimentalMaximum+".");return data;}catch(e){dungeonDifficultyState=null;renderDungeonDifficulty({ok:false,error:betterError(e)});if(!preserveLog)setText("dungeonDifficultyLog",betterError(e));return null;}}
+async function previewDungeonDifficulty(){if(dungeonDifficultyBusy)return;setDungeonDifficultyBusy(true,"Reviewing preview request...");try{if(!progressionPlayerState?.ok)throw new Error("Lookup an offline player before generating a dungeon difficulty preview.");const dungeonId=dungeonDifficultySelectedId();const target=Number(document.getElementById("dungeonDifficultyTarget")?.value||0);if(!dungeonId)throw new Error("Enter or choose an exact dungeon database id.");if(!Number.isInteger(target)||target<3||target>30)throw new Error("Maximum selectable difficulty must be a whole number from 3 to 30.");const confirmed=await appConfirm("Experimental Dungeon Unlock","Prepare selectable difficulty "+target+" for "+dungeonId+" and "+(progressionPlayerState.player?.character_name||"the selected player")+"?\n\nThis rewrites that player's completion links and may create a synthetic best-run entry. It does not grant loot or select the active run. The player must remain offline. A verified full database backup will be created first.","Create Preview + Backup","Cancel");if(!confirmed){setText("dungeonDifficultyProgress","Preview cancelled. No changes applied.");return;}dungeonDifficultyPreviewState=null;syncDungeonDifficultyApplyButton();setDungeonDifficultyBusy(true,"Preparing preview and creating/verifying a full database backup. This may take several minutes; keep the player offline.");setText("dungeonDifficultyLog","Creating a verified full database backup, then preparing the experimental preview. This can take several minutes...");const data=await getJson("/api/progression/dungeon-difficulty/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:progressionPlayerLookupId(),dungeonId,targetSelectableDifficulty:target}),timeoutMs:300000});dungeonDifficultyPreviewState=data;clearInterval(dungeonDifficultyProgressTimer);setText("dungeonDifficultyProgress","Preview ready. Full backup verified. Review the log and type the confirmation to enable Apply.");setValue("dungeonDifficultyConfirm","");syncDungeonDifficultyApplyButton();setText("dungeonDifficultyLog","Experimental preview ready.\nVerified full backup: "+data.databaseBackupPath+"\nExact row snapshot: "+data.snapshotPath+"\nExpires: "+new Date(data.expiresAt).toLocaleString()+"\n\nPlan:\n"+JSON.stringify(data.plan,null,2)+"\n\nDatabase operation:\n"+data.sqlPreview+"\n\nType APPLY DUNGEON EXPERIMENT exactly to enable Apply.");pushProgressionRecent("Dungeon unlock preview",dungeonId+" -> selectable "+target,"EXP");addActivity("progression","Experimental dungeon preview created",dungeonId+" / "+target);playUiSound("success");}catch(e){clearInterval(dungeonDifficultyProgressTimer);setText("dungeonDifficultyProgress","Preview failed: "+betterError(e));dungeonDifficultyPreviewState=null;syncDungeonDifficultyApplyButton();setText("dungeonDifficultyLog",betterError(e));pushProgressionRecent("Dungeon preview failed",betterError(e),"ERR");playUiSound("warning");}finally{setDungeonDifficultyBusy(false,document.getElementById("dungeonDifficultyProgress")?.textContent||"");}}
+async function applyDungeonDifficulty(){if(dungeonDifficultyBusy)return;setDungeonDifficultyBusy(true,"Reviewing apply request...");try{if(!dungeonDifficultyPreviewState)throw new Error("Generate an experimental preview and verified backup first.");if(String(document.getElementById("dungeonDifficultyConfirm")?.value||"")!=="APPLY DUNGEON EXPERIMENT")throw new Error("Type APPLY DUNGEON EXPERIMENT exactly.");const confirmed=await appConfirm("Apply Experimental Dungeon Unlock","Apply selectable difficulty "+dungeonDifficultyPreviewState.targetSelectableDifficulty+" for "+dungeonDifficultyPreviewState.dungeonId+"?\n\nThe Suite will recheck the offline player and completion fingerprint, apply one transaction, and verify the highest completion read-back.","Apply Experiment","Cancel");if(!confirmed){setText("dungeonDifficultyProgress","Apply cancelled. No changes applied.");return;}setDungeonDifficultyBusy(true,"Applying unlock: rechecking the offline player, updating history, and verifying the saved result. Keep the player offline.");const data=await getJson("/api/progression/dungeon-difficulty/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:dungeonDifficultyPreviewState.previewId,confirmText:document.getElementById("dungeonDifficultyConfirm").value}),timeoutMs:60000});clearInterval(dungeonDifficultyProgressTimer);setText("dungeonDifficultyProgress","Unlock applied and verified. Refreshing history...");setText("dungeonDifficultyLog","Experimental dungeon unlock applied and verified.\nDungeon: "+data.dungeonId+"\nMaximum selectable difficulty: "+data.targetSelectableDifficulty+"\nSaved completion difficulty: "+data.requiredCompletionDifficulty+"\nVerified full backup: "+data.databaseBackupPath+"\nSnapshot: "+data.snapshotPath+"\n\n"+data.warning+"\n\nRead-back:\n"+JSON.stringify(data.after,null,2));pushProgressionRecent("Dungeon unlock applied",data.dungeonId+" -> selectable "+data.targetSelectableDifficulty,"EXP");addActivity("progression","Experimental dungeon unlock applied",data.dungeonId+" / "+data.targetSelectableDifficulty);dungeonDifficultyPreviewState=null;setValue("dungeonDifficultyConfirm","");syncDungeonDifficultyApplyButton();const refreshed=await refreshDungeonDifficulty(true);setText("dungeonDifficultyProgress",refreshed?.ok?"Unlock applied and verified. History refreshed. Log in to test the dungeon selector.":"Unlock applied and verified, but history refresh failed. Use Refresh History; do not apply again.");playUiSound("success");}catch(e){clearInterval(dungeonDifficultyProgressTimer);dungeonDifficultyPreviewState=null;setValue("dungeonDifficultyConfirm","");setText("dungeonDifficultyProgress","Apply did not return verified success. Refresh history before retrying; a timeout does not prove the database was unchanged. "+betterError(e));setText("dungeonDifficultyLog",betterError(e));pushProgressionRecent("Dungeon apply failed",betterError(e),"ERR");playUiSound("warning");}finally{setDungeonDifficultyBusy(false,document.getElementById("dungeonDifficultyProgress")?.textContent||"");}}
+async function refreshProgressionInspector(){addActivity("progression","Progression inspector opened","Read-only metadata discovery");try{const data=await getJson("/api/progression/inspect");renderProgressionInspector(data);if(data.ok)addActivity("progression","Progression schema detected",data.schemaSignature||"schema signature unavailable");else addActivity("warn","Progression database unavailable",data.database?.error||"Database unavailable");}catch(e){renderProgressionInspector({ok:false,status:"unavailable",database:{status:"unavailable",error:e.message},schemaSignature:"unknown",tables:[],functions:[],columns:[],supports:{},safety:{readOnlyMode:true,liveEditingEnabled:false,rawSqlInputEnabled:false,message:"Progression database unavailable."}});addActivity("warn","Progression database unavailable",e.message);}}
 function detailRows(rows){return Object.entries(rows||{}).map(([key,value])=>'<div class="detail-row"><span class="subtle">'+esc(key)+'</span><strong>'+esc(value||"--")+'</strong></div>').join("");}
 function renderProgressionPlayer(data){
   progressionPlayerState=data?.ok?data:null;
@@ -25756,10 +26031,17 @@ function renderProgressionPlayer(data){
   progressionSpecializationPreviewState=null;
   progressionSkillPreviewState=null;
   progressionHouseScripState=null;
+  dungeonDifficultyState=null;
+  dungeonDifficultyPreviewState=null;
   setText("progressionHouseScripBalance","--");
   setText("progressionHouseScripLog",data?.ok?"Loading House Scrip balance...":"Load a player to read the House Scrip balance.");
   setValue("progressionHouseScripConfirm","");
   setValue("progressionSpecializationConfirmText","");
+  setValue("dungeonDifficultyConfirm","");
+  setText("dungeonDifficultyStatus",data?.ok?"Loading experimental dungeon completion history...":"Load a player to inspect dungeon completion history.");
+  setText("dungeonDifficultyLog","No experimental dungeon preview generated.");
+  const dungeonRows=document.getElementById("dungeonDifficultyRows");if(dungeonRows)dungeonRows.innerHTML='<tr><td colspan="5">No dungeon history loaded.</td></tr>';
+  syncDungeonDifficultyApplyButton();
   const status=document.getElementById("progressionPlayerStatus");
   if(status){status.className=data?.ok?"empty mt":(data?.status==="not-found"?"warning mt":"warning mt");status.textContent=data?.ok?"Progression player found. Current values loaded into the guarded editor.":(data?.reason||data?.error||"Progression player lookup failed.");}
   const p=data?.player||{};
@@ -25787,7 +26069,8 @@ function renderProgressionPlayer(data){
   const factions=document.getElementById("progressionFactionRows");
   if(factions){const groups=progressionFactionGroups(data);factions.innerHTML=data?.ok?(groups.length?groups.map(row=>'<tr><td>'+esc(progressionFactionLabel(row))+'<div class="subtle">Targets: '+esc(row.actorIds.join(", "))+'</div></td><td>'+esc(row.reputation_amount)+'</td></tr>').join(""):'<tr><td colspan="2">No faction reputation rows found for this player.</td></tr>'):'<tr><td colspan="2">No player loaded.</td></tr>';}
   renderProgressionFactionEditor(data);
-  if(data?.ok)refreshProgressionHouseScrip();
+  if(data?.ok&&progressionCategory==="house-scrip")refreshProgressionHouseScrip();
+  if(data?.ok&&progressionCategory==="dungeons")refreshDungeonDifficulty();
 }
 function progressionSpecializationRow(track){return (progressionPlayerState?.specializationTracks||[]).find(row=>String(row.track_type||"").toLowerCase()===String(track||"").toLowerCase())||null;}
 function renderProgressionSpecializationEditor(data){const select=document.getElementById("progressionSpecializationTrack");if(!select)return;const current=select.value||"Crafting";const known=["Crafting","Gathering","Exploration","Combat","Sabotage"];const detected=(data?.specializationTracks||[]).map(row=>String(row.track_type||"").trim()).filter(Boolean);const tracks=[...new Set([...known,...detected])];select.innerHTML=tracks.map(track=>'<option value="'+esc(track)+'">'+esc(track)+'</option>').join("");select.value=tracks.includes(current)?current:tracks[0];syncProgressionSpecializationEditor();}
@@ -25906,10 +26189,38 @@ async function refreshMarketStatus(){const status=document.getElementById("marke
 function syncMarketListingSelection(){const el=document.getElementById("marketListingsSelection");if(el)el.textContent=selectedMarketListingIds.size+" selected.";}
 function toggleMarketListingSelection(orderId,checked){orderId=Number(orderId)||0;if(!orderId)return;if(checked)selectedMarketListingIds.add(orderId);else selectedMarketListingIds.delete(orderId);syncMarketListingSelection();}
 function formatMarketListingExpiry(expirationTime,gameNow){const expiry=Number(expirationTime||0);const now=Number(gameNow||0);if(!Number.isFinite(expiry)||expiry<=0)return{label:"No expiration",detail:"No valid game-clock expiry",expired:true};if(!Number.isFinite(now)||now<=0)return{label:"Expiry unavailable",detail:"Game time "+Math.floor(expiry).toLocaleString(),expired:false};const remaining=Math.floor(expiry-now);if(remaining<=0)return{label:"Expired",detail:"0 seconds remaining",expired:true};const days=Math.floor(remaining/86400);const hours=Math.floor((remaining%86400)/3600);const minutes=Math.max(1,Math.floor((remaining%3600)/60));const label=days>0?(days+"d "+hours+"h remaining"):(hours>0?(hours+"h "+minutes+"m remaining"):(minutes+"m remaining"));return{label,detail:"Game expiry "+Math.floor(expiry).toLocaleString(),expired:false};}
-function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[],gameNow=Number(data?.gameNow||0),summary=document.getElementById("marketListingsSummary");marketListingRows=listings;if(summary)summary.textContent="Showing "+listings.length+" live listing(s) · updated "+new Date().toLocaleTimeString()+".";const header='<div class="market-listing-header tracking-only"><span>Item</span><span>Grade</span><span>Tier</span><span>Stack</span><span>Seller / Type</span><span>Price</span><span>Expiration</span></div>';const rows=listings.map(row=>{const grade=row.gradeLabel||("Grade "+(row.quality||0)),tier=row.tier||"--",owner=row.ownerClass||("Owner "+(row.ownerId||"-")),type=row.isNpcOrder?"NPC / bot":"Player listing",expiry=formatMarketListingExpiry(row.expirationTime,gameNow);return '<div class="market-listing-row tracking-only"><div class="market-listing-cell market-listing-item"><strong>'+esc(row.name||row.template)+'</strong><span class="subtle env-path-value">'+esc(row.template)+'</span><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+(row.category?' / '+esc(row.category):'')+'</span></div><div class="market-listing-cell"><span class="item-grade-badge">'+esc(grade)+'</span></div><div class="market-listing-cell"><strong>'+esc(tier)+'</strong></div><div class="market-listing-cell"><strong>'+esc(row.stackSize||row.initialStackSize||0)+'</strong></div><div class="market-listing-cell"><strong>'+esc(owner)+'</strong><span class="subtle">'+esc(type)+'</span></div><div class="market-listing-cell"><strong class="market-listing-price">'+esc(row.price)+' Solari</strong></div><div class="market-listing-cell market-listing-expiry '+(expiry.expired?'expired':'')+'"><strong>'+esc(expiry.label)+'</strong><span class="subtle">'+esc(expiry.detail)+'</span></div></div>';}).join('');wrap.innerHTML=listings.length?'<div class="market-listing-grid tracking-only">'+header+rows+'</div>':'<div class="empty">No live market listings found.</div>';}
+const marketManualPurchasesBusy=new Set();
+function marketListingPurchaseAction(row,gameNow){
+  if(row.isNpcOrder||row.playerOwned!==true||Number(gameNow)<=0||Number(row.expirationTime)<=Number(gameNow)||Number(row.price)<=0||Number(row.stackSize)<=0||Number(row.price)*Number(row.stackSize)>999999999)return "";
+  return '<span class="market-listing-actions"><button type="button" data-market-buy="'+esc(row.orderId)+'" '+(marketManualPurchasesBusy.has(String(row.orderId))?'disabled':'')+'>Buy &amp; Pay</button></span>';
+}
+function renderMarketListings(data){const wrap=document.getElementById("marketListings");if(!wrap)return;const listings=data?.listings||[],gameNow=Number(data?.gameNow||0),summary=document.getElementById("marketListingsSummary");marketListingRows=listings;if(summary)summary.textContent="Showing "+listings.length+" live listing(s) · updated "+new Date().toLocaleTimeString()+".";const header='<div class="market-listing-header tracking-only"><span>Item</span><span>Grade</span><span>Tier</span><span>Stack</span><span>Seller / Type</span><span>Price</span><span>Expiration</span></div>';const rows=listings.map(row=>{const grade=row.gradeLabel||("Grade "+(row.quality||0)),tier=row.tier||"--",owner=row.ownerClass||("Owner "+(row.ownerId||"-")),type=row.isNpcOrder?"NPC / bot":"Player listing",expiry=formatMarketListingExpiry(row.expirationTime,gameNow);return '<div class="market-listing-row tracking-only"><div class="market-listing-cell market-listing-item"><strong>'+esc(row.name||row.template)+'</strong><span class="subtle env-path-value">'+esc(row.template)+'</span><span class="subtle">Order '+esc(row.orderId)+' / Item '+esc(row.itemId||"-")+' / '+esc(row.exchangeName||"Exchange")+(row.category?' / '+esc(row.category):'')+'</span></div><div class="market-listing-cell"><span class="item-grade-badge">'+esc(grade)+'</span></div><div class="market-listing-cell"><strong>'+esc(tier)+'</strong></div><div class="market-listing-cell"><strong>'+esc(row.stackSize||row.initialStackSize||0)+'</strong></div><div class="market-listing-cell"><strong>'+esc(owner)+'</strong><span class="subtle">'+esc(type)+'</span></div><div class="market-listing-cell"><strong class="market-listing-price">'+esc(row.price)+' Solari</strong></div><div class="market-listing-cell market-listing-expiry '+(expiry.expired?'expired':'')+'"><strong>'+esc(expiry.label)+'</strong><span class="subtle">'+esc(expiry.detail)+'</span>'+marketListingPurchaseAction(row,gameNow)+'</div></div>';}).join('');wrap.innerHTML=listings.length?'<div class="market-listing-grid tracking-only">'+header+rows+'</div>':'<div class="empty">No live market listings found.</div>';wrap.querySelectorAll('[data-market-buy]').forEach(button=>button.addEventListener('click',()=>buyMarketListing(button.dataset.marketBuy)));}
 async function refreshMarketListings(){const wrap=document.getElementById("marketListings"),summary=document.getElementById("marketListingsSummary");try{if(wrap)wrap.innerHTML='<div class="warning">Loading live market listings...</div>';if(summary)summary.textContent="Refreshing the live game market...";const q=document.getElementById("marketListingsSearch")?.value||"",limit=document.getElementById("marketListingsLimit")?.value||100,data=await getJson("/api/market/listings?limit="+encodeURIComponent(limit)+"&q="+encodeURIComponent(q),{timeoutMs:25000});renderMarketListings(data);return data;}catch(e){if(wrap)wrap.innerHTML='<div class="warning">'+esc(betterError(e))+'</div>';if(summary)summary.textContent="Live market refresh failed.";return null;}}
 function refreshMarketListingsSoon(){clearTimeout(marketListingsTimer);marketListingsTimer=setTimeout(refreshMarketListings,350);}
-async function buyMarketListing(orderId){try{const ok=await appConfirm("Buy player listing","Buy player listing order "+orderId+", remove it from the market, and create the seller Solari payout?","Buy & Pay","Cancel");if(!ok)return;const data=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",timeoutMs:60000});showToast(data?.message||"Player listing bought and seller payout created.","success");await refreshMarketListings();await refreshMarketAutomator();}catch(e){showToast(betterError(e),"error");}}
+async function buyMarketListing(orderId){
+  orderId=String(orderId);
+  if(marketManualPurchasesBusy.has(orderId))return;
+  marketManualPurchasesBusy.add(orderId);
+  document.querySelectorAll("[data-market-buy]").forEach(button=>{if(button.dataset.marketBuy===orderId)button.disabled=true;});
+  try{
+    setText("marketManualPurchaseLog","Checking the selected player listing...");
+    const preview=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/purchase-preview",{timeoutMs:20000});
+    const message=preview.itemName+" × "+preview.stackSize+"\\nUnit price: "+Number(preview.unitPrice).toLocaleString()+" Solari\\nTotal seller payout: "+Number(preview.totalPaid).toLocaleString()+" Solari\\nSeller actor: "+preview.sellerActorId+" / Order "+orderId+"\\n\\nAdmin-funded purchase of the full stack. The seller claims payment in the game Exchange. The item is removed permanently and is NOT delivered to you.";
+    const confirmed=await appConfirm("Buy & Pay — Player Listing",message,"Buy & Pay","Cancel");
+    if(!confirmed){setText("marketManualPurchaseLog","Purchase cancelled. No changes made.");return;}
+    const data=await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/buy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:preview.previewId,confirmText:"BUY AND PAY"}),timeoutMs:45000});
+    setText("marketManualPurchaseLog",data.message+" Payment receipt: "+data.paymentOrderId+".");
+    addActivity("market","Player listing purchased",data.message);
+    showToast("Purchased — seller payout created","success");
+    await refreshMarketListings();
+  }catch(error){
+    setText("marketManualPurchaseLog",betterError(error)+" Refresh listings and check seller claims before retrying if the connection was interrupted.");
+    showToast(betterError(error),"error");
+  }finally{
+    marketManualPurchasesBusy.delete(orderId);
+    document.querySelectorAll("[data-market-buy]").forEach(button=>{if(button.dataset.marketBuy===orderId)button.disabled=false;});
+  }
+}
 async function removeMarketListing(orderId){try{const ok=await appConfirm("Remove market listing","Remove selected listing order "+orderId+" from the market? This does not create a seller payout.","Remove","Cancel");if(!ok)return;await getJson("/api/market/listing/"+encodeURIComponent(orderId)+"/remove",{method:"POST",timeoutMs:60000});showToast("Listing removed.","success");await refreshMarketListings();await refreshMarketAutomator();}catch(e){showToast(betterError(e),"error");}}
 function selectVisibleNpcMarketListings(){for(const row of marketListingRows){const id=Number(row.orderId)||0;if(id)selectedMarketListingIds.add(id);}renderMarketListings({listings:marketListingRows});}
 function clearSelectedMarketListings(){selectedMarketListingIds.clear();renderMarketListings({listings:marketListingRows});}
@@ -26058,6 +26369,7 @@ const STARTUP_TASKS=[
   {key:"maps",label:"Maps",detail:"Loading map deployments.",run:refreshMaps},
   {key:"admin",label:"Players / Items",detail:"Loading players, item catalog, and admin capabilities.",run:refreshAdmin},
   {key:"feed",label:"Player Feed",detail:"Loading live player feed.",run:refreshPlayerFeed},
+  {key:"market",label:"Market Clock",detail:"Fetching server game time and current market listings.",run:refreshMarketListings},
   {key:"receiver",label:"Receiver",detail:"Checking live receiver and give transport.",run:refreshReceiverStatus}
 ];
 function mountStartupProgressPopup(){const overlay=document.getElementById("startupProgressOverlay");const panel=document.getElementById("startupProgress");if(!overlay||!panel)return{overlay,panel};if(overlay.parentElement!==document.body)document.body.appendChild(overlay);Object.assign(overlay.style,{position:"fixed",inset:"0",zIndex:"9999",display:startupProgressState?.hidden?"none":"grid",placeItems:"center",padding:"18px",background:"rgba(8,6,4,.52)",backdropFilter:"blur(8px)"});Object.assign(panel.style,{width:"min(560px, calc(100vw - 36px))",maxWidth:"100%",margin:"0"});return{overlay,panel};}
@@ -26066,7 +26378,7 @@ function updateStartupTask(key,status,message){if(!startupProgressState)return;c
 function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>resolve({timedOut:true,label}),ms));}
 async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
 async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
-function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();}
+function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();refreshMarketListings();}
 renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadDashboardHeroCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
@@ -26099,7 +26411,7 @@ function isRemotePortalRequest(req) {
 
 const REMOTE_LOCAL_ONLY_PREFIXES = [
   "/api/config", "/api/setup/", "/api/test/", "/api/settings/", "/api/ssh-key/", "/api/server-install-path/",
-  "/api/usergame-settings", "/api/items/catalog/scan-installed-game",
+  "/api/usergame-settings", "/api/usergame-backups", "/api/items/catalog/scan-installed-game",
   "/api/live-give/env", "/api/blueprints", "/api/diagnostics", "/api/backend/diagnostics", "/api/remote-access/", "/api/internet-access/", "/api/live-map/resource-areas/generate", "/api/live-map/resource-areas/game-folder",
   "/api/admin/probe", "/api/admin/tuned-channels", "/api/admin/permissions", "/api/gear/discovery", "/api/discovery",
   "/api/market-automator/logs", "/api/director", "/api/database-browser/", "/api/server-migration/", "/api/migration-maintenance", "/api/migration-offline", "/manager-api/"
@@ -26111,7 +26423,7 @@ const REMOTE_VIEWER_GET_PATHS = new Set([
   "/api/live-map/vehicles", "/api/live-map/bases", "/api/live-map/teleport/presets", "/api/live-map/teleport/status", "/api/live-map/resource-areas/status",
   "/api/admin/players", "/api/admin/player-inventory", "/api/admin/repair/inspect", "/api/admin/repair/queue", "/api/players/feed", "/api/admin/items",
   "/api/give-items", "/api/gear-codex/items", "/api/item-database/items", "/api/items/catalog/status", "/api/give-items/capabilities",
-  "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/progression/house-scrip", "/api/landsraad/tiers",
+  "/api/progression/inspect", "/api/progression/player", "/api/progression/skills", "/api/progression/house-scrip", "/api/progression/dungeon-difficulty", "/api/landsraad/tiers",
   "/api/landsraad/weekly-rewards/inspect", "/api/admin/skill-reputation", "/api/market-bot", "/api/market-bot/items", "/api/market-automator/overview",
   "/api/market/status", "/api/market/listings", "/api/live-give/queue-presets", "/api/live-give/queue-presets/get",
   "/api/sietches", "/api/vm/status", "/api/updates/check"
@@ -27785,6 +28097,49 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === "/api/progression/dungeon-difficulty/scan-installed-game" && req.method === "GET") {
+    try {
+      const knownDungeons = await dungeonDifficultyKnownDungeons().catch(() => []);
+      const result = scanInstalledGameDungeons({
+        appDir: __dirname,
+        repakExe: process.env.ALPHANINE_REPAK_EXE || "",
+        knownDungeons
+      });
+      await json(res, result);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", experimental: true, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/dungeon-difficulty" && req.method === "GET") {
+    try {
+      const result = await dungeonDifficultyInspect(url.searchParams.get("query"), url.searchParams.get("dungeonId"));
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", experimental: true, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/dungeon-difficulty/preview" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await dungeonDifficultyPreview(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "error", experimental: true, error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/progression/dungeon-difficulty/apply" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const result = await dungeonDifficultyApply(body);
+      await json(res, result, result.ok ? 200 : 400);
+    } catch (error) {
+      await json(res, { ok: false, status: "failed", experimental: true, error: error.message }, 400);
+    }
+    return;
+  }
   if (url.pathname === "/api/market-bot/exchanges" && req.method === "GET") {
     try { await json(res, await marketBotExchanges()); }
     catch (error) { await json(res, { ok: false, error: error.message, exchanges: [] }, 500); }
@@ -28025,10 +28380,17 @@ async function route(req, res) {
     return;
   }
   {
+    const purchasePreviewMatch = url.pathname.match(/^\/api\/market\/listing\/(\d+)\/purchase-preview$/);
+    if (purchasePreviewMatch && req.method === "GET") {
+      try { await json(res, await previewMarketListingPurchase(purchasePreviewMatch[1])); }
+      catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+      return;
+    }
     const buyMatch = url.pathname.match(/^\/api\/market\/listing\/(\d+)\/buy$/);
     if (buyMatch && req.method === "POST") {
       try {
-        await json(res, await buyMarketListingAsAdmin(buyMatch[1]));
+        const payload = JSON.parse(await readBody(req) || "{}");
+        await json(res, await buyMarketListingAsAdmin(buyMatch[1], payload));
       } catch (err) {
         await json(res, { ok: false, error: err.message }, 500);
       }
@@ -28103,6 +28465,32 @@ async function route(req, res) {
     }
     return;
   }
+  if (url.pathname === '/api/usergame-backups') {
+    if (!remoteAccess.isLoopbackRequest(req)) { await json(res, {ok:false,error:'INI recovery is available only from the local Suite.'},403); return; }
+    try {
+      if (req.method === 'GET') {
+        if (url.searchParams.get('download') === '1') {
+          const record=userGameRecovery.read(url.searchParams.get('id') || '');
+          if (url.searchParams.has('file')) {
+            const index=Number(url.searchParams.get('file'));
+            if(!Number.isInteger(index)||index<0||!record.files[index]) throw Error('Invalid backup file.');
+            const entry=record.files[index];
+            res.setHeader('Content-Type','application/octet-stream');
+            res.setHeader('Content-Disposition','attachment; filename="'+path.posix.basename(entry.path)+'"');
+            res.end(Buffer.from(entry.content,'base64')); return;
+          }
+          res.setHeader('Content-Disposition','attachment; filename="ini-backup-'+record.id+'.json"');
+          await json(res,record);
+        } else await json(res,{ok:true,directory:userGameRecovery.directory,backups:userGameRecovery.list()});
+      } else if (req.method === 'POST') {
+        const body=JSON.parse(await readBody(req,65536)||'{}');
+        const result=await userGameRecovery.restore(body.id,body.filename);
+        appendAdminAudit('ini_backup_restored',{id:body.id,filename:body.filename,...result});
+        await json(res,{ok:true,...result});
+      } else await json(res,{ok:false,error:'Method not allowed'},405);
+    } catch(error) { await json(res,{ok:false,error:error.message},400); }
+    return;
+  }
   if (url.pathname === "/api/usergame-settings" && req.method === "GET") {
     if (!remoteAccess.isLoopbackRequest(req)) {
       await json(res, { ok: false, error: "Live UserGame.ini editing is available only from the local Suite." }, 403);
@@ -28122,7 +28510,7 @@ async function route(req, res) {
     }
     try {
       const body = JSON.parse(await readBody(req, 1024 * 64) || "{}");
-      await json(res, await updateLiveUserGameSettings(body.values));
+      await json(res, await updateLiveUserGameSettings(body.values, body.expectedContent));
     } catch (error) {
       appendAdminAudit("usergame_settings_update_failed", { error: error.message });
       await json(res, { ok: false, error: error.message }, 400);

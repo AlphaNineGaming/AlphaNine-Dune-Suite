@@ -153,6 +153,10 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
     assert.strictEqual(viewerStatus.status, 200);
     const viewerWriteBlocked = await request("https", "/api/action/not-a-real-action", { method: "POST", headers: { Cookie: cookieHeader, "X-CSRF-Token": csrf } });
     assert.strictEqual(viewerWriteBlocked.status, 403);
+    const viewerPurchaseBlocked = await request("https", "/api/market/listing/100/buy", { method: "POST", headers: { Cookie: cookieHeader, "X-CSRF-Token": csrf }, body: { confirmText: "BUY AND PAY", previewId: "test" } });
+    assert.strictEqual(viewerPurchaseBlocked.status, 403, "Viewer must not purchase player listings.");
+    const viewerPurchasePreviewBlocked = await request("https", "/api/market/listing/100/purchase-preview", { headers: { Cookie: cookieHeader } });
+    assert.strictEqual(viewerPurchasePreviewBlocked.status, 403, "Viewer must not prepare purchase approvals.");
     assert.match(home.text, /AlphaNine Dune Suite/);
     const blockedPost = await request("https", "/api/auth/logout", { method: "POST", headers: { Cookie: cookieHeader } });
     assert.strictEqual(blockedPost.status, 403);
@@ -178,6 +182,8 @@ child.stderr.on("data", (chunk) => output.push(String(chunk)));
     const operatorCookieHeader = operatorLogin.headers["set-cookie"].map((cookie) => cookie.split(";")[0]).join("; ");
     const operatorCsrfCookie = operatorLogin.headers["set-cookie"].find((cookie) => cookie.startsWith("alphanine_csrf="));
     const operatorCsrf = decodeURIComponent(operatorCsrfCookie.split(";")[0].split("=")[1]);
+    const operatorPurchaseBlocked = await request("https", "/api/market/listing/100/buy", { method: "POST", headers: { Cookie: operatorCookieHeader, "X-CSRF-Token": operatorCsrf }, body: { confirmText: "BUY AND PAY", previewId: "test" } });
+    assert.strictEqual(operatorPurchaseBlocked.status, 403, "Admin-funded purchases remain Owner-only remotely.");
     const operatorLiveGive = await request("https", "/api/admin/give-item", {
       method: "POST",
       headers: { Cookie: operatorCookieHeader, "X-CSRF-Token": operatorCsrf },

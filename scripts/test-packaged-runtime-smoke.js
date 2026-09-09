@@ -32,6 +32,10 @@ const packagedServerHealthTestPath = path.join(extracted, "scripts", "test-serve
 const packagedBattlegroupControlTestPath = path.join(extracted, "scripts", "test-battlegroup-control.js");
 const packagedStorageDepositTestPath = path.join(extracted, "scripts", "test-storage-deposits.js");
 const packagedGiveItemDurabilityTestPath = path.join(extracted, "scripts", "test-give-item-durability.js");
+const packagedMarketListingsTestPath = path.join(extracted, "scripts", "test-market-listings.js");
+const packagedManualPurchaseTestPath = path.join(extracted, "scripts", "test-market-manual-purchase.js");
+const packagedDungeonDifficultyTestPath = path.join(extracted, "scripts", "test-dungeon-difficulty.js");
+const packagedDungeonCatalogTestPath = path.join(extracted, "scripts", "test-installed-game-dungeon-catalog.js");
 const packagedMarketBotVerificationTestPath = path.join(extracted, "scripts", "test-market-bot-verification.js");
 const packagedMarketBotAuthoritativeEvidenceTestPath = path.join(extracted, "scripts", "test-market-bot-authoritative-evidence.js");
 const packagedMarketBotReconciliationTestPath = path.join(extracted, "scripts", "test-market-bot-reconciliation.js");
@@ -53,6 +57,10 @@ assert(fs.existsSync(packagedServerHealthTestPath), "Packaged app is missing the
 assert(fs.existsSync(packagedBattlegroupControlTestPath), "Packaged app is missing the battlegroup generation/attribution regression test.");
 assert(fs.existsSync(packagedStorageDepositTestPath), "Packaged app is missing the storage-deposit reliability regression test.");
 assert(fs.existsSync(packagedGiveItemDurabilityTestPath), "Packaged app is missing the Give Item durability regression test.");
+assert(fs.existsSync(packagedMarketListingsTestPath), "Packaged app is missing the server-clock market regression test.");
+assert(fs.existsSync(packagedManualPurchaseTestPath), "Packaged app is missing the manual player-purchase regression test.");
+assert(fs.existsSync(packagedDungeonDifficultyTestPath), "Packaged app is missing the experimental dungeon difficulty regression test.");
+assert(fs.existsSync(packagedDungeonCatalogTestPath), "Packaged app is missing the installed-game dungeon scanner regression test.");
 assert(fs.existsSync(packagedMarketBotVerificationTestPath), "Packaged app is missing the Market Bot pause/drain regression test.");
 assert(fs.existsSync(packagedMarketBotAuthoritativeEvidenceTestPath), "Packaged app is missing the authoritative Market Bot evidence regression test.");
 assert(fs.existsSync(packagedMarketBotReconciliationTestPath), "Packaged app is missing the Market Bot pause reconciliation regression test.");
@@ -177,6 +185,22 @@ assert.equal(
   packagedGiveItemDurabilityTest.status,
   0,
   `Packaged Give Item durability regression failed.\n${packagedGiveItemDurabilityTest.stdout || ""}\n${packagedGiveItemDurabilityTest.stderr || ""}`
+);
+const packagedDungeonDifficultyTest = spawnSync(process.execPath, [packagedDungeonDifficultyTestPath], { cwd: extracted, encoding: "utf8", windowsHide: true });
+const packagedMarketListingsTest = spawnSync(process.execPath, [packagedMarketListingsTestPath], { cwd: extracted, encoding: "utf8", windowsHide: true });
+const packagedManualPurchaseTest = spawnSync(process.execPath, [packagedManualPurchaseTestPath], { cwd: extracted, encoding: "utf8", windowsHide: true });
+assert.equal(packagedManualPurchaseTest.status, 0, `Packaged manual player purchase regression failed.\n${packagedManualPurchaseTest.stdout || ""}\n${packagedManualPurchaseTest.stderr || ""}`);
+assert.equal(packagedMarketListingsTest.status, 0, `Packaged server-clock market regression failed.\n${packagedMarketListingsTest.stdout || ""}\n${packagedMarketListingsTest.stderr || ""}`);
+assert.equal(
+  packagedDungeonDifficultyTest.status,
+  0,
+  `Packaged experimental dungeon difficulty regression failed.\n${packagedDungeonDifficultyTest.stdout || ""}\n${packagedDungeonDifficultyTest.stderr || ""}`
+);
+const packagedDungeonCatalogTest = spawnSync(process.execPath, [packagedDungeonCatalogTestPath], { cwd: extracted, encoding: "utf8", windowsHide: true });
+assert.equal(
+  packagedDungeonCatalogTest.status,
+  0,
+  `Packaged installed-game dungeon scanner regression failed.\n${packagedDungeonCatalogTest.stdout || ""}\n${packagedDungeonCatalogTest.stderr || ""}`
 );
 const packagedRemoteAccessTest = spawnSync(process.execPath, [packagedRemoteAccessTestPath], {
   cwd: extracted,
@@ -419,6 +443,10 @@ async function waitForUi() {
     assert(!html.includes('data-blueprint-action="view"'), "Packaged UI still contains a blueprint View action.");
     assert(html.includes("Grant Selected Ranks"), "Packaged UI is missing granular skill rank grants.");
     assert(html.includes("House Scrip is virtual currency"), "Packaged UI is missing the House Scrip grant panel.");
+    assert(html.includes("Dungeon Difficulty Unlocks"), "Packaged UI is missing the experimental dungeon difficulty panel.");
+    assert(html.includes("Choose a Progression Tool"), "Packaged UI is missing the progression category chooser.");
+    assert(html.includes("Installed Game Dungeon IDs"), "Packaged UI is missing the installed-game dungeon scanner.");
+    assert(html.includes("APPLY DUNGEON EXPERIMENT"), "Packaged UI is missing the dungeon experiment confirmation gate.");
     const packagedVersion = JSON.parse(fs.readFileSync(path.join(extracted, "package.json"), "utf8")).version;
     assert.equal(packagedVersion, rootPackage.version, "Packaged version does not match the release source.");
     assert(html.includes("Exactly five distinct thresholds"), "Packaged Landsraad UI is missing the exact-five policy.");

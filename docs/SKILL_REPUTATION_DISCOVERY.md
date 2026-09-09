@@ -2,6 +2,8 @@
 
 Date: 2026-06-05
 
+Historical discovery record. Findings and proposed actions below describe that investigation and may not reflect the current implementation.
+
 Scope: read-only inspection of the local AlphaNine Dune Suite code, the live self-hosted Dune PostgreSQL database, Kubernetes/RabbitMQ metadata, and recent server logs. No skill, reputation, faction, or player tables were modified during discovery.
 
 ## Summary
@@ -349,4 +351,3 @@ Every write must:
 - log the previous row for rollback;
 - log the result;
 - warn that live pickup is not confirmed and may require relog/server restart.
-

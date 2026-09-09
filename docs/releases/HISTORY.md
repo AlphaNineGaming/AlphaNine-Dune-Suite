@@ -1,0 +1,264 @@
+# Historical release summary
+
+Archived from the project README. This is a selected historical summary, not a complete list of releases. See the [release index](README.md) for the preserved version-specific notes.
+
+### 1.2.6
+
+- Fixed Live Market Listings falsely labeling active player listings as expired by using the authoritative Dune universe clock.
+- Includes the Market Bot 1.0.101 player-buying clock correction from 1.2.5.
+
+### 1.2.5
+
+- Fixed the Market Bot player-listing buyer on HarkoVillage and other private servers whose Exchange timestamps use Dune universe time instead of Unix epoch time.
+- Preview and execution now derive the authoritative clock from `dune.farm_variables`, including the stored downtime offset, while retaining a fail-safe database-clock fallback.
+- Updated the bundled Market Bot runtime to 1.0.101 and added regression coverage preventing universe-time listings from being rejected as expired.
+
+### 1.2.3
+
+- Fixed the optional Market Bot player-listing buyer so seller claim records store the listing's per-unit price instead of multiplying stacked payouts twice.
+- Seller Solari claims now use the game's non-expiring Exchange sentinel and cannot be purged like ordinary listings before collection.
+- Player purchases fail closed unless the dedicated Market Bot Exchange user exists and can be debited.
+- Changed the default player purchase chance from 10% to 50% per normal Market Bot cycle; existing saved policies remain explicit until updated.
+- Updated the bundled Market Bot runtime to 1.0.100 and added regression coverage for payout price, expiry, and buyer identity.
+
+### 1.2.2
+
+- Enabled authenticated **Operator** accounts to use Dry-Run and Live Give through the HTTPS and internet Web Portal.
+- Kept the **Viewer** role read-only and preserved the Owner-only boundary for unrelated administration endpoints.
+- Retained session authentication, CSRF protection, execution confirmation, and remote action auditing for Live Give requests.
+- Added regression coverage for both the new Operator permission and the remaining Owner-only administration boundary.
+
+### 1.2.1
+
+- Includes the PostgreSQL backup-validation correction introduced for 1.2.0: normal Funcom ACL entries no longer prevent verified VM backups from being copied locally.
+- Fixed **Open Battlegroup.bat** for installed users by reading the saved server paths from Settings at click time.
+- The desktop app now starts the detected batch file through a persistent Windows command console with the server folder as its working directory.
+- Added Windows-safe quoting for configured paths containing spaces.
+
+### 1.2.0
+
+- Fixed Funcom VM backups being rejected when their PostgreSQL archive contains normal ACL entries.
+- Vendor backup verification now generates its comparison inventory with the same privilege boundary as the Funcom dump.
+- Unexpected schema mismatches now identify their PostgreSQL TOC descriptor counts for faster diagnosis.
+
+### 1.1.9
+
+- Added **UserGame Settings** as a dedicated child page under **Server Management**.
+- Added a safe live editor for 18 supported `UserGame.ini` settings, including player building limits, progression, harvesting, taxes, fees, and world behavior.
+- Saving creates a timestamped VM backup, changes only allowlisted fields, verifies the uploaded file, and applies the default user settings without restarting the battlegroup.
+- Added **Open Battlegroup.bat** to Server Control for direct access to the configured server launcher.
+- Live `UserGame.ini` editing remains local-only and rejects unknown or out-of-range settings.
+
+### 1.1.8
+
+- Fixed **Players** remaining empty until **Give Item** was opened.
+- Opening **Players** now uses the same shared live-player discovery as Give Item.
+- **Refresh Players** forces a fresh lookup, while transient failures preserve the last confirmed player list.
+
+### 1.1.7
+
+- Fixed player backpack item deletion failing with an SSH `Connection closed by host` error.
+- Inventory deletion now streams its database transaction instead of placing the full SQL payload on the SSH command line.
+- Removed an unnecessary inventory-row lock that could stall behind the live game server.
+- If SSH drops after the database commits, the Suite verifies the item is gone before reporting the result.
+
+### 1.1.6
+
+- Fixed HarkoVillage appearing in the Market Bot Exchange selector but remaining disabled when its native Exchange had no saved inventory link.
+- HarkoVillage is now selectable when its Exchange and access point are valid and the inventory is the only missing structure.
+- On first use, the Suite transactionally links the existing Harko inventory or creates an empty Exchange inventory and saves it to the Exchange.
+- Existing Harko and player listings are never moved or modified by this setup.
+- Ambiguous inventories, missing access points, duplicate Exchange names, and invalid inventory ownership remain blocked.
+
+### 1.1.5
+
+- Added a player backpack inventory table to the Players view.
+- Inventory rows show item names, templates, stacks, grades, durability, slots, and item IDs.
+- Added inventory search and refresh controls.
+- Added direct per-item deletion scoped to the selected player's exact backpack.
+- Blueprint-backed items remove their linked blueprint records when deleted.
+- Deletion has no backup, offline-player gate, preview, or typed confirmation.
+
+### 1.1.1
+
+- Fixed Arrakeen Exchange initialization failing with `prompt() is not supported` in the Electron desktop app.
+- Fixed the Market Bot remaining in **Draining** when its database credential lookup crossed the VM's scoped `sudo kubectl` permission boundary.
+- Updated the bundled Market Bot runtime to 1.0.99 with clearer credential and planner diagnostics.
+- Added direct **Use Arrakeen** and **Use HarkoVillage** choices with one protected confirmation.
+- The Suite now repairs or updates the bot when needed, pauses and drains it, saves the selected Exchange, verifies a live preview, and resumes an active bot automatically.
+- Added live Exchange-switch progress with the current stage, percentage, elapsed time, and activity log.
+- Exchange controls remain locked while work is active, and the progress panel reconnects after refreshing or reopening Market Automation.
+- Arrakeen clearly displays **start map first** until its native Exchange has registered.
+- Existing listings remain at their original Exchange and player listings are never changed.
+
+### 1.1.0
+
+- Simplified **Clean Bot Market** and uninstall cleanup so they safely pause and drain the bot without the removed Migration Maintenance workflow.
+- Made the bot catalog and exact preview collapsible and clarified that catalog rows are planned inventory, not current in-game listings.
+- Added a read-only **Live In-Game Market Listings** tracker with search, row limits, seller type, price, stack, grade/tier, Exchange, and expiration details.
+- Added a validated **Bot Listing Exchange** selector for choosing where future bot listings appear.
+- Exchange changes pause and drain an active bot; existing listings remain at their original Exchange and are never silently moved.
+- Added a protected **Initialize Arrakeen Exchange** action for servers where the Arrakeen world partition exists but its Exchange records are missing.
+- Arrakeen initialization uses a recovery snapshot, typed confirmation, transactional state re-checks, and fail-closed conflict detection; it never creates, moves, edits, or deletes listings.
+- Kept the Market Bot runtime pinned to 1.0.98 because these changes improve Suite-side orchestration, inspection, and Exchange selection.
+
+### 1.0.99
+
+- Fixed the dashboard sound toggle displaying corrupted emoji text.
+- Fixed the Quick Actions battlegroup summary showing a literal `\\n` instead of a line break.
+- Removed the misleading `Title not found` placeholder when a battlegroup title is unavailable.
+- Kept the Market Bot runtime pinned to 1.0.98 so this UI-only update does not require bot replacement or repair.
+
+### 1.0.98
+
+- Added an optional random player-listing buyer to the persistent Market Bot. It is disabled by default and requires explicit confirmation.
+- Added per-cycle purchase probability, purchase-count, unit-price, and total-spend limits.
+- Purchases require strict player ownership and active-listing evidence, pay the seller through the native Exchange fulfillment shape, and are recorded in the Market Bot audit log.
+- Clean Bot Market and Uninstall Bot remain restricted to tracked bot-owned listings and never delete player listings.
+
+### 1.0.84
+
+- Self-updates now require the SHA-256 digest and exact file size published by GitHub before the Install Update button is enabled.
+- Downloaded installers are verified locally before launch; mismatched or incomplete files are deleted and never executed.
+- Added a dedicated release build that runs update-integrity, icon, packaging, and packaged-runtime checks before publication.
+- The HTTPS Web Portal is local-only by default; phone/LAN access is an explicit, password-gated opt-in with Private-network firewall guidance.
+- Added 117 optional, non-teleportable Hagga Basin resource spawn markers for Small Spice and Flour Sand.
+- Added ten experimental procedural resource-area overlays generated locally from the installed `Tools.pak` and cached outside the packaged application.
+- Fixed first-click activation, saved resource filters, visible generation errors, cache reuse, opacity, and packaged-runtime extraction.
+
+### 1.0.82
+
+- Storage deposits now choose the lowest valid unused positions instead of extending beyond a finite container's slot range when holes exist.
+- Deposits are blocked when the target already contains duplicate or out-of-range positions.
+- Successful deposits create persistent receipts and automatically recheck the inserted item rows after 2, 5, 15, and 30 seconds without repeating the grant.
+- Give Item now distinguishes database verification from operator-confirmed in-game visibility.
+- Added a protected battlegroup refresh entry that uses the existing player, backup, exact-target, and post-start health gates; it never restarts the VM or deletes raw pods.
+
+### 1.0.81
+
+- Scoped Landsraad reward-tier inspection, backup, editing, and verification to the current non-test term.
+- Historical term rewards no longer appear as extra tiers after weekly resets.
+- Resolves the current term directly from `dune.landsraad_decree_term` without invoking the broken game `landsraad_load_current_term()` function.
+- Added fail-closed protection for test terms, missing or ambiguous current terms, and rollover during preview or apply.
+
+### 1.0.80
+
+- Added a persistent Hide Banner control that collapses the dashboard banner into a compact Show Banner row.
+- Moved About, Discord, and Buy Me a Coffee from the sidebar to compact controls beside UI Mode in the top bar.
+- Preserved responsive wrapping on narrower windows and removed the obsolete sidebar action styles.
+
+### 1.0.72
+
+- Give Item storage destinations now show valid in-game container names, such as `Fuel Cells`, ahead of the derived container type.
+- Storage destination search now matches custom container names and container types.
+- Storage details and deposit results preserve both the custom name and technical container type, while unnamed containers retain the existing fallback label.
+
+### 1.0.71
+
+- Replaced the Suite-process market scheduler with a persistent Linux/amd64 Market Bot installed and supervised inside the Dune VM.
+- Added exact all-item preview, Affordable/Balanced/Expensive pricebooks, per-item target-stock reconciliation, constrained item customization, CSV export, and live status.
+- Added a database advisory lock, strict ownership metadata, idempotent transactional cycles, creation/value caps, and strict protection against arbitrary changes to player and untracked listings.
+- Added preview-confirmed migration that preserves the Legacy Market Automator configuration and existing listings without activating automatically.
+
+### 1.0.70
+
+- Restored grade-0 physical schematic templates to the Live Give inventory path instead of inferring database recipe unlocks from `_Schematic` names.
+- Hid recipe-only duplicates when the same recipe has a spawnable schematic item, while preserving genuine recipe-only and Research unlock entries.
+- Fixed successful recipe and Research database unlocks being labeled “Live Give failed,” and removed their unnecessary receiver dependency.
+
+### 1.0.69
+
+- Redesigned the Market Automator pricing preview as a clean five-column table with sticky headings, readable badges, and highlighted Solari prices.
+- Rebalanced the Automator workspace so the preview uses the available page width without spilling into the Automation Log.
+- Preserved all pricing calculations, presets, overrides, deterministic behavior, Advanced settings, and existing listings.
+
+### 1.0.68
+
+- Fixed Server Cleaner base deletion failures caused by PostgreSQL bigint actor IDs being rounded through JavaScript numeric conversion.
+- Preserved base actor IDs as exact strings from scan results through the UI, API request, backend validation, operation logging, and SQL parameters.
+- Added Cleaner request/failure audit records and packaged regression validation.
+- Single-base deletion is supported. Bulk base deletion is not implemented.
+- Live destructive validation remains pending against a confirmed orphan or disposable test base; owned actor `953` was left untouched.
+
+### 1.0.67
+
+- Added deterministic per-item Market Automator pricing with fixed, dynamic, category-base, metadata-multiplier, and exact manual-override controls.
+- Preserved legacy Automator pricing as fixed on upgrade and required operators to review the pricing preview before enabling Dynamic mode.
+- Added offline-first Item Database and Give Item catalog loading with read-only server discovery and raw-template fallback.
+- Kept existing market listings unchanged and added pricing audit records plus regression coverage through both database price columns.
+
+### 1.0.66
+
+- Limited Blueprint management to saved-blueprint listing, validated inventory import, and JSON/ZIP export.
+- Preserved player selection, inventory-capacity checks, protected database transactions, relog guidance, and audit records.
+- Removed unused rendering dependencies, catalogs, assets, fixtures, and package content.
+
+### 1.0.65
+
+- Added a local-only Database Explorer for safely browsing the selected battlegroup PostgreSQL database.
+- Added schema, table, view, column-type, primary-key, and estimated-row discovery.
+- Added bounded row browsing with parameterized filters, sorting, pagination, selected-row details, and current-page CSV/JSON export.
+- Enforced read-only PostgreSQL transactions, query and lock timeouts, metadata allowlists, cell truncation, and a 5 MB response limit.
+- Blocked Database Explorer UI and API access from LAN, HTTPS, and internet portal sessions, including authenticated Owner sessions.
+
+### 1.0.63
+
+- Added a new royal AlphaNine Suite icon to the application, installer, taskbar, tray, and installed shortcuts.
+- Added immediate Live Map destination feedback with a pulsing target marker while a teleport is being sent, followed by clear success or failure feedback.
+- Allowed click-to-teleport destinations directly on player, vehicle, base, and clustered map markers instead of requiring an empty point beside them.
+- Fixed offline-player teleport failures caused by the game database function being unable to resolve its schema-local `is_player_offline(text)` helper.
+- Added receiver checks for every database routine required by offline teleport and validated the corrected schema resolution against a live server database.
+
+### 1.0.62
+
+- Fixed imported blueprint items that could report "base not found" because their inventory metadata still referenced blueprint ID 0.
+- Added automatic repair for previously imported blueprint items whose stored reference does not match their database blueprint.
+- Improved Live Teleport routing for offline players and allowed more time for receiver-backed teleport operations to complete.
+- Restarted the managed receiver automatically when its active SSH, battlegroup, or teleport configuration is stale.
+
+### 1.0.4
+
+- Added a Give Item popup when admins select Grade 1-5, explaining that the player must relog before database-granted items appear in inventory.
+- Added the same relog warning before live Grade 1-5 grants and Give Queue runs that include graded items.
+- Bumped the service-worker cache for a clean app shell refresh after updating.
+
+### 1.0.3
+
+- Added Market Posting for creating live NPC exchange sell listings from the Suite.
+- Added Live Market Listings so admins can see current exchange orders from the live database.
+- Added a startup progress popup while the Suite detects server, database, VM, maps, players, and receiver status.
+- Improved update packaging so the Windows installer filename matches updater metadata.
+- Bumped the service-worker cache for a clean app shell refresh after updating.
+
+### 0.3.5-beta
+
+- Unified Live Map and Live Teleport coordinate handling.
+- Added safe elevation provenance and preview diagnostics.
+- Live Teleport now requires a matching preview with a known Z/elevation source.
+
+### 0.3.4-beta
+
+#### Live Map
+
+- Complete Live Map overhaul.
+- New backend marker API for Players, Vehicles, and Bases.
+- Local map assets bundled with no runtime GitHub dependency.
+- Added improved Live Map diagnostics.
+- Fixed Suite UI startup regression caused by Live Map initialization.
+- Corrected Hagga Basin Y-axis orientation so player movement matches in-game direction.
+- Validated against a live database with real player, vehicle, and base data.
+
+#### Other
+
+- Improved overall Live Map stability.
+- No changes to Live Give, Progression, Database, or Receiver functionality.
+
+## Requirements
+
+- Windows 10 or Windows 11
+- Dune: Awakening self-hosted server installed
+- Administrator launch when using Hyper-V or VM controls
+- Network access from this PC to the Dune server VM
+- Database access through the configured Dune server environment
+
+Node.js is only required for developers running from source. Installed users should use the Windows installer.

@@ -45,7 +45,7 @@ const packagedExperimentalResourcesTestPath = path.join(extracted, "scripts", "t
 const packagedExperimentalResourcesUiTestPath = path.join(extracted, "scripts", "test-experimental-resource-areas-ui.js");
 const packagedExperimentalResourcesModulePath = path.join(extracted, "lib", "experimental-resource-areas.js");
 const packagedRepakDir = path.join(outputDir, "win-unpacked", "resources", "app.asar.unpacked", "tools", "repak");
-const packagedReleaseNotesPath = path.join(extracted, `RELEASE_NOTES_${rootPackage.version}.md`);
+const packagedReleaseNotesPath = path.join(extracted, `docs/releases/RELEASE_NOTES_${rootPackage.version}.md`);
 assert(fs.existsSync(packagedCleanerTestPath), "Packaged app is missing the Server Cleaner regression test.");
 assert(fs.existsSync(packagedLandsraadTestPath), "Packaged app is missing the Landsraad exact-five regression test.");
 assert(fs.existsSync(packagedServerUpdateTestPath), "Packaged app is missing the Server Updater regression test.");

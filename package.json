@@ -60,7 +60,7 @@
     "build:release:win": "npm run test:update-integrity && npm run build:win && npm run test:packaged",
     "test:ini-recovery": "node scripts/test-user-game-settings.js && node scripts/test-user-game-recovery.js",
     "test:reward-notifications": "node scripts/test-reward-notifications.js",
-    "test:blueprint-designer": "node scripts/test-blueprint-designer-launcher.js && node --test dev/blueprint-documents/test/*.test.js"
+    "test:blueprint-designer": "node scripts/test-blueprint-designer-launcher.js && node scripts/test-blueprint-designer-startup.js && node --test dev/blueprint-documents/test/*.test.js"
   },
   "dependencies": {
     "express": "^5.2.1",

@@ -5,12 +5,16 @@ function saveReport(report){fs.mkdirSync(app.getPath('userData'),{recursive:true
 if(!fs.existsSync(path.join(app.getAppPath(),'blueprint-designer.json')))app.exit(1);
 else {
   const outputArg=process.argv.find(a=>a.startsWith('--designer-smoke-output='));
-  app.setPath('userData',smoke&&outputArg?path.resolve(outputArg.slice('--designer-smoke-output='.length)):path.join(app.getPath('appData'),'AlphaNine Blueprint Designer'));
+  const designerData=smoke&&outputArg?path.resolve(outputArg.slice('--designer-smoke-output='.length)):path.join(app.getPath('appData'),'AlphaNine Blueprint Designer');
+  fs.mkdirSync(designerData,{recursive:true});
+  app.setPath('userData',designerData);
   app.whenReady().then(async()=>{
     const {loadCatalog}=require(path.join(process.resourcesPath,'designer-runtime','geometry-catalog'));
     const {createDocumentWindow}=require(path.join(process.resourcesPath,'designer-runtime','desktop'));
     const geometryCatalog=loadCatalog(path.join(process.resourcesPath,'designer-native','catalog.json'));
     const window=await createDocumentWindow(electron,{mode:'assembly',geometryCatalog,packagedDesigner:true});
+    process.stdin.on('data',data=>{if(data.toString().trim()==='focus'&&!window.isDestroyed()){if(window.isMinimized())window.restore();window.show();window.focus();}});
+    process.stdout.write('ALPHANINE_DESIGNER_READY\n');
     if(smoke){
       const result=await window.webContents.executeJavaScript(`(async()=>{
         async function command(action,payload){const p=await api.project(action,payload);if(p?.error)throw Error(action+": "+p.error);if(!p?.project||!p.scene)throw Error(action+": missing project response");return p;}
@@ -29,6 +33,6 @@ else {
       await window.webContents.executeJavaScript('(async()=>{const p=await api.project("command",{kind:"undo"});if(p.error||p.project?.pieces.length!==0||p.project.dirty)throw Error("Smoke cleanup failed");})()');
       saveReport({passed:true,...result,noSandboxFlag:app.commandLine.hasSwitch('no-sandbox'),serverStarted:false});app.quit();
     }
-  }).catch(error=>{if(smoke)saveReport({passed:false,error:String(error.stack),serverStarted:false});else electron.dialog.showErrorBox('Designer could not start',error.message);app.quit();});
+  }).catch(error=>{process.stderr.write('Designer startup failed: '+error.message+'\n');if(smoke)saveReport({passed:false,error:String(error.stack),serverStarted:false});app.exit(1);});
   app.on('window-all-closed',()=>app.quit());
 }

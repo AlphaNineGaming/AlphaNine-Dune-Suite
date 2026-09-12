@@ -3,7 +3,7 @@ const {createDesignerLauncher}=require('../electron/blueprint-designer-launcher'
 (async()=>{
   const frame={url:'http://127.0.0.1:8810/'},webContents={mainFrame:frame},event={sender:webContents,senderFrame:frame},calls=[];
   const app={isPackaged:false,getAppPath:()=>process.cwd()};
-  const launcher=createDesignerLauncher({app,getMainWindow:()=>({webContents}),port:8810,existsSync:p=>!p.endsWith("blueprint-designer.json"),spawn:(...args)=>{calls.push(args);const child=new EventEmitter();process.nextTick(()=>child.emit('spawn'));return child;}});
+  const launcher=createDesignerLauncher({app,getMainWindow:()=>({webContents}),port:8810,existsSync:p=>!p.endsWith("blueprint-designer.json"),spawn:(...args)=>{calls.push(args);const child=new EventEmitter();child.stdout=new EventEmitter();child.stdin=new EventEmitter();child.stdin.write=()=>{};process.nextTick(()=>{child.emit('spawn');child.stdout.emit('data',Buffer.from('ALPHANINE_DESIGNER_READY\n'));});return child;}});
   assert.equal(launcher.status(event).available,true);
   for(const bad of [{sender:{},senderFrame:frame},{sender:webContents,senderFrame:{...frame}}]){assert.throws(()=>launcher.status(bad));await assert.rejects(launcher.open(bad));}
   frame.url='https://example.org/';assert.throws(()=>launcher.status(event));frame.url='http://127.0.0.1:8810/';

@@ -34,7 +34,9 @@ const coordinates = prefix => ["x","y","z"].map(axis=>fieldNumber(`${prefix}-${a
 function constructionButtons(){
   for(const id of ["new-project","open-project"])el(id).disabled=busy;
   for(const id of ["palette","construction-controls"])el(id).hidden=!construction;
-  el("save").textContent=construction?"Save project copy":"Save Copy";
+  el("save").textContent=construction?"Save Project":"Save Copy";
+  el("export-blueprint").hidden=!construction;
+  el("export-blueprint").disabled=busy||!construction?.pieces.length;
   if(!construction)return;
   el("foundation-snap").disabled=busy||!(autoConnections()?connectionProfiles:snapProfiles)[el("palette-types").value];
   for(const id of ["preview-rotate","cycle-snap"])el(id).disabled=busy||!placing;
@@ -43,7 +45,7 @@ function constructionButtons(){
   for(const id of ["rename-project","place-exact","place-mode"])el(id).disabled=busy||(id!=="rename-project"&&!el("palette-types").value);
   el("undo-project").disabled=busy||!construction.canUndo;el("redo-project").disabled=busy||!construction.canRedo;
   el("title").textContent=construction.name+(construction.dirty?" *":"");
-  el("mode-badge").textContent="LOCAL DEVELOPMENT · CONSTRUCTION";
+  el("mode-badge").textContent="BLUEPRINT PROJECT";
   el("inspector-mode").textContent="LOCAL PROJECT";
 }
 function palette(){
@@ -83,9 +85,9 @@ function applyConstruction(result,reset=false){
   rows=construction.pieces.map(p=>{const r=records.find(r=>r.key===p.id);return {...r,identifier:p.id,resolved:resolved.has(p.id),reasons:r.reasons||[]};});
   selected=new Set((result.selection?.length?result.selection:[...selected]).filter(id=>rows.some(r=>r.key===id)));
   if(reset){placing=false;selected=new Set();el("height").value="100";el("height-label").textContent="All";el("search").value="";el("filter").value="all";el("palette-search").value="";el("palette-category").value="all";el("project-name").value=construction.name;palette();}
-  el("summary").textContent=`${rows.length} project pieces · ${result.scene.unresolved.length} unresolved · Game export unavailable`;
+  el("summary").textContent=`${rows.length} project pieces · ${result.scene.unresolved.length} unresolved · Export as Blueprint JSON`;
   el("convention").textContent="Local construction · Native mesh coordinates · Placement legality unverified";
-  el("evidence").textContent=`${Object.keys(connectionProfiles).length} structural types have native socket alignment, including wedges, curved pieces, roofs, ramps, stairs, pillars, railings and ladders. Green lines or dots show alignment anchors. Candidate ranking and duplicate guards are editor behavior; a snap does not certify game placement legality. Animated doors are inventoried separately and need skeletal geometry support. Runtime support rules, full collisions, unlocks, connection records and game export remain unverified. Project IDs belong only to this editor.`;
+  el("evidence").textContent=`${Object.keys(connectionProfiles).length} structural types have native socket alignment, including wedges, curved pieces, roofs, ramps, stairs, pillars, railings and ladders. Green lines or dots show alignment anchors. Candidate ranking and duplicate guards are editor behavior; a snap does not certify game placement legality. Animated doors are inventoried separately and need skeletal geometry support. Export uses the Suite blueprint format. Building unlocks, materials and legal placement still apply in-game. Exported files use game instance IDs; the editable project is preserved.`;
   el("project-name").value=construction.name;
   renderConstructionScene(!reset&&hadPieces);filter();inspect();buttons();snapMessage();
 }
@@ -93,7 +95,8 @@ async function projectAction(action,payload){
   if(busy)return;busy=true;buttons();
   try{
     const result=await api.project(action,payload);if(result.error)throw Error(result.error);if(result.canceled)return;
-    if(action==="save"){construction=result.project;status(`Project copy saved: ${result.destination}. This is not a game-import blueprint.`);}
+    if(action==="save"){construction=result.project;status(`Project copy saved: ${result.destination}. Use Export Blueprint JSON when ready to import into the game.`);}
+    else if(action==="export"){status(`Blueprint exported: ${result.destination} (${result.pieces} pieces). In Suite, open Blueprints, choose the player and import this JSON. Keep a project copy for later editing.`);}
     else{applyConstruction(result,action==="new"||action==="open");status(action==="command"?"Local project updated. Game blueprint files are unchanged.":"Construction project ready. Save an .a9project copy to keep your design.");}
   }catch(error){status(error.message,true);}finally{busy=false;buttons();}
 }
@@ -191,5 +194,6 @@ if(viewport){
     return true;
   };
 }
-window.ConstructionUI={active:()=>!!construction,buttons:constructionButtons,save:()=>projectAction("save"),updateView:()=>viewport?.setView(new Set([...selected,...(placing?[GHOST]:[])]),r=>r.preview||visible(r)),leave:()=>{clearSnap();lastPointer=null;construction=null;placing=false;constructionEntries=[];snapProfiles={};el("mode-badge").textContent="LOCAL DEVELOPMENT · READ ONLY";el("inspector-mode").textContent="READ ONLY";}};
+el("export-blueprint").onclick=()=>projectAction("export");
+window.ConstructionUI={active:()=>!!construction,buttons:constructionButtons,save:()=>projectAction("save"),updateView:()=>viewport?.setView(new Set([...selected,...(placing?[GHOST]:[])]),r=>r.preview||visible(r)),leave:()=>{clearSnap();lastPointer=null;construction=null;placing=false;constructionEntries=[];snapProfiles={};el("mode-badge").textContent="BLUEPRINT VIEWER";el("inspector-mode").textContent="READ ONLY";}};
 buttons();

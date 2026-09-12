@@ -200,7 +200,9 @@
           "assembly.css",
           "index.html",
           "style.css",
-          "preload.js"
+          "preload.js",
+          "blueprint-export.js",
+          "export-types.json"
         ]
       }
     ]

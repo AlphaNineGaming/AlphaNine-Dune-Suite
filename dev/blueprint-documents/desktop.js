@@ -7,6 +7,7 @@ const { positionEvidence } = require("./reference-fixtures");
 const { suiteScene } = require("./suite-scene");
 const { ProjectDocument, Construction } = require("./construction");
 const MeshTransfer = require("./mesh-transfer");
+const { exportBlueprint } = require("./blueprint-export");
 
 async function createDocumentWindow(electron, options = {}) {
   const { app, BrowserWindow, ipcMain, session: electronSession, dialog } = electron;
@@ -120,10 +121,19 @@ async function createDocumentWindow(electron, options = {}) {
     }
     if (!project) throw Error("Create or open a construction project first.");
     if (action === "command") return projectResult(false, project.command(payload));
+    if (action === "export") {
+      const exported = exportBlueprint(project.document(), options.geometryCatalog);
+      const name = project.snapshot().name.replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").replace(/[. ]+$/, "") || "New blueprint";
+      const result = await dialogs.showSaveDialog(window, { title: "Export game blueprint", defaultPath: name + ".json", filters: [{ name: "Suite game blueprint", extensions: ["json"] }] });
+      if (result.canceled || !result.filePath) return { canceled: true };
+      if (path.extname(result.filePath).toLowerCase() !== ".json") throw Error("Export the blueprint with a .json extension.");
+      const saved = await files.saveCopy(files.create(exported.document), result.filePath);
+      return { ...saved, pieces: exported.pieces };
+    }
     if (action === "save") {
       const result = await dialogs.showSaveDialog(window, { title: "Save construction project to a new file", defaultPath: "New base.a9project", filters: [{ name: "AlphaNine project (not a game blueprint)", extensions: ["a9project"] }] });
       if (result.canceled || !result.filePath) return { canceled: true };
-      if (path.extname(result.filePath).toLowerCase() !== ".a9project") throw Error("Construction projects must use the .a9project extension; game JSON export is unavailable.");
+      if (path.extname(result.filePath).toLowerCase() !== ".a9project") throw Error("Save Project uses the .a9project extension. Use Export Blueprint for game JSON.");
       const saved = await projectFiles.saveCopy(projectSession, result.filePath, project.document());
       project.markSaved(); return { ...saved, project: project.snapshot() };
     }

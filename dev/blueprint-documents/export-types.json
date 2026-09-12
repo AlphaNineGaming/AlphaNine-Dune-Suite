@@ -1,0 +1,2267 @@
+{
+  "buildId": "24654038",
+  "sourceSha256": "77959828b3f6a7abf3d31adc13f27c4459b45fc442e79f4d737a6a41eb91d071",
+  "stabilityRule": "Native m_bIsFoundation mapped to blueprint provides_stability; matches the gameplay-verified CHOAM sample.",
+  "entries": {
+    "Atreides_Outpost_Column": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Door_Frame_Wide": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Door_Frame_Wide_02": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Door_Frame_Tall": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Floor": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Floor_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Floor_Round_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Floor_Wedge": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Foundation": {
+      "foundation": true,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Foundation_Round_Corner": {
+      "foundation": true,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Foundation_Wedge": {
+      "foundation": true,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Hatch": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Passageway": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Pillar_Bottom": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Pillar_Middle": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Pillar_Top": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Railing": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Railing_Gate": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Railing_Inclined": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Railing_Inclined_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Railing_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ramp": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ramp_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ramp_Corner": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ramp_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ramp_Corner_Inward": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ramp_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Cover_Bottom_Half_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Cover_Bottom_Half_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Cover_Top_Half_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Cover_Top_Half_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Round_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Rooftop_01": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Rooftop_02": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Stairs": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Stairs_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Stairs_Corner": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Stairs_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Stairs_Corner_Inward": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Stairs_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_01": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_02": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_03": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_04": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Round_Corner_01": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Round_Corner_02": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Round_Corner_03": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Round_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Bottom_Half_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Bottom_Half_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Bottom_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Bottom_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Top_Half_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Top_Half_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Top_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Top_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Window_01": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Window_02": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Window_03": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Window_04": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ramp_Edge_Wide_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ramp_Edge_Wide_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ramp_Wide": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Stair_Wide": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Top_Wide_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Triangle_Top_Wide_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Floor_Triangle_Wide_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Floor_Triangle_Wide_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Inclined_Wide_Left": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Wall_Inclined_Wide_Right": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Column_Corner": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_PrudenceDoor_Frame": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Ladder": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Gate_Big": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Wedge_Top_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Roof_Wedge_Bottom_Half": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "MTX_Atre_BreakfastRoom_Floor": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "MTX_Atre_BreakfastRoom_FloorRoundCorner": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "MTX_Atre_BreakfastRoom_Wall_01": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "MTX_Atre_BreakfastRoom_WallRoundCorner": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "MTX_Atreides_Outpost_Window_Movie": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "MTX_Atreides_Outpost_Bookshelf": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "MTX_Atreides_Outpost_FloorLight_Movie": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "MTX_Atreides_Outpost_DoorFrame": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Rooftop_Wedge": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Rooftop_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Outpost_Rooftop_Round_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Atreides_Garage_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+    },
+    "Choam_Shelter_Column": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Floor": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Floor_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Floor_Round_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Floor_Wedge": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Foundation": {
+      "foundation": true,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Foundation_Round_Corner": {
+      "foundation": true,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Foundation_Wedge": {
+      "foundation": true,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Hatch": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Pillar_Bottom": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Pillar_Middle": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Pillar_Top": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Railing": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Railing_Gate": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Railing_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Railing_Inclined_Half": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Railing_Inclined": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Ramp": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Ramp_Half": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Ramp_Corner": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Ramp_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Ramp_Corner_Inward": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Ramp_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Roof_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Roof_Half": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Roof_Wedge_Bottom": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Roof_Wedge_Top": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Roof_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Roof_Round_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Rooftop": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Rooftop_02": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Stairs": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Stairs_Half": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Stairs_Corner": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Stairs_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Stairs_Corner_Inward": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Stairs_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_01": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_02": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Half": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Triangle_Bottom_Left": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Triangle_Bottom_Half_Left": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Triangle_Bottom_Right": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Triangle_Bottom_Half_Right": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Triangle_Top_Left": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Triangle_Top_Half_Left": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Triangle_Top_Right": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Wall_Triangle_Top_Half_Right": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Window": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Window_Round_Corner_01": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Window_Round_Corner_02": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_PrudenceDoor_Frame": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Column_Corner": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Ladder": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Roof_Cover_Bottom_Half_Left": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Shelter_Roof_Cover_Bottom_Half_Right": {
+      "foundation": false,
+      "tableSha256": "ffeb99dab0ae2fb8611d29f6a3d42b4ad3b7c8615ce23bb3c3a943f11cfd5a3d"
+    },
+    "Choam_Level2_Column": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Column_Corner": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Door_Frame_Wide": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Floor": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Floor_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Floor_Round_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Foundation": {
+      "foundation": true,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Foundation_Round_Corner": {
+      "foundation": true,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Hatch": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Passageway": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Pillar_Bottom": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Pillar_Middle": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Pillar_Top": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Railing": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Railing_Gate": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Railing_Inclined": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Railing_Inclined_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Railing_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Ramp": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Ramp_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Ramp_Corner": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Ramp_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Ramp_Corner_Inward": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Ramp_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Roof_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Roof_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Roof_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Roof_Cover_Bottom_Half_Left": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Roof_Cover_Bottom_Half_Right": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Roof_Round_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Rooftop_01": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Rooftop_02": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Stairs": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Stairs_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Stairs_Corner": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Stairs_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Stairs_Corner_Inward": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Stairs_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_01": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_02": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Round_Corner_01": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Round_Corner_02": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Round_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Triangle_Bottom_Half_Left": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Triangle_Bottom_Half_Right": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Triangle_Bottom_Left": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Triangle_Bottom_Right": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Triangle_Top_Half_Left": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Triangle_Top_Half_Right": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Triangle_Top_Left": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Wall_Triangle_Top_Right": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Window_01": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Window_02": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Window_Round_Corner_01": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Window_Round_Corner_02": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Ladder": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_PrudenceDoor": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Foundation_Wedge": {
+      "foundation": true,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Floor_Wedge": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Roof_Wedge_Top_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Roof_Wedge_Bottom_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Rooftop_Wedge": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Rooftop_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Rooftop_Round_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Column": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Floor": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Foundation": {
+      "foundation": true,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Passageway": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Stairs": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Wall_01": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Window_01": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Stairs_Corner": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Stairs_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Wall_02": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Floor_Round": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Foundation_Round_Corner": {
+      "foundation": true,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Wall_Round": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Rooftop": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Hatch": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Wall_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Column_02": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Ladder": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Door": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Railing_01": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Window_Round": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Railing_Inclined": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Railing_Gate": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Railing_Corner_Round": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Pillar_Bottom": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Pillar_Middle": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Pillar_Top": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Triangle_Top_Left": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Triangle_Top_Right": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Triangle_Bottom_Right": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Triangle_Bottom_Left": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Half_Triangle_Top_Left": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Half_Triangle_Top_Right": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Half_Triangle_Bottom_Left": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Half_Triangle_Bottom_Right": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Roof_Corner": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Roof_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Roof_Corner_Round": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Choam_TwitchReward_Roof_Half": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Level2_Garage_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Neut_Gunner_Floor": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Neut_Gunner_Foundation": {
+      "foundation": true,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Neut_Gunner_Railing_01": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Neut_Gunner_Railing_02": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Neut_Gunner_Railing_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "MTX_Neut_Gunner_Column": {
+      "foundation": false,
+      "tableSha256": "2a068a706871a21296fe469753c36edf106dc49db644f1e5e17a1b608c0cc1f0"
+    },
+    "Choam_Shelter_Column_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Door_Frame_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Door_Frame_Wide_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Floor_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Floor_Round_Corner_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Floor_Round_Corner_Inverted_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Foundation_New": {
+      "foundation": true,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Foundation_Round_Corner_New": {
+      "foundation": true,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Hatch_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Pillar_Bottom_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Pillar_Middle_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Pillar_Top_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Railing_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Railing_Gate_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Railing_Round_Corner_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Railing_Inclined_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Railing_Inclined_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Ramp_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Ramp_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Ramp_Corner_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Ramp_Corner_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Ramp_Corner_Inward_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Ramp_Corner_Half_Inward_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Roof_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Roof_Corner_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Roof_Corner_Half_Inward_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Roof_Round_Corner_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Rooftop_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Rooftop_02_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Roof_Cover_Half_Left_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Roof_Cover_Half_Right_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Stairs_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Stairs_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Stairs_Corner_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Stairs_Corner_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Stairs_Corner_Inward_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Stairs_Corner_Half_Inward_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_01_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_02_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_03_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Round_Corner_01_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Round_Corner_02_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Round_Corner_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Triangle_Bottom_Left_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Triangle_Bottom_Half_Left_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Triangle_Bottom_Right_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Triangle_Bottom_Half_Right_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Triangle_Top_Left_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Triangle_Top_Half_Left_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Triangle_Top_Right_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Wall_Triangle_Top_Half_Right_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Window_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Window_Round_Corner_01_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Window_Round_Corner_02_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Column_Corner_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Ladder_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Passageway_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Foundation_Wedge_New": {
+      "foundation": true,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Floor_Wedge_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Roof_Wedge_Top_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Roof_Wedge_Bottom_Half_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Rooftop_Wedge_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Rooftop_Round_Corner_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Choam_Shelter_Rooftop_Round_Corner_Inverted_New": {
+      "foundation": false,
+      "tableSha256": "2a932758fa5f8b7705215212aea44c9d5132d1fccab9ceccdcdd38aea67c45c6"
+    },
+    "Harkonnen_Outpost_Column": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Door_Frame_Tall": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Door_Frame_Wide": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Floor": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Floor_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Floor_Round_Inverted": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Floor_Wedge": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Foundation": {
+      "foundation": true,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Foundation_Round_Corner": {
+      "foundation": true,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Foundation_Wedge": {
+      "foundation": true,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Gate_Big": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Hatch": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Passageway": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Pillar_Bottom": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Pillar_Middle": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Pillar_Top": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Railing": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Railing_Gate": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Railing_Inclined": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Railing_Inclined_Half": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Railing_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Ramp": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Ramp_Half": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Ramp_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Ramp_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Ramp_Corner_Inward": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Ramp_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Roof_01": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Roof_02": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Roof_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Roof_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Roof_Corner_Inward": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Roof_Cover_Bottom_Left": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Roof_Cover_Bottom_Right": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Roof_Wedge_Bottom": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Roof_Wedge_Top": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Rooftop": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Rooftop_02": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Stairs": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Stairs_Half": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Stairs_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Stairs_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Stairs_Corner_Inward": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Stairs_Corner_Half_Inward": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Ladder": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_01": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_02": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_03": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_04": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Half": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Round_Corner_02": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Round_Corner_03": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Round_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Corner_Tall": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Inclined_Tall": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Bottom_Left": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Bottom_Right": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Bottom_Half_Left": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Bottom_Half_Right": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Top_Left": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Top_Right": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Top_Half-Left": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Top_Half_Right": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Bottom_Tall_Left": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Bottom_Tall_Right": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Top_Tall_Left": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Wall_Triangle_Top_Tall_Right": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Window": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Window_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Tower": {
+      "foundation": true,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Column_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_PrudenceDoor_Frame": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Rooftop_Wedge": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Rooftop_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Outpost_Rooftop_Round_Inverted": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "Harkonnen_Garage_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "e0f637390935f1d50f21a662edeea5053ee1f02e0e992d28c97b302321744cf5"
+    },
+    "LandingPad_Floor": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "LandingPad_Floor_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "LandingPad_Wall": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "LandingPad_Wall_Triangle_Top_Left": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_JailSet_Floor": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_JailSet_Wall_01": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_JailSet_Wall_02": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_JailSet_Foundation": {
+      "foundation": true,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_JailSet_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Foundation": {
+      "foundation": true,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Wall": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Floor": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Door_Frame_Wide": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Center_Column": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Floor_Wedge": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Foundation_Wedge": {
+      "foundation": true,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Prudence_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Railing": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Ramp": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Rooftop": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Rooftop_Corner": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Rooftop_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Staircase": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Wall_02": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Wall_Triangle_Bottom_Left": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Wall_Triangle_Bottom_Right": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Wall_Triangle_Top_Left": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Wall_Triangle_Top_Right": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Window_01": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Corner_Column": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Garage_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Neut_DesertMechanic_Passageway": {
+      "foundation": false,
+      "tableSha256": "e5f3b0775537c718c59e1ab69661e791aaa580b3c5376897e945046fb4eab8f7"
+    },
+    "MTX_Smug_Pillar_Bottom": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Pillar_Middle": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Pillar_Top": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Ladder": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Column": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Hatch": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Door_Frame_Wide": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Floor": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Floor_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Floor_Wedge": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Floor_Round_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Foundation": {
+      "foundation": true,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Foundation_Round_Corner": {
+      "foundation": true,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Foundation_Wedge": {
+      "foundation": true,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Stairs": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Stairs_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Stairs_Corner": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Stairs_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Stairs_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Stairs_Corner_Inverted_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Ramp": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Ramp_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Ramp_Corner": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Ramp_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Ramp_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Ramp_Corner_Inverted_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Railing": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Railing_Gate": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Railing_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Railing_Inclined_Left": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Railing_Inclined_Half_Left": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Window_01": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Window_02": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Window_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Wedge_Bottom_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Rooftop_02": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Rooftop_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Rooftop_Round_Corner_Inverted": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Rooftop_Wedge": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Rooftop_Wedge_Top_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Round_Corner_Half_02": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Half_02": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Corner_Half_02": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Corner_Half_Inverted_02": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Half_01": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Corner_Half_01": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Corner_Half_Inverted_01": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Round_Corner_Half_01_A": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Rooftop_01": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Triangle_Top_Left": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Triangle_Bottom_Right": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Triangle_Top_Left_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Triangle_Bottom_Right_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Triangle_Bottom_Left": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Triangle_Top_Right": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Triangle_Bottom_Left_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Triangle_Top_Right_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Round_Corner_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Round_Corner_01": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_Round_Corner_02": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_01": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_02": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_03": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Wall_04": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Round_Corner_Half_01_B": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Passageway": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Cover_Bottom_Half_L": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Roof_Cover_Bottom_Half_R": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Railing_Inclined_Right": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Railing_Inclined_Right_Half": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Corner_Column": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Garage_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "MTX_Smug_Prudence_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+    },
+    "Watershippers_Arch_01": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Column": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Floor_01": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Floor_02": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Floor_Round_Corner_01": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Floor_Round_Corner_02": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Floor_Round_Corner_In": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Foundation": {
+      "foundation": true,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Foundation_Round_Corner": {
+      "foundation": true,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Passageway": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Pillar_Bottom": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Pillar_Middle": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Pillar_Top": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Railing": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Railing_Gate": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Railing_Inclined_L": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Railing_Inclined_R": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Railing_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Roof_01": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Roof_02": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Roof_Corner": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Roof_Corner_In": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Roof_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Rooftop_01": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Rooftop_02": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Stairs": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Stairs_Corner": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Stairs_Corner_In": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_01": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_02": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_03": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_Half": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_Triangle_Bottom_Half_L": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_Triangle_Bottom_Half_R": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_Triangle_Bottom_L": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_Triangle_Bottom_R": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_Triangle_Top_Half_L": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_Triangle_Top_Half_R": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_Triangle_Top_L": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Wall_Triangle_Top_R": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Window_01": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Window_02": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Window_Wide": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Window_Round_Corner": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Garage_Door_Big_Frame": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Prudence_Door_Frame": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Ramp": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Ramp_Corner": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Ramp_Corner_Inwards": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Corner_Column": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    },
+    "Watershippers_Door_Frame_Wide": {
+      "foundation": false,
+      "tableSha256": "c54e765d5a3354d531b2cde2da659b750ddaf94bb13a77ada52e8028add963cd"
+    }
+  }
+}

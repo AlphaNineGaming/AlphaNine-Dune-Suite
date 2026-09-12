@@ -12,7 +12,7 @@ else {
     const {loadCatalog}=require(path.join(process.resourcesPath,'designer-runtime','geometry-catalog'));
     const {createDocumentWindow}=require(path.join(process.resourcesPath,'designer-runtime','desktop'));
     const geometryCatalog=loadCatalog(path.join(process.resourcesPath,'designer-native','catalog.json'));
-    const window=await createDocumentWindow(electron,{mode:'assembly',geometryCatalog,packagedDesigner:true});
+    const window=await createDocumentWindow(electron,{mode:'assembly',geometryCatalog,packagedDesigner:true,...(smoke?{dialogs:{showSaveDialog:async()=>({canceled:false,filePath:path.join(app.getPath('userData'),'smoke-blueprint.json')})}}:{})});
     window.show();
     window.moveTop();
     window.focus();
@@ -25,13 +25,15 @@ else {
         async function command(action,payload){const p=await api.project(action,payload);if(p?.error)throw Error(action+": "+p.error);if(!p?.project||!p.scene)throw Error(action+": missing project response");return p;}
         if(busy)throw Error("Unexpected startup file operation");
         const p=await command("new");applyConstruction(p,true);
-        const entry=constructionEntries.find(e=>e.status==="available"&&e.geometry?.kind==="native-render-lod");
+        const entry=constructionEntries.find(e=>e.id==="Choam_Shelter_Foundation_New"&&e.status==="available"&&e.geometry?.kind==="native-render-lod");
         if(!entry)throw Error("No available native mesh");
         const added=await command("command",{kind:"add",type:entry.id,position:[0,0,0],yaw:0});applyConstruction(added);
         if(!viewport?.gl||viewport.gl.isContextLost())throw Error("WebGL context unavailable");
         viewport.fit();viewport.draw();
         if(viewport.lastDraw?.instances!==1||!(viewport.lastDraw.triangles>0)||viewport.gl.getError()!==viewport.gl.NO_ERROR)throw Error("Native mesh draw failed");
-        return {runtime:api.runtime,webgl:true,projectPieces:added.project.pieces.length,catalogEntries:constructionEntries.filter(e=>e.status==="available").length,draw:viewport.lastDraw};
+        const exported=await api.project("export");if(exported.error||!exported.published||exported.pieces!==1)throw Error("Blueprint export failed: "+JSON.stringify(exported));
+        if(document.getElementById("export-blueprint").hidden||document.getElementById("export-blueprint").disabled)throw Error("Blueprint export button is unavailable");
+        return {runtime:api.runtime,webgl:true,projectPieces:added.project.pieces.length,catalogEntries:constructionEntries.filter(e=>e.status==="available").length,draw:viewport.lastDraw,blueprintExport:exported};
       })()`);
       if(!result.runtime.sandboxed||!result.runtime.contextIsolated||!result.webgl||result.catalogEntries<565)throw Error('Packaged sandbox/graphics/catalog check failed: '+JSON.stringify(result));
       await fs.promises.writeFile(path.join(app.getPath('userData'),'smoke-window.png'),(await window.webContents.capturePage()).toPNG());

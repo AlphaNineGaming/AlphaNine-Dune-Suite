@@ -14,4 +14,4 @@ Automated protocol, recipient, failure, verification-gate, grant regression, and
 
 Open Blueprints > Open Designer to create local 3D construction projects in a separate sandboxed window. Includes 565 native construction pieces, socket snapping, selection, editing, undo, White/Gray display colors, and project copies. Existing Suite settings and reward notifications are preserved.
 
-The builder is experimental. Imported native blueprints remain read-only, and general game export is unavailable in the builder UI. Catalog coverage does not establish in-game placement compatibility for every piece.
+The builder is experimental. Imported native blueprints remain read-only. Export Blueprint JSON converts new projects into files for the existing Suite Blueprints import flow. Save Project preserves editable .a9project files. Catalog coverage does not establish in-game placement compatibility for every piece.

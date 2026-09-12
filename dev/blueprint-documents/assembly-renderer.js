@@ -2,6 +2,15 @@
 const el=id=>document.getElementById(id),api=window.blueprintDocuments;
 let opened=null,rows=[],filtered=[],selected=new Set(),busy=false,viewport=null;
 try{viewport=new AssemblyViewport(el("viewport"),select,text=>el("draw-status").textContent=text);}catch(error){el("empty").textContent=error.message;}
+function applyDesignerTheme(theme){
+  document.body.className="theme-"+(["gold","command","purple","contrast","royal"].includes(theme)?theme:"gold");
+  const hex=getComputedStyle(document.body).getPropertyValue("--bg").trim();
+  if(viewport){viewport.backgroundColor=[1,3,5].map(i=>parseInt(hex.slice(i,i+2),16)/255);viewport.selectionColor=[1,3,5].map(i=>parseInt(getComputedStyle(document.body).getPropertyValue("--gold").trim().slice(i,i+2),16)/255);viewport.requestDraw();}
+}
+let themeRevision=0;
+api.onTheme(theme=>{themeRevision++;applyDesignerTheme(theme);});
+const initialThemeRevision=themeRevision;
+api.theme().then(theme=>{if(themeRevision===initialThemeRevision)applyDesignerTheme(theme);}).catch(()=>applyDesignerTheme("gold"));
 function status(text,error=false){el("status").textContent=text;el("status").className=error?"error":"";}
 function buttons(){el("open").disabled=busy;el("save").disabled=busy||!opened;el("focus").disabled=!rows.some(r=>r.resolved&&selected.has(r.key));window.ConstructionUI?.buttons();}
 function visible(row){

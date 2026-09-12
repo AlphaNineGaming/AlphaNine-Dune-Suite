@@ -18,7 +18,7 @@ else {
     window.focus();
     app.focus({steal:true});
     if(!window.isVisible())throw Error('Designer window was created but Windows did not show it.');
-    process.stdin.on('data',data=>{if(data.toString().trim()==='focus'&&!window.isDestroyed()){if(window.isMinimized())window.restore();window.show();window.focus();}});
+    require(path.join(process.resourcesPath,'designer-runtime','theme-control')).attachControls(window);
     process.stdout.write('ALPHANINE_DESIGNER_READY\n');
     if(smoke){
       const result=await window.webContents.executeJavaScript(`(async()=>{

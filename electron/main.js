@@ -728,6 +728,7 @@ function createTray() {
 const designerLauncher = require("./blueprint-designer-launcher").createDesignerLauncher({app,spawn,existsSync:fs.existsSync,getMainWindow:()=>mainWindow,port:APP_PORT});
 ipcMain.handle("blueprint-designer-status", event => designerLauncher.status(event));
 ipcMain.handle("blueprint-designer-open", event => designerLauncher.open(event));
+ipcMain.handle("blueprint-designer-theme", (event, theme) => designerLauncher.setTheme(event, theme));
 
 ipcMain.handle("choose-ssh-key", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {

@@ -6,6 +6,7 @@ const { createReferenceSnapshot } = require("./reference-adapter");
 const { positionEvidence } = require("./reference-fixtures");
 const { suiteScene } = require("./suite-scene");
 const { ProjectDocument, Construction } = require("./construction");
+const { normalizeTheme } = require("./theme-control");
 const MeshTransfer = require("./mesh-transfer");
 const { exportBlueprint } = require("./blueprint-export");
 
@@ -15,7 +16,7 @@ async function createDocumentWindow(electron, options = {}) {
   if (app.commandLine.hasSwitch("no-sandbox") || app.commandLine.hasSwitch("disable-renderer-sandbox")) throw new Error("This viewport requires application sandboxing; disabling flags are refused.");
   const assembly = options.mode === "assembly";
   const page = pathToFileURL(path.join(__dirname, assembly ? "assembly.html" : "index.html")).href + (options.packagedDesigner ? "?start=empty" : "");
-  const uiFiles = assembly ? ["assembly.html", "assembly.css", "assembly-renderer.js", "assembly-viewport.js", "scene-model.js", "mesh-transfer.js", "construction-renderer.js", "foundation-snap.js", "connection-data.js", "connected-snap.js"] : ["index.html", "renderer.js", "view-state.js", "viewport.js", "style.css"];
+  const uiFiles = assembly ? ["assembly.html", "assembly.css", "themes.css", "assembly-renderer.js", "assembly-viewport.js", "scene-model.js", "mesh-transfer.js", "construction-renderer.js", "foundation-snap.js", "connection-data.js", "connected-snap.js"] : ["index.html", "renderer.js", "view-state.js", "viewport.js", "style.css"];
   const allowed = new Set(uiFiles.map(file => pathToFileURL(path.join(__dirname, file)).href));
   allowed.add(page);
   const isolatedSession = electronSession.fromPartition("blueprint-document-development", { cache: false });
@@ -39,6 +40,8 @@ async function createDocumentWindow(electron, options = {}) {
   options.onWindow?.(window);
   window.webContents.on("will-navigate", event => event.preventDefault());
   window.webContents.on("will-attach-webview", event => event.preventDefault());
+  let theme = normalizeTheme(options.theme ?? process.env.ALPHANINE_DESIGNER_THEME);
+  window.setDesignerTheme = value => { theme = normalizeTheme(value); window.webContents.send("blueprint-document:theme-changed", theme); };
   const files = createLocalFiles();
   const projectFiles = createLocalFiles(undefined, ProjectDocument);
   let project = null, projectSession = null;
@@ -47,6 +50,11 @@ async function createDocumentWindow(electron, options = {}) {
   let initialSource = assembly ? options.initialSource : null;
   let busy = false;
   const channels = ["blueprint-document:open", "blueprint-document:save-copy", "blueprint-document:reference-fixture", "blueprint-document:project"];
+  channels.push("blueprint-document:theme");
+  ipcMain.handle("blueprint-document:theme", event => {
+    if(event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== page) throw Error("Untrusted theme request.");
+    return theme;
+  });
   async function mayDiscard() {
     if (!project?.snapshot().dirty) return true;
     const answer = await dialogs.showMessageBox(window, { type: "question", buttons: ["Keep working", "Discard changes"], defaultId: 0, cancelId: 0, message: "This construction project has unsaved changes.", detail: "Save a project copy before leaving if you want to keep them." });

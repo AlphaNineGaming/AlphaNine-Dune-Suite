@@ -15,7 +15,7 @@ if (electron.app.isPackaged) {
     const initialSource = argument("--blueprint");
     return createDocumentWindow(electron, { mode: "assembly", geometryCatalog, initialSource: initialSource ? localPath(initialSource) : null });
   }).then(window=>{
-    process.stdin.on('data',data=>{if(data.toString().trim()==='focus'&&!window.isDestroyed()){if(window.isMinimized())window.restore();window.show();window.focus();}});
+    require('./theme-control').attachControls(window);
     process.stdout.write('ALPHANINE_DESIGNER_READY\n');
   }).catch(error => {
     console.error(error.message);

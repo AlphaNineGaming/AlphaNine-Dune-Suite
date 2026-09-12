@@ -28,10 +28,10 @@ class AssemblyViewport {
     vec3 rotateQ(vec3 v){return v+2.0*(q.w*cross(q.xyz,v)+cross(q.xyz,cross(q.xyz,v)));}
     void main(){vec3 p=rotateQ(vertex*scaling)+translation-target;gl_Position=vec4(dot(p,right)/range.x,dot(p,up)/range.y,-dot(p,forward)/range.z,1.0);surface=rotateQ(normal/scaling);highlight=selected;}`));
     gl.attachShader(p,shader(gl.FRAGMENT_SHADER,`#version 300 es
-    precision highp float;in vec3 surface;flat in float highlight;uniform vec3 pieceColor;out vec4 color;
-    void main(){vec3 n=normalize(surface);float light=.24+.55*abs(dot(n,normalize(vec3(.35,-.5,1.))))+.16*abs(n.z);vec3 base=mix(pieceColor,vec3(1.0,.70,.22),highlight);color=vec4(base*light,1.0);}`));
+    precision highp float;in vec3 surface;flat in float highlight;uniform vec3 pieceColor,selectionColor;out vec4 color;
+    void main(){vec3 n=normalize(surface);float light=.24+.55*abs(dot(n,normalize(vec3(.35,-.5,1.))))+.16*abs(n.z);vec3 base=mix(pieceColor,selectionColor,highlight);color=vec4(base*light,1.0);}`));
     gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(p));
-    this.uniforms=Object.fromEntries(["target","right","up","forward","range","pieceColor"].map(n=>[n,gl.getUniformLocation(p,n)]));gl.enable(gl.DEPTH_TEST);
+    this.uniforms=Object.fromEntries(["target","right","up","forward","range","pieceColor","selectionColor"].map(n=>[n,gl.getUniformLocation(p,n)]));gl.enable(gl.DEPTH_TEST);
   }
   setPieceColor(name){if(!["white","gray"].includes(name))throw Error("Choose white or gray pieces.");this.pieceColor=name==="gray"?[.62,.62,.62]:[1,1,1];this.requestDraw();}
   basis(){const y=this.yaw,p=this.pitch;return {right:[Math.cos(y),-Math.sin(y),0],up:[-Math.sin(y)*Math.sin(p),-Math.cos(y)*Math.sin(p),Math.cos(p)],forward:[Math.sin(y)*Math.cos(p),Math.cos(y)*Math.cos(p),Math.sin(p)]};}
@@ -69,9 +69,9 @@ class AssemblyViewport {
   requestDraw(){if(this.pending||this.lost)return;this.pending=true;requestAnimationFrame(()=>{this.pending=false;this.draw();});}
   draw(){
     if(this.lost)return;const start=performance.now(),gl=this.gl,c=this.canvas,dpr=Math.min(devicePixelRatio||1,2),w=Math.round(c.clientWidth*dpr),h=Math.round(c.clientHeight*dpr);if(!w||!h)return;
-    if(c.width!==w||c.height!==h){c.width=w;c.height=h;}gl.viewport(0,0,w,h);gl.clearColor(.047,.059,.064,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.useProgram(this.program);
+    if(c.width!==w||c.height!==h){c.width=w;c.height=h;}gl.viewport(0,0,w,h);gl.clearColor(...(this.backgroundColor||[.047,.059,.064]),1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.useProgram(this.program);
     const b=this.basis();gl.uniform3fv(this.uniforms.target,this.target);for(const key of ["right","up","forward"])gl.uniform3fv(this.uniforms[key],b[key]);gl.uniform3f(this.uniforms.range,this.scale*w/h,this.scale,Math.max(this.radius*4,this.scale*4));
-    gl.uniform3fv(this.uniforms.pieceColor,this.pieceColor);
+    gl.uniform3fv(this.uniforms.pieceColor,this.pieceColor);gl.uniform3fv(this.uniforms.selectionColor,this.selectionColor||[1,.70,.22]);
     let instances=0,triangles=0;for(const g of this.groups){gl.bindVertexArray(g.vao);gl.drawArraysInstanced(gl.TRIANGLES,0,g.count,g.visibleCount);instances+=g.visibleCount;triangles+=g.count/3*g.visibleCount;}
     this.lastDraw={instances,triangles,cpuSubmitMs:performance.now()-start,drawCalls:this.groups.length};this.onStatus(`${instances.toLocaleString()} meshes · ${triangles.toLocaleString()} triangles · Z up`);this.onDraw?.();
   }

@@ -1,5 +1,7 @@
 # Release notes
 
+- [1.3.5 — Blueprint Designer](RELEASE_NOTES_1.3.5.md)
+
 Version-specific notes, newest first. Additional older versions are covered in the [historical README summary](HISTORY.md).
 
 - [1.3.4](RELEASE_NOTES_1.3.4.md)

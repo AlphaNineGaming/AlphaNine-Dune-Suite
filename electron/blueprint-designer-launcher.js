@@ -1,6 +1,7 @@
 const path=require('node:path');
 function createDesignerLauncher({app,spawn,existsSync,getMainWindow,port}) {
-  let child=null, pending=null, ready=false;
+  let child=null, pending=null, ready=false, theme="gold";
+  function setTheme(event,value){authorize(event);if(!["gold","command","purple","contrast","royal"].includes(value))throw Error("Unsupported designer theme.");theme=value;if(child)child.stdin?.write("theme:"+theme+"\n");return {theme};}
   const entry=path.join(app.getAppPath(),'dev','blueprint-documents','main.js');
   const catalog=path.join(app.getAppPath(),'assets','designer-native','catalog.json');
   function authorize(event){
@@ -12,7 +13,7 @@ function createDesignerLauncher({app,spawn,existsSync,getMainWindow,port}) {
   async function open(event){
     if(!status(event).available)throw Error('The designer is not included in this Suite build.');
     if(child){if(pending)return pending;if(ready){child.stdin?.write("focus\n");return {opened:true,alreadyOpen:true};}}
-    const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;delete env.NODE_OPTIONS;
+    const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;delete env.NODE_OPTIONS;env.ALPHANINE_DESIGNER_THEME=theme;
     const args=app.isPackaged?['--blueprint-designer']:[entry,'--assembly',`--geometry-catalog=${catalog}`];
     const next=spawn(process.execPath,args,{cwd:app.isPackaged?path.dirname(process.execPath):app.getAppPath(),env,stdio:['pipe','pipe','pipe'],windowsHide:false});
     child=next;
@@ -32,6 +33,6 @@ function createDesignerLauncher({app,spawn,existsSync,getMainWindow,port}) {
     });
     return pending;
   }
-  return {status,open};
+  return {status,open,setTheme};
 }
 module.exports={createDesignerLauncher};

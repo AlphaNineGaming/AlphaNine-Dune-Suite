@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("alphaNineSuite", {
   desktop: true,
+  blueprintDesignerStatus: () => ipcRenderer.invoke("blueprint-designer-status"),
+  openBlueprintDesigner: () => ipcRenderer.invoke("blueprint-designer-open"),
   chooseSshKey: () => ipcRenderer.invoke("choose-ssh-key"),
   chooseServerInstallFolder: () => ipcRenderer.invoke("choose-server-install-folder"),
   chooseGameFolder: () => ipcRenderer.invoke("choose-game-folder"),

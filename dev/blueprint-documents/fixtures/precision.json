@@ -1,0 +1,11 @@
+{
+  "name": "Local preservation fixture",
+  "instances": [
+    {"instance_id": 900719925474099312345678901234567890, "building_type": "fixture-only-unverified", "x": 0.123456789012345678901234567890, "y": -0, "z": 1.230000E+004, "rotation": 90.000, "provides_stability": false, "unknownPieceData": {"nested": [null, true, {"reference": "900719925474099312345678901234567890"}]}}
+  ],
+  "placeables": [{"placeable_id": 0, "building_type": "fixture-only-unverified-placeable", "x": 0, "y": 0, "z": 0, "rx": 0, "ry": 0, "rz": 0}],
+  "pentashields": [{"placeable_id": 0, "scale": [1, 2, 3], "futureShieldField": {"keep": true}}],
+  "futureMetadata": {"beyondDouble": 1e999999, "tiny": 1e-999999, "escaped": "\u0041\uD83C\uDFDC", "__proto__": {"untouched": "yes"}},
+  "unknownArray": [[], {}, "", false, null],
+  "ownerIdentifier": "0000012345678901234567890"
+}

@@ -59,7 +59,8 @@
     "build:win": "npm run test:app-icon && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=false && node scripts/ensure-admin-manifest.js",
     "build:release:win": "npm run test:update-integrity && npm run build:win && npm run test:packaged",
     "test:ini-recovery": "node scripts/test-user-game-settings.js && node scripts/test-user-game-recovery.js",
-    "test:reward-notifications": "node scripts/test-reward-notifications.js"
+    "test:reward-notifications": "node scripts/test-reward-notifications.js",
+    "test:blueprint-designer": "node scripts/test-blueprint-designer-launcher.js && node --test dev/blueprint-documents/test/*.test.js"
   },
   "dependencies": {
     "express": "^5.2.1",
@@ -136,7 +137,10 @@
       "!data/experimental-resource-areas/**",
       "!**/*.source-top-max-y.png",
       "!**/*.source-top-min-y.png",
-      "!**/*.log"
+      "!**/*.log",
+      "blueprint-designer.json",
+      "!assets/designer-native/**",
+      "!dev/blueprint-documents/**"
     ],
     "asarUnpack": [
       "manager/**",
@@ -158,6 +162,47 @@
       "allowToChangeInstallationDirectory": true,
       "perMachine": false,
       "allowElevation": true
-    }
+    },
+    "extraResources": [
+      {
+        "from": "assets/designer-native",
+        "to": "designer-native",
+        "filter": [
+          "catalog.json",
+          "models/*.glb"
+        ]
+      },
+      {
+        "from": "dev/blueprint-documents",
+        "to": "designer-runtime",
+        "filter": [
+          "desktop.js",
+          "local-files.js",
+          "document.js",
+          "reference-adapter.js",
+          "reference-fixtures.js",
+          "suite-scene.js",
+          "construction.js",
+          "foundation-snap.js",
+          "connected-snap.js",
+          "connection-data.js",
+          "mesh-transfer.js",
+          "geometry-catalog.js",
+          "native-glb.js",
+          "assembly-renderer.js",
+          "construction-renderer.js",
+          "renderer.js",
+          "viewport.js",
+          "view-state.js",
+          "scene-model.js",
+          "assembly-viewport.js",
+          "assembly.html",
+          "assembly.css",
+          "index.html",
+          "style.css",
+          "preload.js"
+        ]
+      }
+    ]
   }
 }

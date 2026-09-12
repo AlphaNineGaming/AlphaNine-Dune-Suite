@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>AlphaNine • Reference viewport</title><link rel="stylesheet" href="style.css">
+<script src="view-state.js" defer></script><script src="viewport.js" defer></script><script src="renderer.js" defer></script>
+</head><body>
+<header><div class="brand">ALPHANINE <span>DUNE SUITE</span></div><span class="badge">LOCAL DEVELOPMENT · READ ONLY</span></header>
+<main>
+<div class="heading"><div><div class="eyebrow">BLUEPRINT DESIGNER / PHASE 02</div><h1>Reference viewport</h1></div><div class="actions"><button id="open" class="primary">Open local blueprint</button><button id="fixture">Open test fixture</button><button id="save" disabled>Save Copy…</button></div></div>
+<div id="empty" class="panel empty"><h2>Explore the document. Preserve the original.</h2><p>Open a local blueprint to inspect records. Only positions with verified coordinate evidence become reference points.</p><p>The test fixture demonstrates navigation and selection using synthetic coordinates.</p></div>
+<div id="document" hidden>
+<div class="file-summary"><strong id="name"></strong><span><b id="instances">0</b> instances · <b id="placeables">0</b> placeables · <b id="pentashields">0</b> pentashields · <b id="bytes">0</b> bytes preserved</span></div><div id="source" class="path"></div>
+<div class="workspace">
+<section class="panel pieces"><div class="section-title">PIECES <span id="list-count"></span></div><input id="search" type="search" placeholder="Search type or original identifier" aria-label="Search pieces"><select id="list-mode" aria-label="Piece visibility in list"><option value="all">All entries</option><option value="resolved">Reference points</option><option value="unresolved">Unresolved</option></select><div id="piece-list" role="list" aria-label="Searchable pieces"><div id="list-spacer"></div><div id="list-items"></div></div><div id="selection-count" class="subtle">0 selected</div></section>
+<section class="panel scene"><div class="section-title">REFERENCE POINTS <span>NOT BUILDING GEOMETRY</span></div><div class="camera-actions"><button id="focus" disabled>Focus selection</button><button id="fit">Fit points</button><span id="marker-count"></span></div><div class="canvas-wrap"><canvas id="viewport" tabindex="0" aria-label="Reference point viewport. Drag to orbit, Shift-drag or right-drag to pan, wheel to zoom. Click to select, Control-click to toggle selection. F focuses selection."></canvas><div id="viewport-empty">No verified positions to display.<br>Inspect entries in the Unresolved list.</div><div id="hover-label" hidden></div></div><div class="camera-help">Drag: orbit · Shift / right-drag: pan · Wheel: zoom · Ctrl-click: multiselect · F: focus</div><div id="evidence" class="evidence"></div></section>
+<section class="panel inspector"><div class="section-title">INSPECTOR <span>READ ONLY</span></div><div id="inspector-content"><p>Select a reference point or list entry.</p></div></section>
+</div></div>
+<div id="status" role="status" aria-live="polite">Ready to open a local file.</div>
+<footer><span>Camera and selection never modify source data.</span><span>No transforms, geometry, or server operations.</span></footer>
+</main></body></html>

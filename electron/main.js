@@ -1,3 +1,4 @@
+if(process.argv.includes("--blueprint-designer")){require("./blueprint-designer-entry");}else{
 const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
@@ -724,6 +725,10 @@ function createTray() {
   tray.on("double-click", () => focusMainWindow("tray-double-click"));
 }
 
+const designerLauncher = require("./blueprint-designer-launcher").createDesignerLauncher({app,spawn,existsSync:fs.existsSync,getMainWindow:()=>mainWindow,port:APP_PORT});
+ipcMain.handle("blueprint-designer-status", event => designerLauncher.status(event));
+ipcMain.handle("blueprint-designer-open", event => designerLauncher.open(event));
+
 ipcMain.handle("choose-ssh-key", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Select SSH key",
@@ -925,4 +930,6 @@ if (!gotLock) {
 
   app.on("before-quit", cleanupChildren);
   app.on("window-all-closed", quitSuite);
+}
+
 }

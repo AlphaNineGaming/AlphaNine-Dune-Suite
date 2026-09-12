@@ -1,0 +1,35 @@
+{
+  "buildId": "24654038",
+  "entries": [
+    {
+      "id": "MTX_Smug_Foundation",
+      "source": {
+        "pak": "DuneSandbox.pak",
+        "assetPath": "DuneSandbox/Content/DLC/B1C3/Player/PlayerBuilt/Smug/Meshes/SM_Player_PB_Smug_Foundation",
+        "uassetSha256": "1460ebbe4bac1ffaca085e65abbd591a94233a750da01048f8bedfabfae39273",
+        "uexpSha256": "d153e12b1180fd2b360f62b8435b75dcf953f3135f5eb0c58eb8fd5abdf09763"
+      },
+      "tableSource": {
+        "pak": "Systems.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Systems/Building/Data/BuildingData/DT_BuildingData_Smugglers",
+        "uassetSha256": "e59b94b51b9502acf933de006aab90e3920dd45146794f85aa38e524d71e2dd3",
+        "uexpSha256": "82423b90a792a4fd32728236bfca15ded24bfe1208974528134b3c7d85ed3611"
+      }
+    },
+    {
+      "id": "Atreides_Outpost_Foundation",
+      "source": {
+        "pak": "Environment.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Environment/PlayerBuilt/Atre/Outpost/Meshes/SM_Env_PB_Atre_Outpost_Foundation",
+        "uassetSha256": "d426942e9c74733d76d226c95a0a72867174917a471f1771693331daa9cf7406",
+        "uexpSha256": "635de44e456a4a2840c0e3bff194bd357730bce60d23c806f91ead33f3f5190e"
+      },
+      "tableSource": {
+        "pak": "Systems.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Systems/Building/Data/BuildingData/DT_BuildingData_Atreides",
+        "uassetSha256": "8af1ab72e84df4159806d348c736b2fef5844405f1e91ef8369d2252bf048401",
+        "uexpSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+      }
+    }
+  ]
+}

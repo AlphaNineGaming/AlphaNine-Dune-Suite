@@ -1,0 +1,80 @@
+{
+  "buildId": "24654038",
+  "entries": [
+    {
+      "id": "MTX_Atre_BreakfastRoom_Wall_01",
+      "source": {
+        "pak": "DuneSandbox.pak",
+        "assetPath": "DuneSandbox/Content/DLC/MTX/Environment/PlayerBuilt/Atre/BreakfastRoom/Meshes/SM_MTX_Env_PB_Atre_BreakfastRoom_Wall_01",
+        "uassetSha256": "ffb0cd80fce2e40234b346e862f152d3787a5051d63f876328c435d29b6b7f9a",
+        "uexpSha256": "4b4f4e7e09c82e3cedeec2e22d02084bc61c80cc77641580f92cfdbc794ad246"
+      },
+      "tableSource": {
+        "pak": "Systems.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Systems/Building/Data/BuildingData/DT_BuildingData_Atreides",
+        "uassetSha256": "8af1ab72e84df4159806d348c736b2fef5844405f1e91ef8369d2252bf048401",
+        "uexpSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+      }
+    },
+    {
+      "id": "Atreides_Outpost_Wall_04",
+      "source": {
+        "pak": "Environment.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Environment/PlayerBuilt/Atre/Outpost/Meshes/SM_Env_PB_Atre_Outpost_Wall_04",
+        "uassetSha256": "7a4f1cee9ea1d14b6dcfce853cb27ee1febe85803e5d6ecd98e8fbe7fdb1508d",
+        "uexpSha256": "eef5e5168b7b2b5348454c5590f398a094b966285b99bf95282ffb3bf8158dc6"
+      },
+      "tableSource": {
+        "pak": "Systems.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Systems/Building/Data/BuildingData/DT_BuildingData_Atreides",
+        "uassetSha256": "8af1ab72e84df4159806d348c736b2fef5844405f1e91ef8369d2252bf048401",
+        "uexpSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+      }
+    },
+    {
+      "id": "Atreides_Outpost_Wall_01",
+      "source": {
+        "pak": "Environment.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Environment/PlayerBuilt/Atre/Outpost/Meshes/SM_Env_PB_Atre_Outpost_Wall_01",
+        "uassetSha256": "9803b03081685809791402e85137404718fe15867f7a970ee988e29a4f1641f8",
+        "uexpSha256": "a7e4cddb946dbcece32d6fcf33924a56cf58bcae338ca5925bc6f541cdedd618"
+      },
+      "tableSource": {
+        "pak": "Systems.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Systems/Building/Data/BuildingData/DT_BuildingData_Atreides",
+        "uassetSha256": "8af1ab72e84df4159806d348c736b2fef5844405f1e91ef8369d2252bf048401",
+        "uexpSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+      }
+    },
+    {
+      "id": "Atreides_Outpost_Wall_02",
+      "source": {
+        "pak": "Environment.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Environment/PlayerBuilt/Atre/Outpost/Meshes/SM_Env_PB_Atre_Outpost_Wall_02",
+        "uassetSha256": "48c7a7d83158a8bba748bdb5930ba41383e946859acaf8f377296295027327f5",
+        "uexpSha256": "f976323ef23996436bc3cd55af0ea760758360e0addd32e798b903b7aaa51c19"
+      },
+      "tableSource": {
+        "pak": "Systems.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Systems/Building/Data/BuildingData/DT_BuildingData_Atreides",
+        "uassetSha256": "8af1ab72e84df4159806d348c736b2fef5844405f1e91ef8369d2252bf048401",
+        "uexpSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+      }
+    },
+    {
+      "id": "Atreides_Outpost_Wall_03",
+      "source": {
+        "pak": "Environment.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Environment/PlayerBuilt/Atre/Outpost/Meshes/SM_Env_PB_Atre_Outpost_Wall_03",
+        "uassetSha256": "91d6e304e7af799201cd0c4933e6e5415ed92959ebfb723338b4690fb46bae36",
+        "uexpSha256": "cb8a88ce58b1e2809908131957e8dd062184b1f4378e525f607e3fb04f8be633"
+      },
+      "tableSource": {
+        "pak": "Systems.pak",
+        "assetPath": "DuneSandbox/Content/Dune/Systems/Building/Data/BuildingData/DT_BuildingData_Atreides",
+        "uassetSha256": "8af1ab72e84df4159806d348c736b2fef5844405f1e91ef8369d2252bf048401",
+        "uexpSha256": "ac320b0f6f03c3191899d9590d9bc81d0158c42d42cdba4b294d9268ec45cddd"
+      }
+    }
+  ]
+}

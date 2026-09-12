@@ -6,6 +6,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const rewardNotifications = require("./lib/reward-notifications");
 const { assertCapturedDestinationBinding, publicProfileBinding, resolveProfileBinding, verifyProfileBinding } = require("./lib/profile-binding");
 // Resolve an explicit profile argument inside this process. This deliberately
 // does not depend on transient environment inherited across UAC elevation.
@@ -17443,6 +17444,30 @@ async function adminGiveDbItemToPlayer(command, options = {}) {
   };
 }
 
+async function notifyGrantedReward(result, command, enabled) {
+  const notify = rewardNotifications.createRewardNotifier({
+    query: async sql => {
+      const output = await dbQuery(sql, 10000);
+      return String(output || "").split(/\r?\n/).filter(line => line.trim().startsWith("{")).map(line => JSON.parse(line));
+    },
+    displayName: giveItemDisplayName,
+    publish: async (recipient, message) => {
+      const selection = await selectedBattlegroupStatus();
+      const namespace = selection.selectedBattlegroup?.namespace;
+      if (!namespace) throw new Error("Select a battlegroup before sending reward whispers.");
+      const pods = await sshCommand("sudo -n kubectl get pods -n " + shQuote(namespace) + " -o json", 10000);
+      if (!pods.ok) throw new Error("Reward chat pod discovery failed.");
+      const target = rewardNotifications.chooseMqPod(JSON.parse(pods.stdout).items || [], namespace);
+      const expression = rewardNotifications.publishExpression(recipient, message);
+      const sent = await sshCommand("sudo -n kubectl exec -n " + shQuote(namespace) + " " + shQuote(target.pod) + " -c " + shQuote(target.container) + " -- rabbitmqctl eval " + shQuote(expression), 10000);
+      if (!sent.ok || !/reward_whisper=ok/.test(sent.stdout || "")) throw new Error("Reward whisper publish was not confirmed.");
+    }
+  });
+  result.notification = await notify(result, command, enabled);
+  try { appendAdminAudit("reward_notification", { requestId: command.requestId, playerId: command.playerId, status: result.notification.status }); } catch {}
+  return result;
+}
+
 async function adminGiveItem(payload) {
   const timer = liveGiveTimingTracker();
   let command = null;
@@ -17525,6 +17550,7 @@ async function adminGiveItem(payload) {
         throw error;
       }
       const result = await timer.step("database_grade_item_grant", () => adminGiveDbItemToPlayer(command, { mode }));
+      if (mode === "execute") await notifyGrantedReward(result, command, payload.notifyPlayer !== false);
       result.timings = timer.finish();
       appendAdminAudit(mode === "execute" ? "give_item_db_grade_inserted" : "give_item_db_grade_dry_run", {
         ...auditBase,
@@ -17585,11 +17611,12 @@ async function adminGiveItem(payload) {
     }
     if (live.status === "live-verified") {
       const result = { ...live, dryRun: false, status: "live-verified", stderr: "" };
+      await notifyGrantedReward(result, command, payload.notifyPlayer !== false);
       result.timings = timer.finish();
       appendAdminAudit("give_item_live_verified", { ...auditBase, durability, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null }, timings: result.timings });
       return result;
     }
-    const result = { ...live, dryRun: false, status: "live-published", stderr: "" };
+    const result = { ...live, dryRun: false, status: "live-published", stderr: "", notification: { status: "skipped-unverified", message: "No whisper sent: item delivery was not verified." } };
     result.timings = timer.finish();
     appendAdminAudit("give_item_live_published", { ...auditBase, durability, result: { ok: result.ok, status: result.status, transport: result.transport, response: result.response || null }, timings: result.timings });
     return result;
@@ -26239,7 +26266,7 @@ function renderGiveQueue(){const list=document.getElementById("giveQueueList");i
 function addSelectedItemToGiveQueue(){try{const payload=adminGivePayload();giveQueue.push({template:payload.template,name:selectedAdminItem?.name||payload.template,qty:payload.qty,quality:payload.quality,grantKind:payload.grantKind,setDurabilityTo200:payload.setDurabilityTo200});lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const note=/^tech:/i.test(payload.template)?"\\nNote: this research blueprint will unlock the Research tree, not character inventory.":(templateIsSchematic(payload.template)?"\\nNote: this recipe schematic will unlock crafting recipes, not character inventory.":(payload.setDurabilityTo200?"\\nDurability: exactly 200 current / 200 maximum.":"\\nDurability not applicable / not selected."));document.getElementById("giveQueueLog").value="Added to queue: "+giveQueueItemLabel(giveQueue[giveQueue.length-1])+note;addActivity("grant","Added item to Give Queue",payload.template+" x"+payload.qty);playUiSound("click");}catch(e){document.getElementById("giveQueueLog").value=betterError(e);playUiSound("warning");}}
 function removeGiveQueueItem(index){giveQueue.splice(index,1);renderGiveQueue();updateGiveQueueSummary();}
 function clearGiveQueue(){giveQueue=[];lastGiveQueueFailedItems=[];renderGiveQueue();updateGiveQueueSummary();const log=document.getElementById("giveQueueLog");if(log)log.value="Give Queue cleared.";}
-function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];if(data.timings)lines.push("Queue timings: "+JSON.stringify(data.timings));(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(/^tech:/i.test(row.itemId))lines.push("  Note: research blueprint unlocks the Research tree; check the player's Research screen, not inventory.");else if(templateIsSchematic(row.itemId))lines.push("  Note: recipe schematic unlocks crafting recipes; check the player's crafting recipes, not inventory.");if(row.result?.timings)lines.push("  Timings: "+JSON.stringify(row.result.timings));if(row.result?.response?.timings)lines.push("  Receiver timings: "+JSON.stringify(row.result.response.timings));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
+function queueResultLog(data){const lines=["Give Queue "+(data.status||"completed"),"Player: "+(data.playerId||""),"Mode: "+(data.mode||""),"Processed: "+(data.processed||0)+" / "+(data.total||0)+" | Succeeded: "+(data.succeeded||0)+" | Failed: "+(data.failed||0),""];if(data.timings)lines.push("Queue timings: "+JSON.stringify(data.timings));(data.results||[]).forEach(row=>{lines.push((row.success?"OK":"FAIL")+" #"+(row.index+1)+" "+(row.itemName||row.itemId)+" ["+row.itemId+"] x"+row.quantity+" -> "+(row.status||""));if(/^tech:/i.test(row.itemId))lines.push("  Note: research blueprint unlocks the Research tree; check the player's Research screen, not inventory.");else if(templateIsSchematic(row.itemId))lines.push("  Note: recipe schematic unlocks crafting recipes; check the player's crafting recipes, not inventory.");if(row.result?.notification?.message)lines.push("  "+row.result.notification.message);if(row.result?.timings)lines.push("  Timings: "+JSON.stringify(row.result.timings));if(row.result?.response?.timings)lines.push("  Receiver timings: "+JSON.stringify(row.result.response.timings));if(row.error)lines.push("  Error: "+row.error);});return lines.join("\\n");}
 async function giveQueuedItems(itemsOverride=null){const log=document.getElementById("giveQueueLog");if(liveGiveBusy)return;const items=itemsOverride||giveQueue;if(!items.length){if(log)log.value="Give Queue is empty.";playUiSound("warning");return;}try{liveGiveBusy=true;syncGiveItemControls();updateGiveQueueSummary(0,items.length,0,0);if(log)log.value="Checking receiver transport before Give Queue...";await refreshLiveGiveEnv();const mode=document.getElementById("liveGiveMode")?.value||"dry-run";if(mode==="execute"&&!adminLiveGiveAvailable)throw new Error(liveGiveUnavailableMessage||"Live Give unavailable.");if(mode==="execute"&&items.some(item=>usesRelogGrade(item.quality)))await showGradeRelogPopup("queued items");if(mode==="execute"&&!(await appConfirm("Confirm Live Give Queue","Send "+items.length+" queued item(s) to the selected player?","Give Queue","Cancel")))return;const playerId=document.getElementById("adminPlayer").value;if(!playerId)throw new Error("Choose a player first.");if(log)log.value="Processing Give Queue 0 / "+items.length+"...";addActivity("grant","Give Queue started",items.length+" item(s)");const data=await getJson("/api/live-give/queue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId,mode,confirmed:mode==="execute",items}),timeoutMs:300000});lastGiveQueueFailedItems=(data.results||[]).filter(row=>!row.success).map(row=>({template:row.itemId,name:row.itemName,qty:row.quantity,quality:row.quality}));updateGiveQueueSummary(data.processed||0,data.total||items.length,data.succeeded||0,data.failed||0);if(log)log.value=queueResultLog(data);if(!itemsOverride&&data.failed===0)giveQueue=[];renderGiveQueue();addActivity("grant","Give Queue completed",(data.succeeded||0)+" succeeded / "+(data.failed||0)+" failed");playUiSound(data.failed?"warning":"success");}catch(e){if(log)log.value=betterError(e);addActivity("error","Give Queue failed",e.message);playUiSound("warning");}finally{liveGiveBusy=false;syncGiveItemControls();}}
 function retryFailedGiveQueueItems(){if(!lastGiveQueueFailedItems.length)return;giveQueuedItems(lastGiveQueueFailedItems.slice());}
 async function copyGiveQueueLog(){const text=document.getElementById("giveQueueLog")?.value||"";if(!text)return;try{await navigator.clipboard.writeText(text);playUiSound("success");}catch{const log=document.getElementById("giveQueueLog");if(log){log.focus();log.select();document.execCommand("copy");}}}
@@ -26311,7 +26338,7 @@ async function giveAdminItem(){
       addActivity("grant",action,payload.template+" x"+payload.qty+(usesDbGrade?" grade "+payload.quality:"")+(usesDbDurability?" / durability 200":""));
       const data=await getJson("/api/admin/give-item",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,mode:"execute",confirmed:true})});
       const status=giveItemExecutionStatus(data,usesDbGrade);
-      const output=[data.stdout,data.stderr,data.error].filter(Boolean).join("\\n");
+      const output=[data.stdout,data.stderr,data.error,data.notification?.message].filter(Boolean).join("\\n");
       log.textContent=status+"\\n"+output+"\\n\\n"+JSON.stringify({status:data.status,grantKind:data.grantKind||null,transport:data.transport,verified:Boolean(data.verified),durability:data.durability||null,durabilityEvidence:data.durabilityEvidence||null,durabilityVerification:data.durabilityVerification||null,receipt:data.receipt||null,player:data.player||null,inventory:data.inventory||null,item:data.item||null,timings:data.timings||{},receiverTimings:data.response?.timings||{},command:data.command||payload,response:data.response||null},null,2);
       if(data.receipt){renderGiveItemReceipt(data.receipt);pollGiveItemReceipt(data.receipt.receiptId);}
       addActivity("grant",status,payload.template+" -> "+payload.playerId);

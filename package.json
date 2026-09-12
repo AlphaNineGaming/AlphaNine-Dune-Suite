@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "marketBotRuntimeVersion": "1.0.102",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
@@ -58,7 +58,8 @@
     "test:internet-tunnel": "node scripts/test-internet-tunnel.js",
     "build:win": "npm run test:app-icon && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=false && node scripts/ensure-admin-manifest.js",
     "build:release:win": "npm run test:update-integrity && npm run build:win && npm run test:packaged",
-    "test:ini-recovery": "node scripts/test-user-game-settings.js && node scripts/test-user-game-recovery.js"
+    "test:ini-recovery": "node scripts/test-user-game-settings.js && node scripts/test-user-game-recovery.js",
+    "test:reward-notifications": "node scripts/test-reward-notifications.js"
   },
   "dependencies": {
     "express": "^5.2.1",

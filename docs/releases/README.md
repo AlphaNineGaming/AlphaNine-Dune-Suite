@@ -2,6 +2,7 @@
 
 Version-specific notes, newest first. Additional older versions are covered in the [historical README summary](HISTORY.md).
 
+- [1.3.4](RELEASE_NOTES_1.3.4.md)
 - [1.3.3](RELEASE_NOTES_1.3.3.md)
 - [1.3.2](RELEASE_NOTES_1.3.2.md)
 - [1.3.1](RELEASE_NOTES_1.3.1.md)

@@ -13,6 +13,11 @@ else {
     const {createDocumentWindow}=require(path.join(process.resourcesPath,'designer-runtime','desktop'));
     const geometryCatalog=loadCatalog(path.join(process.resourcesPath,'designer-native','catalog.json'));
     const window=await createDocumentWindow(electron,{mode:'assembly',geometryCatalog,packagedDesigner:true});
+    window.show();
+    window.moveTop();
+    window.focus();
+    app.focus({steal:true});
+    if(!window.isVisible())throw Error('Designer window was created but Windows did not show it.');
     process.stdin.on('data',data=>{if(data.toString().trim()==='focus'&&!window.isDestroyed()){if(window.isMinimized())window.restore();window.show();window.focus();}});
     process.stdout.write('ALPHANINE_DESIGNER_READY\n');
     if(smoke){

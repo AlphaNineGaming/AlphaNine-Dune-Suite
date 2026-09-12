@@ -14,7 +14,7 @@ function createDesignerLauncher({app,spawn,existsSync,getMainWindow,port}) {
     if(child){if(pending)return pending;if(ready){child.stdin?.write("focus\n");return {opened:true,alreadyOpen:true};}}
     const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;delete env.NODE_OPTIONS;
     const args=app.isPackaged?['--blueprint-designer']:[entry,'--assembly',`--geometry-catalog=${catalog}`];
-    const next=spawn(process.execPath,args,{cwd:app.isPackaged?path.dirname(process.execPath):app.getAppPath(),env,stdio:['pipe','pipe','pipe'],windowsHide:true});
+    const next=spawn(process.execPath,args,{cwd:app.isPackaged?path.dirname(process.execPath):app.getAppPath(),env,stdio:['pipe','pipe','pipe'],windowsHide:false});
     child=next;
     pending=new Promise((resolve,reject)=>{
       let output="", errors="", settled=false;

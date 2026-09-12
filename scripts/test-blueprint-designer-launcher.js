@@ -11,7 +11,7 @@ const {createDesignerLauncher}=require('../electron/blueprint-designer-launcher'
   frame.url='http://127.0.0.1:8810/#blueprints';assert.equal(launcher.status(event).available,true);
   await launcher.open(event);assert.equal((await launcher.open(event)).alreadyOpen,true);assert.equal(calls.length,1);
   const [exe,args,options]=calls[0];assert.equal(exe,process.execPath);assert.equal(args.length,3);assert.equal(args[1],'--assembly');
-  assert.ok(!args.some(a=>a.includes('no-sandbox')||a.includes('disable-renderer-sandbox')));assert.equal(options.windowsHide,true);assert.equal(options.env.NODE_OPTIONS,undefined);assert.equal(options.env.ELECTRON_RUN_AS_NODE,undefined);
+  assert.ok(!args.some(a=>a.includes('no-sandbox')||a.includes('disable-renderer-sandbox')));assert.equal(options.windowsHide,false);assert.equal(options.env.NODE_OPTIONS,undefined);assert.equal(options.env.ELECTRON_RUN_AS_NODE,undefined);
   app.isPackaged=true;assert.equal(launcher.status(event).available,false);await assert.rejects(launcher.open(event));assert.equal(calls.length,1);
   app.isPackaged=false;
   const missing=createDesignerLauncher({app,getMainWindow:()=>({webContents}),port:8810,existsSync:()=>false,spawn:()=>{throw Error('Must not spawn');}});assert.equal(missing.status(event).available,false);await assert.rejects(missing.open(event));

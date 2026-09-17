@@ -16,8 +16,6 @@ assert(!serverSource.includes("marketBotCatalog(), APP_VERSION"), "A Market Bot 
 assert(electronMainSource.includes('path.join(root, "battlegroup.bat")'), "Desktop launcher does not resolve battlegroup.bat from a configured server root.");
 assert(electronMainSource.includes('ipcMain.handle("open-battlegroup-batch"'), "Desktop battlegroup.bat IPC handler is missing.");
 assert(electronPreloadSource.includes('openBattlegroupBatch: (configuredPaths = {}) => ipcRenderer.invoke("open-battlegroup-batch", configuredPaths)'), "Desktop battlegroup.bat Settings bridge is missing.");
-assert(electronMainSource.includes('["/d", "/s", "/k", `call ""${command}""`]'), "Desktop launcher does not keep the Battlegroup command console open with Windows-safe quoting.");
-assert(electronMainSource.includes("windowsVerbatimArguments: true"), "Desktop launcher does not preserve the quoted Battlegroup batch path for cmd.exe.");
 assert(electronMainSource.includes("persisted.serverInstallPath") && electronMainSource.includes("persisted.awakeningServerPath"), "Desktop launcher does not fall back to freshly persisted Settings paths.");
 assert(serverSource.includes('"/api/usergame-settings"') && serverSource.includes("updateLiveUserGameSettings"), "Live UserGame.ini API is missing.");
 assert(serverSource.includes('if (!remoteAccess.isLoopbackRequest(req))'), "Live UserGame.ini API is not protected by a local-only guard.");
@@ -86,6 +84,9 @@ function extractFunction(source, name) {
     assert(html.includes('id="repair"'), "Rendered Repair Inspector is missing.");
     assert(html.includes('id="dashboardSoundToggle" class="sound-toggle" type="button">Sounds OFF</button>'), "Dashboard sound toggle has invalid initial text.");
     assert(html.includes('id="landsraad"'), "Rendered Landsraad tier editor is missing.");
+    assert(html.includes('id="databaseOwnershipRepairButton"'), "Database repair button is missing.");
+    assert(html.includes('id="databaseRepairProgressBar"') && html.includes('aria-label="Database repair stages"'), "Accessible repair progress bar is missing.");
+    assert(html.includes('elapsed>=5000'), "Repair progress must wait five seconds before appearing.");
     assert(html.includes('id="openBattlegroupBatchButton"') && html.includes('onclick="openBattlegroupBatch()"'), "Server Control battlegroup.bat button is missing.");
     assert(html.includes('class="tab tab-child" data-view="usergame-settings" data-parent-view="management"') && html.includes('id="usergame-settings" class="view"'), "Server Management UserGame Settings child page is missing.");
     assert(html.includes('id="liveUserGamePanel"') && html.includes('id="userGameSaveButton"'), "UserGame Settings Live UserGame.ini panel is missing.");

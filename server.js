@@ -3788,6 +3788,31 @@ fi
 `;
 }
 
+
+function startDatabaseOwnershipRepairJob() {
+  assertWorkloadStartAllowed("repair the database update");
+  const operation = operationRegistry.begin("repair:database-ownership", "Database Update Repair", { category: "database", stage: "Checking database", detail: "Checking for the supported ownership failure.", progress: 5 });
+  setImmediate(async () => {
+    try {
+      const repair = require("./lib/database-ownership-repair").createOwnershipRepair({
+        sshCommand,
+        getTarget: configuredBattlegroupControlTarget,
+        directory: path.join(APPDATA_DIR || DATA_DIR, "database-ownership-repairs"),
+        update: (stage, detail) => operationRegistry.update(operation, stage, detail, { logLine: detail, progress: ({ "Checking database": 5, "Creating backup": 15, "Verifying backup": 40, "Saving backup": 55, "Rechecking database": 65, "Repairing ownership": 75, "Retrying migration": 85, "Waiting for database": 90 })[stage] ?? 5 })
+      });
+      const result = await repair.run();
+      const detail = result.message + (result.backupPath ? " Backup: " + result.backupPath : "");
+      operationRegistry.update(operation, "Completed", detail, { logLine: detail, progress: 100 });
+      operationRegistry.finish(operation, "success");
+      appendAdminAudit("database_ownership_repair_completed", { operationId: operation.id, ...result });
+    } catch (error) {
+      operationRegistry.finish(operation, "failed", error.message);
+      appendAdminAudit("database_ownership_repair_failed", { operationId: operation.id, error: error.message });
+    }
+  });
+  return operationRegistry.public(operation);
+}
+
 function startServerUpdateJob() {
   assertWorkloadStartAllowed("update or restart the battlegroup");
   const operation = operationRegistry.begin("battlegroup:update", "Dune Server Update", {
@@ -5167,22 +5192,35 @@ function beginBattlegroupControlIntent(action, stop, options = {}) {
 }
 
 async function applyBattlegroupControlIntent(control) {
-  battlegroupControlJournal.assertCurrent(control.intent);
-  const before = await readBattlegroupControlResource(control.target);
-  const patch = buildBattlegroupControlMergePatch(control.intent, before.evidence.resourceVersion);
-  const command = `sudo kubectl patch battlegroup ${shQuote(control.target.name)} -n ${shQuote(control.target.namespace)} --type=merge -p ${shQuote(JSON.stringify(patch))}`;
-  const result = await sshCommand(command, 30000, { maxBuffer: 1024 * 1024 });
-  if (!result.ok) {
-    battlegroupControlJournal.append({ version: 1, at: new Date().toISOString(), outcome: "failed", operationId: control.intent.operationId, generation: control.intent.generation, action: control.intent.action, error: String(result.stderr || result.error || "Battlegroup patch failed.").slice(0, 500) });
-    throw new Error(result.stderr || result.stdout || result.error || "Battlegroup control mutation failed.");
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    battlegroupControlJournal.assertCurrent(control.intent);
+    const before = await readBattlegroupControlResource(control.target);
+    battlegroupControlJournal.assertCurrent(control.intent);
+    if (BigInt(before.evidence.generation) > BigInt(control.intent.generation)
+        || (before.evidence.generation === control.intent.generation && before.evidence.operationId !== control.intent.operationId)) {
+      throw new Error("A newer or competing battlegroup control request superseded this operation.");
+    }
+    const patch = buildBattlegroupControlMergePatch(control.intent, before.evidence.resourceVersion);
+    const command = `sudo kubectl patch battlegroup ${shQuote(control.target.name)} -n ${shQuote(control.target.namespace)} --type=merge -p ${shQuote(JSON.stringify(patch))}`;
+    const result = await sshCommand(command, 30000, { maxBuffer: 1024 * 1024 });
+    if (!result.ok) {
+      const detail = String(result.stderr || result.stdout || result.error || "");
+      if (attempt < 3 && /Error from server \(Conflict\):/.test(detail) && /the object has been modified/.test(detail)) {
+        battlegroupControlJournal.assertCurrent(control.intent);
+        await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        continue;
+      }
+      battlegroupControlJournal.append({ version: 1, at: new Date().toISOString(), outcome: "failed", operationId: control.intent.operationId, generation: control.intent.generation, action: control.intent.action, error: String(result.stderr || result.error || "Battlegroup patch failed.").slice(0, 500) });
+      throw new Error(result.stderr || result.stdout || result.error || "Battlegroup control mutation failed.");
+    }
+    const after = await readBattlegroupControlResource(control.target);
+    if (after.evidence.stop !== control.intent.stop || after.evidence.generation !== control.intent.generation || after.evidence.operationId !== control.intent.operationId) {
+      throw new Error("Battlegroup control mutation did not retain its generation and operation attribution.");
+    }
+    const attribution = battlegroupControlJournal.record(control.intent, before.evidence, after.evidence);
+    appendAdminAudit("battlegroup_control_mutation", attribution);
+    return { ok: true, stdout: `Battlegroup ${control.intent.action} intent accepted.`, stderr: "", attribution };
   }
-  const after = await readBattlegroupControlResource(control.target);
-  if (after.evidence.stop !== control.intent.stop || after.evidence.generation !== control.intent.generation || after.evidence.operationId !== control.intent.operationId) {
-    throw new Error("Battlegroup control mutation did not retain its generation and operation attribution.");
-  }
-  const attribution = battlegroupControlJournal.record(control.intent, before.evidence, after.evidence);
-  appendAdminAudit("battlegroup_control_mutation", attribution);
-  return { ok: true, stdout: `Battlegroup ${control.intent.action} intent accepted.`, stderr: "", attribution };
 }
 
 async function waitForBattlegroupStop(target, timeoutMs = 90000) {
@@ -24356,10 +24394,16 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="controls mt">
           <button onclick="act('backup')">Backup</button>
           <button id="serverUpdateButton" onclick="checkServerUpdateNow()">Check Server Update</button>
+          <button id="databaseOwnershipRepairButton" onclick="repairDatabaseOwnership()" title="Back up and repair AlphaNine table ownership when a database update blocks startup.">Repair Database Update</button>
           <button onclick="openDirector()">Open Director</button>
           <button id="openBattlegroupBatchButton" onclick="openBattlegroupBatch()">Open Battlegroup.bat</button>
           <button onclick="act('logs-export')">Export Logs</button>
           <button onclick="act('operator-logs-export')">Export Operator Logs</button>
+        </div>
+        <div id="databaseOwnershipRepairStatus" class="empty mt" role="status" aria-live="polite">Database repair checks for the known update failure and creates a verified backup before changing ownership.</div>
+        <div id="databaseRepairProgress" class="mt" hidden>
+          <div class="server-update-progress" id="databaseRepairProgressBar" role="progressbar" aria-label="Database repair stages" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="databaseRepairProgressFill" style="width:0%"></i></div>
+          <div class="server-update-stage"><strong id="databaseRepairProgressStage">Checking database</strong><span id="databaseRepairProgressTime">0% of stages · 0s</span></div>
         </div>
         <div id="serverUpdateDetectionStatus" class="empty mt">Automatic Funcom update detection starts after the dashboard is ready.</div>
         <pre id="serverLog" class="mt advanced-only">Ready.</pre>
@@ -25788,6 +25832,49 @@ async function runVmAction(action){const log=document.getElementById("vmControlL
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const actionTimeouts=${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)},data=await getJson("/api/action/"+action,{method:"POST",timeoutMs:actionTimeouts[action]||180000});let output=data.stdout||data.stderr||data.error||"Done.";if(action==="backup"&&data.ok){output="Actual VM backup copied and verified locally.\\nVM source: "+(data.vmBackupPath||data.vmPath||"--")+"\\nLocal copy: "+(data.localBackupPath||data.filePath||"--")+"\\nSHA-256: "+(data.sha256||"--")+"\\nSize: "+(data.size||data.file?.size||"--")+" bytes\\nMetadata: "+(data.localMetadataPath||"--");}if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
+async function repairDatabaseOwnership(){
+ const button=document.getElementById("databaseOwnershipRepairButton");
+ const status=document.getElementById("databaseOwnershipRepairStatus");
+ const panel=document.getElementById("databaseRepairProgress");
+ const bar=document.getElementById("databaseRepairProgressBar");
+ const fill=document.getElementById("databaseRepairProgressFill");
+ const stage=document.getElementById("databaseRepairProgressStage");
+ const time=document.getElementById("databaseRepairProgressTime");
+ const started=Date.now();let percent=0,finished=false,shown=false,operationId="";
+ const draw=()=>{
+  const elapsed=Date.now()-started;
+  if(elapsed>=5000&&!finished)shown=true;
+  panel.hidden=!shown;
+  fill.style.width=percent+"%";bar.setAttribute("aria-valuenow",String(percent));
+  time.textContent=percent+"% of stages · "+Math.floor(elapsed/1000)+"s";
+ };
+ button.disabled=true;status.className="empty mt";status.textContent="Checking database update...";stage.textContent="Checking database";panel.hidden=true;draw();
+ const timer=window.setInterval(draw,250);
+ const operationFor=data=>(data.operations||data.active||[]).find(row=>operationId?row.id===operationId:row.key==="repair:database-ownership"&&["running","pending"].includes(row.status));
+ try{
+  let initial;
+  try{initial=await getJson("/api/database/repair-ownership",{method:"POST",timeoutMs:15000});}
+  catch(error){const snapshot=await getJson("/api/operations",{timeoutMs:15000});const active=operationFor(snapshot);if(!active)throw error;initial={ok:true,operation:active};}
+  if(!initial.ok||!initial.operation?.id)throw new Error(initial.error||"Repair did not start.");
+  operationId=initial.operation.id;
+  for(;;){
+   let progress;
+   try{progress=await getJson("/api/operations",{timeoutMs:15000});}
+   catch(error){status.className="warning mt";status.textContent="Reconnecting to repair status. The operation may still be running.";await new Promise(resolve=>setTimeout(resolve,2500));continue;}
+   renderOperations(progress);
+   const op=operationFor(progress);
+   if(!op)throw new Error("Repair status unavailable. Check Recent Operations.");
+   status.className="empty mt";status.textContent=op.stage+": "+(op.error||op.detail||"");stage.textContent=op.stage;
+   if(Number.isFinite(op.progress))percent=Math.max(percent,Math.min(99,Math.max(0,op.progress)));
+   draw();
+   if(op.status==="success"){percent=100;draw();playUiSound("success");break;}
+   if(!["running","pending"].includes(op.status))throw new Error(op.error||op.detail||"Repair stopped.");
+   await new Promise(resolve=>setTimeout(resolve,1500));
+  }
+ }catch(error){status.className="warning mt";status.textContent=betterError(error);stage.textContent="Repair stopped";playUiSound("warning");}
+ finally{finished=true;window.clearInterval(timer);draw();button.disabled=false;}
+}
+
 async function openBattlegroupBatch(){const log=document.getElementById("serverLog");try{if(!window.alphaNineSuite?.openBattlegroupBatch)throw new Error("Battlegroup.bat can be opened only from the installed desktop Suite.");if(log)log.textContent="Reading the saved server folder from Settings...";const cfg=await getJson("/api/config");if(log)log.textContent="Opening battlegroup.bat from the configured server folder...";const data=await window.alphaNineSuite.openBattlegroupBatch({serverInstallPath:cfg.serverInstallPath||"",awakeningServerPath:cfg.awakeningServerPath||""});if(!data?.ok)throw new Error(data?.error||"Could not open battlegroup.bat.");if(log)log.textContent="Opened "+(data.filePath||"battlegroup.bat")+" in a Windows command console.";syncLogs();addActivity("action","Opened battlegroup.bat",data.filePath||"");playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);syncLogs();addActivity("error","Battlegroup.bat launch failed",e.message);playUiSound("warning");}}
 function userGameSettingInput(setting,value){const id="usergame-"+setting.key;if(setting.type==="boolean")return '<label>'+esc(setting.label)+'<select id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'"><option value="true"'+(value===true?' selected':'')+'>True</option><option value="false"'+(value===false?' selected':'')+'>False</option></select><small>'+esc(setting.key)+'</small></label>';const current=value===undefined||value===null?'':String(value);return '<label>'+esc(setting.label)+'<input id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'" type="number" min="'+esc(setting.min)+'" max="'+esc(setting.max)+'" step="'+esc(setting.step||1)+'" value="'+esc(current)+'"><small>'+esc(setting.key)+(setting.unit?' · '+esc(setting.unit):'')+(setting.note?' · '+esc(setting.note):'')+'</small></label>';}
 function renderLiveUserGameSettings(data){liveUserGameState=data;const grid=document.getElementById("userGameSettingsGrid"),preview=document.getElementById("userGameRawPreview"),save=document.getElementById("userGameSaveButton");const groups=[];for(const setting of data.schema||[]){let group=groups.find(row=>row.name===setting.group);if(!group){group={name:setting.group,settings:[]};groups.push(group);}group.settings.push(setting);}if(grid)grid.innerHTML=groups.map(group=>'<div class="panel pad"><div class="label">'+esc(group.name)+'</div><div class="field-grid mt">'+group.settings.map(setting=>userGameSettingInput(setting,data.values?.[setting.key])).join('')+'</div></div>').join('')||'<div class="empty">No supported UserGame.ini settings were returned.</div>';if(preview)preview.textContent=data.content||"";if(save)save.disabled=!data.ok;const missing=data.missingKeys||[];const status=document.getElementById("userGameStatus");if(status){status.className=(missing.length?'warning':'empty')+' mt';status.textContent=(data.path||"UserGame.ini")+(missing.length?' · Missing or invalid: '+missing.join(', '):' · '+(data.schema?.length||0)+' supported settings loaded.');}}
@@ -27057,6 +27144,15 @@ async function route(req, res) {
   if (url.pathname === "/api/server-update/check" && req.method === "GET") {
     const result = await checkServerUpdate({ force: url.searchParams.get("force") === "1" });
     await json(res, result, result.ok ? 200 : 503);
+    return;
+  }
+  if (url.pathname === "/api/database/repair-ownership" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Database Update Repair is available only in the local Suite." }, 403);
+      return;
+    }
+    try { await json(res, { ok: true, operation: startDatabaseOwnershipRepairJob() }, 202); }
+    catch (error) { const failure = operationErrorResponse(error); await json(res, failure.payload, failure.statusCode); }
     return;
   }
   if (url.pathname === "/api/server-update/start" && req.method === "POST") {

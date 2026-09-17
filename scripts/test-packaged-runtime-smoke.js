@@ -90,6 +90,12 @@ assert(
   !packagedServerSource.includes("const actorId=Number(row.actorId)||0"),
   "Packaged Server Cleaner still coerces actor IDs through Number."
 );
+for (const name of ["test-database-ownership-repair.js", "test-database-repair-progress.js", "test-suite-control-fixes.js"]) {
+  const testPath = path.join(extracted, "scripts", name);
+  assert(fs.existsSync(testPath), "Packaged app is missing " + name);
+  const result = spawnSync(process.execPath, [testPath], { cwd: extracted, encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, "Packaged " + name + " failed.\n" + result.stdout + "\n" + result.stderr);
+}
 const packagedCleanerTest = spawnSync(process.execPath, [packagedCleanerTestPath], {
   cwd: extracted,
   encoding: "utf8",

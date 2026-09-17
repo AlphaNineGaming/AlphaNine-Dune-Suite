@@ -376,27 +376,13 @@ function battlegroupBatchPath(cfg = readAppConfig(), persisted = readAppConfig()
   return "";
 }
 
-function openBattlegroupBatchConsole(filePath) {
-  return new Promise((resolve, reject) => {
-    const command = String(filePath || "");
-    if (!command || path.basename(command).toLowerCase() !== "battlegroup.bat" || command.includes('"')) {
-      reject(new Error("The detected battlegroup.bat path is invalid."));
-      return;
-    }
-    const commandProcessor = String(process.env.ComSpec || "cmd.exe").trim() || "cmd.exe";
-    const child = spawn(commandProcessor, ["/d", "/s", "/k", `call ""${command}""`], {
-      cwd: path.dirname(command),
-      detached: true,
-      stdio: "ignore",
-      windowsHide: false,
-      windowsVerbatimArguments: true
-    });
-    child.once("error", reject);
-    child.once("spawn", () => {
-      child.unref();
-      resolve();
-    });
-  });
+async function openBattlegroupBatchConsole(filePath) {
+  const command = String(filePath || "");
+  if (!command || path.basename(command).toLowerCase() !== "battlegroup.bat" || command.includes('"')) {
+    throw new Error("The detected battlegroup.bat path is invalid.");
+  }
+  const error = await shell.openPath(command);
+  if (error) throw new Error("Could not open battlegroup.bat: " + error);
 }
 
 function generateReceiverToken() {

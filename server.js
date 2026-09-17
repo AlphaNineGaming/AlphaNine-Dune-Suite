@@ -8526,10 +8526,12 @@ async function waitForSuccessfulDatabaseOperation(operationName, timeoutMs = 5 *
   throw new Error(`Vendor DatabaseOperation did not reach a successful terminal state (${String(last?.status?.phase || "unknown")}).`);
 }
 
+const { resolveDumpVolumePath } = require("./lib/vendor-backup-path");
+
 async function remoteBackupSample(remotePath) {
-  const command = `stat -c '%s|%Y|%d:%i' -- ${shQuote(remotePath)}`;
+  const command = `sudo -n stat -c '%s|%Y|%d:%i' -- ${shQuote(remotePath)}`;
   const result = await sshCommand(command, 20000, { maxBuffer: 1024 * 16 });
-  if (!result.ok) throw new Error("The vendor backup artifact could not be statted.");
+  if (!result.ok) throw new Error(`The vendor backup artifact could not be inspected: ${shortOutput(result.stderr || result.error || "stat failed")}`);
   const [size, modified, identity] = String(result.stdout || "").trim().split("|");
   return { size, modified, identity };
 }
@@ -8561,7 +8563,7 @@ async function inspectRemoteBackupArchive(remotePath, target, expectedInventory)
   const temporaryName = `/tmp/alphanine-backup-verify-${crypto.randomUUID()}.backup`;
   const remote = [
     "set -o pipefail",
-    `sudo kubectl exec -i -n ${shQuote(target.namespace)} ${shQuote(target.dbPod)} -- sh -c ${shQuote(`umask 077; temporary=${shQuote(temporaryName)}; trap 'rm -f "$temporary"' EXIT; cat > "$temporary"; pg_restore --list "$temporary"; pg_restore --file=/dev/null "$temporary"`)} < ${shQuote(remotePath)}`
+    `sudo -n cat -- ${shQuote(remotePath)} | sudo -n kubectl exec -i -n ${shQuote(target.namespace)} ${shQuote(target.dbPod)} -- sh -c ${shQuote(`umask 077; temporary=${shQuote(temporaryName)}; trap 'rm -f "$temporary"' EXIT; cat > "$temporary"; pg_restore --list "$temporary"; pg_restore --file=/dev/null "$temporary"`)}`
   ].join("; ");
   const result = await sshCommand(remote, 10 * 60 * 1000, { maxBuffer: 1024 * 1024 * 64 });
   if (!result.ok) throw new Error(`Matching-version pg_restore rejected or could not fully read the vendor archive: ${shortOutput(result.stderr || result.error || "archive inspection failed")}`);
@@ -8569,16 +8571,26 @@ async function inspectRemoteBackupArchive(remotePath, target, expectedInventory)
 }
 
 async function verifyVendorBackup(parsed, operation) {
-  const identity = resolveVendorArtifactIdentity(operation, parsed.vmPath);
-  const first = await remoteBackupSample(identity.path);
+  let identity = resolveVendorArtifactIdentity(operation, parsed.vmPath);
+  let first;
+  try { first = await remoteBackupSample(identity.path); }
+  catch (originalError) {
+    if (!/No such file or directory/i.test(originalError.message)) throw originalError;
+    identity = await resolveDumpVolumePath(operation, identity, async (kind, name, namespace) => {
+      const result = await sshCommand(`sudo -n kubectl get ${kind} ${shQuote(name)} ${namespace ? `-n ${shQuote(namespace)}` : ""} -o json`, 20000, { maxBuffer: 1024 * 1024 * 4 });
+      if (!result.ok) throw new Error(`Could not resolve backup ${kind}: ${shortOutput(result.stderr || result.error)}`);
+      return JSON.parse(result.stdout);
+    });
+    first = await remoteBackupSample(identity.path);
+  }
   await sleepMs(1500);
   const second = await remoteBackupSample(identity.path);
   const stable = validateStableSamples([first, second]);
-  const headerResult = await sshCommand(`od -An -tx1 -N5 -- ${shQuote(identity.path)}`, 20000, { maxBuffer: 1024 * 16 });
+  const headerResult = await sshCommand(`sudo -n od -An -tx1 -N5 -- ${shQuote(identity.path)}`, 20000, { maxBuffer: 1024 * 16 });
   if (!headerResult.ok) throw new Error("The vendor backup header could not be read.");
   const header = Buffer.from(String(headerResult.stdout || "").replace(/[^0-9a-f]/gi, ""), "hex");
   validatePgDumpHeader(header);
-  const hashResult = await sshCommand(`sha256sum -- ${shQuote(identity.path)}`, 10 * 60 * 1000, { maxBuffer: 1024 * 16 });
+  const hashResult = await sshCommand(`sudo -n sha256sum -- ${shQuote(identity.path)}`, 10 * 60 * 1000, { maxBuffer: 1024 * 16 });
   const sha256 = String(hashResult.stdout || "").trim().match(/^([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() || "";
   if (!hashResult.ok || !sha256) throw new Error("The vendor backup SHA-256 could not be calculated.");
   const target = await databaseRuntimeTarget();
@@ -8620,7 +8632,7 @@ async function copyVerifiedVendorBackupToLocal(vmBackup, verification, metadata 
     const connection = await databaseBackupSshConnection();
     const streamed = await streamCommandToFile({
       command: "ssh",
-      args: [...connection.args, `cat -- ${shQuote(verifiedRemotePath)}`],
+      args: [...connection.args, `sudo -n cat -- ${shQuote(verifiedRemotePath)}`],
       outputPath: partialPath,
       expectedBytes: verification.size,
       timeoutMs: 60 * 60 * 1000
@@ -8940,7 +8952,7 @@ async function createDatabaseBackup(options = {}) {
       throw new Error(`The actual VM backup could not be copied locally: ${verificationError.message}`);
     }
     options.onStatus?.("Verified on VM", "The actual VM backup is verified. Copying that exact artifact to local storage next.");
-    const vmBackup = vmBackupParts(verification.identity.path, { vmBackupPath: verification.identity.path });
+    const vmBackup = vmBackupParts(verification.identity.path, { vmBackupPath: verification.identity.path, battlegroupId: operation.spec.battleGroup, vmYamlPath: parsed.vmPath ? `${parsed.vmPath}.yaml` : "" });
     const metadata = {
       ok: true,
       verified: true,

@@ -9213,7 +9213,7 @@ async function selectedBattlegroupDumpDir() {
 
 function battlegroupImportUploadPermissionMessage(remoteDir, detail = "") {
   const base = `The VM user cannot write directly to ${remoteDir}. AlphaNine staged the backup in /tmp, but could not promote it into the Battlegroup dump folder.`;
-  const hint = "Run the Suite as the VM admin path that has sudo access, or grant the dune user write access to the Battlegroup dump folder, then retry the import.";
+  const hint = "Configure the Suite's VM SSH connection with a user that has sudo access, or grant that VM user write access to the Battlegroup dump folder, then retry the import.";
   return [base, hint, detail].filter(Boolean).join(" ");
 }
 
@@ -9236,11 +9236,11 @@ async function promoteStagedImportFile(stagedPath, remotePath, remoteDir, label 
     "  exit 13",
     "fi",
     "rm -f \"$staged\""
-  ].join("; ");
+  ].join("\n");
   const result = await sshCommand(command, 120000, { maxBuffer: 1024 * 256 });
   if (!result.ok) {
     const detail = result.stderr || result.stdout || result.error || `Could not move staged ${label} into the Battlegroup dump folder.`;
-    const message = /__ALPHANINE_IMPORT_DIR_NOT_WRITABLE__|permission denied/i.test(detail)
+    const message = !/syntax error/i.test(detail) && /(?:^|\n)\s*__ALPHANINE_IMPORT_DIR_NOT_WRITABLE__\s*(?:\n|$)|permission denied/i.test(detail)
       ? battlegroupImportUploadPermissionMessage(remoteDir, detail)
       : detail;
     databaseBackupAudit("battlegroup_import_promote_failed", { ok: false, label, stagedPath, remotePath, remoteDir, error: message, details: detail.slice(0, 2000) });

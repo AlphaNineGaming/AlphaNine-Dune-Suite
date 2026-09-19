@@ -1,5 +1,7 @@
 # Release notes
 
+- [1.3.9 — VM Connections and Portal Live Give](RELEASE_NOTES_1.3.9.md)
+
 - [1.3.8 — Battlegroup Import Fix](RELEASE_NOTES_1.3.8.md)
 
 - [1.3.5 — Blueprint Designer](RELEASE_NOTES_1.3.5.md)

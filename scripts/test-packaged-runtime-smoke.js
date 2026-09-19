@@ -461,7 +461,7 @@ async function waitForUi() {
     assert(html.includes('getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:120000})'), "Packaged Server Updater UI deadline is not longer than bounded backend work.");
     assert(html.includes('id="server-health"'), "Packaged UI is missing the Server Health page.");
     assert(html.includes("Refresh Health"), "Packaged UI is missing manual Server Health refresh.");
-    assert(html.includes('getJson("/api/server-health",{timeoutMs:65000})'), "Packaged Server Health scan is missing its bounded UI deadline.");
+    assert(html.includes('getJson("/api/server-health",{timeoutMs:240000})'), "Packaged Server Health scan must allow its bounded queued checks to finish.");
     assert(html.includes("Preparing resource areas…"), "Packaged UI is missing the preparing state for Resource Areas.");
     assert(html.includes("Resource areas ready."), "Packaged UI is missing the ready state for Resource Areas.");
     assert(html.includes("No resource types selected."), "Packaged UI is missing the empty selection state for Resource Areas.");

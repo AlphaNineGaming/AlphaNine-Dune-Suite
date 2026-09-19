@@ -1,0 +1,22 @@
+const assert=require('assert/strict'),fs=require('fs'),vm=require('vm');
+const {createVmConnectionCache}=require('../lib/vm-connection-cache');
+(async()=>{
+ let now=0,reads=0,release;
+ let cache=createVmConnectionCache({now:()=>now,ttlMs:30,read:async()=>{reads++;return {host:'vm'};}});
+ await Promise.all([cache.get('a'),cache.get('a'),cache.get('a')]);assert.equal(reads,1);
+ now=29;await cache.get('a');assert.equal(reads,1);
+ now=30;await cache.get('a');assert.equal(reads,2);
+ await cache.get('changed-settings');assert.equal(reads,3);
+ cache.invalidate();await cache.get('changed-settings');assert.equal(reads,4);
+ let attempts=0;cache=createVmConnectionCache({read:async()=>{if(++attempts===1)throw Error('denied');return {};}});
+ await assert.rejects(cache.get('a'));await cache.get('a');assert.equal(attempts,2);
+ cache=createVmConnectionCache({read:()=>new Promise(r=>release=r)});
+ const old=cache.get('a');await Promise.resolve();const releaseOld=release;cache.invalidate();const fresh=cache.get('a');await Promise.resolve();release({host:'new'});await fresh;releaseOld({host:'old'});await old;assert.equal((await cache.get('a')).host,'new');
+ reads=0;cache=createVmConnectionCache({read:async()=>{reads++;return {cacheVerified:false};}});await cache.get('a');await cache.get('a');assert.equal(reads,2);
+ const source=fs.readFileSync(require('path').join(__dirname, '..', 'server.js'),'utf8');let invalidations=0,executions=0;
+ const ctx=vm.createContext({standardVmSshConnection:async()=>({args:[]}),vmConnectionCache:{invalidate:()=>invalidations++},run:async()=>{executions++;return {ok:false,error:'lost connection'};},runWithStdin:async()=>{executions++;return {ok:false};}});
+ vm.runInContext(source.slice(source.indexOf('async function sshCommand('),source.indexOf('const USER_GAME_INI_PATH')),ctx);
+ await ctx.sshCommand('mutation');assert.equal(executions,1);assert.equal(invalidations,1);
+ await ctx.sshCommand('import',100,{inputPath:'test'});assert.equal(executions,2);assert.equal(invalidations,2);
+ console.log('PASS connection cache: sharing, TTL, settings changes, invalidation, failed/unconfirmed discovery, old completion isolation; failed commands are never replayed');
+})().catch(e=>{console.error(e);process.exitCode=1;});

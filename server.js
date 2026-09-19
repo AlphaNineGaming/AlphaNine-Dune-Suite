@@ -1,4 +1,4 @@
-﻿const http = require("http");
+const http = require("http");
 const https = require("https");
 const net = require("net");
 const { execFile, spawn, spawnSync } = require("child_process");
@@ -6,6 +6,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { createVmStatusProbe } = require("./lib/vm-status-probe");
 const rewardNotifications = require("./lib/reward-notifications");
 const { assertCapturedDestinationBinding, publicProfileBinding, resolveProfileBinding, verifyProfileBinding } = require("./lib/profile-binding");
 // Resolve an explicit profile argument inside this process. This deliberately
@@ -2402,6 +2403,8 @@ async function checkGitHubUpdates(repo) {
   }
 }
 
+const { runHealthChecks, healthCommandResult } = require('./lib/health-check-runner');
+
 function run(command, args, options = {}) {
   return new Promise((resolve) => {
     execFile(command, args, {
@@ -2413,6 +2416,8 @@ function run(command, args, options = {}) {
         ok: !error,
         code: error && typeof error.code === "number" ? error.code : 0,
         signal: error?.signal || null,
+        killed: Boolean(error?.killed),
+        errorCode: error?.code || null,
         timedOut: Boolean(error?.killed && /timed out/i.test(String(error?.message || ""))),
         stdout: String(stdout || ""),
         stderr: String(stderr || ""),
@@ -2847,13 +2852,10 @@ function vmConfigFallback(reason = "") {
   };
 }
 
+const vmStatusProbe = createVmStatusProbe({ read: vmInfo, fallback: vmConfigFallback });
+
 async function vmInfoFast(timeoutMs = 5000) {
-  const result = await Promise.race([
-    vmInfo(),
-    timeoutAfter(timeoutMs, `Hyper-V status timed out after ${timeoutMs} ms.`)
-  ]);
-  if (result?.timeout) return vmConfigFallback(result.message);
-  return result;
+  return vmStatusProbe.get(configuredVmName(), timeoutMs);
 }
 
 async function backendElevationStatus() {
@@ -2976,6 +2978,17 @@ function appendVmAudit(action, result) {
 }
 
 async function vmAction(action) {
+  vmConnectionCache.invalidate();
+  vmStatusProbe.invalidate();
+  try {
+    return await vmActionUncached(action);
+  } finally {
+    vmConnectionCache.invalidate();
+    vmStatusProbe.invalidate();
+  }
+}
+
+async function vmActionUncached(action) {
   const allowed = new Set(["start", "stop", "restart"]);
   if (!allowed.has(action)) return { ok: false, error: "Unsupported VM action." };
   const vmName = configuredVmName();
@@ -3413,12 +3426,19 @@ async function vmConnectionMonitor() {
   };
 }
 
+const vmConnectionCache = require('./lib/vm-connection-cache').createVmConnectionCache({read: discoverVmSshConnection});
+
 async function standardVmSshConnection() {
+  // Changing any saved setting makes the old entry ineligible for reuse.
+  return vmConnectionCache.get(JSON.stringify(loadConfig()));
+}
+
+async function discoverVmSshConnection() {
   const sync = MAINTENANCE_BOOTSTRAP_RUNNER
     ? { config: loadConfig() }
     : await autoSyncVmIpFromHyperV().catch(() => ({ config: loadConfig() }));
   const cfg = sync.config || loadConfig();
-  const info = sync.vm || await vmInfo(cfg.vmName || configuredVmName());
+  const info = sync.vm || await vmStatusProbe.get(cfg.vmName || configuredVmName(), 45000);
   const ip = normalizeIpv4(info.ip) || cfg.sshHost || cfg.vmIp || cfg.receiverSshHost || "";
   if (!info.exists && !ip) throw new Error(info.error || "VM not found.");
   if (info.exists && info.state !== "Running") throw new Error("VM is not running.");
@@ -3433,7 +3453,7 @@ async function standardVmSshConnection() {
     "-i", key.path,
       `${user}@${ip}`
     ],
-    host: ip,
+    host: ip, cacheVerified: Boolean(info.ok && info.exists && info.state === "Running"),
     user,
     key: key.path
   };
@@ -3444,8 +3464,12 @@ async function sshCommand(command, timeout = 180000, options = {}) {
   try { connection = await standardVmSshConnection(); }
   catch (error) { return { ok: false, stdout: "", stderr: error.message, error: error.message }; }
   const args = [...connection.args, command];
-  if (options.inputPath) return runWithStdin("ssh", args, options.inputPath, { timeout, maxBuffer: options.maxBuffer });
-  return run("ssh", args, { timeout, maxBuffer: options.maxBuffer });
+  const result = options.inputPath
+    ? await runWithStdin("ssh", args, options.inputPath, { timeout, maxBuffer: options.maxBuffer })
+    : await run("ssh", args, { timeout, maxBuffer: options.maxBuffer });
+  if (!result.ok) vmConnectionCache.invalidate();
+  // Never automatically replay commands: they may already have changed the server.
+  return result;
 }
 
 const USER_GAME_INI_PATH = "/home/dune/.dune/download/scripts/setup/config/UserGame.ini";
@@ -3478,22 +3502,34 @@ async function updateLiveUserGameSettings(requestedValues, expectedContent) {
   return { ...current, ...result, message: result.changedFiles.length ? 'UserGame.ini settings saved and verified. Restart the battlegroup when ready.' : 'The requested settings are already saved.', restartRequired: result.changedFiles.length > 0 };
 }
 
-async function serverHealthRemoteCheck(command, timeout = 15000, maxBuffer = 1024 * 1024) {
+async function serverHealthRemoteCheck(command, timeout = 15000, maxBuffer = 1024 * 1024, connectionPromise = null) {
   const started = Date.now();
-  const result = await sshCommand(command, timeout, { maxBuffer }).catch((error) => ({
+  const execute = async () => {
+    if (!connectionPromise) return sshCommand(command, timeout, {maxBuffer});
+    const connection = await connectionPromise;
+    const args = connection.args.map(arg => arg === "LogLevel=QUIET" ? "LogLevel=ERROR" : arg);
+    return run("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", ...args, command], {timeout, maxBuffer});
+  };
+  const result = await execute().catch((error) => ({
     ok: false,
     stdout: "",
     stderr: "",
     error: error.message || String(error)
   }));
-  return { ...result, durationMs: Date.now() - started };
+  if (!result.ok) vmConnectionCache.invalidate();
+  return { ...healthCommandResult(result, timeout), durationMs: Date.now() - started };
 }
 
 async function runServerHealthScan() {
   const started = Date.now();
+  let connectionPromise;
+  const remoteCheck = (command, timeout, maxBuffer) => {
+    if (!connectionPromise) connectionPromise = standardVmSshConnection();
+    return serverHealthRemoteCheck(command, timeout, maxBuffer, connectionPromise);
+  };
   const checkedAt = new Date().toISOString();
   const selectedBattlegroup = normalizeSelectedBattlegroup(loadConfig().selectedBattlegroup);
-  const kubectlJson = (resource, timeout = 15000) => serverHealthRemoteCheck(
+  const kubectlJson = (resource, timeout = 15000) => remoteCheck(
     `sudo kubectl get ${resource} -A -o json --request-timeout=10s`,
     timeout
   );
@@ -3523,23 +3559,23 @@ async function runServerHealthScan() {
     database,
     receiver,
     marketBot
-  ] = await Promise.all([
-    safe(vmInfoFast(6000), { exists: false, state: "Unknown" }),
-    serverHealthRemoteCheck("printf 'ALPHANINE_HEALTH_SSH_OK\\n'", 10000, 4096),
-    serverHealthRemoteCheck("sudo kubectl version -o json --request-timeout=7s", 12000),
-    kubectlJson("nodes", 15000),
-    kubectlJson("namespaces", 15000),
-    kubectlJson("pods", 20000),
-    kubectlJson("deployments,statefulsets,daemonsets", 20000),
-    kubectlJson("services,endpoints", 20000),
-    kubectlJson("persistentvolumeclaims", 15000),
-    serverHealthRemoteCheck("sudo kubectl get events -A --field-selector type=Warning -o json --request-timeout=10s", 20000),
-    serverHealthRemoteCheck("sudo kubectl top nodes --no-headers --request-timeout=7s", 12000, 1024 * 256),
-    serverHealthRemoteCheck("sudo kubectl top pods -A --containers --no-headers --request-timeout=10s", 15000, 1024 * 512),
-    serverHealthRemoteCheck(hostMetricsCommand, 12000, 1024 * 64),
-    safe(databaseHealthSnapshot(8000), { ok: false, status: "unavailable", message: "Database health check failed." }),
-    safe(receiverStatus(), { ok: false, status: "Offline", lastError: "Receiver status is unavailable." }),
-    safe(marketBotStatus(), { installed: false, status: "Unknown", message: "Market Bot status is unavailable." })
+  ] = await runHealthChecks([
+    () => safe(vmInfoFast(6000), { exists: false, state: "Unknown" }),
+    () => remoteCheck("printf 'ALPHANINE_HEALTH_SSH_OK\\n'", 10000, 4096),
+    () => remoteCheck("sudo kubectl version -o json --request-timeout=7s", 12000),
+    () => kubectlJson("nodes", 15000),
+    () => kubectlJson("namespaces", 15000),
+    () => remoteCheck("sudo kubectl get pods -A --field-selector=status.phase!=Succeeded -o json --request-timeout=30s", 40000, 16 * 1024 * 1024),
+    () => kubectlJson("deployments,statefulsets,daemonsets", 20000),
+    () => kubectlJson("services,endpoints", 20000),
+    () => kubectlJson("persistentvolumeclaims", 15000),
+    () => remoteCheck("sudo kubectl get events -A --field-selector type=Warning -o json --request-timeout=10s", 20000),
+    () => remoteCheck("sudo kubectl top nodes --no-headers --request-timeout=7s", 12000, 1024 * 256),
+    () => remoteCheck("sudo kubectl top pods -A --containers --no-headers --request-timeout=10s", 15000, 1024 * 512),
+    () => remoteCheck(hostMetricsCommand, 12000, 1024 * 64),
+    () => safe(databaseHealthSnapshot(20000), { ok: false, status: "unavailable", message: "Database health check failed." }),
+    () => safe(receiverStatus(), { ok: false, status: "Offline", lastError: "Receiver status is unavailable." }),
+    () => safe(marketBotStatus(), { installed: false, status: "Unknown", message: "Market Bot status is unavailable." })
   ]);
   return buildServerHealthReport({
     checkedAt,
@@ -5380,7 +5416,7 @@ function syncedVmIpConfig(cfg, detectedIp) {
 async function autoSyncVmIpFromHyperV(options = {}) {
   const cfg = loadConfig();
   if (!isLocalHyperVConfig(cfg)) return { ok: true, synced: false, config: cfg, reason: "not-local-hyperv" };
-  const vm = await vmInfo(cfg.vmName || configuredVmName()).catch((error) => ({ ok: false, error: error.message }));
+  const vm = await vmStatusProbe.get(cfg.vmName || configuredVmName(), 45000).catch((error) => ({ ok: false, error: error.message }));
   const detectedIp = normalizeIpv4(vm?.ip);
   if (!detectedIp) return { ok: false, synced: false, config: cfg, vm, error: vm?.error || "Hyper-V did not report a VM IPv4 address." };
   const savedFields = {
@@ -14136,6 +14172,16 @@ function adminProbeUnavailable(error, transportOverride = null) {
     error: error?.message || "Admin probe failed.",
     note: `Database/admin probe is offline: ${error?.message || "unknown error"}`
   };
+}
+
+function portalLiveGiveStatus(transport) {
+  // Whitelist response fields: never expose URLs, credentials, paths or raw errors.
+  const mode = ["http-json", "rabbitmq-http"].includes(transport.mode) ? transport.mode : "dry-run";
+  const configured = Boolean(transport.configured);
+  const reachable = Boolean(transport.reachable) && (!transport.statusCode || (transport.statusCode >= 200 && transport.statusCode < 300));
+  const liveGiveAvailable = configured && reachable;
+  const message = liveGiveAvailable ? "Live Give transport is configured and reachable." : "Live Give transport is unavailable. Check receiver configuration in the local Suite.";
+  return {ok:true, liveGiveAvailable, message, giveTransport:{mode, configured, reachable, reason:liveGiveAvailable ? "" : message}};
 }
 
 async function liveGiveEnvStatus() {
@@ -25218,8 +25264,8 @@ function renderServerHealth(data){
   const checked=data.checkedAt?new Date(data.checkedAt).toLocaleString():"Unknown";
   document.getElementById("serverHealthStamp").textContent="Checked "+checked+" in "+Math.round(Number(data.durationMs||0)/1000)+"s"+(data.selectedServer&&data.selectedServer.namespace?" • "+data.selectedServer.namespace:"");
   document.getElementById("serverHealthReasons").innerHTML=(data.reasons||[]).length?data.reasons.map(function(reason){return '<div>• '+esc(reason)+'</div>';}).join(""):'<span class="subtle">No health problems detected.</span>';
-  const summary=data.summary||{},summaryRows=[["Nodes",summary.nodes],["Namespaces",summary.namespaces],["Pods",summary.pods],["Containers",(summary.readyContainers||0)+"/"+(summary.containers||0)],["Restarts",summary.restarts],["Warnings",summary.recentWarnings]];
-  document.getElementById("serverHealthSummary").innerHTML=summaryRows.map(function(row){return '<div class="health-summary-card"><span class="micro">'+esc(row[0])+'</span><strong>'+esc(row[1]??0)+'</strong></div>';}).join("");
+  const summary=data.summary||{},summaryRows=[["Nodes",summary.nodes],["Namespaces",summary.namespaces],["Pods (excluding completed)",summary.pods],["Containers",summary.podInventoryAvailable===false?"Unknown":(summary.readyContainers||0)+"/"+(summary.containers||0)],["Restarts",summary.restarts],["Warnings",summary.recentWarnings]];
+  document.getElementById("serverHealthSummary").innerHTML=summaryRows.map(function(row){return '<div class="health-summary-card"><span class="micro">'+esc(row[0])+'</span><strong>'+esc(row[1]??"Unknown")+'</strong></div>';}).join("");
   const connectivity=data.connectivity||{};
   document.getElementById("serverHealthConnectivity").innerHTML=[
     serverHealthCard("Hyper-V VM",connectivity.hyperv),
@@ -25252,8 +25298,8 @@ function renderServerHealth(data){
   const pvcRows=((data.storage&&data.storage.pvcs)||[]).map(function(pvc){return '<tr data-state="'+esc(pvc.state)+'"><td>'+serverHealthBadge(pvc.state)+'</td><td>'+esc(pvc.namespace)+'</td><td><strong>'+esc(pvc.name)+'</strong></td><td>'+esc(pvc.phase)+'</td><td>'+esc(pvc.capacity||pvc.requested||"Unknown")+'</td><td>'+esc(pvc.storageClass||"Default")+'</td><td>'+esc(pvc.volume||"Pending")+'</td></tr>';});
   document.getElementById("serverHealthStorage").innerHTML=serverHealthTable(["State","Namespace","Claim","Phase","Capacity","Class","Volume"],pvcRows);
   const warnings=data.warnings||[];
-  document.getElementById("serverHealthWarnings").innerHTML=warnings.length?warnings.map(function(event){const recovered=event.active===false;return '<div class="health-warning'+(recovered?' recovered':'')+'"><strong>'+esc(recovered?"Recovered":event.reason)+'</strong><span class="micro">'+esc(event.age)+" • "+esc(event.namespace)+"/"+esc(event.objectName)+(recovered?" • "+esc(event.reason):"")+'</span><div>'+esc(event.message)+'</div></div>';}).join(""):'<div class="empty">No relevant warning events.</div>';
-  const checkRows=(data.checks||[]).map(function(check){const state=check.ok?"Healthy":(check.optional?"Unknown":"Unhealthy");return '<tr data-state="'+state+'"><td>'+serverHealthBadge(state)+'</td><td><strong>'+esc(check.label)+'</strong>'+(check.optional?' <span class="micro">optional</span>':'')+'</td><td>'+esc(check.durationMs===null?"--":check.durationMs+" ms")+'</td><td class="'+(check.optional&&!check.ok?"health-unavailable":"health-reason")+'">'+esc(check.ok?"Completed":(check.optional?"Unavailable":check.error||"Failed"))+'</td></tr>';});
+  document.getElementById("serverHealthWarnings").innerHTML=warnings.length?warnings.map(function(event){const recovered=event.active===false;return '<div class="health-warning'+(recovered?' recovered':'')+'"><strong>'+esc(recovered?"Recovered":event.reason)+'</strong><span class="micro">'+esc(event.age)+" • "+esc(event.namespace)+"/"+esc(event.objectName)+(recovered?" • "+esc(event.reason):"")+'</span><div>'+esc(event.message)+'</div></div>';}).join(""):'<div class="empty">'+(data.inventoryAvailability&&data.inventoryAvailability.events===false?'Warning event check unavailable.':'No relevant warning events.')+'</div>';
+  const checkRows=(data.checks||[]).map(function(check){const state=check.ok?"Healthy":"Unknown";return '<tr data-state="'+state+'"><td>'+serverHealthBadge(state)+'</td><td><strong>'+esc(check.label)+'</strong>'+(check.optional?' <span class="micro">optional</span>':'')+'</td><td>'+esc(check.durationMs===null?"--":check.durationMs+" ms")+'</td><td class="'+(check.optional&&!check.ok?"health-unavailable":"health-reason")+'">'+esc(check.ok?"Completed":(check.error||"Unavailable"))+'</td></tr>';});
   document.getElementById("serverHealthChecks").innerHTML=serverHealthTable(["State","Check","Duration","Result"],checkRows);
 }
 async function refreshServerHealth(){
@@ -25261,7 +25307,7 @@ async function refreshServerHealth(){
   const button=document.getElementById("serverHealthRefreshButton");
   if(button){button.disabled=true;button.textContent="Scanning…";}
   document.getElementById("serverHealthStamp").textContent="Running bounded read-only checks…";
-  serverHealthRefreshInFlight=(async function(){try{const data=await getJson("/api/server-health",{timeoutMs:65000});renderServerHealth(data);return data;}catch(error){const state=document.getElementById("serverHealthState");state.textContent="Unknown";state.className="health-state unknown";document.getElementById("serverHealthStamp").textContent="Health scan failed.";document.getElementById("serverHealthReasons").textContent=betterError(error);}finally{serverHealthRefreshInFlight=null;if(button){button.disabled=false;button.textContent="Refresh Health";}}})();
+  serverHealthRefreshInFlight=(async function(){try{const data=await getJson("/api/server-health",{timeoutMs:240000});renderServerHealth(data);return data;}catch(error){const state=document.getElementById("serverHealthState");state.textContent="Unknown";state.className="health-state unknown";document.getElementById("serverHealthStamp").textContent="Health scan failed.";document.getElementById("serverHealthReasons").textContent=betterError(error);}finally{serverHealthRefreshInFlight=null;if(button){button.disabled=false;button.textContent="Refresh Health";}}})();
   return serverHealthRefreshInFlight;
 }
 function syncServerHealthAutoRefresh(){
@@ -25814,8 +25860,9 @@ function relativeTime(value){if(!value)return"";const date=new Date(value);if(Nu
 function renderPlayerFeed(players){const wrap=document.getElementById("playerFeed");if(!wrap)return;if(!players.length){wrap.innerHTML='<div class="empty">No players discovered yet.</div>';return;}wrap.innerHTML=players.map(p=>{const status=["online","offline","unknown"].includes(p.status)?p.status:"unknown";const level=p.level?"Level "+esc(p.level):"Level: Unknown";const id=p.character_id||p.player_controller_id||p.account_id||p.id||"";const offline=status==="offline"&&p.last_seen?(" - Last seen "+relativeTime(p.last_seen)):"";const statusText=status.charAt(0).toUpperCase()+status.slice(1)+offline;return '<div class="feed-row"><span class="feed-dot '+esc(status)+'"></span><div class="feed-name"><strong>'+esc(p.name||p.character_name||p.account_id||"Unknown")+'</strong><div class="feed-id">'+(id?"ID "+esc(id):"ID unavailable")+'</div></div><div class="feed-level">'+level+'</div><div class="feed-status '+esc(status)+'">'+esc(statusText)+'</div></div>';}).join("");}
 async function refreshPlayerFeed(){const stamp=document.getElementById("playerFeedStamp");try{const data=await getJson("/api/players/feed");renderPlayerFeed(data.players||[]);if(stamp)stamp.textContent="Updated "+new Date().toLocaleTimeString();}catch(e){const wrap=document.getElementById("playerFeed");if(wrap)wrap.innerHTML='<div class="empty">'+esc(betterError(e))+'</div>';if(stamp)stamp.textContent="Feed error";}}
 function vmDisplayStatus(vm){const raw=String(vm?.state||vm?.status||vm?.label||"").trim().toLowerCase();if(["running","started","online","healthy"].includes(raw))return"Running";if(["off","stopped","saved","offline"].includes(raw))return"Offline";if(vm?.errorCode==="vm_not_found")return"VM not found";if(vm?.errorCode==="hyperv_module_unavailable"||vm?.hyperv?.code==="hyperv_module_unavailable")return"Hyper-V module unavailable";if(vm?.errorCode==="access_denied")return vm?.needsAdmin?"Admin required":"Hyper-V blocked";return raw&&raw!=="unknown"?String(vm.state||vm.status||vm.label):"Unknown";}
-function renderVmStatus(vm){const status=vmDisplayStatus(vm);tone("vm",status);tone("dashboardVmStatus",status);setText("vmControlStatus",status);}
-function vmDisplayMessage(data){const vm=data?.vm||data||{};const status=vmDisplayStatus(vm);return vm?.error?status+": "+vm.error:status;}
+let vmStatusView={name:"",startedAt:-1,lastConfirmed:null,status:"Unknown"};
+function renderVmStatus(vm){const name=String(vm?.name||appConfig?.vmName||"");if(name!==vmStatusView.name)vmStatusView={name,startedAt:-1,lastConfirmed:null,status:"Unknown"};const startedAt=Number.isFinite(vm?.statusProbeStartedAtMs)?vm.statusProbeStartedAtMs:Date.now();if(startedAt<vmStatusView.startedAt||(startedAt===vmStatusView.startedAt&&vm?.readPending===true&&vmStatusView.completed))return false;vmStatusView.startedAt=startedAt;const pending=vm?.readPending===true;vmStatusView.completed=!pending;let status=vmDisplayStatus(vm);if(pending){status=vmStatusView.lastConfirmed?"Checking (last: "+vmStatusView.lastConfirmed.status+")":"Checking";}else{vmStatusView.lastConfirmed=vm?.ok&&vm?.exists&&status!=="Unknown"?{status,checkedAt:vm.checkedAtMs||Date.now()}:null;}vmStatusView.status=status;tone("vm",status);tone("dashboardVmStatus",status);setText("vmControlStatus",status);setText("vmControlLog",vmDisplayMessage({vm}));return true;}
+function vmDisplayMessage(data){const vm=data?.vm||data||{};const status=vm?.readPending?vmStatusView.status:vmDisplayStatus(vm);const previous=vm?.readPending&&vmStatusView.lastConfirmed?" Last confirmed at "+new Date(vmStatusView.lastConfirmed.checkedAt).toLocaleTimeString()+".":"";return(vm?.error?status+": "+vm.error:status)+previous;}
 function databaseHealthLabel(data){const health=data?.databaseHealth;if(health&&health.ok)return"DB reachable";if(health&&health.status==="unavailable")return"DB unavailable";const summary=data?.status?.summary||{};return summary.database||"Unknown";}
 let sietchRows=[];
 function sietchOptionLabel(row){return (row.label||"(unnamed)")+" / "+(row.map||"Unknown map")+" / D"+(row.dimensionIndex||"0")+" / #"+(row.partitionId||"--");}
@@ -25839,7 +25886,7 @@ function renderPingGraph(history){const graph=document.getElementById("vmPingGra
 async function refreshVmMonitorPoll(){try{const data=await getJson("/api/vm-monitor",{timeoutMs:45000});clearIndicatorDelay("vm-monitor");const kind=monitorKindClass(data.kind);setText("vmMonitorStatus",data.status||"Unknown");setText("vmMonitorAddress",data.vm?.address||"Unknown");setText("vmMonitorHost",data.vm?.hostname||"Unknown");setText("vmUptime",data.vm?.uptime||"Unknown");setText("vmHealthScore",Number.isFinite(Number(data.healthScore))?Math.round(Number(data.healthScore))+"%":"--");setText("vmPingCurrent",monitorMs(data.latency?.current));setText("vmPingAverage",monitorMs(data.latency?.average));setText("vmPingMin",monitorMs(data.latency?.min));setText("vmPingMax",monitorMs(data.latency?.max));setText("vmMonitorStamp","Last check "+new Date(data.checkedAt||Date.now()).toLocaleTimeString());setText("vmLastSuccess",data.lastSuccessfulConnection&&data.lastSuccessfulConnection!=="None yet"?new Date(data.lastSuccessfulConnection).toLocaleString():data.lastSuccessfulConnection||"None yet");["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card "+kind;});const ports=data.ports||[];const services=data.services||{};document.getElementById("vmPortList").innerHTML=renderMonitorRows(ports);document.getElementById("vmServiceList").innerHTML=renderServiceRows(services);document.getElementById("vmPortDetailList").innerHTML=ports.length?ports.map(row=>{const info=[row.source||"",row.detail||"",row.responseMs!=null?monitorMs(row.responseMs):(row.error||"")].filter(Boolean).join(" / ")||"Discovered";return '<div>'+esc(row.label)+": "+esc(monitorStatusLabel(row))+" / "+esc(info)+'</div>';}).join(""):'<div>No configured ports.</div>';document.getElementById("vmErrorList").innerHTML=(data.lastErrors||[]).length?data.lastErrors.map(error=>'<div>'+esc(error)+'</div>').join(""):'<div>No recent connection errors.</div>';renderPingGraph(data.latency?.history||[]);badge("topSsh",services.ssh?.reachable?"SSH reachable":"SSH offline");addActivity("vm","VM connection monitor",(data.status||"Unknown")+" / "+Math.round(Number(data.healthScore)||0)+"%");return data;}catch(e){if(isIndicatorPollDelay(e)){const message="VM monitor check delayed; keeping the last confirmed indicators.";setText("vmMonitorStatus","Check delayed");setText("vmMonitorStamp",message);["vmStatusCard","vmLatencyCard"].forEach(id=>{const el=document.getElementById(id);if(el)el.className="vm-status-card warn";});reportIndicatorDelay("vm-monitor","VM monitor delayed",message);return{ok:false,delayed:true,error:betterError(e)};}setText("vmMonitorStatus","Monitor error");setText("vmMonitorStamp",betterError(e));const card=document.getElementById("vmStatusCard");if(card)card.className="vm-status-card bad";addActivity("error","VM monitor failed",e.message);return{ok:false,error:betterError(e)};}}
 function refreshVmMonitor(){if(vmMonitorRefreshInFlight)return vmMonitorRefreshInFlight;vmMonitorRefreshInFlight=refreshVmMonitorPoll().finally(()=>{vmMonitorRefreshInFlight=null;});return vmMonitorRefreshInFlight;}
 function betterError(e){const candidates=[e?.reason,e?.apiResponse?.reason,e?.error,e?.apiResponse?.error,e?.message,e];const message=candidates.find(value=>typeof value==="string"&&value.trim()&&value.trim()!=="[object Object]");return message?message.trim():"Command failed. Check that the suite is running as Administrator and the Dune VM is reachable.";}
-async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status",{timeoutMs:30000});renderVmStatus(data.vm);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
+async function refreshVmStatus(){const log=document.getElementById("vmControlLog");try{const data=await getJson("/api/vm/status",{timeoutMs:30000});const rendered=renderVmStatus(data.vm);if(rendered!==false&&log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM status refreshed",data.vm?.state||data.status||"Unknown");return data;}catch(e){renderVmStatus({state:"Error"});if(log)log.textContent=betterError(e);addActivity("error","VM status failed",e.message);return null;}}
 async function runVmAction(action){const log=document.getElementById("vmControlLog");try{if((action==="stop"||action==="restart")&&!(await appConfirm("Confirm VM action","Are you sure you want to "+action+" the VM?","Run "+action,"Cancel")))return;if(log)log.textContent="Running VM "+action+"...";addActivity("vm","Running VM "+action);const data=await getJson("/api/vm/"+action+(action==="start"?"?wait=1":""),{method:"POST",timeoutMs:120000});renderVmStatus(data.vm||data);if(log)log.textContent=vmDisplayMessage(data);addActivity("vm","VM "+action+" completed",data.vm?.state||data.status||data.error||"");playUiSound(data.ok?"success":"warning");setTimeout(()=>{refresh();refreshVmMonitor();},1200);return data;}catch(e){if(log)log.textContent=betterError(e);addActivity("error","VM "+action+" failed",e.message);playUiSound("warning");return null;}}
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const actionTimeouts=${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)},data=await getJson("/api/action/"+action,{method:"POST",timeoutMs:actionTimeouts[action]||180000});let output=data.stdout||data.stderr||data.error||"Done.";if(action==="backup"&&data.ok){output="Actual VM backup copied and verified locally.\\nVM source: "+(data.vmBackupPath||data.vmPath||"--")+"\\nLocal copy: "+(data.localBackupPath||data.filePath||"--")+"\\nSHA-256: "+(data.sha256||"--")+"\\nSize: "+(data.size||data.file?.size||"--")+" bytes\\nMetadata: "+(data.localMetadataPath||"--");}if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
@@ -25916,7 +25963,7 @@ function renderEnvSetup(data=null){if(data?.activeRuntimeConfig)liveGiveEnvDiagn
 async function restartReceiverWithCurrentConfig(){const box=document.getElementById("envReceiverTokenWarning");try{if(box){box.classList.remove("hidden");box.textContent="Restarting receiver with current configuration...";}const data=await getJson("/api/receiver/restart",{method:"POST"});if(box)box.textContent=data.message||"Receiver restart requested.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
 async function regenerateReceiverToken(){const box=document.getElementById("envReceiverTokenWarning");try{if(!(await appConfirm("Regenerate receiver token","Regenerate the receiver token and restart the managed receiver?","Regenerate","Cancel")))return;if(box){box.classList.remove("hidden");box.textContent="Regenerating receiver token...";}const data=await getJson("/api/receiver/token/regenerate",{method:"POST"});if(box)box.textContent=data.message||"Receiver token regenerated.";await refreshReceiverStatus();await refreshLiveGiveEnv();playUiSound(data.ok?"success":"warning");}catch(e){if(box){box.classList.remove("hidden");box.textContent=betterError(e);}playUiSound("warning");}}
 function syncLiveGiveTransportStatus(){const el=document.getElementById("liveGiveTransportStatus");const transport=liveGiveTransport?.mode||"dry-run";if(el){el.textContent=adminLiveGiveAvailable?("Transport: "+transport+" / Live Give Available. Result will be published/queued unless inventory verification confirms it."):("Transport: "+transport+" / "+(liveGiveUnavailableMessage||"Live Give Unavailable."));el.className=(adminLiveGiveAvailable?"empty mt":"warning mt")+" advanced-status";}const mode=document.getElementById("liveGiveMode");if(mode){const liveOption=[...mode.options].find(o=>o.value==="execute");if(liveOption)liveOption.disabled=!adminLiveGiveAvailable;if(!adminLiveGiveAvailable&&mode.value==="execute")mode.value="dry-run";}renderEnvSetup();syncGiveItemControls();}
-async function refreshLiveGiveEnv(){try{const data=await getJson("/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
+async function refreshLiveGiveEnv(){try{const data=await getJson(location.protocol==="https:"?"/api/live-give/status":"/api/live-give/env");adminLiveGiveAvailable=Boolean(data.liveGiveAvailable);liveGiveTransport=data.giveTransport||null;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(data.message||liveGiveTransportMessage(liveGiveTransport||data));syncLiveGiveTransportStatus();renderEnvSetup(data);badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");}catch(e){adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(e);syncLiveGiveTransportStatus();renderEnvSetup();}}
 function renderDatabaseTunnelStatus(data){const tunnel=data?.tunnel||data||{};const status=tunnel.running?"Running":(tunnel.localTunnelExpected===false?"Direct DB":(tunnel.state==="starting"?"Starting":(tunnel.state==="failed"?"Failed":"Not Running")));tone("dbTunnelStatus",status);setText("dbTunnelDetail","Port: "+(tunnel.port||15432)+" / PID: "+(tunnel.pid||tunnel.startedPid||"--")+(tunnel.lastError?" / "+tunnel.lastError:""));setText("dbTunnelStatusDetail",status);setText("dbTunnelPort",tunnel.port||15432);setText("dbTunnelPid",tunnel.pid||tunnel.startedPid||"--");setText("settingsDbTunnelStatus",status);setText("settingsDbTunnelPort",tunnel.port||15432);setText("settingsDbTunnelPid",tunnel.pid||tunnel.startedPid||"--");}
 function renderDatabaseStatus(data){tone("dbMgmtStatus",data?.ok?"Online":(data?.status||"Unavailable"));setText("dbMgmtStatusDetail",data?.ok?("Uptime "+(data.uptime||"unknown")+" / "+(data.durationMs||0)+" ms"):(data?.message||data?.error||"Database unavailable."));tone("dbMgmtSize",data?.size||"--");tone("dbMgmtConnections",data?.ok?((data.connections||"0")+" / "+(data.activeQueries||"0")):"--");if(data?.tunnel)renderDatabaseTunnelStatus(data.tunnel);badge("topDb",data?.ok?"DB reachable":"DB unavailable");}
 function renderDatabaseLocation(data){const folder=data?.folder||"";setText("dbBackupPath",folder||"Unknown");setText("dbBackupDefaultPath",data?.defaultFolder||"Unknown");tone("dbMgmtBackupFolderState",folder?"Configured":"Missing");}
@@ -26403,7 +26450,7 @@ function syncGiveItemResultFromLog(){if(!document.getElementById("give")?.classL
 function wireGiveItemResult(){const source=document.getElementById("adminLog");if(!source||source.dataset.giveResultWired)return;source.dataset.giveResultWired="true";new MutationObserver(syncGiveItemResultFromLog).observe(source,{childList:true,characterData:true,subtree:true});syncGiveItemResultFromLog();}
 function setGiveServerStatus(message,kind){const el=document.getElementById("liveGiveServerStatus");if(!el)return;el.textContent=message;el.className=(kind==="ok"?"empty mt":"warning mt")+" advanced-status";}
 function syncGiveItemControls(){const give=document.getElementById("adminGiveButton");const add=document.getElementById("addGiveQueueButton");const queue=document.getElementById("giveQueueButton");const retry=document.getElementById("retryGiveQueueButton");const start=document.getElementById("liveGiveStartServerButton");const mode=document.getElementById("liveGiveMode")?.value||"dry-run";const storageMode=document.getElementById("giveDestination")?.value==="storage";const usesDbGrade=Number(document.getElementById("adminQuality")?.value||0)>0;const usesDbDurability=selectedGiveDurability().applied;const usesDirectDbUnlock=isTechKnowledgeItem(selectedAdminItem)||isRecipeSchematicItem(selectedAdminItem);const blocked=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||(!storageMode&&mode==="execute"&&!usesDbGrade&&!usesDbDurability&&!usesDirectDbUnlock&&!adminLiveGiveAvailable);if(give)give.disabled=blocked||(storageMode&&!selectedGiveStorage());if(add){add.disabled=storageMode||liveGiveBusy||!selectedAdminItem;add.title=storageMode?"Give Queue currently targets player inventory only.":"Add selected item to Give Queue";}if(queue)queue.disabled=storageMode||blocked||!giveQueue.length;if(retry)retry.disabled=storageMode||blocked||!lastGiveQueueFailedItems.length;if(start)start.disabled=liveGiveBusy||liveGiveServerChecking||liveGiveServerStarting||liveGiveServerOnline;}
-async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const receiver=await getJson("/api/receiver/status",{timeoutMs:5000});liveGiveServerOnline=Boolean(receiver.ok);adminLiveGiveAvailable=Boolean(receiver.ok);liveGiveTransport={mode:"http-json",configured:Boolean(receiver.ok),reachable:Boolean(receiver.ok),target:receiver.giveUrl||"",reason:receiver.ok?"":(receiver.reason||receiver.error||"Receiver is offline.")};liveGiveUnavailableMessage=receiver.ok?"":liveGiveTransportMessage(liveGiveTransport);setGiveServerStatus(receiver.ok?"Server Status: Online. Give Item receiver is available.":"Server Status: Offline. "+(receiver.reason||receiver.error||"Receiver is offline."),receiver.ok?"ok":"warn");syncLiveGiveTransportStatus();return receiver;}catch(receiverError){try{const env=await getJson("/api/live-give/env",{timeoutMs:8000});adminLiveGiveAvailable=Boolean(env.liveGiveAvailable);liveGiveTransport=env.giveTransport||liveGiveTransport;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(env.message||liveGiveTransportMessage(liveGiveTransport||env));liveGiveServerOnline=adminLiveGiveAvailable||Boolean(env.giveTransport?.reachable);setGiveServerStatus(liveGiveServerOnline?(adminLiveGiveAvailable?"Server Status: Online. Give Item is available.":"Server Status: Receiver online. Live Give transport is limited."):"Server Status: Offline. "+(liveGiveUnavailableMessage||env.error||"Start the server before using Give Item."),liveGiveServerOnline?"ok":"warn");syncLiveGiveTransportStatus();return env;}catch(envError){liveGiveServerOnline=false;adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(receiverError)+" / "+betterError(envError);setGiveServerStatus("Server Status: Offline. "+liveGiveUnavailableMessage,"warn");syncLiveGiveTransportStatus();return null;}}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
+async function checkGiveItemServerStatus(){liveGiveServerChecking=true;syncGiveItemControls();setGiveServerStatus("Server Status: Checking","warn");try{const receiver=await getJson("/api/receiver/status",{timeoutMs:5000});liveGiveServerOnline=Boolean(receiver.ok);adminLiveGiveAvailable=Boolean(receiver.ok);liveGiveTransport={mode:"http-json",configured:Boolean(receiver.ok),reachable:Boolean(receiver.ok),target:receiver.giveUrl||"",reason:receiver.ok?"":(receiver.reason||receiver.error||"Receiver is offline.")};liveGiveUnavailableMessage=receiver.ok?"":liveGiveTransportMessage(liveGiveTransport);setGiveServerStatus(receiver.ok?"Server Status: Online. Give Item receiver is available.":"Server Status: Offline. "+(receiver.reason||receiver.error||"Receiver is offline."),receiver.ok?"ok":"warn");syncLiveGiveTransportStatus();return receiver;}catch(receiverError){try{const env=await getJson("/api/live-give/status",{timeoutMs:8000});adminLiveGiveAvailable=Boolean(env.liveGiveAvailable);liveGiveTransport=env.giveTransport||liveGiveTransport;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":(env.message||liveGiveTransportMessage(liveGiveTransport||env));liveGiveServerOnline=adminLiveGiveAvailable||Boolean(env.giveTransport?.reachable);setGiveServerStatus(liveGiveServerOnline?(adminLiveGiveAvailable?"Server Status: Online. Give Item is available.":"Server Status: Receiver online. Live Give transport is limited."):"Server Status: Offline. "+(liveGiveUnavailableMessage||env.error||"Start the server before using Give Item."),liveGiveServerOnline?"ok":"warn");syncLiveGiveTransportStatus();return env;}catch(envError){liveGiveServerOnline=false;adminLiveGiveAvailable=false;liveGiveUnavailableMessage=betterError(receiverError)+" / "+betterError(envError);setGiveServerStatus("Server Status: Offline. "+liveGiveUnavailableMessage,"warn");syncLiveGiveTransportStatus();return null;}}finally{liveGiveServerChecking=false;syncGiveItemControls();}}
 async function startGiveItemTool(){const mode=document.getElementById("liveGiveMode");if(mode)mode.value="execute";liveGiveBusy=false;liveGiveServerStarting=false;renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncGiveDestination();syncGiveDurabilityOption();syncGiveItemControls();await Promise.all([refreshGivePlayersFast(),refreshGiveItemsFast(),checkGiveItemServerStatus(),loadLatestStorageDepositReceipt(),loadLatestGiveItemReceipt()]);syncGiveDurabilityOption();syncLiveGiveMode();}
 async function startServerForGiveItem(){const log=document.getElementById("adminLog");if(liveGiveBusy||liveGiveServerStarting)return;try{liveGiveServerStarting=true;syncGiveItemControls();setGiveServerStatus("Server Status: Starting Server","warn");if(log)log.textContent="Starting server. Give Item remains disabled until the server is online.";addActivity("server","Starting server","Give Item remains blocked until online.");const data=await getJson("/api/action/start",{method:"POST",timeoutMs:${SERVER_MANAGEMENT_UI_TIMEOUTS.start}});if(!data.ok)throw new Error(data.stderr||data.stdout||data.error||"Server start failed.");if(log)log.textContent="Server start requested. Checking status...\\n"+(data.stdout||data.stderr||"");playUiSound("success");}catch(e){if(log)log.textContent="Server start failed. Give Item remains disabled.\\n"+betterError(e);addActivity("error","Server start failed",e.message);playUiSound("warning");}finally{liveGiveServerStarting=false;await checkGiveItemServerStatus();}}
 function giveItemExecutionStatus(data,usesDbGrade=false){
@@ -26558,7 +26605,7 @@ const REMOTE_LOCAL_ONLY_PREFIXES = [
   "/api/market-automator/logs", "/api/director", "/api/database-browser/", "/api/server-migration/", "/api/migration-maintenance", "/api/migration-offline", "/manager-api/"
 ];
 const REMOTE_VIEWER_GET_PATHS = new Set([
-  "/api/status", "/api/vm-monitor", "/api/server-update/check", "/api/scheduler", "/api/receiver/status",
+  "/api/live-give/status", "/api/status", "/api/vm-monitor", "/api/server-update/check", "/api/scheduler", "/api/receiver/status",
   "/api/battlegroups", "/api/battlegroups/selected", "/api/database/status", "/api/database/tunnel/status", "/api/database/backups",
   "/api/maps", "/api/world-map/metadata", "/api/live-map/markers", "/api/live-map/entities", "/api/live-map/players",
   "/api/live-map/vehicles", "/api/live-map/bases", "/api/live-map/teleport/presets", "/api/live-map/teleport/status", "/api/live-map/resource-areas/status",
@@ -27798,6 +27845,11 @@ async function route(req, res) {
     } catch (error) {
       await json(res, { ok: false, error: error.message }, /not found/i.test(error.message) ? 404 : 500);
     }
+    return;
+  }
+  if (url.pathname === "/api/live-give/status" && req.method === "GET") {
+    try { await json(res, portalLiveGiveStatus(await checkGiveTransport())); }
+    catch { await json(res, {ok:false, liveGiveAvailable:false, message:"Live Give status check failed. Try again or check the local Suite."}, 503); }
     return;
   }
   if (url.pathname === "/api/live-give/env" && req.method === "GET") {

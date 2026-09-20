@@ -1,0 +1,26 @@
+const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
+const source=fs.readFileSync(require('path').join(__dirname, '..', 'server.js'),'utf8');
+const start=source.indexOf('function vmDisplayStatus(vm)');
+const end=source.indexOf('function databaseHealthLabel',start);
+const values={};
+const ctx=vm.createContext({appConfig:{vmName:'dune'},tone:(id,value)=>values[id]=value,setText:(id,value)=>values[id]=value});
+vm.runInContext(source.slice(start,end),ctx);
+function render(state,timestamp,extra={}){return ctx.renderVmStatus({name:'dune',state,ok:true,exists:true,statusProbeStartedAtMs:timestamp,checkedAtMs:timestamp,...extra});}
+render('Running',10);
+assert.equal(values.vm,'Running');
+render('Unknown',20,{ok:false,exists:false,readPending:true,error:'Still checking'});
+assert.equal(values.vm,'Checking (last: Running)');
+assert.match(values.vmControlLog,/Last confirmed at/);
+assert.equal(render('Stopped',9),false);
+assert.equal(values.vm,'Checking (last: Running)');
+render('Stopped',20);
+assert.equal(values.vm,'Offline');
+assert.equal(render('Unknown',20,{readPending:true}),false);
+assert.equal(values.vm,'Offline');
+render('Unknown',30,{ok:false,exists:false,errorCode:'access_denied',error:'Access denied'});
+assert.equal(values.vm,'Hyper-V blocked');
+render('Unknown',40,{ok:false,exists:false,readPending:true});
+assert.equal(values.vm,'Checking');
+ctx.renderVmStatus({name:'other-vm',state:'Unknown',readPending:true,statusProbeStartedAtMs:50});
+assert.equal(values.vm,'Checking');
+console.log('PASS UI: pending read labeled with last confirmation, old responses ignored, late timeout cannot overwrite completed sample, real errors visible, changed VM clears history');

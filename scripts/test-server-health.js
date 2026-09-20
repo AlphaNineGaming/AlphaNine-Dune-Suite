@@ -231,3 +231,31 @@ assert(!/\bkubectl\s+(apply|patch|delete|edit|replace|rollout|scale)\b/i.test(sc
 assert(!/\b(rc-service|systemctl|service)\b.*\b(restart|start|stop)\b/i.test(scanSource), "Server Health must not modify services.");
 
 console.log("Server Health parser, safety, redaction, metrics-neutrality, and UI/API wiring tests passed.");
+
+for (const failure of [{ok:false,error:'stdout maxBuffer length exceeded'}, {ok:false,error:'SSH timed out'}, {ok:true,stdout:'invalid JSON'}]) {
+  const unavailableInput = healthyInput();
+  unavailableInput.commandResults.pods = failure;
+  const unavailable = buildServerHealthReport(unavailableInput);
+  assert.equal(unavailable.services.dune.state, 'Unknown');
+  assert.equal(unavailable.services.rabbitmq.state, 'Unknown');
+  assert.equal(unavailable.summary.pods, null);
+  assert.equal(unavailable.summary.containers, null);
+  assert.equal(unavailable.state, 'Degraded');
+  assert(unavailable.reasons.some(reason => reason.includes('Pod inventory unavailable')));
+  unavailableInput.commandResults.workloads = jsonResult([workload('Deployment', 'dune-server', 2, 0)]);
+  assert.equal(buildServerHealthReport(unavailableInput).state, 'Unhealthy', 'Real workload failure must remain visible');
+}
+console.log('Missing pod inventory is unknown; independently failing workloads remain unhealthy.');
+const partialInput = healthyInput();
+partialInput.commandResults.nodes = {ok:false,error:'SSH timeout'};
+partialInput.commandResults.events = {ok:false,error:'Events timeout'};
+partialInput.database = {ok:false,status:'unavailable',error:'Query timeout'};
+const partial = buildServerHealthReport(partialInput);
+assert.equal(partial.connectivity.kubernetes.state,'Unknown');
+assert.equal(partial.connectivity.kubernetes.status,'Connected');
+assert.equal(partial.services.postgres.state,'Unknown');
+assert.equal(partial.state,'Degraded');
+assert.equal(partial.summary.nodes,null);
+assert.equal(partial.summary.recentWarnings,null);
+assert(partial.reasons.includes('Query timeout'));
+console.log('Partial probes preserve API reachability and report missing checks accurately.');

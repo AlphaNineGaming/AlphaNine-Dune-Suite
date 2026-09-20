@@ -929,23 +929,29 @@ async function resolveMqTarget() {
   if (!SSH_HOST) throw new Error("DUNE_RECEIVER_SSH_HOST is required.");
   if (MQ_NAMESPACE && MQ_POD) return { namespace: MQ_NAMESPACE, pod: MQ_POD };
 
-  const podsJson = await ssh("sudo kubectl get pods -A -o json", TIMEOUT_MS);
-  let data;
-  try {
-    data = JSON.parse(podsJson.stdout || "{}");
-  } catch (error) {
-    throw new Error(`Could not parse kubectl pod list: ${error.message}`);
+  // Full pod JSON includes annotations/specs for every workload and can exceed
+  // the SSH output buffer. Return only the three fields needed for discovery.
+  const namespace = MQ_NAMESPACE || BG_NAMESPACE;
+  const scope = namespace ? `-n ${shQuote(namespace)}` : "-A";
+  const output = await ssh(`sudo kubectl get pods ${scope} --no-headers -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase`, TIMEOUT_MS);
+  const pods = String(output.stdout || "").trim().split(/\r?\n/).filter(Boolean).map(line => {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length !== 3) throw new Error("Could not parse compact kubectl pod list.");
+    return { namespace: fields[0], pod: fields[1], phase: fields[2] };
+  });
+  const candidates = pods.filter(pod =>
+    (!namespace || pod.namespace === namespace) &&
+    (!MQ_POD || pod.pod === MQ_POD) &&
+    (!BG_NAME || pod.pod.startsWith(`${BG_NAME}-`)) &&
+    /mq-game|game.*mq|rabbit.*game/i.test(pod.pod)
+  );
+  const ready = candidates.filter(pod => pod.phase === "Running");
+  if (ready.length > 1) {
+    throw new Error("Multiple running mq-game pods found. Set DUNE_RECEIVER_MQ_NAMESPACE and DUNE_RECEIVER_MQ_POD explicitly.");
   }
-
-  const pods = (data.items || []).map((item) => ({
-    namespace: item.metadata?.namespace || "",
-    pod: item.metadata?.name || "",
-    phase: item.status?.phase || ""
-  }));
-  const candidates = pods.filter((pod) => /mq-game|game.*mq|rabbit.*game/i.test(`${pod.namespace}/${pod.pod}`));
-  const running = candidates.find((pod) => pod.phase === "Running") || candidates[0];
+  const running = ready[0];
   if (!running) {
-    throw new Error("Could not find the Dune mq-game RabbitMQ pod. Set DUNE_RECEIVER_MQ_NAMESPACE and DUNE_RECEIVER_MQ_POD manually.");
+    throw new Error("Could not find a running Dune mq-game RabbitMQ pod. Set DUNE_RECEIVER_MQ_NAMESPACE and DUNE_RECEIVER_MQ_POD manually.");
   }
   return { namespace: running.namespace, pod: running.pod };
 }

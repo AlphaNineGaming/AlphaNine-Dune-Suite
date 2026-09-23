@@ -189,6 +189,17 @@ for (const required of [
   "Daily restart was skipped"
 ]) assert(scriptSource.includes(required), `Scheduler runtime is missing safety behavior: ${required}`);
 
+// Exercise the actual runtime pipeline with enough output to expose early pipe closure.
+const { spawnSync } = require("child_process");
+const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+const cronProbe = scriptSource.match(/if (sudo -n ps[^;]+); then add_check "cron-runtime"/)[1];
+for (const [present, producerFails, expected] of [[true,false,0],[false,false,1],[true,true,1]]) {
+  const producer = 'sudo() { ' + (present ? "printf 'crond\\n'; " : '') + "printf '%s\\n' worker{1..100000}; " + (producerFails ? 'return 1; ' : '') + '}; ';
+  const result = spawnSync(bash, ['-c', 'set -o pipefail; ' + producer + cronProbe], { encoding: 'utf8' });
+  assert.ifError(result.error);
+  assert.equal(result.status, expected, 'Cron probe must consume the full process list and preserve process-query failures: ' + result.stderr);
+}
+
 assert(scriptSource.includes('add_check "cron-runtime"'), "Self-test must validate the BusyBox crond runtime without controlling it.");
 assert(!/rc-service|systemctl|service crond/.test(scriptSource), "Scheduler runtime must not control a service manager.");
 

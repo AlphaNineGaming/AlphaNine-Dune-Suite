@@ -598,7 +598,7 @@ self_test() {
   if health=$(health_snapshot 2>/dev/null); then add_check "health-query" true "$(printf '%s' "$health" | jq -c .)"; else add_check "health-query" false "query failed"; fi
   if sudo -n grep -q '^# BEGIN ALPHANINE DUNE SCHEDULER$' /etc/crontabs/dune 2>/dev/null; then cron_ok=true; else cron_ok=false; fi
   add_check "cron-registration" "$cron_ok" "/etc/crontabs/dune"
-  if sudo -n ps -eo comm= 2>/dev/null | grep -Eq '^crond$'; then add_check "cron-runtime" true "BusyBox crond is running"; else add_check "cron-runtime" false "BusyBox crond is not running"; fi
+  if sudo -n ps -eo comm= 2>/dev/null | grep -E '^crond$' >/dev/null; then add_check "cron-runtime" true "BusyBox crond is running"; else add_check "cron-runtime" false "BusyBox crond is not running"; fi
   local ok
   if [ "$(printf '%s' "$failures" | jq 'length')" -eq 0 ]; then ok=true; else ok=false; fi
   local result

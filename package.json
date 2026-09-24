@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.3.11",
+  "version": "1.3.12",
   "marketBotRuntimeVersion": "1.0.102",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
@@ -44,7 +44,7 @@
     "test:python-discovery": "node scripts/test-python-discovery.js",
     "test:manager-netstat": "node scripts/test-manager-netstat-decoding.js",
     "test:manager-sandworm": "node scripts/test-manager-sandworm-settings.js",
-    "test:server-update": "node scripts/test-server-update-monitor.js",
+    "test:server-update": "node scripts/test-server-update-monitor.js && node scripts/test-server-update-link-warnings.js && node scripts/test-server-download-repair.js",
     "test:server-health": "node scripts/test-server-health.js",
     "test:vm-scheduler": "node scripts/test-vm-scheduler.js && node scripts/test-battlegroup-control.js && node scripts/test-battlegroup-control-paths.js",
     "test:specialization-progression": "node scripts/test-specialization-progression.js",

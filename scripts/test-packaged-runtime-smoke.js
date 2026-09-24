@@ -158,6 +158,14 @@ assert.equal(
   0,
   `Packaged Server Updater regression failed.\n${packagedServerUpdateTest.stdout || ""}\n${packagedServerUpdateTest.stderr || ""}`
 );
+for (const testName of ["test-server-download-repair.js", "test-server-update-link-warnings.js"]) {
+  const testPath = path.join(extracted, "scripts", testName);
+  assert(fs.existsSync(testPath), "Packaged app is missing " + testName);
+  const result = spawnSync(process.execPath, [testPath], { cwd: extracted, encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, testName + " failed: " + result.stdout + result.stderr);
+}
+assert(packagedServerSource.includes('id="serverDownloadRepairButton"'), "Packaged app is missing Repair Server Download.");
+assert(packagedServerSource.includes('"/api/server-update/repair-download"'), "Packaged app is missing the download repair API.");
 const packagedServerHealthTest = spawnSync(process.execPath, [packagedServerHealthTestPath], {
   cwd: extracted,
   encoding: "utf8",

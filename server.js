@@ -91,6 +91,7 @@ const {
   serverUpdateProgress,
   serverManagementTimeoutMs,
   runServerUpdateLifecycle,
+  reconcileServerUpdateResult,
   createServerUpdateCheckCoordinator
 } = require("./lib/server-update");
 const { createBlueprintService } = require("./lib/blueprints");
@@ -3791,7 +3792,7 @@ async function sshStreamingCommand(command, options = {}) {
         });
       };
       child.on("error", (error) => finish(failure(error.message, { stdout, stderr })));
-      child.on("exit", (code, signal) => {
+      child.on("close", (code, signal) => {
         const underlyingError = code === 0 ? "" : (cleanUpdateLine(stderr) || `SSH update exited with code ${code}.`);
         finish(code === 0
           ? { ok: true, code: 0, signal: signal || "", stdout, stderr, error: "", timedOut: false }
@@ -3849,6 +3850,45 @@ function startDatabaseOwnershipRepairJob() {
   return operationRegistry.public(operation);
 }
 
+function startServerDownloadRepairJob() {
+  assertWorkloadStartAllowed("repair the server download");
+  const { runDownloadRepair, serverDownloadRepairCommand, downloadRepairProgress } = require("./lib/server-download-repair");
+  const operation = operationRegistry.begin("battlegroup:update:validate", "Repair Server Download", {
+    category: "server", stage: "Checking download", detail: "Checking storage, permissions, and active downloads.", progress: 1
+  });
+  setImmediate(async () => {
+    let progress = 1;
+    try { appendAdminAudit("server_download_repair_started", { operationId: operation.id }); } catch {}
+    await runServerUpdateLifecycle({
+      command: serverDownloadRepairCommand(),
+      stage: "Validating server download",
+      timeoutMs: SERVER_UPDATE_TIMEOUTS.updateCommandMs,
+      execute: () => runDownloadRepair(sshStreamingCommand, (line) => {
+        const cleaned = cleanUpdateLine(line);
+        progress = downloadRepairProgress(cleaned, progress);
+        operationRegistry.update(operation, "Validating server download", cleaned.slice(0, 500), { progress, logLine: cleaned });
+        return "Validating server download";
+      }),
+      onSuccess: () => {
+        const detail = "Server download validated. Use Check Server Update to apply it when you are ready; applying an update may restart server workloads.";
+        operationRegistry.update(operation, "Download validated", detail, { progress: 100, logLine: detail });
+        operationRegistry.finish(operation, "success");
+        serverUpdateCheckCoordinator?.reset();
+        try { appendAdminAudit("server_download_repair_completed", { operationId: operation.id }); } catch {}
+      },
+      onFailure: (diagnostics) => {
+        operationRegistry.update(operation, diagnostics.stage, diagnostics.message, { progress, logLine: "ERROR: " + diagnostics.underlyingError, diagnostics });
+        operationRegistry.finish(operation, "failed", diagnostics.message, { stage: diagnostics.stage, diagnostics });
+        try { appendAdminAudit("server_download_repair_failed", { operationId: operation.id, ...diagnostics }); } catch {}
+      },
+      onFinally: () => {
+        if (operation.status === "running" || operation.status === "pending") operationRegistry.finish(operation, "failed", "Download repair stopped without a terminal result.");
+      }
+    });
+  });
+  return operationRegistry.public(operation);
+}
+
 function startServerUpdateJob() {
   assertWorkloadStartAllowed("update or restart the battlegroup");
   const operation = operationRegistry.begin("battlegroup:update", "Dune Server Update", {
@@ -3862,7 +3902,9 @@ function startServerUpdateJob() {
     let lastPublishedAt = 0;
     let lastPublishedStage = "Starting update";
     let lastPublishedProgress = -1;
-    const command = serverUpdateApplyCommand();
+    const updateConfig = loadConfig();
+    const selection = serverUpdateSelection(updateConfig);
+    const command = serverUpdateApplyCommand(updateConfig);
     try { appendAdminAudit("server_update_started", { operationId: operation.id, selection: serverUpdateSelection(), timeoutMs: SERVER_UPDATE_TIMEOUTS.updateCommandMs }); } catch {}
     await runServerUpdateLifecycle({
       command,
@@ -3874,7 +3916,7 @@ function startServerUpdateJob() {
           reason: "Explicit administrator server update",
           callSite: "server.js:startServerUpdateJob"
         });
-        const result = await sshStreamingCommand(command, {
+        let result = await sshStreamingCommand(command, {
           timeout: SERVER_UPDATE_TIMEOUTS.updateCommandMs,
           maxBuffer: 1024 * 1024 * 4,
           onStage: (stage, elapsedMs) => {
@@ -3895,10 +3937,17 @@ function startServerUpdateJob() {
             return parsed.stage;
           }
         });
+        result = await reconcileServerUpdateResult(result, selection, async () => {
+          operationRegistry.update(operation, "Verifying deployed revision", "Checking the selected battlegroup after updater link warnings.", { progress });
+          const verification = await sshCommand(serverUpdateMetadataCommand(updateConfig), SERVER_UPDATE_TIMEOUTS.metadataCommandMs, { maxBuffer: 1024 * 256 });
+          if (!verification.ok) throw new Error("Could not verify the deployed revision.");
+          return parseServerUpdateMetadata(verification.stdout);
+        });
         await recordAttributedVendorBattlegroupOutcome(control, result);
         return result;
       },
       onSuccess: (result) => {
+        operationRegistry.update(operation, "Completed", result.warning || "Dune server update completed.", { progress: 100, logLine: result.warning ? `WARNING: ${result.warning}` : "Dune server update completed." });
         operationRegistry.finish(operation, "success");
         serverUpdateCheckCoordinator?.reset();
         try { appendAdminAudit("server_update_completed", { operationId: operation.id, progress: 100, elapsedMs: result.elapsedMs, command: result.command }); } catch {}
@@ -3949,7 +3998,7 @@ function localSchedulerConfig() {
 
 async function vmSchedulerStatus(options = {}) {
   const localConfig = localSchedulerConfig();
-  const result = await migrationReadOnlyEvidenceResult(buildVmSchedulerStatusCommand(), 45000, {
+  const result = await migrationReadOnlyEvidenceResult(buildVmSchedulerStatusCommand({ displayOnly: options.displayOnly === true }), 45000, {
     ...options,
     maxBuffer: 1024 * 1024 * 2,
     purpose: options.purpose || "Import preflight: AlphaNine automatic-restart scheduler evidence"
@@ -3993,7 +4042,7 @@ async function installVmScheduler(input = {}) {
   if (!selfTest.ok) throw new Error(`VM scheduler self-test failed: ${(selfTest.failures || []).join(", ") || "unknown requirement"}`);
   const saved = saveSchedulerConfig(SCHEDULER_CONFIG_PATH, config, selected.name);
   appendAdminAudit("vm_scheduler_installed", { selectedBattlegroup: selected, config: saved, selfTest });
-  return { ok: true, installed: true, verified: true, config: saved, selfTest, status: await vmSchedulerStatus() };
+  return { ok: true, installed: true, verified: true, config: saved, selfTest, status: await vmSchedulerStatus({ displayOnly: true }) };
 }
 
 async function removeVmScheduler() {
@@ -24452,6 +24501,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="controls mt">
           <button onclick="act('backup')">Backup</button>
           <button id="serverUpdateButton" onclick="checkServerUpdateNow()">Check Server Update</button>
+          <button id="serverDownloadRepairButton" onclick="repairServerDownload()">Repair Server Download</button>
           <button id="databaseOwnershipRepairButton" onclick="repairDatabaseOwnership()" title="Back up and repair AlphaNine table ownership when a database update blocks startup.">Repair Database Update</button>
           <button onclick="openDirector()">Open Director</button>
           <button id="openBattlegroupBatchButton" onclick="openBattlegroupBatch()">Open Battlegroup.bat</button>
@@ -25675,9 +25725,18 @@ function fillServerUpdateVersions(data={}){const metadata=data.metadata||data;se
 function showServerUpdatePanel(data=serverUpdateCheckState||{}){fillServerUpdateVersions(data);document.getElementById("serverUpdatePanel")?.classList.remove("hidden");}
 function hideServerUpdatePanel(){document.getElementById("serverUpdatePanel")?.classList.add("hidden");}
 function serverUpdateDiagnosticText(operation){const d=operation?.diagnostics;if(!d)return"";return["Stage: "+(d.stage||operation.stage||"Unknown"),"Command: "+(d.command||"Unknown"),"Elapsed: "+Number(d.elapsedMs||0)+" ms","Backend timeout: "+Number(d.timeoutMs||0)+" ms","Underlying error: "+(d.underlyingError||operation.error||"Unknown")].concat(d.nestedTimeoutMs?["Nested server-management timeout: "+Number(d.nestedTimeoutMs)+" ms"]:[]).join("\n");}
-function renderServerUpdateOperation(operation){if(!operation)return;const running=operation.status==="running"||operation.status==="pending";const success=operation.status==="success";const progress=Number.isFinite(Number(operation.progress))?Math.max(0,Math.min(100,Number(operation.progress))):(success?100:0);setText("serverUpdatePanelTitle",success?"Dune server update completed":operation.status==="failed"?"Dune server update failed":"Updating Dune server");setText("serverUpdatePanelDetail",operation.detail||operation.error||(running?"Funcom update is running.":"Update finished."));setText("serverUpdateStage",operation.diagnostics?.stage||operation.stage||"Updating");setText("serverUpdateProgressText",Math.round(progress)+"% · "+serverUpdateElapsed(operation));const fill=document.getElementById("serverUpdateProgressFill");if(fill)fill.style.width=progress+"%";const badgeEl=document.getElementById("serverUpdatePanelState");if(badgeEl){badgeEl.textContent=success?"Completed":operation.status==="failed"?"Failed":"Updating";badgeEl.className="badge "+(success?"ok":operation.status==="failed"?"bad":"warn");}const lines=Array.isArray(operation.logTail)?operation.logTail:[],diagnostics=serverUpdateDiagnosticText(operation);setText("serverUpdateLiveLog",[lines.length?lines.join("\n"):(operation.error||"Waiting for Funcom update output..."),diagnostics].filter(Boolean).join("\n\nFailure diagnostics:\n"));setServerUpdateDetectionStatus(success?"Dune server update completed.":operation.status==="failed"?("Update failed: "+(operation.error||operation.detail||"Unknown error")):("Update running: "+(operation.stage||"Starting")),success?"empty":"warning");if(!running){serverUpdateOperationId="";window.clearTimeout(serverUpdatePollTimer);playUiSound(success?"success":"warning");showToast(success?"Dune server update completed.":"Dune server update failed.",success?"success":"error");setTimeout(()=>checkServerUpdateAvailability({force:true,prompt:false}),1800);}}
-async function pollServerUpdateOperation(operationId){window.clearTimeout(serverUpdatePollTimer);if(!operationId)return;try{const data=await getJson("/api/operations",{timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiPollMs}});renderOperations(data);const operation=(data.operations||[]).find(row=>row.id===operationId)||(data.active||[]).find(row=>row.key==="battlegroup:update");if(!operation)throw new Error("The server update operation was not found.");serverUpdateOperationId=operation.id;renderServerUpdateOperation(operation);if(operation.status==="running"||operation.status==="pending")serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operation.id),1000);}catch(error){setText("serverUpdatePanelDetail",betterError(error));setServerUpdateDetectionStatus("Update status unavailable: "+betterError(error),"warning");serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operationId),2500);}}
-async function startDetectedServerUpdate(updateData=serverUpdateCheckState||{}){showServerUpdatePanel(updateData);setText("serverUpdatePanelTitle","Starting Dune server update");setText("serverUpdatePanelDetail","Creating a protected background update operation.");setText("serverUpdateLiveLog","Waiting for Funcom update output...");try{const data=await getJson("/api/server-update/start",{method:"POST",timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiStartMs}});serverUpdateOperationId=data.operation?.id||"";if(!serverUpdateOperationId)throw new Error("Update operation ID was not returned.");renderServerUpdateOperation(data.operation);setActionCenter("Dune server update started","Live status is available in the update panel.","working");addActivity("server","Dune server update started",serverUpdateOperationId);await pollServerUpdateOperation(serverUpdateOperationId);}catch(error){const operations=await refreshOperations().catch(()=>null);const active=(operations?.active||[]).find(row=>row.key==="battlegroup:update");if(active){serverUpdateOperationId=active.id;showServerUpdatePanel(updateData);await pollServerUpdateOperation(active.id);return;}serverUpdateOperationId="";setText("serverUpdatePanelTitle","Dune server update could not start");setText("serverUpdatePanelDetail",betterError(error));setText("serverUpdateLiveLog",betterError(error));setServerUpdateDetectionStatus("Update could not start: "+betterError(error),"warning");playUiSound("warning");}}
+function renderServerUpdateOperation(operation){if(!operation)return;const repair=operation.key==="battlegroup:update:validate",label=repair?"Server download repair":"Dune server update";const running=operation.status==="running"||operation.status==="pending";const success=operation.status==="success";const progress=Number.isFinite(Number(operation.progress))?Math.max(0,Math.min(100,Number(operation.progress))):(success?100:0);setText("serverUpdatePanelTitle",success?label+" completed":operation.status==="failed"?label+" failed":repair?"Validating server download":"Updating Dune server");setText("serverUpdatePanelDetail",operation.detail||operation.error||(running?"Funcom update is running.":"Update finished."));setText("serverUpdateStage",operation.diagnostics?.stage||operation.stage||"Updating");setText("serverUpdateProgressText",Math.round(progress)+"% · "+serverUpdateElapsed(operation));const fill=document.getElementById("serverUpdateProgressFill");if(fill)fill.style.width=progress+"%";const badgeEl=document.getElementById("serverUpdatePanelState");if(badgeEl){badgeEl.textContent=success?"Completed":operation.status==="failed"?"Failed":"Updating";badgeEl.className="badge "+(success?"ok":operation.status==="failed"?"bad":"warn");}const lines=Array.isArray(operation.logTail)?operation.logTail:[],diagnostics=serverUpdateDiagnosticText(operation);setText("serverUpdateLiveLog",[lines.length?lines.join("\n"):(operation.error||"Waiting for Funcom update output..."),diagnostics].filter(Boolean).join("\n\nFailure diagnostics:\n"));setServerUpdateDetectionStatus(success?label+" completed.":operation.status==="failed"?("Update failed: "+(operation.error||operation.detail||"Unknown error")):("Update running: "+(operation.stage||"Starting")),success?"empty":"warning");if(!running){serverUpdateOperationId="";window.clearTimeout(serverUpdatePollTimer);playUiSound(success?"success":"warning");showToast(success?label+" completed.":label+" failed.",success?"success":"error");setTimeout(()=>checkServerUpdateAvailability({force:true,prompt:false}),1800);}}
+async function pollServerUpdateOperation(operationId){window.clearTimeout(serverUpdatePollTimer);if(!operationId)return;try{const data=await getJson("/api/operations",{timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiPollMs}});renderOperations(data);const operation=(data.operations||[]).find(row=>row.id===operationId)||(data.active||[]).find(row=>String(row.key||"").startsWith("battlegroup:update"));if(!operation)throw new Error("The server update operation was not found.");serverUpdateOperationId=operation.id;renderServerUpdateOperation(operation);if(operation.status==="running"||operation.status==="pending")serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operation.id),1000);}catch(error){setText("serverUpdatePanelDetail",betterError(error));setServerUpdateDetectionStatus("Update status unavailable: "+betterError(error),"warning");serverUpdatePollTimer=window.setTimeout(()=>pollServerUpdateOperation(operationId),2500);}}
+async function startDetectedServerUpdate(updateData=serverUpdateCheckState||{}){showServerUpdatePanel(updateData);setText("serverUpdatePanelTitle","Starting Dune server update");setText("serverUpdatePanelDetail","Creating a protected background update operation.");setText("serverUpdateLiveLog","Waiting for Funcom update output...");try{const data=await getJson("/api/server-update/start",{method:"POST",timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiStartMs}});serverUpdateOperationId=data.operation?.id||"";if(!serverUpdateOperationId)throw new Error("Update operation ID was not returned.");renderServerUpdateOperation(data.operation);setActionCenter("Dune server update started","Live status is available in the update panel.","working");addActivity("server","Dune server update started",serverUpdateOperationId);await pollServerUpdateOperation(serverUpdateOperationId);}catch(error){const operations=await refreshOperations().catch(()=>null);const active=(operations?.active||[]).find(row=>String(row.key||"").startsWith("battlegroup:update"));if(active){serverUpdateOperationId=active.id;showServerUpdatePanel(updateData);await pollServerUpdateOperation(active.id);return;}serverUpdateOperationId="";setText("serverUpdatePanelTitle","Dune server update could not start");setText("serverUpdatePanelDetail",betterError(error));setText("serverUpdateLiveLog",betterError(error));setServerUpdateDetectionStatus("Update could not start: "+betterError(error),"warning");playUiSound("warning");}}
+async function repairServerDownload(){
+  if(serverUpdateOperationId){showServerUpdatePanel();return;}
+  if(!await appConfirm("Repair Server Download","SteamCMD will validate the downloaded server files and download missing or damaged files. This can take several minutes and use substantial disk space and bandwidth. After validation, use Check Server Update to apply the download.","Validate Download","Cancel"))return;
+  const button=document.getElementById("serverDownloadRepairButton");if(button)button.disabled=true;
+  showServerUpdatePanel();setText("serverUpdatePanelTitle","Starting download repair");setText("serverUpdatePanelDetail","Checking the server download.");setText("serverUpdateLiveLog","Waiting for SteamCMD output...");
+  try{const data=await getJson("/api/server-update/repair-download",{method:"POST",timeoutMs:30000});serverUpdateOperationId=data.operation?.id||"";if(!serverUpdateOperationId)throw new Error("Download repair operation ID was not returned.");renderServerUpdateOperation(data.operation);await pollServerUpdateOperation(serverUpdateOperationId);}
+  catch(error){const operations=await refreshOperations().catch(()=>null);const active=(operations?.active||[]).find(row=>row.key==="battlegroup:update:validate");if(active){serverUpdateOperationId=active.id;renderServerUpdateOperation(active);await pollServerUpdateOperation(active.id);return;}setText("serverUpdatePanelTitle","Download repair could not start");setText("serverUpdatePanelDetail",betterError(error));showToast(betterError(error),"error");}
+  finally{if(button)button.disabled=false;}
+}
 function serverUpdatePromptKey(data){return [data.requiredBuildId||"",data.downloadedRevision||"",data.deployedRevision||""].join("|");}
 async function checkServerUpdateAvailability(options={}){const force=options.force===true,prompt=options.prompt!==false;if(serverUpdateOperationId)return serverUpdateCheckState;setServerUpdateDetectionStatus("Checking Funcom and Steam server versions...","warning");const button=document.getElementById("serverUpdateButton");if(button)button.disabled=true;try{const data=await getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiCheckMs}});serverUpdateCheckState=data;fillServerUpdateVersions(data);if(!data.updateAvailable){setServerUpdateDetectionStatus("Server is current. Steam build "+serverUpdateValue(data.currentBuildId)+" · deployed "+serverUpdateValue(data.deployedRevision)+".","empty");if(force)showToast("Dune server is up to date.","success");return data;}setServerUpdateDetectionStatus("Dune server update available. "+(data.reason||"A newer Funcom build was detected."),"warning");if(prompt){const key=serverUpdatePromptKey(data);let alreadyPrompted=false;try{alreadyPrompted=sessionStorage.getItem("alphaNineServerUpdatePrompted")===key;}catch{}if(force||!alreadyPrompted){const activeDialog=document.querySelector(".suite-modal-overlay:not(.hidden),.setup-overlay:not(.hidden),.startup-progress-overlay:not(.hidden)");if(activeDialog){window.setTimeout(()=>checkServerUpdateAvailability({force:false,prompt:true}),30000);return data;}try{sessionStorage.setItem("alphaNineServerUpdatePrompted",key);}catch{}const message=(data.reason||"A newer Dune server build is available.")+"\n\nSteam build: "+serverUpdateValue(data.currentBuildId)+(data.requiredBuildId&&data.requiredBuildId!==data.currentBuildId?" -> "+data.requiredBuildId:"")+"\nDownloaded revision: "+serverUpdateValue(data.downloadedRevision)+"\nDeployed revision: "+serverUpdateValue(data.deployedRevision)+"\n\nUpdating may reconcile or restart server pods and disconnect online players. A recent backup is recommended.";if(await appConfirm("Dune Server Update Available",message,"Update Now","Later"))await startDetectedServerUpdate(data);}}return data;}catch(error){setServerUpdateDetectionStatus("Automatic server update check unavailable: "+betterError(error),"warning");if(force)showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
 async function checkServerUpdateNow(){return checkServerUpdateAvailability({force:true,prompt:true});}
@@ -25688,14 +25747,14 @@ function markSchedulerDirty(){schedulerDirty=true;setText("schedulerDirtyStatus"
 function syncSchedulerPolicyWarning(){document.getElementById("schedulerForceWarning")?.classList.toggle("hidden",getValue("schedulerPlayerPolicy")!=="force");}
 function schedulerStatusClass(status){const value=String(status||"").toLowerCase();return["succeeded","success","healthy","ready"].includes(value)?"ok":["failed","error","aborted","blocked"].includes(value)?"bad":"warn";}
 function renderSchedulerHistory(history=[]){const rows=document.getElementById("schedulerHistoryRows");if(!rows)return;const ordered=[...history].reverse();rows.innerHTML=ordered.length?ordered.map(row=>'<tr><td>'+esc(row.timestamp||"--")+'</td><td>'+esc(row.action||"--")+'</td><td><span class="badge '+schedulerStatusClass(row.status)+'">'+esc(row.status||"--")+'</span></td><td>'+esc(row.message||"")+'</td></tr>').join(""):'<tr><td colspan="4">No scheduler events yet.</td></tr>';}
-function renderSchedulerStatus(data={}){schedulerState=data;const installed=data.installed===true,config=(installed?data.config:null)||data.localConfig||{};tone("schedulerInstalled",installed?"Installed":"Not Installed");setText("schedulerInstalledDetail",data.reachable===false?(data.error||"VM unavailable"):(installed?(data.cronRegistered?"Cron registered and VM reachable":"Runtime present; cron needs repair"):("Not installed in the VM")));tone("schedulerEnabledStatus",installed?(config.enabled===false?"Paused":"Active"):"Not Installed");setText("schedulerNextDetail",config.backup?.enabled!==false&&config.restart?.enabled!==false?("Backup "+(config.backup?.time||"--")+" / Restart "+(config.restart?.time||"--")+" / "+(config.timezone||"UTC")):(config.backup?.enabled!==false?"Backup only":"Restart only"));tone("schedulerBattlegroup",config.battlegroup||appConfig?.selectedBattlegroup?.name||"Not Selected");tone("schedulerPlayers",data.players===null||data.players===undefined?"Unknown":String(data.players));const last=data.lastStatus;const lastEl=document.getElementById("schedulerLastStatus");if(lastEl){lastEl.className=(last&&schedulerStatusClass(last.status)==="bad"?"warning":"empty")+" mt";lastEl.textContent=last?(last.timestamp+" · "+last.action+" · "+last.status+"\n"+last.message):"No scheduler event loaded.";}setText("schedulerPauseButton",config.enabled===false?"Resume Schedule":"Pause Schedule");setText("schedulerInstallButton",installed?"Save & Reinstall Schedule":"Install Schedule In VM");renderSchedulerHistory(data.history||[]);setText("schedulerLog",data.error?data.error:JSON.stringify({installed:data.installed,cronRegistered:data.cronRegistered,vmNow:data.vmNow,localNow:data.localNow,health:data.health,lastStatus:data.lastStatus,state:data.state},null,2));if(!schedulerDirty)fillSchedulerConfig(config);}
+function renderSchedulerStatus(data={}){schedulerState=data;const installed=data.installed===true,config=(installed?data.config:null)||data.localConfig||{};tone("schedulerInstalled",installed?"Installed":data.ok===false?"Status Unavailable":"Not Installed");setText("schedulerInstalledDetail",data.reachable===false?(data.error||"VM unavailable"):(installed?(data.cronRegistered?(data.workloadActive?"Cron registered; server operation in progress":"Cron registered and VM reachable"):"Runtime present; cron needs repair"):(data.error||"Not installed in the VM")));tone("schedulerEnabledStatus",installed?(config.enabled===false?"Paused":"Active"):data.ok===false?"Unknown":"Not Installed");setText("schedulerNextDetail",config.backup?.enabled!==false&&config.restart?.enabled!==false?("Backup "+(config.backup?.time||"--")+" / Restart "+(config.restart?.time||"--")+" / "+(config.timezone||"UTC")):(config.backup?.enabled!==false?"Backup only":"Restart only"));tone("schedulerBattlegroup",config.battlegroup||appConfig?.selectedBattlegroup?.name||"Not Selected");tone("schedulerPlayers",data.players===null||data.players===undefined?"Unknown":String(data.players));const last=data.lastStatus;const lastEl=document.getElementById("schedulerLastStatus");if(lastEl){lastEl.className=(last&&schedulerStatusClass(last.status)==="bad"?"warning":"empty")+" mt";lastEl.textContent=last?(last.timestamp+" · "+last.action+" · "+last.status+"\n"+last.message):"No scheduler event loaded.";}setText("schedulerPauseButton",config.enabled===false?"Resume Schedule":"Pause Schedule");setText("schedulerInstallButton",installed?"Save & Reinstall Schedule":"Install Schedule In VM");renderSchedulerHistory(data.history||[]);setText("schedulerLog",data.error?data.error:JSON.stringify({installed:data.installed,cronRegistered:data.cronRegistered,vmNow:data.vmNow,localNow:data.localNow,health:data.health,lastStatus:data.lastStatus,state:data.state},null,2));if(!schedulerDirty)fillSchedulerConfig(config);}
 async function refreshScheduler(){try{setText("schedulerLog","Reading scheduler configuration and VM health...");const data=await getJson("/api/scheduler",{timeoutMs:50000});renderSchedulerStatus(data);return data;}catch(error){renderSchedulerStatus({ok:false,installed:false,reachable:false,error:betterError(error),localConfig:schedulerState?.localConfig||{}});playUiSound("warning");return null;}}
 async function installScheduler(overrideEnabled=null){const payload=schedulerConfigFromUi();if(overrideEnabled!==null){payload.enabled=overrideEnabled;setChecked("schedulerEnabled",overrideEnabled);}const selected=appConfig?.selectedBattlegroup||battlegroupData?.selectedBattlegroup;if(selected?.name)payload.battlegroup=selected.name;let warning="Target: "+(payload.battlegroup||"not selected")+"\nTimezone: "+payload.timezone+"\nDaily backup: "+(payload.backup.enabled?payload.backup.time:"Disabled")+"\nDaily restart: "+(payload.restart.enabled?payload.restart.time:"Disabled")+"\nPlayers online: "+(payload.restart.playersOnlinePolicy==="force"?"FORCE after "+payload.restart.maxDeferralMinutes+" minutes":"Skip after "+payload.restart.maxDeferralMinutes+" minutes")+"\n\nPast times today will not run automatically.";if(payload.restart.playersOnlinePolicy==="force")warning+="\n\nWARNING: Force policy can restart while players are online.";if(!(await appConfirm(schedulerState?.installed?"Update VM Schedule":"Install VM Schedule",warning,schedulerState?.installed?"Save & Reinstall":"Install","Cancel")))return;const button=document.getElementById("schedulerInstallButton");if(button)button.disabled=true;try{setText("schedulerLog","Installing scheduler runtime, timezone data, configuration, and cron registration...");const data=await getJson("/api/scheduler/install",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),timeoutMs:600000});schedulerDirty=false;renderSchedulerStatus(data.status||data);showToast(payload.enabled?"VM scheduler installed and verified":"VM scheduler paused and verified","success");playUiSound("success");}catch(error){setText("schedulerLog",betterError(error));showToast("Scheduler installation failed","error");playUiSound("warning");}finally{if(button)button.disabled=false;}}
 async function toggleSchedulerEnabled(){const installed=schedulerState?.installed===true;if(!installed){await appAlert("Scheduler not installed","Install the scheduler in the VM before pausing or resuming it.");return;}const enabled=!(schedulerState?.config?.enabled!==false);await installScheduler(enabled);}
 async function pollSchedulerOperation(operationId){if(!operationId)return;for(let attempt=0;attempt<480;attempt+=1){await new Promise(resolve=>setTimeout(resolve,5000));try{const data=await getJson("/api/operations");const operation=(data.operations||[]).find(row=>row.id===operationId);if(operation){setText("schedulerLog",[operation.stage,operation.detail,...(operation.logTail||[])].filter(Boolean).join("\n"));if(!["running","pending"].includes(operation.status)){await refreshScheduler();showToast(operation.status==="success"?"Scheduler action completed":"Scheduler action failed",operation.status==="success"?"success":"error");return;}}}catch{}}}
 async function runSchedulerAction(action){if(!schedulerState?.installed){await appAlert("Scheduler not installed","Install and verify the VM scheduler first.");return;}let title="Run Scheduler Test",message="Run dependency, target, player-count, cron, and health checks without changing the battlegroup?",confirmLabel="Run Test";if(action==="backup-now"){title="Run Verified Backup Now";message="Create a real Funcom database backup for "+(schedulerState.config?.battlegroup||"the selected battlegroup")+" now? The artifact and recovery YAML will be verified.";confirmLabel="Run Backup";}if(action==="restart-now"){title="Run Protected Restart Now";message="This will check online players, require a recent verified backup (or create one), restart the exact battlegroup, and wait for full health.\n\nIf any players are online, the manual restart will be blocked.";confirmLabel="Backup & Restart";}if(!(await appConfirm(title,message,confirmLabel,"Cancel")))return;try{const data=await getJson("/api/scheduler/action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action}),timeoutMs:30000});setText("schedulerLog","Scheduler action started. Operation: "+(data.operation?.id||"unknown")+"\nThe job continues in the VM and Operations history.");addActivity("scheduler",title,data.operation?.id||"");pollSchedulerOperation(data.operation?.id);playUiSound("click");}catch(error){setText("schedulerLog",betterError(error));playUiSound("warning");}}
 async function removeScheduler(){if(!schedulerState?.installed){await appAlert("Scheduler not installed","There is no managed scheduler runtime to remove from the VM.");return;}if(!(await appConfirm("Remove VM Scheduler","Remove the AlphaNine cron entry, runtime, VM configuration, state, and VM history? Existing database backup artifacts will not be deleted.","Remove Scheduler","Cancel")))return;try{setText("schedulerLog","Removing only AlphaNine-managed scheduler files and cron lines...");const data=await getJson("/api/scheduler/remove",{method:"POST",timeoutMs:90000});renderSchedulerStatus(data);showToast("VM scheduler removed; backups were preserved","success");playUiSound("success");}catch(error){setText("schedulerLog",betterError(error));playUiSound("warning");}}
-async function resumeServerUpdatePanel(){try{const data=await refreshOperations();const active=(data?.active||[]).find(row=>row.key==="battlegroup:update");if(!active)return false;serverUpdateOperationId=active.id;showServerUpdatePanel(serverUpdateCheckState||{});renderServerUpdateOperation(active);pollServerUpdateOperation(active.id);return true;}catch{return false;}}
+async function resumeServerUpdatePanel(){try{const data=await refreshOperations();const active=(data?.active||[]).find(row=>String(row.key||"").startsWith("battlegroup:update"));if(!active)return false;serverUpdateOperationId=active.id;showServerUpdatePanel(serverUpdateCheckState||{});renderServerUpdateOperation(active);pollServerUpdateOperation(active.id);return true;}catch{return false;}}
 async function initializeServerUpdateMonitor(){if(await resumeServerUpdatePanel())return;await checkServerUpdateAvailability({force:false,prompt:true});}
 function renderActivity(){const html=activity.length?activity.map(a=>'<div class="activity-item"><div class="activity-time">'+esc(a.time)+' / '+esc(a.type)+'</div><strong>'+esc(a.message)+'</strong>'+(a.detail?'<div class="subtle">'+esc(a.detail)+'</div>':'')+'</div>').join(""):'<div class="empty">No activity yet.</div>';document.getElementById("activityFeed").innerHTML=html;const logs=document.getElementById("activityFeedLogs");if(logs)logs.innerHTML=html;}
 function syncLogs(){const server=document.getElementById("serverLog");const mirror=document.getElementById("serverLogMirror");if(server&&mirror)mirror.textContent=server.textContent;}
@@ -27214,6 +27273,15 @@ async function route(req, res) {
     catch (error) { const failure = operationErrorResponse(error); await json(res, failure.payload, failure.statusCode); }
     return;
   }
+  if (url.pathname === "/api/server-update/repair-download" && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Download repair is available only in the local Suite." }, 403);
+      return;
+    }
+    try { await json(res, { ok: true, started: true, operation: startServerDownloadRepairJob() }, 202); }
+    catch (error) { const failure = operationErrorResponse(error); await json(res, failure.payload, failure.statusCode); }
+    return;
+  }
   if (url.pathname === "/api/server-update/start" && req.method === "POST") {
     try {
       const operation = startServerUpdateJob();
@@ -27225,7 +27293,7 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/scheduler" && req.method === "GET") {
-    await json(res, await vmSchedulerStatus());
+    await json(res, await vmSchedulerStatus({ displayOnly: true }));
     return;
   }
   if (url.pathname === "/api/scheduler/install" && req.method === "POST") {

@@ -210,3 +210,25 @@ assert.match(scriptSource, /player_count[\s\S]*restart postponed because players
 
 fs.rmSync(tempDir, { recursive: true, force: true });
 console.log("VM scheduler validation, installer, exact targeting, safety gates, retention scope, and command tests passed.");
+
+// Display installation independently from transient work; keep strict evidence for safety.
+const displayStatusCommand = buildStatusCommand({ displayOnly: true });
+assert(displayStatusCommand.includes('[ "$helper_process_refs" -ge 0 ]'));
+assert(buildStatusCommand().includes('[ "$helper_process_refs" = 0 ]'));
+assert(displayStatusCommand.includes('workloadActive: ($active > 0)'));
+const vm = require('vm');
+const uiSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const renderer = uiSource.split('\n').find(line => line.startsWith('function renderSchedulerStatus('));
+const labels = {};
+const uiContext = { tone: (id, value) => { labels[id] = value; }, setText: (id, value) => { labels[id] = value; }, document: { getElementById: () => null }, renderSchedulerHistory: () => {}, fillSchedulerConfig: () => {}, schedulerDirty: false, appConfig: {} };
+vm.createContext(uiContext);
+vm.runInContext(renderer, uiContext);
+uiContext.renderSchedulerStatus({ ok: true, installed: true, cronRegistered: true, workloadActive: true, config: { enabled: true } });
+assert.equal(labels.schedulerInstalled, 'Installed');
+assert.equal(labels.schedulerInstalledDetail, 'Cron registered; server operation in progress');
+uiContext.renderSchedulerStatus({ ok: false, installed: false, error: 'Inspection failed' });
+assert.equal(labels.schedulerInstalled, 'Status Unavailable');
+assert.equal(labels.schedulerInstalledDetail, 'Inspection failed');
+uiContext.renderSchedulerStatus({ ok: true, installed: false });
+assert.equal(labels.schedulerInstalled, 'Not Installed');
+console.log('Scheduler installation display and strict evidence separation checks passed.');

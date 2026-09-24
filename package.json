@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.3.10",
+  "version": "1.3.11",
   "marketBotRuntimeVersion": "1.0.102",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
@@ -62,7 +62,8 @@
     "test:reward-notifications": "node scripts/test-reward-notifications.js",
     "test:blueprint-designer": "node scripts/test-blueprint-designer-launcher.js && node scripts/test-blueprint-designer-startup.js && node --test dev/blueprint-documents/test/*.test.js",
     "test:database-repair": "node scripts/test-database-ownership-repair.js && node scripts/test-database-repair-progress.js && node scripts/test-suite-control-fixes.js",
-    "test:vm-portal-fixes": "node scripts/test-vm-receiver-regressions.cjs && node scripts/test-vm-status-view.cjs && node scripts/test-health-check-runner.cjs && node scripts/test-vm-connection-cache.cjs && node scripts/test-portal-live-give.cjs"
+    "test:vm-portal-fixes": "node scripts/test-vm-receiver-regressions.cjs && node scripts/test-vm-status-view.cjs && node scripts/test-health-check-runner.cjs && node scripts/test-vm-connection-cache.cjs && node scripts/test-portal-live-give.cjs",
+    "test:scheduler-backup-storage": "node scripts/test-scheduler-backup-storage.js"
   },
   "dependencies": {
     "express": "^5.2.1",

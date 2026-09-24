@@ -110,7 +110,8 @@ load_runtime_config() {
   BATTLEGROUP=$(config_text '.battlegroup' '')
   TIMEZONE=$(config_text '.timezone' 'UTC')
   NAMESPACE="$FUNCOM_PREFIX$BATTLEGROUP"
-  BACKUP_DIR="/funcom/artifacts/database-dumps/$BATTLEGROUP"
+  # Resolved from the successful dump pod and its bound volume, never guessed.
+  BACKUP_DIR=""
   export TZ="$TIMEZONE"
   if ! printf '%s' "$BATTLEGROUP" | grep -Eq '^[a-z0-9][a-z0-9-]{2,62}$'; then
     printf '%s\n' "Configured battlegroup is invalid." >&2
@@ -253,7 +254,58 @@ operation_conflict_reason() {
   printf '%s' ""
 }
 
+resolve_backup_path() {
+  local operation_name="$1" backup_name="$2" operation pod mapping claim pvc pv
+  operation=$(kubectl_safe get databaseoperation "$operation_name" -n "$NAMESPACE" -o json) || return 1
+  printf '%s' "$operation" | jq -e --arg name "$operation_name" --arg ns "$NAMESPACE" --arg bg "$BATTLEGROUP" --arg backup "$backup_name" '
+    .metadata.name == $name and .metadata.namespace == $ns and
+    (.metadata.uid | type == "string" and length > 0) and
+    .status.phase == "Succeeded" and .spec.battleGroup == $bg and
+    .spec.action == "dump" and .spec.backup == $backup' >/dev/null || return 1
+  pod=$(kubectl_safe get pod "$operation_name-pod" -n "$NAMESPACE" -o json) || return 1
+  mapping=$(printf '%s\n%s\n' "$operation" "$pod" | jq -sce --arg backup "$backup_name" '
+    def safe: type == "string" and length > 0 and (explode | all(. >= 32)) and
+      (split("/") | all(. != ".." and . != "."));
+    .[0] as $op | .[1] as $pod |
+    if $pod.metadata.namespace != $op.metadata.namespace or $pod.status.phase != "Succeeded" or
+      ([$pod.metadata.ownerReferences[]? | select(.kind == "DatabaseOperation" and .name == $op.metadata.name and .uid == $op.metadata.uid)] | length) != 1
+    then error("dump pod ownership or completion mismatch") else . end |
+    [$pod.spec.containers[]? | . as $container |
+      (($container.command // []) + ($container.args // []))[] |
+      select(startswith("--dump_path=")) | ltrimstr("--dump_path=") as $dump |
+      select(($dump | safe) and ($dump | startswith("/")) and (($dump | split("/") | last) == $backup)) |
+      $container.volumeMounts[]? | . as $mount |
+      select((.mountPath | safe) and (.subPathExpr == null)) |
+      ("/" + (.mountPath | ltrimstr("/") | rtrimstr("/"))) as $root |
+      select($dump | startswith($root + "/")) |
+      ($mount.subPath // "") as $sub |
+      select($sub == "" or (($sub | safe) and ($sub | startswith("/") | not))) |
+      $pod.spec.volumes[]? | select(.name == $mount.name) |
+      select(.persistentVolumeClaim.claimName | type == "string" and length > 0) |
+      {claim:.persistentVolumeClaim.claimName, relative:([$sub, ($dump | ltrimstr($root + "/"))] | map(select(length > 0)) | join("/"))}
+    ] | if length == 1 then .[0] else error("dump storage mapping missing or ambiguous") end') || return 1
+  claim=$(printf '%s' "$mapping" | jq -er '.claim') || return 1
+  pvc=$(kubectl_safe get pvc "$claim" -n "$NAMESPACE" -o json) || return 1
+  printf '%s' "$pvc" | jq -e --arg claim "$claim" --arg ns "$NAMESPACE" '
+    .metadata.name == $claim and .metadata.namespace == $ns and
+    (.metadata.uid | type == "string" and length > 0) and .status.phase == "Bound" and
+    (.spec.volumeName | type == "string" and length > 0)' >/dev/null || return 1
+  pv=$(kubectl_safe get pv "$(printf '%s' "$pvc" | jq -er '.spec.volumeName')" -o json) || return 1
+  printf '%s\n%s\n%s\n' "$mapping" "$pvc" "$pv" | jq -ser '
+    .[0] as $mapping | .[1] as $pvc | .[2] as $pv |
+    if $pv.metadata.name != $pvc.spec.volumeName or
+      $pv.spec.claimRef.uid != $pvc.metadata.uid or
+      $pv.spec.claimRef.name != $pvc.metadata.name or $pv.spec.claimRef.namespace != $pvc.metadata.namespace
+    then error("dump volume binding mismatch") else . end |
+    ($pv.spec.local.path // $pv.spec.hostPath.path) as $root |
+    if ($root | type) != "string" then error("unsupported dump storage") else . end |
+    if ($root | startswith("/")) and ($root | explode | all(. >= 32)) and
+      ($root | split("/") | all(. != ".." and . != "."))
+    then ($root | rtrimstr("/")) + "/" + $mapping.relative else error("invalid dump storage root") end'
+}
+
 prune_backups() {
+  [ -n "$BACKUP_DIR" ] || return 1
   local retention
   retention=$(config_number '.backup.retention' '7')
   [ "$retention" -ge 1 ] 2>/dev/null || retention=7
@@ -269,7 +321,7 @@ prune_backups() {
           ;;
       esac
     fi
-  done < <(sudo -n ls -1t "$BACKUP_DIR"/alphanine-scheduled-*.backup 2>/dev/null || true)
+  done < <(sudo -n sh -c 'ls -1t "$1"/alphanine-scheduled-*.backup' sh "$BACKUP_DIR" 2>/dev/null || true)
 }
 
 run_backup() {
@@ -331,7 +383,12 @@ EOF
     return 1
   fi
 
-  local backup_path="$BACKUP_DIR/$backup_name"
+  local backup_path
+  if ! backup_path=$(resolve_backup_path "$operation_name" "$backup_name" 2>> "$LOG_FILE"); then
+    record_event "backup" "failed" "Funcom reported success but the dump storage location could not be verified." "$(jq -cn --arg operation "$operation_name" '{operation:$operation}')"
+    return 1
+  fi
+  BACKUP_DIR=${backup_path%/*}
   if ! sudo -n test -s "$backup_path"; then
     record_event "backup" "failed" "Funcom reported success but the backup artifact is missing or empty." "$(jq -cn --arg path "$backup_path" '{backupPath:$path}')"
     return 1
@@ -349,15 +406,24 @@ EOF
   size=$(sudo -n stat -c %s "$backup_path" 2>/dev/null || printf '0')
   now_epoch=$(date +%s)
   local_date=$(date +%Y-%m-%d)
-  state_update '.lastBackupDate=$date | .lastSuccessfulBackupEpoch=$epoch | .lastSuccessfulBackupName=$name' \
-    --arg date "$local_date" --argjson epoch "$now_epoch" --arg name "$backup_name"
+  if ! state_update '.lastBackupDate=$date | .lastSuccessfulBackupEpoch=$epoch | .lastSuccessfulBackupName=$name | .lastSuccessfulBackupPath=$path | .lastSuccessfulBackupBattlegroup=$battlegroup' \
+    --arg date "$local_date" --argjson epoch "$now_epoch" --arg name "$backup_name" --arg path "$backup_path" --arg battlegroup "$BATTLEGROUP"; then
+    record_event "backup" "failed" "Verified backup state could not be saved." '{}'
+    return 1
+  fi
   prune_backups
   record_event "backup" "succeeded" "Verified battlegroup backup completed." "$(jq -cn --arg name "$backup_name" --arg path "$backup_path" --argjson size "$size" --arg reason "$reason" '{backupName:$name,backupPath:$path,sizeBytes:$size,reason:$reason}')"
   return 0
 }
 
 backup_is_fresh() {
-  local max_age_minutes last_epoch now_epoch age
+  local max_age_minutes last_epoch now_epoch age backup_path backup_name
+  backup_path=$(jq -er '.lastSuccessfulBackupPath // empty' "$STATE_FILE") || return 1
+  backup_name=$(jq -er '.lastSuccessfulBackupName // empty' "$STATE_FILE") || return 1
+  [ "$(jq -r '.lastSuccessfulBackupBattlegroup // ""' "$STATE_FILE")" = "$BATTLEGROUP" ] || return 1
+  case "$backup_path" in /*/alphanine-scheduled-*.backup) ;; *) return 1 ;; esac
+  [ "${backup_path##*/}" = "$backup_name" ] || return 1
+  sudo -n test -s "$backup_path" && sudo -n test -s "$backup_path.yaml" || return 1
   max_age_minutes=$(config_number '.restart.backupFreshMinutes' '90')
   last_epoch=$(jq -r '.lastSuccessfulBackupEpoch // 0' "$STATE_FILE")
   now_epoch=$(date +%s)

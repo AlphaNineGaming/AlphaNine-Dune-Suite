@@ -16680,14 +16680,15 @@ async function liveMapTeleportRequest(payload, options = {}) {
 
 async function liveMapTeleportStatus() {
   const cfg = loadConfig();
-  const availability = await liveGiveServerAvailability();
   const receiver = await receiverStatus();
   const hookConfigured = Boolean(String(cfg.teleportEndpointPath || "").trim() && String(cfg.teleportPayloadTemplate || "").trim());
-  const receiverTeleport = receiver?.health?.config?.teleport || {};
+  const health = receiver.ok ? await receiverHealthJson(cfg) : null;
+  const receiverTeleport = health?.data?.config?.teleport || {};
+  const dispatchReadinessSupported = health?.data?.ok === true && receiverTeleport.dispatchReadinessVersion === 1;
   const receiverLiveTeleportEnabled = receiverTeleport.liveTeleportEnabled !== false;
   const receiverTeleportSupported = receiverTeleport.teleportSupported !== false;
   const reasons = [];
-  if (!availability.online) reasons.push("Server is not online.");
+  if (receiver.ok && !dispatchReadinessSupported) reasons.push("Restart or update the receiver to enable teleport transport readiness checks.");
   if (!receiver.ok) reasons.push(`Receiver is not reachable at ${receiver.healthUrl}.`);
   if (!cfg.liveTeleportEnabled) reasons.push("Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.");
   if (receiver.ok && receiverTeleport.liveTeleportEnabled === false) reasons.push("Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.");
@@ -16695,8 +16696,12 @@ async function liveMapTeleportStatus() {
   if (receiver.ok && receiverTeleport.teleportSupported === false) reasons.push("Receiver does not support live teleport.");
   return {
     ok: true,
-    canTeleport: availability.online && receiver.ok && Boolean(cfg.liveTeleportEnabled) && receiverLiveTeleportEnabled && hookConfigured && receiverTeleportSupported,
-    serverHealthy: availability.online,
+    canTeleport: receiver.ok && dispatchReadinessSupported && Boolean(cfg.liveTeleportEnabled) && receiverLiveTeleportEnabled && hookConfigured && receiverTeleportSupported,
+    dispatchReadinessSupported,
+    // Receiver reachability is not game health. The receiver verifies the
+    // selected transport at dispatch, after database-backed player resolution.
+    serverHealthy: null,
+    readinessMode: "receiver-dispatch",
     receiverReachable: receiver.ok,
     liveTeleportEnabled: Boolean(cfg.liveTeleportEnabled),
     receiverLiveTeleportEnabled,
@@ -16710,8 +16715,8 @@ async function liveMapTeleportStatus() {
 async function liveMapTeleportExecute(payload) {
   const status = await liveMapTeleportStatus();
   const preview = await liveMapTeleportRequest({ ...payload, requestMode: "execute" }, { dryRun: false, test: false, execution: true });
-  if (!status.serverHealthy) return { ok: false, status: "blocked", error: "Server is not online.", ...preview, readiness: status };
   if (!status.receiverReachable) return { ok: false, status: "blocked", error: "Receiver offline.", ...preview, readiness: status };
+  if (!status.dispatchReadinessSupported) return { ok: false, status: "blocked", error: "Restart or update the receiver to enable teleport transport readiness checks.", ...preview, readiness: status };
   if (!status.liveTeleportEnabled) return { ok: false, status: "blocked", error: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.", ...preview, readiness: status };
   if (!status.receiverLiveTeleportEnabled) return { ok: false, status: "blocked", error: "Receiver live teleport is disabled. Set DUNE_RECEIVER_LIVE_TELEPORT_ENABLED=true to allow live teleport.", ...preview, readiness: status };
   if (!status.hookConfigured) return { ok: false, status: "blocked", error: "Teleport endpoint/payload is not configured.", ...preview, readiness: status };

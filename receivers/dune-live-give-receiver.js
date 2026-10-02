@@ -3,6 +3,7 @@ const { execFile } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { assertTeleportPodReady, assertTeleportConsumerReady } = require("../lib/teleport-readiness");
 
 const MANAGED_ENV_PATH = String(process.env.ALPHANINE_MANAGED_ENV_PATH || "").trim();
 const MANAGED_ENV_LOADED = loadDotEnv(MANAGED_ENV_PATH);
@@ -514,7 +515,6 @@ async function processTeleportCoords(request) {
       onlineStatusSource: "suite-database"
     };
   }
-  let rmqError = null;
   try {
     const result = await publishTeleport(request);
     return {
@@ -527,30 +527,15 @@ async function processTeleportCoords(request) {
       onlineStatusSource: "rabbitmq"
     };
   } catch (error) {
-    rmqError = error;
-    logReceiver("teleport rmq path failed; checking offline DB fallback", {
+    logReceiver("teleport online transport failed", {
       requestId: request.requestId,
       flsId: request.flsId,
       error: error.message
     });
-  }
-
-  let result;
-  try {
-    result = await updateOfflinePlayerPosition(request);
-  } catch (error) {
-    error.diagnostics = {
-      ...(error.diagnostics || {}),
-      rmqError: rmqError?.message || ""
-    };
+    // A transport failure does not establish that the player is offline.
+    // Only the explicit database-backed offline path above may update position.
     throw error;
   }
-  return {
-    path: "db",
-    message: `Offline player ${request.flsId} position updated for next login.`,
-    target: { x: request.x, y: request.y, z: request.z, partition_id: result.partitionId },
-    command: result.sql
-  };
 }
 
 function isExplicitOfflinePlayerStatus(value) {
@@ -558,7 +543,9 @@ function isExplicitOfflinePlayerStatus(value) {
 }
 
 async function publishTeleport(request) {
+  const battlegroup = await resolveBattlegroup();
   const target = await resolveMqTarget();
+  await verifyTeleportTransport(target, battlegroup);
   const serverCommand = buildTeleportServerCommand(request);
   const erlang = buildRabbitEval(serverCommand, request.requestId);
   const rmq = {
@@ -593,6 +580,20 @@ async function publishTeleport(request) {
   ].join(" ");
   const output = await ssh(remote, TELEPORT_TIMEOUT_MS);
   return { command: serverCommand, executedCommand: buildRabbitCommandLog(target), output: output.stdout || output.stderr || "", rmq };
+}
+
+async function verifyTeleportTransport(target, battlegroup) {
+  try {
+    const pod = await ssh(`sudo kubectl get pod -n ${shQuote(target.namespace)} ${shQuote(target.pod)} -o json`, TELEPORT_TIMEOUT_MS);
+    let details;
+    try { details = JSON.parse(pod.stdout); }
+    catch { throw new Error("Kubernetes returned invalid messaging pod status."); }
+    assertTeleportPodReady(details, target, battlegroup);
+    const queues = await ssh(`sudo kubectl exec -n ${shQuote(target.namespace)} ${shQuote(target.pod)} -- rabbitmqctl -q list_queues -p / name consumers --formatter=json`, TELEPORT_TIMEOUT_MS);
+    assertTeleportConsumerReady(queues.stdout);
+  } catch (error) {
+    throw new Error(`Could not verify online teleport readiness: ${error.message}`);
+  }
 }
 
 async function updateOfflinePlayerPosition(request) {
@@ -872,6 +873,7 @@ function receiverConfigDiagnostics() {
     battlegroupsDetected: 0,
     database: { status: selectedBattlegroup ? "target-configured" : "unknown" },
     teleport: {
+      dispatchReadinessVersion: 1,
       dryRunSupported: true,
       teleportSupported: LIVE_TELEPORT_ENABLED,
       liveTeleportEnabled: LIVE_TELEPORT_ENABLED,

@@ -16684,7 +16684,7 @@ async function liveMapTeleportStatus() {
   const hookConfigured = Boolean(String(cfg.teleportEndpointPath || "").trim() && String(cfg.teleportPayloadTemplate || "").trim());
   const health = receiver.ok ? await receiverHealthJson(cfg) : null;
   const receiverTeleport = health?.data?.config?.teleport || {};
-  const dispatchReadinessSupported = health?.data?.ok === true && receiverTeleport.dispatchReadinessVersion === 1;
+  const dispatchReadinessSupported = health?.data?.ok === true && receiverTeleport.dispatchReadinessVersion === 2;
   const receiverLiveTeleportEnabled = receiverTeleport.liveTeleportEnabled !== false;
   const receiverTeleportSupported = receiverTeleport.teleportSupported !== false;
   const reasons = [];

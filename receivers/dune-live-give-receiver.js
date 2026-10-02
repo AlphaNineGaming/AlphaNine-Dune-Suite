@@ -551,7 +551,7 @@ async function publishTeleport(request) {
   const rmq = {
     exchange: "heartbeats",
     routingKey: "notifications",
-    targetQueue: "notifications",
+    routingTarget: "heartbeats / notifications",
     targetNamespace: target.namespace,
     targetPod: target.pod,
     payload: serverCommand,
@@ -565,7 +565,7 @@ async function publishTeleport(request) {
     requestId: request.requestId,
     exchange: rmq.exchange,
     routingKey: rmq.routingKey,
-    targetQueue: rmq.targetQueue,
+    routingTarget: rmq.routingTarget,
     targetNamespace: rmq.targetNamespace,
     targetPod: rmq.targetPod,
     payload: rmq.payload,
@@ -589,8 +589,14 @@ async function verifyTeleportTransport(target, battlegroup) {
     try { details = JSON.parse(pod.stdout); }
     catch { throw new Error("Kubernetes returned invalid messaging pod status."); }
     assertTeleportPodReady(details, target, battlegroup);
-    const queues = await ssh(`sudo kubectl exec -n ${shQuote(target.namespace)} ${shQuote(target.pod)} -- rabbitmqctl -q list_queues -p / name consumers --formatter=json`, TELEPORT_TIMEOUT_MS);
-    assertTeleportConsumerReady(queues.stdout);
+    const prefix = `sudo kubectl exec -n ${shQuote(target.namespace)} ${shQuote(target.pod)} -- rabbitmqctl -q`;
+    const [queues, bindings, exchanges] = await Promise.all([
+      ssh(`${prefix} list_queues -p / name consumers --formatter=json`, TELEPORT_TIMEOUT_MS),
+      ssh(`${prefix} list_bindings -p / source_name destination_name destination_kind routing_key --formatter=json`, TELEPORT_TIMEOUT_MS),
+      ssh(`${prefix} list_exchanges -p / name type --formatter=json`, TELEPORT_TIMEOUT_MS)
+    ]);
+    const route = assertTeleportConsumerReady(queues.stdout, bindings.stdout, exchanges.stdout);
+    logReceiver("teleport route verified", { namespace: target.namespace, pod: target.pod, ...route });
   } catch (error) {
     throw new Error(`Could not verify online teleport readiness: ${error.message}`);
   }
@@ -873,7 +879,7 @@ function receiverConfigDiagnostics() {
     battlegroupsDetected: 0,
     database: { status: selectedBattlegroup ? "target-configured" : "unknown" },
     teleport: {
-      dispatchReadinessVersion: 1,
+      dispatchReadinessVersion: 2,
       dryRunSupported: true,
       teleportSupported: LIVE_TELEPORT_ENABLED,
       liveTeleportEnabled: LIVE_TELEPORT_ENABLED,

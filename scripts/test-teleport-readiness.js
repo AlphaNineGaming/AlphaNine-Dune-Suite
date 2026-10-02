@@ -11,11 +11,31 @@ assert.doesNotThrow(() => assertTeleportPodReady(pod, target, bg));
 assert.throws(() => assertTeleportPodReady(pod, target, { ...bg, namespace: "other" }), /selected battlegroup/);
 assert.throws(() => assertTeleportPodReady({ ...pod, metadata: { ...pod.metadata, deletionTimestamp: "now" } }, target, bg), /not ready/);
 assert.throws(() => assertTeleportPodReady({ ...pod, status: { phase: "Running", conditions: [] } }, target, bg), /not ready/);
-assert.doesNotThrow(() => assertTeleportConsumerReady('[{"name":"notifications","consumers":1}]'));
-for (const value of ['[]', '[{"name":"notifications","consumers":0}]', '[{"name":"other","consumers":2}]']) {
-  assert.throws(() => assertTeleportConsumerReady(value), /no active game consumer/);
+const encode = JSON.stringify;
+const exchange = [{ name: "heartbeats", type: "direct" }];
+const binding = { source_name: "heartbeats", destination_name: "amq.gen-player-session", destination_kind: "queue", routing_key: "notifications" };
+const activeQueues = [{ name: binding.destination_name, consumers: 1 }];
+const check = (queues = activeQueues, bindings = [binding], exchanges = exchange) =>
+  assertTeleportConsumerReady(encode(queues), encode(bindings), encode(exchanges));
+assert.deepEqual(check().queues, [binding.destination_name], "Routing key is not the queue name");
+assert.throws(() => check([{ name: "notifications", consumers: 2 }]), /no active consumer/, "Unbound same-name queues cannot make the route ready");
+assert.throws(() => check([{ name: binding.destination_name, consumers: 0 }]), /no active consumer/);
+assert.throws(() => check(activeQueues, []), /no bound destination/);
+assert.throws(() => check(activeQueues, [{ ...binding, source_name: "other" }]), /no bound destination/);
+assert.throws(() => check(activeQueues, [{ ...binding, routing_key: "other" }]), /no bound destination/);
+assert.doesNotThrow(() => check(activeQueues, [{ ...binding, routing_key: "ignored" }], [{ name: "heartbeats", type: "fanout" }]));
+for (const pattern of ["notifications", "*", "#", "#.notifications", "notifications.#"]) {
+  assert.doesNotThrow(() => check(activeQueues, [{ ...binding, routing_key: pattern }], [{ name: "heartbeats", type: "topic" }]));
 }
-assert.throws(() => assertTeleportConsumerReady("connection refused"), /invalid queue status/);
+assert.throws(() => check(activeQueues, [{ ...binding, routing_key: "notifications.*" }], [{ name: "heartbeats", type: "topic" }]), /no bound destination/);
+assert.doesNotThrow(() => check(activeQueues, [
+  { ...binding, destination_kind: "exchange", destination_name: "forward" },
+  { ...binding, source_name: "forward" },
+  { ...binding, source_name: "forward", destination_kind: "exchange", destination_name: "heartbeats" }
+], [...exchange, { name: "forward", type: "direct" }]));
+assert.throws(() => check(activeQueues, [binding], []), /missing or has unsupported type/);
+assert.throws(() => assertTeleportConsumerReady("connection refused", "[]", "[]"), /invalid queue status/);
+assert.throws(() => assertTeleportConsumerReady("[]", "bad", "[]"), /invalid binding status/);
 
 const root = path.join(__dirname, "..");
 const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
@@ -26,7 +46,7 @@ function extract(source, name, nextName) {
 
 async function main() {
   let reachable = true;
-  let capability = 1;
+  let capability = 2;
   const context = {
     loadConfig: () => ({ liveTeleportEnabled: true, teleportEndpointPath: "/teleport", teleportPayloadTemplate: "{}" }),
     liveGiveServerAvailability: () => { throw new Error("CLI must not be invoked"); },
@@ -40,6 +60,8 @@ async function main() {
   capability = undefined;
   assert.equal((await context.liveMapTeleportStatus()).canTeleport, false, "Old receivers must not bypass readiness checks");
   capability = 1;
+  assert.equal((await context.liveMapTeleportStatus()).canTeleport, false, "1.3.14 receivers need restart before using corrected routing checks");
+  capability = 2;
   reachable = false;
   assert.equal((await context.liveMapTeleportStatus()).canTeleport, false);
 

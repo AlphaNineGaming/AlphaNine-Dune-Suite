@@ -29,6 +29,16 @@ const { scanInstalledGameDungeons } = require("./lib/installed-game-dungeon-cata
 const { applyTeleportRequestMode } = require("./lib/teleport-request-mode");
 const { HYDRATION_TOOLTIP, extractHydrationFromGasAttributes } = require("./lib/hydration");
 const { OperationRegistry, OperationBusyError, operationsConflict } = require("./lib/operations");
+const packageCleanup = require("./lib/server-package-cleanup").createPackageCleanup();
+const { createVmDiskCompaction, TRIM_COMMAND: VM_TRIM_COMMAND } = require("./lib/vm-disk-compaction");
+const vmDiskCompaction = createVmDiskCompaction({
+  configuration: () => ({ platform: process.platform, serverType: loadConfig().serverType, vmName: configuredVmName() }),
+  powershell: (script, options = {}) => {
+    if (!options.longRunning) return ps(script, 60000);
+    // Windows owns the compaction; do not kill it with the general command timeout.
+    return new Promise(resolve => execFile("powershell.exe", ["-NoProfile", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => resolve({ ok: !error, stdout: String(stdout || ""), stderr: String(stderr || ""), error: error ? error.message : "" })));
+  }
+});
 const {
   BANNER: MIGRATION_MAINTENANCE_BANNER,
   ENTER_CONFIRMATION: MIGRATION_MAINTENANCE_ENTER_CONFIRMATION,
@@ -3471,6 +3481,56 @@ async function sshCommand(command, timeout = 180000, options = {}) {
   if (!result.ok) vmConnectionCache.invalidate();
   // Never automatically replay commands: they may already have changed the server.
   return result;
+}
+
+function packageCleanupTarget() {
+  const cfg = loadConfig();
+  return crypto.createHash("sha256").update(JSON.stringify([cfg.serverType, cfg.vmName, cfg.sshHost, cfg.vmIp, cfg.sshUser, cfg.sshKey])).digest("hex");
+}
+async function packageCleanupContext() {
+  const target = packageCleanupTarget();
+  const connection = await standardVmSshConnection();
+  return { target, execute: async (command, timeout = 60000) => {
+    if (packageCleanupTarget() !== target) throw new Error("VM settings changed. Scan again before cleanup.");
+    return run("ssh", [...connection.args, command], { timeout, maxBuffer: 16 * 1024 * 1024 });
+  }};
+}
+function startVmDiskMaintenance(action, input = {}) {
+  if (migrationMaintenance.status().active) throw new Error("Exit Migration Maintenance Mode before VM disk maintenance.");
+  const vmName = configuredVmName();
+  const operation = operationRegistry.begin("maintenance:vm-disk-" + action, action === "compact" ? "Compact VM Disk" : "Prepare VM Free Space", { category: "vm" });
+  Promise.resolve().then(async () => {
+    if (configuredVmName() !== vmName) throw new Error("Configured VM changed. Detect its disks again.");
+    let result;
+    if (action === "compact") result = await vmDiskCompaction.compact({ ...input, onProgress: (stage, detail) => operationRegistry.update(operation, stage, detail) });
+    else {
+      const detected = await vmDiskCompaction.inspect();
+      if (detected.vmName !== vmName || detected.state !== "Running") throw new Error("Start the configured VM before preparing free space.");
+      const context = await packageCleanupContext();
+      if (configuredVmName() !== vmName) throw new Error("Configured VM changed before trimming.");
+      operationRegistry.update(operation, "Preparing free space", "Marking unused Linux blocks for reclamation. The VM stays running.");
+      const trimmed = await context.execute(VM_TRIM_COMMAND, 5 * 60 * 1000);
+      if (!trimmed.ok) throw new Error(trimmed.stderr || trimmed.error || "Free-space preparation failed. Compaction may recover little space without trimming.");
+      result = { ok: true, message: "Free-space preparation complete. Shut down the VM fully, then detect and compact its disk.", details: trimmed.stdout };
+    }
+    appendAdminAudit("vm_disk_" + action, result);
+    operationRegistry.finish(operation, "success", "", { diagnostics: result });
+    vmStatusProbe.invalidate();
+  }).catch(error => operationRegistry.finish(operation, "failed", error.message));
+  return operationRegistry.public(operation);
+}
+function startPackageCleanup(previewId) {
+  if (migrationMaintenance.status().active) throw new Error("Exit Migration Maintenance Mode before cleaning server packages.");
+  const operation = operationRegistry.begin("cleanup:server-packages", "Clean Old Server Packages", { category: "server" });
+  const requestedTarget = packageCleanupTarget();
+  Promise.resolve().then(async () => {
+    const context = await packageCleanupContext();
+    if (context.target !== requestedTarget) throw new Error("VM settings changed before cleanup started. Scan again.");
+    const result = await packageCleanup.clean({ ...context, previewId, onProgress: (stage, detail) => operationRegistry.update(operation, stage, detail) });
+    appendAdminAudit("server_package_cleanup", { removedCount: result.removed.length, skippedCount: result.skipped.length, freedBytes: result.freedBytes, errors: result.errors });
+    operationRegistry.finish(operation, result.ok ? "success" : "failed", result.error || "", { diagnostics: result });
+  }).catch(error => operationRegistry.finish(operation, "failed", error.message));
+  return operationRegistry.public(operation);
 }
 
 const USER_GAME_INI_PATH = "/home/dune/.dune/download/scripts/setup/config/UserGame.ini";
@@ -24502,11 +24562,20 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <button onclick="act('backup')">Backup</button>
           <button id="serverUpdateButton" onclick="checkServerUpdateNow()">Check Server Update</button>
           <button id="serverDownloadRepairButton" onclick="repairServerDownload()">Repair Server Download</button>
+          <button id="serverPackageCleanupScanButton" onclick="scanServerPackages()">Clean Old Server Packages</button>
           <button id="databaseOwnershipRepairButton" onclick="repairDatabaseOwnership()" title="Back up and repair AlphaNine table ownership when a database update blocks startup.">Repair Database Update</button>
           <button onclick="openDirector()">Open Director</button>
           <button id="openBattlegroupBatchButton" onclick="openBattlegroupBatch()">Open Battlegroup.bat</button>
           <button onclick="act('logs-export')">Export Logs</button>
           <button onclick="act('operator-logs-export')">Export Operator Logs</button>
+        </div>
+        <div id="serverPackageCleanupPanel" class="panel pad mt" hidden>
+          <div class="label">Old Server Packages</div>
+          <div class="subtle">Keeps packages used by containers and server configuration, plus the two newest versions. Game saves and backups stay in place.</div>
+          <div id="serverPackageCleanupStatus" class="empty mt" role="status" aria-live="polite">Scan to find unused versions.</div>
+          <pre id="serverPackageCleanupList" class="mt" style="max-height:240px;overflow:auto;white-space:pre-wrap"></pre>
+          <button id="serverPackageCleanupRunButton" class="danger mt" onclick="cleanServerPackages()" disabled>Clean Unused Packages</button>
+          <div class="subtle mt">Estimated package sizes may share files. Cleanup measures actual free space inside the VM. The Hyper-V disk file may require separate compaction to shrink on your PC.</div>
         </div>
         <div id="databaseOwnershipRepairStatus" class="empty mt" role="status" aria-live="polite">Database repair checks for the known update failure and creates a verified backup before changing ownership.</div>
         <div id="databaseRepairProgress" class="mt" hidden>
@@ -24532,8 +24601,18 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <button class="primary" onclick="runVmAction('start')">Start VM</button>
           <button class="danger" onclick="runVmAction('stop')">Stop VM</button>
           <button onclick="runVmAction('restart')">Restart VM</button>
+          <button id="vmDiskInspectButton" onclick="inspectVmDisks()">Compact VM Disk</button>
         </div>
         <div class="subtle mt advanced-only"><a href="https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/manage/manage-hyper-v-hosts" target="_blank" rel="noopener">How to fix Hyper-V permissions</a></div>
+        <div id="vmDiskPanel" class="panel pad mt" hidden>
+          <div class="label">Reclaim Space on Your PC</div>
+          <div class="subtle">The Suite detects disk paths from your configured Hyper-V VM. First prepare free space while the VM is running, then shut the VM down fully and compact its disk. Keep a current backup before disk maintenance.</div>
+          <div class="controls mt"><button id="vmDiskTrimButton" onclick="runVmDiskMaintenance('trim')">Prepare Free Space</button><button onclick="inspectVmDisks()">Detect VM Disks</button></div>
+          <label class="mt">Detected disk<select id="vmDiskSelect" onchange="renderVmDiskSelection()"></select></label>
+          <div id="vmDiskStatus" class="empty mt" role="status" aria-live="polite">Detecting VM disks...</div>
+          <button id="vmDiskCompactButton" class="danger mt" onclick="runVmDiskMaintenance('compact')" disabled>Compact Detected Disk</button>
+          <div class="subtle mt">Compaction keeps the disk capacity and leaves the VM off. It may reclaim no space if free blocks cannot be identified. Running, Saved, shared, fixed-size and checkpoint disks are blocked.</div>
+        </div>
         <pre id="vmControlLog" class="mt advanced-only">Ready.</pre>
       </div>
       <div class="panel pad mt">
@@ -25950,6 +26029,60 @@ async function runVmAction(action){const log=document.getElementById("vmControlL
 async function ensureVmRunningBeforeBattlegroupStart(){const data=await getJson("/api/vm/status");const vm=data.vm||{};renderVmStatus(vm);if(!vm.configured)throw new Error("VM name is not configured. Set VM Name in Settings before starting the Battlegroup.");if(vm.hyperv&&!vm.hyperv.available)throw new Error(vm.hyperv.message||"Hyper-V not detected on this system.");if(vm.state==="Running")return true;if(vm.state==="Stopped"){if(!(await appConfirm("Start VM first?","VM is stopped. Start VM before starting the Battlegroup?","Start VM","Cancel")))return false;const started=await runVmAction("start");if(!started?.ok)throw new Error(started?.error||started?.waited?.error||"VM failed to reach Running before timeout.");if((started.vm?.state||started.state)!=="Running")throw new Error("VM failed to reach Running before timeout. Battlegroup start aborted.");return true;}return true;}
 async function act(action){document.getElementById("serverLog").textContent="Running "+action+"...";addActivity("action","Running "+action);try{if(action==="start"){const shouldContinue=await ensureVmRunningBeforeBattlegroupStart();if(!shouldContinue){document.getElementById("serverLog").textContent="Battlegroup start cancelled.";syncLogs();return;}}const actionTimeouts=${JSON.stringify(SERVER_MANAGEMENT_UI_TIMEOUTS)},data=await getJson("/api/action/"+action,{method:"POST",timeoutMs:actionTimeouts[action]||180000});let output=data.stdout||data.stderr||data.error||"Done.";if(action==="backup"&&data.ok){output="Actual VM backup copied and verified locally.\\nVM source: "+(data.vmBackupPath||data.vmPath||"--")+"\\nLocal copy: "+(data.localBackupPath||data.filePath||"--")+"\\nSHA-256: "+(data.sha256||"--")+"\\nSize: "+(data.size||data.file?.size||"--")+" bytes\\nMetadata: "+(data.localMetadataPath||"--");}if(data.dbTunnel){output+="\\n\\nDB Tunnel: "+(data.dbTunnel.tunnel?.status||data.dbTunnel.message||data.dbTunnel.error||"Unknown")+"\\nPort: "+(data.dbTunnel.tunnel?.port||15432)+"\\nPID: "+(data.dbTunnel.tunnel?.pid||data.dbTunnel.startedPid||"--");renderDatabaseTunnelStatus(data.dbTunnel.tunnel||data.dbTunnel);}document.getElementById("serverLog").textContent=output;syncLogs();addActivity("action",action+" completed",(data.error||data.dbTunnel?.message||"").slice(0,120));playUiSound(data.error?"warning":"success");setTimeout(()=>{refresh();refreshDatabaseTunnelStatus();},1200);}catch(e){document.getElementById("serverLog").textContent=betterError(e);syncLogs();addActivity("error",action+" failed",e.message);playUiSound("warning");}}
 async function openDirector(){try{const data=await getJson("/api/director");if(data.url) window.open(data.url,"_blank");else document.getElementById("serverLog").textContent=data.error||"Director URL unavailable.";}catch(e){document.getElementById("serverLog").textContent=betterError(e);}}
+let vmDiskPreview=null,vmDiskMaintenanceBusy=false;
+function renderVmDiskSelection(){
+ const index=Number(document.getElementById("vmDiskSelect").value),disk=vmDiskPreview?.disks?.[index];
+ document.getElementById("vmDiskCompactButton").disabled=vmDiskMaintenanceBusy||!disk?.canCompact;
+ if(disk)document.getElementById("vmDiskStatus").textContent="VM: "+vmDiskPreview.vmName+" ("+vmDiskPreview.state+"). File size: "+packageSpace(disk.fileSize)+". Capacity: "+packageSpace(disk.capacity)+". "+(disk.reason||"Ready to compact this detected disk.");
+}
+async function inspectVmDisks(){
+ const panel=document.getElementById("vmDiskPanel"),status=document.getElementById("vmDiskStatus"),button=document.getElementById("vmDiskInspectButton"),select=document.getElementById("vmDiskSelect");panel.hidden=false;button.disabled=true;vmDiskPreview=null;select.replaceChildren();document.getElementById("vmDiskCompactButton").disabled=true;status.textContent="Reading the configured VM and its disk attachments from Hyper-V...";
+ try{const data=await getJson("/api/vm/disk/inspect",{method:"POST",timeoutMs:90000});vmDiskPreview=data;for(const disk of data.disks){const option=document.createElement("option");option.value=String(disk.index);option.textContent=disk.path+" · "+packageSpace(disk.fileSize);select.appendChild(option);}document.getElementById("vmDiskTrimButton").disabled=vmDiskMaintenanceBusy||data.state!=="Running";if(data.disks.length)renderVmDiskSelection();else status.textContent="No file-backed disks were found on "+data.vmName+".";}
+ catch(error){status.textContent=betterError(error);document.getElementById("vmDiskTrimButton").disabled=true;}finally{button.disabled=false;}
+}
+async function runVmDiskMaintenance(action){
+ if(vmDiskMaintenanceBusy)return;const disk=vmDiskPreview?.disks?.[Number(document.getElementById("vmDiskSelect").value)];
+ if(action==="compact"&&!disk?.canCompact)return;
+ const confirmed=await appConfirm(action==="compact"?"Compact VM Disk":"Prepare VM Free Space", action==="compact"?"Compact this detected disk? "+disk.path+". The VM must remain fully off until compaction finishes. Disk capacity stays the same; actual space recovered may be zero.":"Mark unused Linux blocks as reclaimable while the VM is running? This prepares for compaction and does not delete files. If no supported trim tool is installed, the Suite will report it.",action==="compact"?"Compact Disk":"Prepare Free Space","Cancel");if(!confirmed)return;
+ const status=document.getElementById("vmDiskStatus");vmDiskMaintenanceBusy=true;document.getElementById("vmDiskCompactButton").disabled=true;document.getElementById("vmDiskTrimButton").disabled=true;
+ let operationId="";
+ try{let data;try{data=await getJson("/api/vm/disk/"+action,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(action==="compact"?{previewId:vmDiskPreview.previewId,diskIndex:disk.index}:{}),timeoutMs:30000});}catch(error){const snapshot=await getJson("/api/operations");const active=(snapshot.active||[]).find(row=>row.key==="maintenance:vm-disk-"+action);if(!active)throw error;data={operation:active};}
+ operationId=data.operation.id;vmDiskPreview=null;
+ for(;;){const snapshot=await getJson("/api/operations",{timeoutMs:30000});const operation=(snapshot.operations||[]).find(row=>row.id===operationId);if(!operation)throw Error("Disk maintenance status is unavailable. Check Operations before retrying.");status.textContent=operation.stage+(operation.detail?" · "+operation.detail:"");
+ if(["success","failed","interrupted"].includes(operation.status)){if(operation.status!=="success")throw Error(operation.error||"Disk maintenance stopped.");const result=operation.diagnostics||{};status.textContent=action==="compact"?result.message+" Before: "+packageSpace(result.beforeBytes)+". After: "+packageSpace(result.afterBytes)+". Reclaimed on PC: "+packageSpace(result.freedBytes)+".":result.message+(result.details?" "+result.details:"");break;}await new Promise(resolve=>setTimeout(resolve,1500));}
+ }catch(error){status.textContent=betterError(error)+(operationId?" Check Operations for details.":"");}finally{vmDiskMaintenanceBusy=false;vmDiskPreview=null;document.getElementById("vmDiskCompactButton").disabled=true;document.getElementById("vmDiskTrimButton").disabled=false;}
+}
+let serverPackageCleanupPreview=null;
+function packageSpace(bytes){return (Number(bytes||0)/1073741824).toFixed(2)+" GB";}
+async function scanServerPackages(){
+ const panel=document.getElementById("serverPackageCleanupPanel"),status=document.getElementById("serverPackageCleanupStatus"),scan=document.getElementById("serverPackageCleanupScanButton"),clean=document.getElementById("serverPackageCleanupRunButton");
+ panel.hidden=false;scan.disabled=true;clean.disabled=true;serverPackageCleanupPreview=null;status.textContent="Scanning packages and checking server references...";document.getElementById("serverPackageCleanupList").textContent="";
+ try{const data=await getJson("/api/server-packages/scan",{method:"POST",timeoutMs:180000});serverPackageCleanupPreview=data;
+ status.textContent=data.candidates.length+" unused packages found. Estimated package size: "+packageSpace(data.estimatedBytes)+" (shared files may reduce the space freed). VM free space: "+packageSpace(data.disk.availableBytes)+".";
+ document.getElementById("serverPackageCleanupList").textContent=data.candidates.map(row=>row.tags.join(", ")+" · "+packageSpace(row.sizeBytes)).concat(data.retained.map(row=>"Keep: "+row.tags.join(", ")+" — "+row.reason)).join("\\n");clean.disabled=!data.candidates.length;
+ }catch(error){status.textContent=betterError(error);}finally{scan.disabled=false;}
+}
+async function cleanServerPackages(){
+ if(!serverPackageCleanupPreview)return;
+ if(!(await appConfirm("Clean Old Server Packages", "Remove "+serverPackageCleanupPreview.candidates.length+" unused packages from the VM? Packages referenced by containers and server configuration and the two newest versions will be kept. Saves and backups will stay in place.", "Clean Packages", "Cancel")))return;
+ const status=document.getElementById("serverPackageCleanupStatus"),scan=document.getElementById("serverPackageCleanupScanButton"),clean=document.getElementById("serverPackageCleanupRunButton");scan.disabled=true;clean.disabled=true;
+ let operationId="";
+ try{
+  let data;try{data=await getJson("/api/server-packages/clean",{method:"POST",body:JSON.stringify({previewId:serverPackageCleanupPreview.previewId}),timeoutMs:30000});}
+  catch(error){const snapshot=await getJson("/api/operations");const active=(snapshot.active||[]).find(row=>row.key==="cleanup:server-packages");if(!active)throw error;data={operation:active};}
+  operationId=data.operation.id;serverPackageCleanupPreview=null;
+  for(;;){const snapshot=await getJson("/api/operations",{timeoutMs:30000});const operation=(snapshot.operations||[]).find(row=>row.id===operationId);if(!operation)throw new Error("Cleanup status is unavailable. Refresh Operations before trying again.");
+   status.textContent=operation.stage+(operation.detail?" · "+operation.detail:"");
+   if(operation.status==="success"||operation.status==="failed"||operation.status==="interrupted"){
+    const result=operation.diagnostics;
+    if(result){status.textContent=(operation.status==="success"?"Cleanup complete. ":"Cleanup stopped. ")+result.removed.length+" packages removed, "+result.skipped.length+" skipped. Measured space freed: "+packageSpace(result.freedBytes)+". VM free space: "+packageSpace(result.afterAvailableBytes)+(operation.error?". "+operation.error:"");}
+    else status.textContent=operation.error||"Cleanup finished.";
+    if(operation.status!=="success")showToast(operation.error||"Cleanup stopped.","error");break;
+   }
+   await new Promise(resolve=>setTimeout(resolve,1500));
+  }
+ }catch(error){status.textContent=betterError(error)+(operationId?" Check Operations for cleanup status.":"");}finally{serverPackageCleanupPreview=null;scan.disabled=false;clean.disabled=true;}
+}
 async function repairDatabaseOwnership(){
  const button=document.getElementById("databaseOwnershipRepairButton");
  const status=document.getElementById("databaseOwnershipRepairStatus");
@@ -27257,6 +27390,27 @@ async function route(req, res) {
   if (url.pathname === "/api/vm-monitor" && req.method === "GET") {
     try { await json(res, await sharedVmConnectionMonitor()); }
     catch (error) { await json(res, { ok: false, error: error.message }, 500); }
+    return;
+  }
+  if (["/api/vm/disk/inspect", "/api/vm/disk/trim", "/api/vm/disk/compact"].includes(url.pathname) && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) { await json(res, { ok: false, error: "VM disk maintenance is available only in the local Suite." }, 403); return; }
+    try {
+      if (url.pathname.endsWith("/inspect")) await json(res, await vmDiskCompaction.inspect());
+      else { const body = JSON.parse(await readBody(req, 65536) || "{}"); await json(res, { ok: true, operation: startVmDiskMaintenance(url.pathname.endsWith("/compact") ? "compact" : "trim", { previewId: String(body.previewId || ""), diskIndex: body.diskIndex }) }, 202); }
+    } catch (error) { const failure = operationErrorResponse(error); await json(res, failure.payload, failure.statusCode); }
+    return;
+  }
+  if ((url.pathname === "/api/server-packages/scan" || url.pathname === "/api/server-packages/clean") && req.method === "POST") {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req)) {
+      await json(res, { ok: false, error: "Server package cleanup is available only in the local Suite." }, 403); return;
+    }
+    try {
+      if (url.pathname.endsWith("/scan")) await json(res, await packageCleanup.scan(await packageCleanupContext()));
+      else {
+        const body = JSON.parse(await readBody(req, 65536) || "{}");
+        await json(res, { ok: true, operation: startPackageCleanup(String(body.previewId || "")) }, 202);
+      }
+    } catch (error) { const failure = operationErrorResponse(error); await json(res, failure.payload, failure.statusCode); }
     return;
   }
   if (url.pathname === "/api/server-update/check" && req.method === "GET") {

@@ -1,6 +1,7 @@
 # Documentation
 
 - [Suite overview, installation, and troubleshooting](../README.md)
+- [VM cleanup and disk compaction: step-by-step](VM_STORAGE_CLEANUP_GUIDE.md)
 - [Market Bot guide](MARKET_AUTOMATOR_GUIDE.md)
 - [Release notes](releases/README.md)
 - [Release test checklist](RELEASE_TEST.md)

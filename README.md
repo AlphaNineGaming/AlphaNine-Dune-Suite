@@ -30,6 +30,7 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 - [Download the latest installer](https://github.com/AlphaNineGaming/AlphaNine-Dune-Suite/releases/latest)
 - [Release notes](docs/releases/README.md)
+- [VM cleanup and disk compaction: step-by-step](docs/VM_STORAGE_CLEANUP_GUIDE.md)
 - [Market Bot guide](docs/MARKET_AUTOMATOR_GUIDE.md)
 - [Release test checklist](docs/RELEASE_TEST.md)
 - [Documentation index](docs/README.md)

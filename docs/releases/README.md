@@ -1,5 +1,6 @@
 # Release notes
 
+- [1.3.17 — Character Travel Diagnostics](RELEASE_NOTES_1.3.17.md)
 - [1.3.16 — Character Recovery](RELEASE_NOTES_1.3.16.md)
 - [1.3.15 — Teleport Routing Hotfix](RELEASE_NOTES_1.3.15.md)
 - [1.3.14 — Teleport Readiness Fix](RELEASE_NOTES_1.3.14.md)

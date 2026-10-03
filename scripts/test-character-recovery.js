@@ -12,7 +12,7 @@ const clone = (x) => JSON.parse(JSON.stringify(x));
 // rollback/disconnect discard them, and COMMIT publishes them to a fresh reader.
 function harness(options = {}) {
   const initial = {
-    pawn: { id:"6",owner_account_id:"2",class:CHARACTER_CLASS,state:"Default",serial:"123",
+    pawn: { id:"6",owner_account_id:options.pawnOwner??"2",class:options.pawnClass??CHARACTER_CLASS,state:options.actorState??"Default",serial:"123",
       map:options.currentMap||"Arrakeen",partition_id:"3",dimension_index:0,x:90,y:80,z:70,
       rotation:"{\"w\":0.7,\"x\":0,\"y\":0,\"z\":0.6}",
       properties:{skills:["a","b"],equipment:{head:"helmet"},progression:{level:42}},
@@ -26,7 +26,7 @@ function harness(options = {}) {
   function pawnRow(state) {
     const p=state.pawn;
     const {map,partition_id,dimension_index,x,y,z,rotation,...protectedPawn}=p;
-    return {row_id:"1",account_id:"2",pawn_id:"6",controller_id:"4",state_id:"5",character_name:"Test Player",
+    return {row_id:"1",account_id:"2",pawn_id:"6",controller_id:options.controllerId??"4",state_id:"5",character_name:"Test Player",
       online_status:options.onlineStatus||"Offline",database_offline:options.databaseOffline!==false,
       home_dimension_index:options.homeDimension??0,return_dimension_index:options.returnDimension??0,
       fls_id:"original-fls-id",fls_accounts:options.ambiguousFls?2:1,pawn_links:1,
@@ -62,6 +62,16 @@ function harness(options = {}) {
         }
         case "recovery-links":return {rows:[{protected_links:JSON.stringify(state.links),transfer_blocked:!!options.transferBlocked,login_dimension:options.loginDimension??0}]};
         case "recovery-destination":return {rows:options.destinationMissing?[]:[{source_actor_id:"60",partition_id:"10",dimension_index:0,x:12,y:34,z:56,partition_snapshot:"{\"partition_id\":10,\"dimension_index\":0,\"blocked\":false}"}]};
+        case "recovery-diagnostic": {
+          assert.equal(this.write,false,"Travel diagnostics require a read-only transaction");
+          if(options.diagnosticFails)throw new Error("Diagnostic query failed");
+          const p=pawnRow(state);
+          const evidence={accountId:"2",playerName:"Test Player",pawnId:p.pawn_id,controllerId:p.controller_id,playerStateId:p.state_id,onlineStatus:p.online_status,
+            actors:options.missingPawn?[]:[{id:p.pawn_id,class:p.class,ownerAccountId:p.owner_account_id,state:p.state,map:p.map,partitionId:p.partition_id,dimensionIndex:p.dimension_index}],
+            loginTargetDimensionIndex:0,travelReturn:state.links.travel_return,travelParents:[],transferImport:null};
+          return {rows:options.missingCharacter?[]:(options.ambiguousPawn?[{evidence},{evidence:{...evidence,pawnId:"99"}}]:[{evidence}])};
+        }
+        case "recovery-diagnostic-routines":return {rows:[{signature:"dune.admin_move_offline_player_to_partition(text,bigint,dune.vector)",definition:vendor[0].prosrc}]};
         case "recovery-move": {
           assert(this.write&&this.locked,"The function must execute under recovery-owned locks and transaction");
           assert.match(input.text,/select dune\.admin_move_offline_player_to_partition\(/);
@@ -127,6 +137,10 @@ for(const [name,options,pattern] of [
   ["missing pawn",{missingPawn:true},/missing or ambiguous/],
   ["ambiguous pawn",{ambiguousPawn:true},/missing or ambiguous/],
   ["ambiguous original FLS identifier",{ambiguousFls:true},/FLS identifier/],
+  ["colliding actor identities",{controllerId:"6"},/pawn 6, PlayerController 6 and PlayerState 5.*three distinct actors/],
+  ["unsupported pawn class",{pawnClass:"/Game/UnknownPlayerCharacter.UnknownPlayerCharacter_C"},/pawn 6 has unsupported character class.*UnknownPlayerCharacter/],
+  ["wrong pawn ownership",{pawnOwner:"42"},/pawn 6 belongs to account 42; the selected account is 2/],
+  ["pawn in travel state",{actorState:"Travel"},/pawn 6 has actor state "Travel"; recovery requires Default/],
   ["missing destination",{destinationMissing:true},/destination could not/],
   ["no authoritative safe preset",{noPresets:true},/destination could not/],
   ["out-of-bounds destination",{outOfBounds:true},/destination could not/],
@@ -200,17 +214,18 @@ test("release contains no investigated universal coordinate or direct actor UPDA
 function uiHarness() {
   const source=fs.readFileSync(path.join(__dirname,"../server.js"),"utf8");
   const snippet=source.slice(source.indexOf("let characterRecoveryPreview=null"),source.indexOf("function resetPlayerRename(",source.indexOf("let characterRecoveryPreview=null")));
-  const elements={},calls=[],toasts=[];
+  const elements={},calls=[],toasts=[],downloads=[];
   const h={player:{account_id:"2",online_status:"Offline"},confirmed:true,fail:false};
   function element(id){return elements[id]??=( {disabled:false,textContent:"",classList:{add(){},remove(){}}});}
   const preview={ok:true,previewId:"server-token",accountId:"2",playerName:"Test Player",currentLocation:"Arrakeen"};
   const context={document:{getElementById:element},selectedPlayer:()=>h.player,
     setText:(id,text)=>{element(id).textContent=text;},showToast:(...args)=>toasts.push(args),betterError:e=>e.message,
     appConfirm:async(title,message)=>{calls.push({confirmation:message});if(h.switchDuringConfirmation)h.player={account_id:"9",online_status:"Offline"};return h.confirmed;},
-    getJson:async(url,options)=>{calls.push({url,options});if(h.fail)throw new Error("Recovery unverified; inspect before retrying");return options?.method==="POST"?{ok:true,message:SUCCESS,accountId:"2"}:preview;},
+    getJson:async(url,options)=>{calls.push({url,options});if(h.fail)throw new Error("Recovery unverified; inspect before retrying");if(url.includes("/diagnostics?")){if(h.switchDuringDiagnostic)h.player={account_id:"9",online_status:"Offline"};return {ok:true,readOnly:true,accountId:"2",characters:[{pawnId:"6",actors:[{id:"6",state:"Travel",map:"Arrakeen"}]}],routines:[]};}return options?.method==="POST"?{ok:true,message:SUCCESS,accountId:"2"}:preview;},
+    databaseExplorerDownload:(...args)=>downloads.push(args),
     refreshPlayersAfterRename:async()=>{if(h.refreshFails)throw new Error("Players refresh unavailable");},encodeURIComponent};
   vm.createContext(context);vm.runInContext(snippet,context);
-  return {...h,state:h,context,elements,calls,toasts,element};
+  return {...h,state:h,context,elements,calls,toasts,downloads,element};
 }
 test("Players enables recovery only for an offline selected player",()=>{
   const h=uiHarness();h.context.syncCharacterRecoveryControls();assert.equal(h.element("playerRecoveryOpenButton").disabled,false);
@@ -242,4 +257,38 @@ test("Players refresh failure preserves the verified recovery result",async()=>{
   assert.match(h.element("playerRecoveryStatus").textContent,/Use Refresh Players/);
   assert.equal(h.toasts.some(t=>t[1]==="error"),false);
   assert.equal(h.element("playerRecoveryApplyButton").disabled,true);
+});
+
+for(const options of [{actorState:"Travel"},{onlineStatus:"Online"},{missingPawn:true},{ambiguousPawn:true},{missingCharacter:true}])test("Suite diagnostics inspect blocked linkage without authorizing recovery: "+JSON.stringify(options),async()=>{
+  const h=harness(options);const data=await h.service.diagnostics("2");
+  assert.equal(data.readOnly,true);assert.equal(data.previewId,undefined);
+  assert.equal(h.model.moves.length,0);assert.equal(h.model.backupCalls,0);assert.equal(h.model.commits,0);assert.equal(h.model.journal,null);
+  assert.deepEqual(h.model.state,h.model.before);
+  assert.doesNotMatch(JSON.stringify(data),/original-fls-id|helmet|skillPoints/);
+  assert(h.model.trace.some(t=>t.name==="ROLLBACK"));
+  assert(h.model.trace.filter(t=>typeof t.name==="string"&&t.name.startsWith("BEGIN")).every(t=>t.name.includes("READ ONLY")));
+});
+test("failed diagnostic read closes its read-only transaction without writes",async()=>{
+  const h=harness({diagnosticFails:true});await assert.rejects(h.service.diagnostics("2"),/Diagnostic query failed/);
+  assert(h.model.trace.some(t=>t.name==="ROLLBACK"));assert.equal(h.model.moves.length,0);assert.equal(h.model.commits,0);
+});
+test("travel diagnostics remain usable after recovery inspection is blocked",async()=>{
+  const h=uiHarness();h.state.fail=true;await h.context.openCharacterRecovery();h.state.fail=false;
+  await h.context.inspectCharacterTravel();assert.equal(h.element("playerRecoveryLocation").textContent,"Current Location: Arrakeen");
+  assert.match(h.element("playerRecoveryDiagnosticStatus").textContent,/Pawn 6 \/ State: Travel/);
+  assert.equal(h.element("playerRecoveryApplyButton").disabled,true);
+  h.context.exportCharacterTravel();assert.equal(h.downloads.length,1);
+  assert.equal(JSON.parse(h.downloads[0][2]).readOnly,true);
+  assert.equal(h.calls.some(c=>c.options?.method==="POST"),false);
+});
+test("switching players prevents displaying or exporting a stale travel report",async()=>{
+  const h=uiHarness();h.state.switchDuringDiagnostic=true;await h.context.inspectCharacterTravel();h.context.exportCharacterTravel();
+  assert.equal(h.downloads.length,0);assert.equal(h.element("playerRecoveryExportButton").disabled,true);
+});
+test("travel diagnostic API uses the existing local-only boundary",()=>{
+  const source=fs.readFileSync(path.join(__dirname,"../server.js"),"utf8");
+  const start=source.indexOf('if (url.pathname === "/api/admin/players/recovery/diagnostics"');
+  const endpoint=source.slice(start,source.indexOf('if (url.pathname === "/api/admin/players/recovery" && req.method === "POST")',start));
+  assert.match(endpoint,/isRemotePortalRequest\(req\) \|\| !remoteAccess\.isLoopbackRequest\(req\)/);
+  assert.match(endpoint,/403/);assert.match(endpoint,/characterRecovery\.diagnostics/);
 });

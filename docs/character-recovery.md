@@ -4,6 +4,15 @@ In **Players**, select an offline player, choose **Recover Character**, and conf
 **Recover to Hagga Basin**. The Suite resolves the player's existing authoritative
 PlayerCharacter across maps. The administrator does not enter destination fields.
 
+If recovery is blocked, choose **Inspect Travel State** in the recovery panel.
+It shows the linked pawn's map and state using a read-only transaction, even when
+the pawn is in Travel or its linkage is missing/ambiguous. **Export Diagnostics**
+downloads one JSON report for investigation, with actor/linkage and travel-routing
+metadata and relevant vendor function definitions. No manual SQL is needed.
+Inspection creates no recovery confirmation and never calls the movement function.
+It is local-only and excludes inventory/progression payloads, credentials and FLS
+identifiers. Travel state is not reset or repaired by this inspection.
+
 Recovery uses `dune.admin_move_offline_player_to_partition`, passing the original
 FLS identifier, an existing validated Hagga partition, and exact safe coordinates.
 There is no direct actor UPDATE, character creation, ID reassignment or travel

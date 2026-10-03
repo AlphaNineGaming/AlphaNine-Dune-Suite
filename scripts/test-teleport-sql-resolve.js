@@ -163,7 +163,7 @@ async function post(baseUrl, route, body) {
 
     const page = await (await fetch(baseUrl)).text();
     assert.equal(page.includes('id="teleportPartitionId"'), false, "Partition input must not be exposed in the UI.");
-    assert.match(page, /Select a player row without changing the camera, then click the map destination/);
+    assert.match(page, /Choose a player without changing the camera, then click the map destination/);
     assert.match(page, /id="liveTeleportButton" onclick="executeLiveTeleport\(\)" disabled>Teleport</);
     assert.equal(page.includes('onclick="previewTeleport()">Preview Teleport'), false, "Map-click must not require a preview button.");
     assert.match(page, /function liveMapClickTeleportPayload[\s\S]*?z:5000[\s\S]*?commandMode:"safe-ground"/);

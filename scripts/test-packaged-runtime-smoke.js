@@ -25,6 +25,8 @@ const packagedServerSource = fs.readFileSync(path.join(extracted, "server.js"), 
 assert(fs.existsSync(path.join(extracted, "lib", "character-recovery.js")), "Packaged app is missing Character Recovery.");
 const recoveryTest = spawnSync(process.execPath, [path.join(extracted, "scripts", "test-character-recovery.js")], { cwd: extracted, encoding: "utf8", windowsHide: true });
 assert.equal(recoveryTest.status, 0, "Packaged Character Recovery tests failed: " + recoveryTest.stdout + recoveryTest.stderr);
+const playerSelectTest = spawnSync(process.execPath, [path.join(extracted, "scripts", "test-live-map-player-select.js")], { cwd: extracted, encoding: "utf8", windowsHide: true });
+assert.equal(playerSelectTest.status, 0, "Packaged Live Map player selection tests failed: " + playerSelectTest.stdout + playerSelectTest.stderr);
 assert(fs.existsSync(path.join(extracted, "lib", "server-package-cleanup.js")), "Packaged app is missing server package cleanup.");
 const cleanupTest = spawnSync(process.execPath, [path.join(extracted, "scripts", "test-server-package-cleanup.js")], { cwd: extracted, encoding: "utf8" });
 assert.equal(cleanupTest.status, 0, "Packaged cleanup tests failed: " + cleanupTest.stdout + cleanupTest.stderr);

@@ -71,7 +71,12 @@ function harness(options = {}) {
             loginTargetDimensionIndex:0,travelReturn:state.links.travel_return,travelParents:[],transferImport:null};
           return {rows:options.missingCharacter?[]:(options.ambiguousPawn?[{evidence},{evidence:{...evidence,pawnId:"99"}}]:[{evidence}])};
         }
-        case "recovery-diagnostic-routines":return {rows:[{signature:"dune.admin_move_offline_player_to_partition(text,bigint,dune.vector)",definition:vendor[0].prosrc}]};
+        case "recovery-diagnostic-routines": {
+          assert.equal(this.write,false,"Vendor definitions must be collected read-only");
+          assert.match(input.text,/pg_catalog\.pg_get_functiondef/);
+          for(const name of ['login_account','get_player_pawn','load_full_actors','get_actor_server_info','save_actors','delete_actor_states_travel','get_traveling_non_player_actor_ids','get_traveling_actor_ids','get_traveling_actor_id_and_types','update_traveling_actor_tree','update_traveling_actor_dependencies']) assert(input.text.includes("'"+name+"'"),'Missing routine: '+name);
+          return {rows:[{signature:"dune.admin_move_offline_player_to_partition(text,bigint,dune.vector)",definition:vendor[0].prosrc}]};
+        }
         case "recovery-move": {
           assert(this.write&&this.locked,"The function must execute under recovery-owned locks and transaction");
           assert.match(input.text,/select dune\.admin_move_offline_player_to_partition\(/);

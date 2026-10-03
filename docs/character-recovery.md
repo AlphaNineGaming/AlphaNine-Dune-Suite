@@ -55,3 +55,5 @@ Tests: `npm run test:character-recovery`. They use a transactional database mode
 captured vendor-definition fixtures and Players UI harnesses. The feature's read-only
 inspection was additionally checked against the current server; no live character
 was moved during implementation verification.
+
+Travel diagnostics also export the installed vendor login, full actor loading, save and travel-state helper definitions. These are definitions only; inspection never invokes those routines. Their presence does not authorize travel finalization or prove login succeeds.

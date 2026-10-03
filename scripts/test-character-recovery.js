@@ -6,6 +6,7 @@ const { test } = require("node:test");
 const vm = require("node:vm");
 const { createCharacterRecovery, CHARACTER_CLASS, SUCCESS, ROUTINES, fingerprint } = require("../lib/character-recovery");
 const vendor = require("./fixtures/character-recovery-vendor-routines.json");
+const travelLoader = require("./fixtures/character-recovery-travel-loader.json");
 const clone = (x) => JSON.parse(JSON.stringify(x));
 
 // Transactional DB model: uncommitted function effects exist only on the client;
@@ -17,9 +18,9 @@ function harness(options = {}) {
       rotation:"{\"w\":0.7,\"x\":0,\"y\":0,\"z\":0.6}",
       properties:{skills:["a","b"],equipment:{head:"helmet"},progression:{level:42}},
       gas_attributes:{health:250,stamina:180} },
-    links:{account:{id:2,user:"original-fls-id"},character:{id:1},controller:{id:4,map:"Arrakeen"},player_state:{id:5,map:"Arrakeen"},
+    links:{account:{id:2,user:"original-fls-id"},character:{id:1},controller:{id:4,map:"Arrakeen",state:options.controllerState||"Default"},player_state:{id:5,map:"Arrakeen",state:options.playerStateState||"Default"},
       inventories:[{id:11,actor_id:6}],items:[{id:33,inventory_id:11,equipment:true}],
-      progression:{skillPoints:17},login_travel:{login_target_dimension_index:0},travel_return:{map:"HaggaBasin"}}
+      progression:{skillPoints:17},login_travel:{login_target_dimension_index:0},travel_return:{map:"HaggaBasin"},travel_parents:options.travelParents||[],transfer_import:options.transferImport||null}
   };
   const model = { state:clone(initial),before:clone(initial),trace:[],moves:[],commits:0,rollbacks:0,backupCalls:0,backupChecks:0,journal:null,clients:0 };
   const context = {databaseId:"cluster-1",checkpoint:{name:"selected-group",namespace:"selected-namespace"},target:{name:"selected-group",namespace:"selected-namespace"}};
@@ -60,7 +61,12 @@ function harness(options = {}) {
           const row=pawnRow(state);
           return {rows:options.missingPawn?[]:options.ambiguousPawn?[row,{...row,row_id:"99"}]:[row]};
         }
-        case "recovery-links":return {rows:[{protected_links:JSON.stringify(state.links),transfer_blocked:!!options.transferBlocked,login_dimension:options.loginDimension??0}]};
+        case "recovery-travel-loader":return {rows:options.missingLoader?[]:options.ambiguousLoader?[travelLoader,travelLoader]:[{...travelLoader,...(options.changedLoader?{prosrc:travelLoader.prosrc+" changed"}:{})}]};
+        case "recovery-links": {
+          assert.match(input.text,/x\.id<>\$5::bigint and x\.state::text<>'Default'/);
+          assert.match(input.text,/x\.id=\$5::bigint and x\.state::text not in \('Default','Travel'\)/);
+          return {rows:[{protected_links:JSON.stringify(state.links),transfer_blocked:!!options.transferBlocked||state.links.controller.state!=="Default"||state.links.player_state.state!=="Default"||state.links.travel_parents.length>0||!!state.links.transfer_import,login_dimension:options.loginDimension??0}]};
+        }
         case "recovery-destination":return {rows:options.destinationMissing?[]:[{source_actor_id:"60",partition_id:"10",dimension_index:0,x:12,y:34,z:56,partition_snapshot:"{\"partition_id\":10,\"dimension_index\":0,\"blocked\":false}"}]};
         case "recovery-diagnostic": {
           assert.equal(this.write,false,"Travel diagnostics require a read-only transaction");
@@ -84,6 +90,7 @@ function harness(options = {}) {
           model.moves.push(input.values);
           Object.assign(state.pawn,{map:"HaggaBasin",partition_id:"10",dimension_index:0,x:12,y:34,z:56});
           if(options.functionFails)throw new Error("Vendor database function failed after its UPDATE");
+          if(options.stateChanged)state.pawn.state=state.pawn.state==="Travel"?"Default":"Travel";
           if(options.badMap)state.pawn.map="HarkoVillage";
           if(options.badDimension)state.pawn.dimension_index=7;
           if(options.badPartition)state.pawn.partition_id="77";
@@ -145,7 +152,7 @@ for(const [name,options,pattern] of [
   ["colliding actor identities",{controllerId:"6"},/pawn 6, PlayerController 6 and PlayerState 5.*three distinct actors/],
   ["unsupported pawn class",{pawnClass:"/Game/UnknownPlayerCharacter.UnknownPlayerCharacter_C"},/pawn 6 has unsupported character class.*UnknownPlayerCharacter/],
   ["wrong pawn ownership",{pawnOwner:"42"},/pawn 6 belongs to account 42; the selected account is 2/],
-  ["pawn in travel state",{actorState:"Travel"},/pawn 6 has actor state "Travel"; recovery requires Default/],
+  ["unsupported pawn state",{actorState:"AbortedAuthorityTransfer"},/unsupported actor state/],
   ["missing destination",{destinationMissing:true},/destination could not/],
   ["no authoritative safe preset",{noPresets:true},/destination could not/],
   ["out-of-bounds destination",{outOfBounds:true},/destination could not/],
@@ -297,3 +304,22 @@ test("travel diagnostic API uses the existing local-only boundary",()=>{
   assert.match(endpoint,/isRemotePortalRequest\(req\) \|\| !remoteAccess\.isLoopbackRequest\(req\)/);
   assert.match(endpoint,/403/);assert.match(endpoint,/characterRecovery\.diagnostics/);
 });
+
+for(const currentMap of ["Arrakeen","HarkoVillage"])test("isolated Travel pawn recovers from "+currentMap+" with state and protected data unchanged",async()=>{
+ const h=harness({actorState:"Travel",currentMap});const preview=await h.service.inspect("2");const result=await h.service.recover({previewId:preview.previewId,confirmed:true});
+ assert.equal(result.status,"verified");assert.equal(h.model.state.pawn.state,"Travel");assert.equal(h.model.state.pawn.map,"HaggaBasin");assert.equal(h.model.moves.length,1);assert.equal(h.model.commits,1);
+ assert.deepEqual(h.model.state.pawn,{...h.model.before.pawn,map:"HaggaBasin",partition_id:"10",dimension_index:0,x:12,y:34,z:56});assert.deepEqual(h.model.state.links,h.model.before.links);
+ const names=h.model.trace.map(x=>x.name);assert(names.includes("recovery-travel-loader"));assert(names.indexOf("recovery-pawn",names.indexOf("recovery-move"))<names.indexOf("COMMIT"),"Verify before commit");assert(names.lastIndexOf("recovery-pawn")>names.indexOf("COMMIT"),"Fresh readback after commit");
+});
+for(const [name,options,pattern] of [
+ ["online Travel player",{onlineStatus:"Online"},/must be offline/],
+ ["Travel controller",{controllerState:"Travel"},/Travel, migration/],
+ ["Travel PlayerState",{playerStateState:"Travel"},/Travel, migration/],
+ ["linked travel parent",{travelParents:[{id:"6",parent_id:"99"}]},/Travel, migration/],
+ ["transfer import",{transferImport:{state:"Started"}},/Travel, migration/],
+ ["changed Travel loader",{changedLoader:true},/full actor loader/],
+ ["missing Travel loader",{missingLoader:true},/full actor loader/],
+ ["ambiguous Travel loader",{ambiguousLoader:true},/full actor loader/]
+])test(name+" remains blocked without writes",async()=>{const h=harness({actorState:"Travel",...options});await assert.rejects(h.service.inspect("2"),pattern);assert.equal(h.model.moves.length,0);assert.equal(h.model.backupCalls,0);assert.deepEqual(h.model.state,h.model.before);});
+for(const options of [{stateChanged:true},{functionFails:true},{protectedPawnChanged:true},{badMap:true}])test("Travel recovery failure rolls back all changes: "+JSON.stringify(options),async()=>{const h=harness({actorState:"Travel",...options});const preview=await h.service.inspect("2");await assert.rejects(h.service.recover({previewId:preview.previewId,confirmed:true}));assert.equal(h.model.rollbacks,1);assert.equal(h.model.commits,0);assert.deepEqual(h.model.state,h.model.before);});
+test("Default recovery does not require Travel-only loader compatibility",async()=>{const h=harness({missingLoader:true});const preview=await h.service.inspect("2");await h.service.recover({previewId:preview.previewId,confirmed:true});assert(!h.model.trace.some(x=>x.name==="recovery-travel-loader"));});

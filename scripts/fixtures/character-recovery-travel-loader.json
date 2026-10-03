@@ -1,0 +1,7 @@
+{
+  "prosrc": "\nbegin\n\treturn query\n\t\twith\n\t\t\tids as (\n\t\t\t\tselect * from unnest(in_ids) with ordinality as t(id, ord)\n\t\t\t),\n\t\t\tentities as (\n\t\t\t\tselect\n\t\t\t\t\tactor_id,\n\t\t\t\t\t(fgl_bridge.entity_id, fgl_bridge.slot_name, entity_data.components)::FglEntity as data\n\t\t\t\tfrom\n\t\t\t\t\tids\n\t\t\t\t\tleft join actor_fgl_entities as fgl_bridge on ids.id=fgl_bridge.actor_id\n\t\t\t\t\tleft join fgl_entities as entity_data using (entity_id)\n\t\t\t)\n\t\tselect\n\t\t\tid, \"class\", \"transform\", (\n\t\t\t\tcoalesce(array_agg(entities.data) filter (where entities.data is not null), array[]::FglEntity[]),\n\t\t\t\tactors.properties,\n\t\t\t\tactors.gas_attributes,\n\t\t\t\tcase\n\t\t\t\t\twhen exists(select 1 from buildings where ids.id = buildings.id) then load_building(id)\n\t\t\t\t\telse null\n\t\t\t\tend,\n\t\t\t\tcase\n\t\t\t\t\twhen exists(select 1 from placeables where ids.id = placeables.id) then load_placeable(id)\n\t\t\t\t\telse null\n\t\t\t\tend\n\t\t\t\t,\n\t\t\t\tcase\n\t\t\t\t\twhen exists(select 1 from totems where id = totems.id) then load_totem(id)\n\t\t\t\tend\n\t\t\t)::ActorGenericData, actors.serial\n\t\tfrom\n\t\t\tids\n\t\t\tjoin actors using (id)\n\t\t\tleft join entities on id=entities.actor_id\n\t\tgroup by ids.ord, id, class, \"transform\", actors.properties, actors.gas_attributes, actors.serial\n\t\torder by ids.ord;\nend\n",
+  "prokind": "f",
+  "prosecdef": false,
+  "proconfig": null,
+  "signature_ok": true
+}

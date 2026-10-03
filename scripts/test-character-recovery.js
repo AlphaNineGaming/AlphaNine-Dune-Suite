@@ -67,6 +67,7 @@ function harness(options = {}) {
           assert.match(input.text,/x\.id=\$5::bigint and x\.state::text not in \('Default','Travel'\)/);
           return {rows:[{protected_links:JSON.stringify(state.links),transfer_blocked:!!options.transferBlocked||state.links.controller.state!=="Default"||state.links.player_state.state!=="Default"||state.links.travel_parents.length>0||!!state.links.transfer_import,login_dimension:options.loginDimension??0}]};
         }
+        case "recovery-manual-partition":return {rows:options.manualPartitionMissing?[]:options.manualPartitionAmbiguous?[{partition_id:"10",dimension_index:0},{partition_id:"11",dimension_index:0}]:[{partition_id:"10",dimension_index:options.manualPartitionDimension??0,partition_snapshot:options.partitionChanged&&model.moves.length?"changed":"manual-partition"}]};
         case "recovery-destination":return {rows:options.destinationMissing?[]:[{source_actor_id:"60",partition_id:"10",dimension_index:0,x:12,y:34,z:56,partition_snapshot:"{\"partition_id\":10,\"dimension_index\":0,\"blocked\":false}"}]};
         case "recovery-diagnostic": {
           assert.equal(this.write,false,"Travel diagnostics require a read-only transaction");
@@ -86,9 +87,10 @@ function harness(options = {}) {
         case "recovery-move": {
           assert(this.write&&this.locked,"The function must execute under recovery-owned locks and transaction");
           assert.match(input.text,/select dune\.admin_move_offline_player_to_partition\(/);
-          assert.deepEqual(input.values,["original-fls-id","10",12,34,56]);
+          const xyz=options.manualCoordinates||{x:12,y:34,z:56};
+          assert.deepEqual(input.values,["original-fls-id","10",xyz.x,xyz.y,xyz.z]);
           model.moves.push(input.values);
-          Object.assign(state.pawn,{map:"HaggaBasin",partition_id:"10",dimension_index:0,x:12,y:34,z:56});
+          Object.assign(state.pawn,{map:"HaggaBasin",partition_id:"10",dimension_index:0,...xyz});
           if(options.functionFails)throw new Error("Vendor database function failed after its UPDATE");
           if(options.stateChanged)state.pawn.state=state.pawn.state==="Travel"?"Default":"Travel";
           if(options.badMap)state.pawn.map="HarkoVillage";
@@ -233,7 +235,7 @@ function uiHarness() {
   const context={document:{getElementById:element},selectedPlayer:()=>h.player,
     setText:(id,text)=>{element(id).textContent=text;},showToast:(...args)=>toasts.push(args),betterError:e=>e.message,
     appConfirm:async(title,message)=>{calls.push({confirmation:message});if(h.switchDuringConfirmation)h.player={account_id:"9",online_status:"Offline"};return h.confirmed;},
-    getJson:async(url,options)=>{calls.push({url,options});if(h.fail)throw new Error("Recovery unverified; inspect before retrying");if(url.includes("/diagnostics?")){if(h.switchDuringDiagnostic)h.player={account_id:"9",online_status:"Offline"};return {ok:true,readOnly:true,accountId:"2",characters:[{pawnId:"6",actors:[{id:"6",state:"Travel",map:"Arrakeen"}]}],routines:[]};}return options?.method==="POST"?{ok:true,message:SUCCESS,accountId:"2"}:preview;},
+    getJson:async(url,options)=>{calls.push({url,options});if(h.fail)throw new Error("Recovery unverified; inspect before retrying");if(url.endsWith("/recovery/preview")){if(h.switchDuringDiagnostic)h.player={account_id:"9",online_status:"Offline"};return {...preview,destination:{verifiedSafe:false,partitionId:"10",x:12,y:34,z:56}};}if(url.includes("/diagnostics?")){if(h.switchDuringDiagnostic)h.player={account_id:"9",online_status:"Offline"};return {ok:true,readOnly:true,accountId:"2",characters:[{pawnId:"6",actors:[{id:"6",state:"Travel",map:"Arrakeen"}]}],routines:[]};}return options?.method==="POST"?{ok:true,message:SUCCESS,accountId:"2"}:preview;},
     databaseExplorerDownload:(...args)=>downloads.push(args),
     refreshPlayersAfterRename:async()=>{if(h.refreshFails)throw new Error("Players refresh unavailable");},encodeURIComponent};
   vm.createContext(context);vm.runInContext(snippet,context);
@@ -323,3 +325,28 @@ for(const [name,options,pattern] of [
 ])test(name+" remains blocked without writes",async()=>{const h=harness({actorState:"Travel",...options});await assert.rejects(h.service.inspect("2"),pattern);assert.equal(h.model.moves.length,0);assert.equal(h.model.backupCalls,0);assert.deepEqual(h.model.state,h.model.before);});
 for(const options of [{stateChanged:true},{functionFails:true},{protectedPawnChanged:true},{badMap:true}])test("Travel recovery failure rolls back all changes: "+JSON.stringify(options),async()=>{const h=harness({actorState:"Travel",...options});const preview=await h.service.inspect("2");await assert.rejects(h.service.recover({previewId:preview.previewId,confirmed:true}));assert.equal(h.model.rollbacks,1);assert.equal(h.model.commits,0);assert.deepEqual(h.model.state,h.model.before);});
 test("Default recovery does not require Travel-only loader compatibility",async()=>{const h=harness({missingLoader:true});const preview=await h.service.inspect("2");await h.service.recover({previewId:preview.previewId,confirmed:true});assert(!h.model.trace.some(x=>x.name==="recovery-travel-loader"));});
+
+const manualTarget=(location={x:12,y:34,z:56})=>({map:"HaggaBasin",location,acceptUnverifiedHeight:true});
+test("manual recovery accepts explicitly chosen coordinates without a safe preset",async()=>{
+ const xyz={x:74346,y:233799,z:5000};const h=harness({actorState:"Travel",noPresets:true,manualCoordinates:xyz});const preview=await h.service.inspect("2",manualTarget(xyz));
+ assert.equal(preview.destination.verifiedSafe,false);assert.equal(preview.destination.source,"administrator-coordinates");assert.equal(preview.destination.partitionId,"10");
+ await assert.rejects(h.service.recover({previewId:preview.previewId,confirmed:true}),/unverified landing height/);assert.equal(h.model.moves.length,0);
+ const result=await h.service.recover({previewId:preview.previewId,confirmed:true,acceptUnverifiedHeight:true,destination:{x:0,y:0,z:0}});assert.equal(result.status,"verified");
+ assert.deepEqual(h.model.state.pawn,{...h.model.before.pawn,map:"HaggaBasin",partition_id:"10",dimension_index:0,...xyz});assert.deepEqual(h.model.state.links,h.model.before.links);assert.equal(h.model.journal.destination.verifiedSafe,false);
+});
+for(const [name,options,target,pattern] of [
+ ["missing height acknowledgement",{}, {...manualTarget(),acceptUnverifiedHeight:false},/acknowledge/],
+ ["wrong map",{}, {...manualTarget(),map:"Arrakeen"},/Hagga/],
+ ["non-finite coordinate",{},manualTarget({x:12,y:34,z:NaN}),/finite/],
+ ["out-of-bounds point",{outOfBounds:true},manualTarget(),/in-bounds/],
+ ["missing partition",{manualPartitionMissing:true},manualTarget(),/exactly one valid/],
+ ["ambiguous partition",{manualPartitionAmbiguous:true},manualTarget(),/exactly one valid/],
+ ["partition dimension mismatch",{manualPartitionDimension:1},manualTarget(),/exactly one valid/],
+ ["character dimension mismatch",{homeDimension:1},manualTarget(),/compatible character dimension/],
+ ["online player",{onlineStatus:"Online"},manualTarget(),/must be offline/]
+])test("manual recovery rejects "+name+" before any write",async()=>{const h=harness({noPresets:true,...options});await assert.rejects(h.service.inspect("2",target),pattern);assert.equal(h.model.moves.length,0);assert.equal(h.model.backupCalls,0);});
+for(const options of [{functionFails:true},{badLocation:true},{stateChanged:true},{serverOnline:true},{backupFails:true}])test("manual recovery preserves protections: "+JSON.stringify(options),async()=>{const h=harness({actorState:"Travel",noPresets:true,...options});const preview=await h.service.inspect("2",manualTarget());await assert.rejects(h.service.recover({previewId:preview.previewId,confirmed:true,acceptUnverifiedHeight:true}));assert.equal(h.model.commits,0);assert.deepEqual(h.model.state,h.model.before);if(h.model.moves.length)assert.equal(h.model.rollbacks,1);});
+test("manual recovery API is local-only and the confirmation never labels its height safe",()=>{const source=fs.readFileSync(path.join(__dirname,"../server.js"),"utf8");const endpoint=source.slice(source.indexOf('if (url.pathname === "/api/admin/players/recovery/preview"'),source.indexOf('if (url.pathname === "/api/admin/players/recovery" && req.method === "POST")'));assert.match(endpoint,/remoteAccess\.isLoopbackRequest/);assert.match(endpoint,/403/);assert.match(endpoint,/characterRecovery\.inspect/);assert.doesNotMatch(endpoint,/characterRecovery\.recover/);assert.match(source,/Landing height is unverified; offline recovery does not resolve safe ground/);});
+
+test("manual UI confirms the selected player and unverified coordinates explicitly",async()=>{const h=uiHarness();for(const [key,value] of Object.entries({X:12,Y:34,Z:56}))h.element("recoveryManual"+key).value=String(value);h.element("recoveryManualAcknowledgement").checked=true;await h.context.previewManualCharacterRecovery();assert.match(h.element("playerRecoveryStatus").textContent,/Landing height is unverified/);await h.context.recoverSelectedCharacter();assert.match(h.calls.find(c=>c.confirmation).confirmation,/Test Player.*X 12, Y 34, Z 56.*height is unverified/);const posts=h.calls.filter(c=>c.options?.method==="POST");assert.deepEqual(JSON.parse(posts.at(-1).options.body),{previewId:"server-token",confirmed:true,acceptUnverifiedHeight:true});});
+test("manual UI rejects missing acknowledgement and ignores a switched player",async()=>{const h=uiHarness();for(const key of ["X","Y","Z"])h.element("recoveryManual"+key).value="12";await h.context.previewManualCharacterRecovery();assert.equal(h.calls.length,0);h.element("recoveryManualAcknowledgement").checked=true;h.state.switchDuringDiagnostic=true;await h.context.previewManualCharacterRecovery();assert.equal(h.element("playerRecoveryApplyButton").disabled,true);await h.context.recoverSelectedCharacter();assert.equal(h.calls.filter(c=>c.url==="/api/admin/players/recovery").length,0);});

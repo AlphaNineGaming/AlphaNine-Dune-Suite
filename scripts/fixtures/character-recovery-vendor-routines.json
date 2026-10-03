@@ -1,0 +1,34 @@
+[
+  {
+    "proname": "admin_move_offline_player_to_partition",
+    "prosrc": "\nbegin\n\tif not (select is_player_offline(in_fls_id)) then\n\t\t-- CAVEAT: DirectorDbApi.TryMoveOfflinePlayerToPartition depends on this string.\n\t\traise exception 'Player must be Offline';\n\tend if;\n\n\tif not exists(select 1 from world_partition where partition_id = in_target_partition_id) then\n\t\traise exception 'Partition with ID % not found', in_target_partition_id;\n\tend if;\n\n\traise notice 'Moving player % to partition % location x=%, y=%, z=%', in_fls_id, in_target_partition_id, in_target_location.x, in_target_location.y, in_target_location.z;\n\n\twith target_partition as (\n\t\tselect partition_id, map, dimension_index\n\t\tfrom world_partition\n\t\twhere partition_id = in_target_partition_id\n\t\tlimit 1\n\t), target_pawn_id as (\n\t\tselect player_state.player_pawn_id as id\n\t\tfrom accounts, player_state\n\t\twhere accounts.user = in_fls_id and accounts.id = player_state.account_id\n\t\tlimit 1\n\t), update_overmap_player_location as (\n\t\tselect\n\t\t\tcase\n\t\t        when target_partition.map = 'Overmap' then overmap_save_player_survival_data(target_pawn_id.id, false, in_target_location)\n\t\t        else null\n    \t\tend\n\t\tfrom target_pawn_id, target_partition\n\t)\n\tupdate actors\n\t\tset\n\t\t\ttransform = (in_target_location, (transform).rotation),\n\t\t\tmap = upgrade_map_name(target_partition.map),\n\t\t\tdimension_index = target_partition.dimension_index,\n\t\t\tpartition_id = target_partition.partition_id\n\t\tfrom\n\t\t\ttarget_pawn_id, target_partition, update_overmap_player_location\n\t\twhere actors.id = target_pawn_id.id;\nend\n",
+    "prokind": "f",
+    "prosecdef": false,
+    "proconfig": null,
+    "signature_ok": true
+  },
+  {
+    "proname": "decrypt_user_data",
+    "prosrc": "select convert_from(in_encrypted_data, 'utf8');",
+    "prokind": "f",
+    "prosecdef": false,
+    "proconfig": null,
+    "signature_ok": true
+  },
+  {
+    "proname": "is_player_offline",
+    "prosrc": "\ndeclare\n    has_state int;\n    is_offline boolean;\nbegin\n    -- If there's no player_state row for this account, treat the player as offline\n    select count(*) into has_state\n    from player_state ps\n    join accounts a on a.id = ps.account_id\n    where a.user = in_fls_id;\n\n    if has_state = 0 then\n        return true;\n    end if;\n\n    select exists(\n        select 1\n        from player_state ps\n        join accounts a on a.id = ps.account_id\n        where a.user = in_fls_id\n          and (\n            ps.online_status = 'Offline'\n            -- Player is treated as offline if last played server is offline/unavailable, or not set at all\n            or (ps.server_id is null or ps.server_id not in (select * from active_server_ids))\n          )\n    ) into is_offline;\n\n    return is_offline;\nend\n",
+    "prokind": "f",
+    "prosecdef": false,
+    "proconfig": null,
+    "signature_ok": true
+  },
+  {
+    "proname": "upgrade_map_name",
+    "prosrc": "\nBEGIN\n\treturn\n\t\tCASE in_map_name\n\t\t\tWHEN 'Survival_1' THEN 'HaggaBasin'\n\t\t\tWHEN 'SH_HarkoVillage' THEN 'HarkoVillage'\n\t\t\tWHEN 'DeepDesert_1' THEN 'DeepDesert'\n\t\t\tWHEN 'Overmap' THEN 'Overland'\n\t\t\tWHEN 'SH_Arrakeen' THEN 'Arrakeen'\n\t\t\tWHEN 'CB_Story_Hephaestus' THEN 'WreckOfHephaestus'\n\t\t\tWHEN 'CB_Story_Ecolab_Carthag' THEN 'BeneathCarthag'\n\t\t\tWHEN 'CB_SurvivalChallenge_Station_15' THEN 'Station15'\n\t\t\tWHEN 'CB_Story_WaterFatManor' THEN 'WaterFat'\n\t\t\tWHEN 'SH_FallenLight' THEN 'FallenLight'\n\t\t\tWHEN 'Story_ProcesVerbal' THEN 'ProcesVerbal'\n\t\t\tWHEN 'DLC_Story_LostHarvest' THEN 'LostHarvest'\n\t\t\tWHEN 'DLC_Story_LostHarvest_EcolabA' THEN 'LostHarvest_EcolabA'\n\t\t\tWHEN 'DLC_Story_LostHarvest_EcolabB' THEN 'LostHarvest_EcolabB'\n\t\t\tWHEN 'DLC_Story_LostHarvest_ForgottenLab' THEN 'LostHarvest_ForgottenLab'\n\t\t\tWHEN 'Story_ArtOfKanly' THEN 'ArtOfKanly'\n\t\t\tWHEN 'Story_HeighlinerDungeon' THEN 'HeighlinerDungeon'\n\t\t\tWHEN 'CB_Dungeon_Hephaestus' THEN 'WreckOfHephaestusDungeon'\n\t\t\tWHEN 'CB_Dungeon_OldCarthag' THEN 'OldCarthagDungeon'\n\t\t\tWHEN 'CB_Story_BanditFortress01' THEN 'SandfliesFortress'\n\t\t\tWHEN 'CB_Overland_S_05' THEN 'ClosedOffTestingStationIsland'\n\t\t\tWHEN 'CB_Overland_S_06' THEN 'GroundVehicleTimeTrialIsland'\n\t\t\tWHEN 'CB_Overland_S_04' THEN 'ErythriteCaveIsland'\n\t\t\tWHEN 'CB_Overland_M_01' THEN 'RadioactiveShipwreck'\n\t\t\tWHEN 'CB_Overland_S_07' THEN 'TheRuinsOfTsimpo'\n\t\t\tWHEN 'Story_Faction_Outpost_Hark' THEN 'Story_Faction_Outpost_Hark'\n\t\t\tWHEN 'Story_Faction_Outpost_Atre' THEN 'Story_Faction_Outpost_Atre'\n\t\t\tWHEN 'CB_Ecolab_Bronze_Green_089' THEN 'RadiationDungeon'\n\t\t\tWHEN 'CB_Ecolab_Bronze_Green_152' THEN 'ElectricityDungeon'\n\t\t\tWHEN 'CB_Ecolab_Bronze_Green_195' THEN 'PoisonDungeon'\n\t\t\tWHEN 'CB_Ecolab_Bronze_Green_024' THEN 'DarknessDungeon'\n\t\t\tWHEN 'CB_Ecolab_Bronze_Green_136' THEN 'FireDungeon'\n\t\t\tWHEN 'CB_Story_DestroyedZanovar' THEN 'DestroyedZanovar'\n\t\t\tWHEN 'CB_Story_OrbitalMonitor' THEN 'OrbitalMonitor'\n\t\t\tWHEN 'CB_Dungeon_TheFacility' THEN 'FacilityDungeon'\n\t\t\tWHEN 'CB_Dungeon_ThePit' THEN 'PitDungeon'\n\t\t\tWHEN 'CB_Overland_S_08' THEN 'WindPass'\n\t\t\tWHEN 'CB_Arrakis_Generic_Sietch_Room' THEN 'SietchTalab'\n\t\t\tWHEN 'CB_Arrakis_Story_Paranoid_PrayerRoom' THEN 'ParanoidRoom'\n\t\t\tWHEN 'CB_Arrakis_Story_Glutton_DiningRoom' THEN 'GluttonRoom'\n\t\t\tELSE in_map_name\n\t\tEND;\nEND;\n",
+    "prokind": "f",
+    "prosecdef": false,
+    "proconfig": null,
+    "signature_ok": true
+  }
+]

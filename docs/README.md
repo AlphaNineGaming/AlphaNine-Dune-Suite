@@ -4,6 +4,7 @@
 - [VM cleanup and disk compaction: step-by-step](VM_STORAGE_CLEANUP_GUIDE.md)
 - [Market Bot guide](MARKET_AUTOMATOR_GUIDE.md)
 - [Release notes](releases/README.md)
+- [Character Recovery guide](character-recovery.md)
 - [Release test checklist](RELEASE_TEST.md)
 - [Market Bot provenance](MARKET_BOT_PROVENANCE.md)
 - [Historical skill and reputation discovery](SKILL_REPUTATION_DISCOVERY.md)

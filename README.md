@@ -15,6 +15,7 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 - First-launch setup wizard
 - Integrated receiver start, stop, restart, and status
 - Player feed and player management
+- Recover an offline player's existing character to a verified safe Hagga Basin location
 - Player blueprint listing, validated inventory import, individual JSON export, selected export, and all-blueprint ZIP export
 - Give Item with Dry-Run and Live Give modes
 - Storage deposits with bounded free-slot allocation, persistent receipts, integrity polling, in-game visibility confirmation, and protected battlegroup refresh
@@ -30,6 +31,7 @@ Normal users should not need to install Node.js, run npm commands, edit JSON fil
 
 - [Download the latest installer](https://github.com/AlphaNineGaming/AlphaNine-Dune-Suite/releases/latest)
 - [Release notes](docs/releases/README.md)
+- [Character Recovery guide](docs/character-recovery.md)
 - [VM cleanup and disk compaction: step-by-step](docs/VM_STORAGE_CLEANUP_GUIDE.md)
 - [Market Bot guide](docs/MARKET_AUTOMATOR_GUIDE.md)
 - [Release test checklist](docs/RELEASE_TEST.md)

@@ -107,6 +107,7 @@ const {
 const { createBlueprintService } = require("./lib/blueprints");
 const { createDatabaseBrowser } = require("./lib/database-browser");
 const DungeonDifficulty = require("./lib/dungeon-difficulty");
+const { createCharacterRecovery } = require("./lib/character-recovery");
 const MarketManualPurchase = require("./lib/market-manual-purchase");
 const { USER_GAME_SETTINGS_SCHEMA, parseUserGameIni, updateUserGameIni } = require("./lib/user-game-settings");
 const { createMarketAutomator } = require("./lib/market-automator");
@@ -381,6 +382,7 @@ const PROGRESSION_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "progression-back
 const PROGRESSION_AUDIT_LOG = path.join(PROGRESSION_DATA_DIR, "logs", "progression-audit.log");
 const PLAYER_RENAME_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "player-rename-backups");
 const REPAIR_BACKUP_DIR = path.join(PROGRESSION_DATA_DIR, "repair-backups");
+const CHARACTER_RECOVERY_DIR = path.join(PROGRESSION_DATA_DIR, "character-recovery");
 const REPAIR_QUEUE_PATH = path.join(PROGRESSION_DATA_DIR, "repair-queue.json");
 const BATTLEGROUP_CONTROL_STATE_PATH = path.join(PROGRESSION_DATA_DIR, "battlegroup-control.json");
 const BATTLEGROUP_CONTROL_AUDIT_PATH = path.join(PROGRESSION_DATA_DIR, "logs", "battlegroup-control.jsonl");
@@ -17100,6 +17102,82 @@ async function dungeonDifficultyApply(payload = {}) {
   };
 }
 
+function recoveryVerifiedPresets() {
+  const presets = loadTeleportLocationPresets();
+  if (!presets.ok) throw new Error("Saved safe locations could not be read.");
+  if (!fs.existsSync(ADMIN_AUDIT_LOG)) return [];
+  const events = fs.readFileSync(ADMIN_AUDIT_LOG, "utf8").split(/\r?\n/)
+    .filter((line) => line.includes("teleport_preset_saved"))
+    .map((line) => { try { return JSON.parse(line); } catch { return null; } });
+  return presets.presets.filter((preset) => preset.map === "HaggaBasin" && preset.source === "online-player-position")
+    .map((preset) => ({ ...preset, auditVerified: events.some((event) => event?.action === "teleport_preset_saved"
+      && event.name === preset.name && event.map === preset.map && String(event.actorId) === preset.source_actor_id
+      && String(event.partitionId) === String(preset.partition_id)
+      && ["x", "y", "z"].every((key) => event[key] === preset[key])) }));
+}
+
+async function recoveryOfflineHold(context) {
+  verifyDatabaseTargetCheckpoint(context.checkpoint, "character recovery");
+  if (activeMaintenanceWorkflow()) throw new Error("Wait for the active database or migration operation before recovering a character.");
+  await collectDatabaseBackupOfflineEvidence(context.target);
+  const bot = await marketBotStatus({ strictEvidence: true });
+  if (bot.ok === false || bot.reachable !== true || (bot.installed !== false && bot.quiescent !== true)) {
+    throw new Error("Pause Market Bot and wait for verified quiescence before character recovery.");
+  }
+}
+
+const characterRecovery = createCharacterRecovery({
+  getContext: async () => {
+    const checkpoint = databaseTargetCheckpoint("Character recovery");
+    const target = await databaseRuntimeTarget();
+    if (target.namespace !== checkpoint.namespace || target.name !== checkpoint.name) throw new Error("The selected recovery database is ambiguous.");
+    const identity = parsePlayerInventoryResult(await dbQueryStreamed("select json_build_object('databaseId',(pg_catalog.pg_control_system()).system_identifier::text)::text", 30000, target), "Recovery database identity");
+    return { checkpoint, target, databaseId: identity.databaseId };
+  },
+  openClient: async (context) => {
+    verifyDatabaseTargetCheckpoint(context.checkpoint, "recovery connection");
+    const settings = await liveMapDirectDbSettings();
+    const { Client } = require("pg");
+    const client = new Client({ host: settings.host, port: settings.port, database: settings.database, user: settings.user,
+      password: String(loadConfig().databasePassword || ""), application_name: "AlphaNine Character Recovery",
+      connectionTimeoutMillis: 15000, query_timeout: 120000 });
+    try { await client.connect(); return client; }
+    catch (error) { await client.end().catch(() => {}); throw error; }
+  },
+  getVerifiedPresets: recoveryVerifiedPresets,
+  withinBounds: (point, map) => Coordinates.withinBounds(point, map),
+  assertHold: recoveryOfflineHold,
+  assertSafe: async (context) => {
+    await recoveryOfflineHold(context);
+    const preflight = await nativeSafetyBackupPreflight();
+    if (preflight.target.namespace !== context.target.namespace || preflight.target.name !== context.target.name
+      || preflight.target.dbPod !== context.target.dbPod || preflight.target.dbSvc !== context.target.dbSvc) throw new Error("The safety-backup target changed.");
+  },
+  createBackup: (context) => createDatabaseBackup({ safety: true, method: "native", prefix: "pre-character-recovery", databaseCheckpoint: context.checkpoint }),
+  verifyBackup: async (backup) => {
+    if (!backup.filePath || !backup.localMetadataPath || !backup.verified) throw new Error("The recovery backup is not verified.");
+    const actual = await hashDatabaseBackupFile(backup.filePath);
+    const metadata = JSON.parse(await fs.promises.readFile(backup.localMetadataPath, "utf8"));
+    if (metadata.verified !== true || metadata.usableForRestore !== true || metadata.size !== actual.size
+      || metadata.sha256 !== actual.sha256 || backup.size !== actual.size || backup.sha256 !== actual.sha256) throw new Error("The recovery safety backup changed or failed verification.");
+  },
+  loadJournal: async (accountId, context) => {
+    const scope = crypto.createHash("sha256").update(`${context.databaseId}/${context.target.namespace}/${context.target.name}`).digest("hex");
+    const file = path.join(CHARACTER_RECOVERY_DIR, scope, `${accountId}.json`);
+    try { return JSON.parse(await fs.promises.readFile(file, "utf8")); }
+    catch (error) { if (error.code === "ENOENT") return null; throw new Error("The previous recovery journal could not be verified."); }
+  },
+  saveJournal: async (accountId, value) => {
+    const scope = crypto.createHash("sha256").update(`${value.context.databaseId}/${value.context.target.namespace}/${value.context.target.name}`).digest("hex");
+    const folder = path.join(CHARACTER_RECOVERY_DIR, scope);
+    await fs.promises.mkdir(folder, { recursive: true });
+    const file = path.join(folder, `${accountId}.json`);
+    await writeDatabaseBackupJsonAtomic(file, value);
+    if (JSON.stringify(JSON.parse(await fs.promises.readFile(file, "utf8"))) !== JSON.stringify(value)) throw new Error("The recovery before-state journal failed read-back verification.");
+  },
+  audit: (action, data) => appendAdminAudit(action, data)
+});
+
 function parsePlayerInventoryResult(output, label) {
   for (const line of String(output || "").split(/\r?\n/).reverse()) {
     const text = line.trim();
@@ -23609,6 +23687,17 @@ input,select { font-size:14px; }
         <div class="panel pad">
           <div class="label">Selected Player Details</div>
           <div id="playerDetails" class="empty mt">Select a player to inspect account and character details.</div>
+          <div id="playerRecoveryPanel" class="hidden mt">
+            <div class="label">Recover Character</div>
+            <div id="playerRecoveryLocation" class="mt">Current Location: Checking...</div>
+            <div class="mt">Recovery Destination: Hagga Basin</div>
+            <div class="empty mt">Player must be offline. A safety backup will be created before recovery.</div>
+            <div class="action-row mt">
+              <button id="playerRecoveryApplyButton" class="primary" onclick="recoverSelectedCharacter()" disabled>Recover to Hagga Basin</button>
+              <button onclick="closeCharacterRecovery()">Cancel</button>
+            </div>
+            <div id="playerRecoveryStatus" class="empty mt"></div>
+          </div>
           <div id="playerRenamePanel" class="player-rename-panel hidden mt">
             <div class="label">Rename Character</div>
             <label class="mt">New Character Name<input id="playerRenameName" maxlength="${PLAYER_RENAME_MAX_LENGTH}" placeholder="Enter a new character name" oninput="invalidatePlayerRenamePreview()"></label>
@@ -23623,6 +23712,7 @@ input,select { font-size:14px; }
           <div class="action-row mt">
             <button class="primary" onclick="jumpToGive()">Give Item</button>
             <button id="playerRenameOpenButton" onclick="openPlayerRename()">Rename Player</button>
+            <button id="playerRecoveryOpenButton" onclick="openCharacterRecovery()" disabled>Recover Character</button>
             <button onclick="refreshPlayersPage(true)">Refresh Players</button>
             <button data-open="logs">View Diagnostics</button>
           </div>
@@ -26299,7 +26389,12 @@ function syncPlayerInventoryControls(){const refresh=document.getElementById("pl
 function renderPlayerInventory(){const body=document.getElementById("playerInventoryRows");const summary=document.getElementById("playerInventorySummary");const status=document.getElementById("playerInventoryStatus");if(!body)return;const selected=selectedPlayer();if(!selected){body.innerHTML='<tr><td colspan="7">No player selected.</td></tr>';if(summary)summary.textContent="Select a player to load inventory.";if(status){status.className="empty mt";status.textContent="Select a player to inspect their backpack.";}syncPlayerInventoryControls();return;}const inventory=playerInventoryState?.inventory||null;const query=String(document.getElementById("playerInventorySearch")?.value||"").trim().toLowerCase();const rows=query?playerInventoryRows.filter(row=>[playerInventoryItemName(row),row.templateId,row.id,row.positionIndex,row.stackSize,row.qualityLevel].join(" ").toLowerCase().includes(query)):playerInventoryRows;if(summary)summary.textContent=inventory?(playerInventoryRows.length+" item stack"+(playerInventoryRows.length===1?"":"s")+" / Inventory "+inventory.id+(inventory.maxItemCount>0?" / "+inventory.maxItemCount+" slots":"")):"Inventory not loaded.";if(!playerInventoryState){body.innerHTML='<tr><td colspan="7">Click Refresh Inventory to load this backpack.</td></tr>';syncPlayerInventoryControls();return;}if(!rows.length){body.innerHTML='<tr><td colspan="7">'+(query?"No inventory items match that search.":"The selected player backpack is empty.")+'</td></tr>';syncPlayerInventoryControls();return;}body.innerHTML=rows.map(row=>{const catalog=playerInventoryCatalogItem(row);const detail=row.blueprintId?("Blueprint "+row.blueprintId):(catalog?.category||row.templateId||"");return '<tr><td>'+esc(row.positionIndex??"-")+'</td><td><strong>'+esc(playerInventoryItemName(row))+'</strong><div class="subtle">'+esc(detail)+'</div></td><td>'+esc(row.stackSize??0)+'</td><td>'+esc("Grade "+(row.qualityLevel??0))+'</td><td>'+esc(playerInventoryDurability(row))+'</td><td>'+esc(row.id||"-")+'</td><td><button type="button" class="danger" data-player-inventory-delete="'+esc(row.id)+'">Delete</button></td></tr>';}).join("");body.querySelectorAll("[data-player-inventory-delete]").forEach(button=>button.addEventListener("click",()=>deletePlayerInventoryItem(button.dataset.playerInventoryDelete)));syncPlayerInventoryControls();}
 async function refreshPlayerInventory(){const player=selectedPlayer();if(!player){playerInventoryState=null;playerInventoryRows=[];renderPlayerInventory();return null;}playerInventoryBusy=true;syncPlayerInventoryControls();const status=document.getElementById("playerInventoryStatus");if(status){status.className="empty mt";status.textContent="Loading "+(player.name||player.character_name||"player")+" backpack...";}try{const data=await getJson("/api/admin/player-inventory?playerId="+encodeURIComponent(player.id),{timeoutMs:30000});playerInventoryState=data;playerInventoryRows=Array.isArray(data.items)?data.items:[];if(status){status.className="empty mt";status.textContent=playerInventoryRows.length?"Backpack loaded. Use Delete to remove an item stack.":"This backpack is empty.";}renderPlayerInventory();return data;}catch(error){playerInventoryState=null;playerInventoryRows=[];if(status){status.className="warning mt";status.textContent=betterError(error);}renderPlayerInventory();return null;}finally{playerInventoryBusy=false;syncPlayerInventoryControls();}}
 async function deletePlayerInventoryItem(itemId){const player=selectedPlayer();const row=playerInventoryRows.find(item=>String(item.id)===String(itemId));if(!player||!row)return;const name=playerInventoryItemName(row);const confirmed=await appConfirm("Delete Inventory Item","Delete "+name+" x"+(row.stackSize||0)+" from "+(player.name||player.character_name||"the selected player")+"'s backpack?","Delete","Cancel");if(!confirmed)return;playerInventoryBusy=true;syncPlayerInventoryControls();const status=document.getElementById("playerInventoryStatus");if(status){status.className="empty mt";status.textContent="Deleting "+name+"...";}try{const data=await getJson("/api/admin/player-inventory/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId:player.id,itemId:row.id}),timeoutMs:30000});showToast(data.message||"Inventory item deleted.","success");addActivity("players","Inventory item deleted",name+" / Item "+row.id);playUiSound("success");await refreshPlayerInventory();}catch(error){if(status){status.className="warning mt";status.textContent=betterError(error);}showToast(betterError(error),"error");addActivity("error","Inventory item delete failed",error.message);playUiSound("warning");}finally{playerInventoryBusy=false;syncPlayerInventoryControls();}}
-function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();syncPlayerInventoryControls();}
+function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();syncPlayerInventoryControls();syncCharacterRecoveryControls();}
+let characterRecoveryPreview=null,characterRecoveryBusy=false;
+function closeCharacterRecovery(){characterRecoveryPreview=null;document.getElementById("playerRecoveryPanel")?.classList.add("hidden");syncCharacterRecoveryControls();}
+function syncCharacterRecoveryControls(){const p=selectedPlayer();const open=document.getElementById("playerRecoveryOpenButton");const apply=document.getElementById("playerRecoveryApplyButton");if(open)open.disabled=characterRecoveryBusy||!p||!p.account_id||String(p.online_status||"").toLowerCase()!=="offline";if(apply)apply.disabled=characterRecoveryBusy||!characterRecoveryPreview||String(p?.account_id)!==characterRecoveryPreview.accountId;}
+async function openCharacterRecovery(){const p=selectedPlayer();if(!p||String(p.online_status||"").toLowerCase()!=="offline"){showToast("The selected player must be offline.","warning");return;}const accountId=String(p.account_id);characterRecoveryPreview=null;document.getElementById("playerRecoveryPanel")?.classList.remove("hidden");setText("playerRecoveryLocation","Current Location: Checking...");setText("playerRecoveryStatus","Checking the character and safe destination...");syncCharacterRecoveryControls();try{const data=await getJson("/api/admin/players/recovery?accountId="+encodeURIComponent(accountId),{timeoutMs:90000});if(String(selectedPlayer()?.account_id)!==accountId)return;characterRecoveryPreview=data;const label=({HaggaBasin:"Hagga Basin",HarkoVillage:"Harko Village"})[data.currentLocation]||data.currentLocation;setText("playerRecoveryLocation","Current Location: "+label);setText("playerRecoveryStatus","");}catch(error){setText("playerRecoveryStatus",betterError(error));}finally{syncCharacterRecoveryControls();}}
+async function recoverSelectedCharacter(){const preview=characterRecoveryPreview;if(!preview||characterRecoveryBusy)return;const confirmed=await appConfirm("Recover Character","Recover "+preview.playerName+" to a safe location in Hagga Basin?","Recover to Hagga Basin","Cancel");if(!confirmed)return;if(String(selectedPlayer()?.account_id)!==preview.accountId){closeCharacterRecovery();return;}characterRecoveryBusy=true;characterRecoveryPreview=null;syncCharacterRecoveryControls();setText("playerRecoveryStatus","Creating and verifying the safety backup, then recovering the character...");try{const data=await getJson("/api/admin/players/recovery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:preview.previewId,confirmed:true}),timeoutMs:60*60*1000});setText("playerRecoveryLocation","Current Location: Hagga Basin");setText("playerRecoveryStatus",data.message);showToast(data.message,"success");try{await refreshPlayersAfterRename(data.accountId);}catch(refreshError){setText("playerRecoveryStatus",data.message+" Use Refresh Players to update the list: "+betterError(refreshError));showToast("Character recovered; refresh Players before continuing.","warning");}}catch(error){setText("playerRecoveryStatus",betterError(error));showToast(betterError(error),"error");}finally{characterRecoveryBusy=false;syncCharacterRecoveryControls();}}
 function resetPlayerRename(hide=true){playerRenamePreviewState=null;const panel=document.getElementById("playerRenamePanel");const input=document.getElementById("playerRenameName");const apply=document.getElementById("playerRenameApplyButton");const preview=document.getElementById("playerRenamePreviewButton");const status=document.getElementById("playerRenameStatus");if(panel)panel.classList.toggle("hidden",hide);if(input)input.value="";if(apply)apply.disabled=true;if(preview)preview.disabled=false;if(status){status.className="empty mt";status.textContent="Preview checks that the player is offline and the new name is available.";}}
 function closePlayerRename(){resetPlayerRename(true);}
 function openPlayerRename(){const p=selectedPlayer();if(!p){showToast("Select a player first.","warning");return;}resetPlayerRename(false);const status=document.getElementById("playerRenameStatus");if(!p.player_state_row_id){if(status){status.className="warning mt";status.textContent="This player does not have an active encrypted player-state record. Refresh Players and try again.";}return;}const input=document.getElementById("playerRenameName");if(status){status.className=/^(offline|disconnected|inactive)$/i.test(String(p.online_status||""))?"empty mt":"warning mt";status.textContent=/^(offline|disconnected|inactive)$/i.test(String(p.online_status||""))?"Player is offline. Enter the new name and generate a protected preview.":"Player status is "+(p.online_status||"unknown")+". The rename preview will remain blocked until the player is offline.";}input?.focus();}
@@ -26307,9 +26402,9 @@ function invalidatePlayerRenamePreview(){playerRenamePreviewState=null;const app
 async function previewSelectedPlayerRename(){const p=selectedPlayer();const status=document.getElementById("playerRenameStatus");const previewButton=document.getElementById("playerRenamePreviewButton");const applyButton=document.getElementById("playerRenameApplyButton");try{if(!p)throw new Error("Select a player first.");if(!p.player_state_row_id)throw new Error("The selected player does not have an active player-state record.");const newName=document.getElementById("playerRenameName")?.value||"";playerRenamePreviewState=null;if(applyButton)applyButton.disabled=true;if(previewButton)previewButton.disabled=true;if(status){status.className="warning mt";status.textContent="Checking player status, name availability, and creating the encrypted-row backup...";}const data=await getJson("/api/admin/players/rename/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerStateRowId:p.player_state_row_id,newName}),timeoutMs:45000});playerRenamePreviewState=data;if(status){status.className="empty mt";status.textContent=(data.message||"Rename preview ready.")+"\nBackup: "+(data.backupPath||"created")+"\nPreview expires: "+new Date(data.expiresAt).toLocaleTimeString();}if(applyButton)applyButton.disabled=false;showToast("Player rename preview ready.","success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}showToast(betterError(e),"error");}finally{if(previewButton)previewButton.disabled=false;}}
 async function refreshPlayersAfterRename(accountId){const data=await loadSharedPlayerDirectory({force:true});const preferred=String(accountId||selectedPlayerId||"");selectedPlayerId=adminPlayers.some(row=>String(row.id)===preferred)?preferred:(adminPlayers[0]?.id||"");renderSharedPlayerDirectory();syncPermissionForms();progressionPlayerState=null;if(liveMap)refreshLiveMap().catch(()=>{});return data;}
 async function applySelectedPlayerRename(){const p=selectedPlayer();const preview=playerRenamePreviewState;const status=document.getElementById("playerRenameStatus");const applyButton=document.getElementById("playerRenameApplyButton");try{if(!p||!preview)throw new Error("Generate a rename preview first.");if(String(p.player_state_row_id)!==String(preview.playerStateRowId))throw new Error("The selected player changed. Generate a new rename preview.");const confirmed=await appConfirm("Rename Player","Rename "+preview.currentName+" to "+preview.newName+"?\n\nThe player must remain offline. Account ID, inventory, bases, guild, and progression IDs will not be changed.","Rename Player","Cancel");if(!confirmed)return;if(applyButton)applyButton.disabled=true;if(status){status.className="warning mt";status.textContent="Applying encrypted character-name update and verifying the database read-back...";}const data=await getJson("/api/admin/players/rename/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previewId:preview.previewId,confirmed:true}),timeoutMs:45000});playerRenamePreviewState=null;if(status){status.className="empty mt";status.textContent=(data.message||"Player renamed.")+"\nBackup: "+(data.backupPath||"created")+"\nAudit: "+(data.auditLogPath||"admin-audit.log");}showToast(data.message||"Player renamed.","success");addActivity("players","Player renamed",data.previousName+" -> "+data.newName);try{await refreshPlayersAfterRename(data.accountId);closePlayerRename();}catch(refreshError){if(status){status.className="warning mt";status.textContent=(data.message||"Player renamed.")+"\nThe database update was verified, but the Players page could not refresh: "+betterError(refreshError)+"\nUse Refresh Players before making another change.";}showToast("Player renamed; refresh Players before continuing.","warning");}playUiSound("success");}catch(e){if(status){status.className="warning mt";status.textContent=betterError(e);}if(applyButton)applyButton.disabled=!playerRenamePreviewState;showToast(betterError(e),"error");addActivity("error","Player rename failed",e.message);playUiSound("warning");}}
-function selectPlayer(id){selectedPlayerId=String(id||"");playerInventoryState=null;playerInventoryRows=[];resetPlayerRename(true);const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();renderPlayerInventory();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();if(document.querySelector("section#players.view")?.classList.contains("active"))refreshPlayerInventory();}
-function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;resetPlayerRename(true);const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;resetPlayerRename(true);const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function selectPlayer(id){selectedPlayerId=String(id||"");playerInventoryState=null;playerInventoryRows=[];resetPlayerRename(true);closeCharacterRecovery();const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();renderPlayerInventory();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();if(document.querySelector("section#players.view")?.classList.contains("active"))refreshPlayerInventory();}
+function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;resetPlayerRename(true);closeCharacterRecovery();const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
+function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;resetPlayerRename(true);closeCharacterRecovery();const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");const renameButton=document.getElementById("playerRenameOpenButton");if(renameButton)renameButton.disabled=!p||!p.player_state_row_id;if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Connection</span><strong>'+esc(p.online_status||"unknown")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div>'+hydrationDetailRow(p.hydration)+'<div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
 function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
 function permissionQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
@@ -28200,6 +28295,16 @@ async function route(req, res) {
     const cache = loadDuneItemsCache();
     const items = cache.items || [];
     await json(res, { ok: cache.ok !== false, offlineReady: true, generatedAt: cache.generatedAt || "", totalItems: items.length, cachePath: DUNE_ITEMS_CACHE_PATH, catalogPath: DUNE_ITEMS_CATALOG_PATH, learnedCatalogPath: SERVER_DISCOVERED_ITEMS_PATH, imageCacheDir: GEAR_IMAGE_CACHE_DIR, gradeCounts: itemGradeCounts(items), tierCounts: itemTierCounts(items), report: { ...(cache.report || {}), startupValidation: ITEM_CATALOG_STARTUP_REPORT } });
+    return;
+  }
+  if (url.pathname === "/api/admin/players/recovery" && req.method === "GET") {
+    try { await json(res, await characterRecovery.inspect(url.searchParams.get("accountId"))); }
+    catch (error) { await json(res, { ok: false, status: "blocked", error: error.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/admin/players/recovery" && req.method === "POST") {
+    try { await json(res, await characterRecovery.recover(JSON.parse(await readBody(req) || "{}"))); }
+    catch (error) { await json(res, { ok: false, status: error.code === "RECOVERY_UNVERIFIED" ? "unverified" : "blocked", error: error.message }, error.code === "RECOVERY_UNVERIFIED" ? 409 : 400); }
     return;
   }
   if (url.pathname === "/api/items/catalog/scan-installed-game" && req.method === "POST") {

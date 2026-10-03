@@ -1,5 +1,9 @@
 # Release notes
 
+- [1.3.16 — Character Recovery](RELEASE_NOTES_1.3.16.md)
+- [1.3.15 — Teleport Routing Hotfix](RELEASE_NOTES_1.3.15.md)
+- [1.3.14 — Teleport Readiness Fix](RELEASE_NOTES_1.3.14.md)
+
 - [1.3.13 — VM Storage Cleanup & Disk Compaction](RELEASE_NOTES_1.3.13.md)
 
 - [1.3.9 — VM Connections and Portal Live Give](RELEASE_NOTES_1.3.9.md)

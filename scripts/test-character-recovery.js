@@ -20,7 +20,7 @@ function harness(options = {}) {
       gas_attributes:{health:250,stamina:180} },
     links:{account:{id:2,user:"original-fls-id"},character:{id:1},controller:{id:4,map:"Arrakeen",state:options.controllerState||"Default"},player_state:{id:5,map:"Arrakeen",state:options.playerStateState||"Default"},
       inventories:[{id:11,actor_id:6}],items:[{id:33,inventory_id:11,equipment:true}],
-      progression:{skillPoints:17},login_travel:{login_target_dimension_index:0},travel_return:{map:"HaggaBasin"},travel_parents:options.travelParents||[],transfer_import:options.transferImport||null}
+      progression:{skillPoints:17},login_travel:{login_target_dimension_index:0},travel_return:{map:"HaggaBasin"},travel_actors:options.travelActors||[],travel_parents:options.travelParents||[],transfer_import:options.transferImport||null}
   };
   const model = { state:clone(initial),before:clone(initial),trace:[],moves:[],commits:0,rollbacks:0,backupCalls:0,backupChecks:0,journal:null,clients:0 };
   const context = {databaseId:"cluster-1",checkpoint:{name:"selected-group",namespace:"selected-namespace"},target:{name:"selected-group",namespace:"selected-namespace"}};
@@ -65,7 +65,7 @@ function harness(options = {}) {
         case "recovery-links": {
           assert.match(input.text,/x\.id<>\$5::bigint and x\.state::text<>'Default'/);
           assert.match(input.text,/x\.id=\$5::bigint and x\.state::text not in \('Default','Travel'\)/);
-          return {rows:[{protected_links:JSON.stringify(state.links),transfer_blocked:!!options.transferBlocked||state.links.controller.state!=="Default"||state.links.player_state.state!=="Default"||state.links.travel_parents.length>0||!!state.links.transfer_import,login_dimension:options.loginDimension??0}]};
+          return {rows:[{protected_links:JSON.stringify(state.links),non_parent_blocked:!!options.transferBlocked||state.links.controller.state!=="Default"||state.links.player_state.state!=="Default"||!!state.links.transfer_import,transfer_blocked:!!options.transferBlocked||state.links.controller.state!=="Default"||state.links.player_state.state!=="Default"||state.links.travel_parents.length>0||!!state.links.transfer_import,login_dimension:options.loginDimension??0}]};
         }
         case "recovery-manual-partition":return {rows:options.manualPartitionMissing?[]:options.manualPartitionAmbiguous?[{partition_id:"10",dimension_index:0},{partition_id:"11",dimension_index:0}]:[{partition_id:"10",dimension_index:options.manualPartitionDimension??0,partition_snapshot:options.partitionChanged&&model.moves.length?"changed":"manual-partition"}]};
         case "recovery-destination":return {rows:options.destinationMissing?[]:[{source_actor_id:"60",partition_id:"10",dimension_index:0,x:12,y:34,z:56,partition_snapshot:"{\"partition_id\":10,\"dimension_index\":0,\"blocked\":false}"}]};
@@ -101,6 +101,8 @@ function harness(options = {}) {
           if(options.protectedPawnChanged)state.pawn.properties.progression.level=0;
           if(options.inventoryChanged)state.links.items=[];
           if(options.controllerChanged)state.links.controller.map="HaggaBasin";
+          if(options.travelParentChanged)state.links.travel_parents=[];
+          if(options.travelActorChanged)state.links.travel_actors[0].map="HaggaBasin";
           return {rows:[{}]};
         }
         default:throw new Error("Unexpected query: "+name);
@@ -235,7 +237,7 @@ function uiHarness() {
   const context={document:{getElementById:element},selectedPlayer:()=>h.player,
     setText:(id,text)=>{element(id).textContent=text;},showToast:(...args)=>toasts.push(args),betterError:e=>e.message,
     appConfirm:async(title,message)=>{calls.push({confirmation:message});if(h.switchDuringConfirmation)h.player={account_id:"9",online_status:"Offline"};return h.confirmed;},
-    getJson:async(url,options)=>{calls.push({url,options});if(h.fail)throw new Error("Recovery unverified; inspect before retrying");if(url.endsWith("/recovery/preview")){if(h.switchDuringDiagnostic)h.player={account_id:"9",online_status:"Offline"};return {...preview,destination:{verifiedSafe:false,partitionId:"10",x:12,y:34,z:56}};}if(url.includes("/diagnostics?")){if(h.switchDuringDiagnostic)h.player={account_id:"9",online_status:"Offline"};return {ok:true,readOnly:true,accountId:"2",characters:[{pawnId:"6",actors:[{id:"6",state:"Travel",map:"Arrakeen"}]}],routines:[]};}return options?.method==="POST"?{ok:true,message:SUCCESS,accountId:"2"}:preview;},
+    getJson:async(url,options)=>{calls.push({url,options});if(h.fail)throw new Error("Recovery unverified; inspect before retrying");if(url.endsWith("/recovery/preview")){if(h.switchDuringDiagnostic)h.player={account_id:"9",online_status:"Offline"};return {...preview,destination:{verifiedSafe:false,forceTravelParents:JSON.parse(options.body).destination.forceTravelParents===true,partitionId:"10",x:12,y:34,z:56}};}if(url.includes("/diagnostics?")){if(h.switchDuringDiagnostic)h.player={account_id:"9",online_status:"Offline"};return {ok:true,readOnly:true,accountId:"2",characters:[{pawnId:"6",actors:[{id:"6",state:"Travel",map:"Arrakeen"}]}],routines:[]};}return options?.method==="POST"?{ok:true,message:SUCCESS,accountId:"2"}:preview;},
     databaseExplorerDownload:(...args)=>downloads.push(args),
     refreshPlayersAfterRename:async()=>{if(h.refreshFails)throw new Error("Players refresh unavailable");},encodeURIComponent};
   vm.createContext(context);vm.runInContext(snippet,context);
@@ -366,4 +368,24 @@ test("manual preview shows progress, reports its own error and performs no movem
 });
 test("closing recovery ignores the pending automatic preview",async()=>{
  const h=uiHarness();let resolve;h.context.getJson=()=>new Promise(yes=>{resolve=yes;});const pending=h.context.openCharacterRecovery();h.context.closeCharacterRecovery();resolve({accountId:"2",previewId:"closed-token",currentLocation:"Arrakeen"});await pending;assert.equal(h.element("playerRecoveryApplyButton").disabled,true);
+});
+
+const forceParentFixture={travelParents:[{id:6,parent_id:329,is_instigator:true}],travelActors:[{id:329,class:"CHOAM ornithopter",owner_account_id:null,map:"HarkoVillage",state:"Default"}]};
+const forceTarget=()=>({...manualTarget(),forceTravelParents:true});
+test("explicit Force pawn teleport moves only the pawn and preserves vehicle and travel records",async()=>{
+ const h=harness({...forceParentFixture,currentMap:"HarkoVillage",noPresets:true});await assert.rejects(h.service.inspect("2",manualTarget()),/linkage is ambiguous/);const p=await h.service.inspect("2",forceTarget());assert.equal(p.destination.forceTravelParents,true);
+ await assert.rejects(h.service.recover({previewId:p.previewId,confirmed:true,acceptUnverifiedHeight:true}),/Confirm Force pawn teleport/);assert.equal(h.model.moves.length,0);
+ await h.service.recover({previewId:p.previewId,confirmed:true,acceptUnverifiedHeight:true,forceTravelParents:true});assert.equal(h.model.state.pawn.map,"HaggaBasin");assert.deepEqual(h.model.state.links,h.model.before.links);assert.equal(h.model.commits,1);assert.equal(h.model.journal.destination.forceTravelParents,true);
+});
+for(const options of [{transferImport:{state:"Importing"}},{controllerState:"Travel"},{playerStateState:"Travel"},{ambiguousPawn:true},{onlineStatus:"Online"},{serverOnline:true},{backupFails:true}])test("Force pawn teleport retains non-parent safety checks: "+JSON.stringify(options),async()=>{
+ const h=harness({...forceParentFixture,noPresets:true,...options});await assert.rejects(async()=>{const p=await h.service.inspect("2",forceTarget());await h.service.recover({previewId:p.previewId,confirmed:true,acceptUnverifiedHeight:true,forceTravelParents:true});});assert.equal(h.model.moves.length,0);assert.deepEqual(h.model.state,h.model.before);
+});
+for(const options of [{travelParentChanged:true},{travelActorChanged:true},{badLocation:true}])test("Force pawn teleport rolls back any linked data or location changes: "+JSON.stringify(options),async()=>{
+ const h=harness({...forceParentFixture,noPresets:true,...options});const p=await h.service.inspect("2",forceTarget());await assert.rejects(h.service.recover({previewId:p.previewId,confirmed:true,acceptUnverifiedHeight:true,forceTravelParents:true}));assert.equal(h.model.rollbacks,1);assert.equal(h.model.commits,0);assert.deepEqual(h.model.state,h.model.before);
+});
+test("execution request cannot enable the override on a normal preview",async()=>{
+ const h=harness({noPresets:true});const p=await h.service.inspect("2",manualTarget());h.model.state.links.travel_parents=forceParentFixture.travelParents;await assert.rejects(h.service.recover({previewId:p.previewId,confirmed:true,acceptUnverifiedHeight:true,forceTravelParents:true}),/linkage is ambiguous/);assert.equal(h.model.moves.length,0);
+});
+test("force UI acknowledgement is bound to preview and named final confirmation",async()=>{
+ const h=uiHarness();for(const key of ["X","Y","Z"])h.element("recoveryManual"+key).value="12";h.element("recoveryManualAcknowledgement").checked=true;h.element("recoveryForcePawnAcknowledgement").checked=true;await h.context.previewManualCharacterRecovery();await h.context.recoverSelectedCharacter();assert.match(h.calls.find(c=>c.confirmation).confirmation,/Test Player.*Force pawn teleport.*links will remain unchanged/);assert.equal(JSON.parse(h.calls.filter(c=>c.url==="/api/admin/players/recovery").at(-1).options.body).forceTravelParents,true);h.context.closeCharacterRecovery();assert.equal(h.element("recoveryForcePawnAcknowledgement").checked,false);
 });

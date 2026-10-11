@@ -21,6 +21,10 @@ const httpsPort = port + 500;
 
 if (!fs.existsSync(archive)) throw new Error(`Packaged archive was not found: ${archive}`);
 asar.extractAll(archive, extracted);
+for (const script of ["test-user-game-settings.js", "test-user-game-recovery.js"]) {
+  const result = spawnSync(process.execPath, [path.join(extracted, "scripts", script)], { cwd: extracted, encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, "Packaged TaskGoalAmount checks failed: " + result.stdout + result.stderr);
+}
 const packagedServerSource = fs.readFileSync(path.join(extracted, "server.js"), "utf8");
 assert(fs.existsSync(path.join(extracted, "lib", "character-recovery.js")), "Packaged app is missing Character Recovery.");
 const recoveryTest = spawnSync(process.execPath, [path.join(extracted, "scripts", "test-character-recovery.js")], { cwd: extracted, encoding: "utf8", windowsHide: true });

@@ -7,7 +7,7 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ini-recovery-test-'));
 const template='/home/dune/.dune/download/scripts/setup/config/UserGame.ini';
 const active='/var/lib/rancher/k3s/storage/pvc-one/UserGame.ini';
 const engine=active.replace('UserGame','UserEngine');
-const game='; custom comment\r\n[/Script/DuneSandbox.DuneGameMode]\r\nm_GlobalXPMultiplier=1.00\r\nm_GlobalHarvestHealthMultiplier=1.00\r\nUnknown=keep\r\n';
+const game='; custom comment\r\n[/Script/DuneSandbox.LandsraadSettings]\r\nData=(m_TaskGoalAmount=70000,m_ControlPointsPerCycle=2,Nested=(Label="a,b"))\r\n[/Script/DuneSandbox.DuneGameMode]\r\nm_GlobalXPMultiplier=1.00\r\nm_GlobalHarvestHealthMultiplier=1.00\r\nUnknown=keep\r\n';
 let fail=false,conflict=false,vm='one',calls=0;
 const mapped=p=>path.join(root,Buffer.from(p).toString('hex'));
 const originals=new Map([[template,game],[template.replace('UserGame','UserEngine'),'[URL]\nPort=12345\n'],[active,game.replace('m_GlobalHarvestHealthMultiplier=1.00','m_GlobalHarvestHealthMultiplier=4.00')+'m_GlobalHarvestAmountMultiplier=5.00\r\nPartitionSetting=yes\r\n'],[engine,'[URL]\r\nPort=23456\r\nIGWPort=34567\r\n']]);
@@ -30,18 +30,19 @@ const recovery=createUserGameRecovery({directory,quote:s=>s,target:()=>vm,sshCom
  return {ok:result.status===0,stdout:result.stdout,stderr:result.stderr||String(result.error||'')};
 }});
 (async()=>{
- const first=await recovery.save({m_GlobalXPMultiplier:2,m_GlobalHarvestHealthMultiplier:1},game);
+ const first=await recovery.save({m_GlobalXPMultiplier:2,m_GlobalHarvestHealthMultiplier:1,m_TaskGoalAmount:35000},game);
  assert.equal(first.changedFiles.length,2);
  for(const p of [template,active]) {const text=fs.readFileSync(mapped(p),'utf8');assert(text.includes('m_GlobalXPMultiplier=2.00'));assert(text.includes('Unknown=keep'));}
  assert(fs.readFileSync(mapped(active),'utf8').includes('PartitionSetting=yes'));
  assert(fs.readFileSync(mapped(active),'utf8').includes('m_GlobalHarvestHealthMultiplier=4.00'),'Unedited per-map settings must survive form saves');
  assert.equal(fs.readFileSync(mapped(engine),'utf8'),originals.get(engine));
+ for(const p of [template,active]) assert(fs.readFileSync(mapped(p),'utf8').includes('Data=(m_TaskGoalAmount=35000,m_ControlPointsPerCycle=2,Nested=(Label="a,b"))'));
  assert.equal(recovery.list().length,1);
  assert.equal(recovery.read(first.backupId).files.length,4);
- const noChange=await recovery.save({m_GlobalXPMultiplier:2});assert.equal(noChange.changedFiles.length,0);assert.equal(calls,1);
+ const noChange=await recovery.save({m_GlobalXPMultiplier:2,m_TaskGoalAmount:35000});assert.equal(noChange.changedFiles.length,0);assert.equal(calls,1);
  await assert.rejects(recovery.save({m_GlobalXPMultiplier:3},game),/changed since/);
  const before=fs.readFileSync(mapped(template)); fail=true;
- await assert.rejects(recovery.save({m_GlobalXPMultiplier:3}),/rollback completed/);fail=false;
+ await assert.rejects(recovery.save({m_GlobalXPMultiplier:3,m_TaskGoalAmount:12000}),/rollback completed/);fail=false;
  assert.deepEqual(fs.readFileSync(mapped(template)),before);
  assert(fs.readFileSync(mapped(active),'utf8').includes('m_GlobalXPMultiplier=2.00'));
  conflict=true;await assert.rejects(recovery.save({m_GlobalXPMultiplier:3}),/changed since backup/);conflict=false;

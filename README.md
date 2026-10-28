@@ -218,7 +218,7 @@ Need help with AlphaNine Dune Suite?
 
 Join the AlphaNine Gaming Discord community:
 
-[https://discord.gg/kutj6MyR2](https://discord.gg/kutj6MyR2)
+[https://discord.gg/cz4Zwbt7k](https://discord.gg/cz4Zwbt7k)
 
 Support includes:
 
@@ -247,3 +247,7 @@ Any game-related assets used within the project remain the property of their res
 AlphaNine Dune Suite is maintained by AlphaNineGaming.
 
 Thanks to the Dune: Awakening self-hosting community for discovery work, testing, and operational feedback.
+
+## 1.3.25 cleanup stability
+
+Old Server Packages streams large inventories and isolates parsing in a bounded background process. Failed scans restore dashboard controls and fail closed. Existing package protection and confirmation remain in place. Experimental automatic container cleanup and kubelet policy controls are excluded from this release.

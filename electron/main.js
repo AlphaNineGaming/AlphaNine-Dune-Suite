@@ -15,6 +15,7 @@ const RECEIVER_DEFAULT_HOST = "127.0.0.1";
 const RECEIVER_DEFAULT_PORT = 5055;
 const START_TIMEOUT_MS = 45000;
 const SUITE_ICON_PATH = path.join("assets", "alphanine-suite-icon-v2.png");
+const { startupPermissions: providerStartupPermissions, selection: providerSelection } = require("../lib/providers/suite-provider");
 const DESKTOP_STARTUP_POLICY = createStartupPolicy();
 const MAINTENANCE_BOOTSTRAP_RUNNER = DESKTOP_STARTUP_POLICY.maintenanceBootstrap;
 const MIGRATION_STARTUP_SUPPRESSED_RUNNER = DESKTOP_STARTUP_POLICY.migrationStartupSuppressed;
@@ -351,12 +352,13 @@ function createFirstRunFiles() {
 function readAppConfig() {
   try {
     return JSON.parse(fs.readFileSync(userPath("config.json"), "utf8").replace(/^\uFEFF/, ""));
-  } catch {
-    return {};
+  } catch (error) {
+    return error.code === "ENOENT" ? { setupComplete: false } : { serverType: "invalid-profile" };
   }
 }
 
 function battlegroupBatchPath(cfg = readAppConfig(), persisted = readAppConfig()) {
+  if (providerSelection(persisted) !== "legacy") throw new Error("Battlegroup launch is unavailable for a read-only provider.");
   const roots = [
     cfg.serverInstallPath,
     cfg.awakeningServerPath,
@@ -770,6 +772,7 @@ ipcMain.handle("choose-database-backup-file", async () => {
 });
 
 ipcMain.handle("open-path", async (_event, targetPath) => {
+  if (!providerStartupPermissions(readAppConfig()).allowAutomation) return { ok: false, error: "Arbitrary local path launching is unavailable for this provider or unfinished profile." };
   const value = String(targetPath || "").trim();
   if (!value) return { ok: false, error: "Path is empty." };
   const error = await shell.openPath(value);
@@ -777,6 +780,7 @@ ipcMain.handle("open-path", async (_event, targetPath) => {
 });
 
 ipcMain.handle("open-battlegroup-batch", async (_event, configuredPaths = {}) => {
+  if (!providerStartupPermissions(readAppConfig()).allowAutomation) return { ok: false, error: "This provider or unfinished profile has no validated Windows battlegroup launch adapter." };
   const requested = configuredPaths && typeof configuredPaths === "object" ? configuredPaths : {};
   const filePath = battlegroupBatchPath({
     serverInstallPath: String(requested.serverInstallPath || "").trim(),
@@ -884,7 +888,7 @@ async function boot() {
   }
   if (MAINTENANCE_BOOTSTRAP_RUNNER) appendLog("desktop", "Maintenance Bootstrap Mode: Receiver and normal desktop startup automation are disabled.");
   else if (MIGRATION_STARTUP_SUPPRESSED_RUNNER) appendLog("desktop", "Migration startup-suppressed mode: only the loopback Server Migration backend will be started.");
-  else if (DESKTOP_STARTUP_POLICY.allowDesktopReceiver) await startReceiverIfNeeded();
+  else if (DESKTOP_STARTUP_POLICY.allowDesktopReceiver && providerStartupPermissions(readAppConfig()).allowAutomation) await startReceiverIfNeeded();
   await startServer();
   createWindow();
   createTray();

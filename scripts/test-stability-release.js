@@ -1,0 +1,16 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const root=path.join(__dirname,'..'),server=fs.readFileSync(path.join(root,'server.js'),'utf8');
+assert.equal(require('../package.json').version,'1.3.25');
+assert.doesNotMatch(server,/containerGc|gcLifecycle|container-gc/);
+for(const file of ['lib/container-gc-lifecycle.js','lib/container-gc-policy.js','lib/container-gc-review.js','lib/container-gc-vm.js','scripts/plan-container-gc.js'])assert.equal(fs.existsSync(path.join(root,file)),false,file+' must not ship');
+assert.match(server,/runCleanupCommand/);
+assert.match(server,/https:\/\/discord\.gg\/cz4Zwbt7k/);
+assert.match(server,/async function scanServerPackages/);
+assert.match(server,/async function cleanServerPackages/);
+const worker=fs.readFileSync(path.join(root,'lib/cleanup-process.js'),'utf8');
+assert.match(worker,/fork\(__filename/);
+assert.match(worker,/max-old-space-size/);
+assert.match(worker,/pipeline\(/);
+assert.doesNotMatch(worker,/container-review|kubelet-review|gc-events|node-review/);
+console.log('PASS: focused 1.3.25 source contains streaming/isolated parser and Discord update; automatic cleanup UI, routes, policy modules and planning commands are absent.');

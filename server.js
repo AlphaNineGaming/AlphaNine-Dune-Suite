@@ -199,12 +199,9 @@ const {
 } = require("./lib/server-migration");
 const {
   CONFIRMATION: EMPTY_MARKET_CONFIRMATION,
-  buildCleanupSql: buildEmptyMarketCleanupSql,
   buildPortableEvidenceSql: buildPortableEmptyMarketEvidenceSql,
   buildPreviewSql: buildEmptyMarketPreviewSql,
-  migrationMarketIsEmpty,
-  runEmptyMarket,
-  validatePreview: validateEmptyMarketPreview
+  migrationMarketIsEmpty
 } = require("./lib/migration-empty-market");
 const {
   buildDestinationMarketCleanupSql,
@@ -316,6 +313,11 @@ const {
   playerRenamePreviewExpired
 } = require("./lib/player-rename");
 
+const { selection: providerSelection, startupPermissions: providerStartupPermissions, readBootstrapConfig: readProviderBootstrapConfig, validateSelectionChange, routeDecision: providerRouteDecision, providerLocalRequest, createSuiteProviders, catalog: providerCatalog } = require("./lib/providers/suite-provider");
+const { createFeatureRouter } = require("./lib/providers/feature-router");
+const { createTargetBindings } = require("./lib/providers/target-binding");
+let providerTargetBindings;
+const PROVIDER_BOOT_PERMISSIONS = providerStartupPermissions(readProviderBootstrapConfig({ configPath: SELECTED_PROFILE_BINDING?.configPath }));
 const APP_PACKAGE = require("./package.json");
 const APP_VERSION = String(APP_PACKAGE.version);
 const MARKET_BOT_RUNTIME_VERSION = String(APP_PACKAGE.marketBotRuntimeVersion || APP_VERSION);
@@ -323,7 +325,7 @@ const MARKET_BOT_RUNTIME_VERSION = String(APP_PACKAGE.marketBotRuntimeVersion ||
 // dormant implementation isolated until it is either removed from source or
 // deliberately reintroduced as a separately reviewed product feature.
 const SERVER_MIGRATION_ENABLED = false;
-const SUITE_STARTUP_POLICY = createStartupPolicy();
+const SUITE_STARTUP_POLICY = createStartupPolicy({ providerIsolation: !PROVIDER_BOOT_PERMISSIONS.allowAutomation });
 const SIDE_EFFECT_FREE_RUNNER = SUITE_STARTUP_POLICY.sideEffectFree;
 const MAINTENANCE_BOOTSTRAP_RUNNER = SUITE_STARTUP_POLICY.maintenanceBootstrap;
 const MIGRATION_STARTUP_SUPPRESSED_RUNNER = SUITE_STARTUP_POLICY.migrationStartupSuppressed;
@@ -721,6 +723,7 @@ function detectPythonPath(configValue = {}) {
 }
 
 function autoDetectInitialConfig(configValue) {
+  if (providerSelection(configValue) !== "legacy") return { config: configValue, changed: false };
   const next = { ...configValue };
   let changed = false;
   const setIfBlank = (key, value) => {
@@ -886,6 +889,12 @@ function applyConfigRuntimeEnv(configValue = loadConfig()) {
 }
 
 function loadConfig() {
+  const pinned = providerTargetBindings?.current();
+  if (pinned) {
+    const actual = { ...defaultConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")) };
+    providerTargetBindings.assertCurrent(actual);
+    return JSON.parse(JSON.stringify(pinned));
+  }
   if (!fs.existsSync(CONFIG_PATH)) {
     if (MIGRATION_STARTUP_SUPPRESSED_RUNNER) return { ...defaultConfig };
     const token = generateReceiverToken();
@@ -896,7 +905,9 @@ function loadConfig() {
     return detected;
   }
   const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, ""));
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Suite configuration must be a JSON object.");
   const loaded = { ...defaultConfig, ...raw };
+  if (providerSelection(loaded) !== "legacy") return loaded;
   const repaired = repairMaskedSecrets(loaded);
   const localHostNormalized = normalizeLocalConnectionHosts(repaired.config);
   const configValue = localHostNormalized.config;
@@ -947,6 +958,20 @@ function normalizeSelectedBattlegroup(value) {
 }
 
 function saveConfig(nextConfig) {
+  const providerCurrent = loadConfig();
+  const providerNext = validateSelectionChange(providerCurrent, nextConfig, PROVIDER_BOOT_PERMISSIONS);
+  for (const key of Object.keys(nextConfig)) if (isSecretConfigKey(key) && isMaskedSecretValue(nextConfig[key])) providerNext[key] = providerCurrent[key];
+  providerTargetBindings?.assertChange(providerCurrent, providerNext);
+  if (providerSelection(providerNext) !== providerSelection(providerCurrent) && operationRegistry.snapshot().active.length) throw new Error("Finish active Suite operations before changing provider.");
+  if (providerSelection(providerNext) === "remote-linux") {
+    const remote = { ...providerCurrent, serverType: "remote-linux", sshHost: providerNext.sshHost, sshUser: providerNext.sshUser, sshKey: providerNext.sshKey, sshPort: providerNext.sshPort ?? 22, sshKnownHostsPath: providerNext.sshKnownHostsPath, remoteRuntimeRoot: providerNext.remoteRuntimeRoot || "", setupComplete: providerNext.setupComplete === true };
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "remoteDeployment")) remote.remoteDeployment = providerNext.remoteDeployment;
+    for (const key of ["remoteDatabaseEnabled", "remoteDatabaseHost", "remoteDatabasePort", "remoteDatabaseName", "remoteDatabaseUser", "remoteDatabasePassword", "remoteDatabaseCaPath"]) {
+      if (Object.prototype.hasOwnProperty.call(nextConfig, key) && !(isSecretConfigKey(key) && isMaskedSecretValue(nextConfig[key]))) remote[key] = nextConfig[key];
+    }
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(remote, null, 2));
+    return remote;
+  }
   const allowed = ["setupComplete", "serverType", "host", "port", "vmName", "vmIp", "sshHost", "sshUser", "sshKey", "databaseHost", "databasePort", "databaseName", "databaseUser", "databasePassword", "receiverHost", "receiverPort", "receiverToken", "adminGiveItemToken", "receiverTokenSource", "receiverSshHost", "receiverSshUser", "receiverSshKey", "mapDefault", "logLevel", "updateRepo", "panelTitle", "panelSubtitle", "pythonPath", "serverInstallPath", "awakeningServerPath", "liveTeleportEnabled", "dragTeleportEnabled", "teleportSafeZOffset", "teleportEndpointPath", "teleportCommandTemplate", "teleportPayloadTemplate", "progressionEditingEnabled", "databaseBackupLocation", "uiMode", "uiSoundsEnabled", "uiSoundVolume", "lanWebPortalEnabled", "selectedBattlegroup"];
   const current = loadConfig();
   const clean = {};
@@ -1116,7 +1141,13 @@ function serverInstallPathStatus(value) {
   return result;
 }
 
+function publicProviderConfig(configValue) {
+  const copy = { ...configValue };
+  for (const key of Object.keys(copy)) if (isSecretConfigKey(key)) { copy[key + "Set"] = Boolean(copy[key]); copy[key] = copy[key] ? "********" : ""; }
+  return copy;
+}
 function publicConfig(configValue = loadConfig()) {
+  if (providerSelection(configValue) !== "legacy") return publicProviderConfig(configValue);
   const copy = { ...configValue };
   copy.configPath = CONFIG_PATH;
   copy.databasePasswordSet = Boolean(copy.databasePassword);
@@ -1134,6 +1165,7 @@ function publicConfig(configValue = loadConfig()) {
 }
 
 function configWithSshDiagnostics(configValue = loadConfig()) {
+  if (providerSelection(configValue) !== "legacy") return publicProviderConfig(configValue);
   return {
     ...configValue,
     configPath: CONFIG_PATH,
@@ -1220,11 +1252,19 @@ function loadRuntimeEnvFilesIntoProcess() {
 
 loadRuntimeEnvFilesIntoProcess();
 const config = loadConfig();
-const startupManagedEnv = MIGRATION_STARTUP_SUPPRESSED_RUNNER
+providerTargetBindings = createTargetBindings({ activeOperations: () => operationRegistry.snapshot().active.length });
+const suiteProviders = createSuiteProviders({ configuration: loadConfig, legacyReaders: {
+  vm: { inspect: (...args) => vmInfoFast(...args) },
+  runtime: { inspect: (...args) => serverHealthSnapshot(...args) },
+  database: { inspect: (...args) => databaseStatus(...args) },
+  filesystem: { inspect: value => serverInstallPathStatus(value) }
+} });
+const featureRouter = createFeatureRouter({ providers: suiteProviders, selection: providerSelection });
+const startupManagedEnv = MIGRATION_STARTUP_SUPPRESSED_RUNNER || providerSelection(config) !== "legacy"
   ? { path: MANAGED_ENV_PATH, values: managedEnvValues(config), suppressed: true }
   : writeManagedEnvFile(config);
 process.env.ALPHANINE_MANAGED_ENV_PATH = startupManagedEnv.path;
-applyConfigRuntimeEnv(config);
+if (providerSelection(config) === "legacy") applyConfigRuntimeEnv(config);
 const VM_NAME = config.vmName;
 const VM_IP = String(config.vmIp || "").trim();
 const SSH_USER = config.sshUser || "dune";
@@ -3492,9 +3532,9 @@ function packageCleanupTarget() {
 async function packageCleanupContext() {
   const target = packageCleanupTarget();
   const connection = await standardVmSshConnection();
-  return { target, execute: async (command, timeout = 60000) => {
+  return { target, execute: async (command, timeout = 60000, options = {}) => {
     if (packageCleanupTarget() !== target) throw new Error("VM settings changed. Scan again before cleanup.");
-    return run("ssh", [...connection.args, command], { timeout, maxBuffer: 16 * 1024 * 1024 });
+    return require("./lib/cleanup-process").runCleanupCommand("ssh", [...connection.args, command], { timeout, json: options.json, projection: options.projection, command });
   }};
 }
 function startVmDiskMaintenance(action, input = {}) {
@@ -10178,69 +10218,6 @@ async function migrationEmptyMarketPreview(selection = {}, options = {}) {
   return { ...publicEmptyMarketPreview(raw), safety: safety.evidence, target: safety.target, checkpoint: safety.checkpoint };
 }
 
-async function executeMigrationEmptyMarket(body = {}, operation = null) {
-  const selection = {
-    deleteBotListings: body.deleteBotListings === true,
-    deletePlayerListings: body.deletePlayerListings === true,
-    deleteLegacyNpcListings: body.deleteLegacyNpcListings === true
-  };
-  const offlineCheckpoint = migrationOfflineMode.captureCheckpoint("Migration Empty Market");
-  let target = null;
-  let initialSafetyCheckpoint = null;
-  const result = await runEmptyMarket({
-    selection,
-    confirmText: String(body.confirmText || ""),
-    acknowledged: body.acknowledged === true,
-    checkpoint: async (stage) => migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, `Empty Market ${stage}`),
-    onStage: async (stage) => operation?.update?.(stage, "Migration Empty Market protected workflow"),
-    stopMarketBot: async () => stopMarketBotForMigration(),
-    verifyMarketBotStopped: async () => publicMarketBotInfrastructureEvidence(await remoteMarketBotStoppedServiceEvidence()),
-    preflight: async () => {
-      const safety = await collectEmptyMarketSafetyEvidence({ target, ignoreOperationId: operation?.id });
-      target = safety.target;
-      if (!initialSafetyCheckpoint) initialSafetyCheckpoint = safety.checkpoint;
-      else assertMarketBotMigrationSafetyCheckpoint(initialSafetyCheckpoint, safety.checkpoint, "Empty Market safety revalidation");
-      return safety.evidence;
-    },
-    preview: async (selected) => parseMigrationJson(await migrationSql(target, buildEmptyMarketPreviewSql(selected)), "Empty Market selected-set preview"),
-    createBackup: async () => {
-      const backup = await createNativeDatabaseBackup({
-        prefix: "pre-empty-market-rollback",
-        verifyCheckpoint: (stage) => migrationOfflineMode.verifyCheckpoint(offlineCheckpoint, stage),
-        requiredAlphaTables: [...MIGRATION_MARKET_BOT_TABLES],
-        onStatus: (stage, detail) => operation?.update?.(`Backup: ${stage}`, detail)
-      });
-      if (!backup.ok) throw new Error(backup.error || "The mandatory Empty Market rollback backup failed.");
-      return backup;
-    },
-    verifyBackup: async (backup) => ({
-      verified: backup.verified === true,
-      usableForRestore: backup.verified === true,
-      archiveReadVerified: backup.toc?.archiveReadVerified === true,
-      completeDune: backup.toc?.duneSchema === true,
-      alphaTables: backup.toc?.requiredAlphaTables || [],
-      size: String(backup.size || ""), sha256: String(backup.sha256 || ""), filePath: backup.filePath
-    }),
-    execute: async (selected, preview) => parseMigrationJson(await migrationSql(target, buildEmptyMarketCleanupSql(selected, preview), 10 * 60 * 1000), "Empty Market transaction"),
-    postVerify: async (selected) => parseMigrationJson(await migrationSql(target, buildEmptyMarketPreviewSql(selected)), "Empty Market post-verification"),
-    uninstallMarketBot: async () => uninstallMarketBotForMigration(),
-    verifyMarketBotAbsent: async () => publicMarketBotInfrastructureEvidence(await remoteMarketBotStoppedServiceEvidence(), { requireAbsent: true }),
-    restoreBackup: async (backup) => restoreCustomArchive(backup.filePath, target, MIGRATION_ROLLBACK_FLAGS),
-    verifyRestore: async (_backup, before) => {
-      const after = validateEmptyMarketPreview(parseMigrationJson(await migrationSql(target, buildEmptyMarketPreviewSql(selection)), "Empty Market rollback verification"), selection);
-      return { matchesBefore: canonicalMigrationJson(after) === canonicalMigrationJson(before) };
-    }
-  });
-  appendAdminAudit("migration_empty_market_completed", {
-    operationId: operation?.id || "", deleteBotListings: selection.deleteBotListings,
-    deletePlayerListings: selection.deletePlayerListings, deleteLegacyNpcListings: selection.deleteLegacyNpcListings,
-    removed: result.removed, removedByCategory: result.removedByCategory,
-    backupSize: result.backup.size, backupSha256: result.backup.sha256,
-    marketBotInfrastructureRemoved: result.marketBotInfrastructureRemoved === true
-  });
-  return result;
-}
-
 function migrationCondition(id, ok, message, evidence = {}) {
   return { id, ok: ok === true, message: String(message || ""), evidence };
 }
@@ -10497,18 +10474,6 @@ async function migrationEvidence(target, options = {}) {
       policy: marketBotCompatibility
     } : null
   };
-}
-
-async function revalidateMigrationMarketBotSafety(target, expectedCheckpoint, stage, options = {}) {
-  const writers = await collectIndependentWriterSamples(
-    async () => parseMigrationJson(await migrationSql(target, ACTIVE_WRITERS_SQL), `Market Bot safety writer at ${stage}`),
-    () => sleepMs(750)
-  );
-  const writerEvidence = evaluateIndependentWriterSamples(writers);
-  if (!writerEvidence.ok) throw new Error(`Market Bot migration safety failed at ${stage}: an unexpected writer or open transaction appeared.`);
-  const safety = await collectMigrationMarketBotSafety(target);
-  assertMarketBotMigrationSafetyCheckpoint(expectedCheckpoint, safety.checkpoint, stage, options);
-  return safety;
 }
 
 async function migrationExportPreflight(payload = {}, options = {}) {
@@ -23097,6 +23062,7 @@ input,select { font-size:14px; }
       <div class="auto-setup-grid">
         <div>
           <div class="empty">Simple setup detects the local Dune server install, Python runtime, the game-created SSH key, Hyper-V VM IP, database password, and receiver settings, then writes them to config.json and the managed .env.</div>
+          <label>Server Type<select id="setupWelcomeServerType" onchange="providerChooseWelcome()"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-linux">Remote Linux / VPS — read-only (Experimental)</option><option value="remote-vm">Remote VM (legacy)</option><option value="manual">Manual / Advanced (legacy)</option><option value="docker" disabled>Docker — planned / unsupported</option><option value="proxmox" disabled>Proxmox — planned / unsupported</option><option value="managed-hosting" disabled>Managed hosting — planned / unsupported</option></select></label>
           <div class="setup-mode-actions">
             <button id="setupAutoRunButton" type="button" class="primary" onclick="runSimpleSetup()">Run Auto Setup</button>
             <button type="button" onclick="openAdvancedSetupWizard()">Advanced Setup</button>
@@ -23118,7 +23084,7 @@ input,select { font-size:14px; }
     </div>
     <div id="setupPage1" class="setup-page">
       <div class="field-grid">
-        <label>Server Type<select id="setupServerType" onchange="syncConnectionHostLocks('setup')"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
+        <label>Server Type<select id="setupServerType" onchange="syncConnectionHostLocks('setup')"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-linux">Remote Linux / VPS — read-only (Experimental)</option><option value="remote-vm">Remote VM (legacy)</option><option value="manual">Manual / Advanced (legacy)</option><option value="docker" disabled>Docker — planned / unsupported</option><option value="proxmox" disabled>Proxmox — planned / unsupported</option><option value="managed-hosting" disabled>Managed hosting — planned / unsupported</option></select></label>
         <div class="path-picker-row">
           <label>DUNE_SERVER_INSTALL_PATH<input id="setupServerInstallPath" placeholder="Browse to the server install folder" onchange="refreshServerInstallPathWarning('setupServerInstallPath','setupServerInstallPathWarning')"></label>
           <button type="button" onclick="browseServerInstallPath('setupServerInstallPath','setupServerInstallPathWarning')">Browse...</button>
@@ -23140,6 +23106,25 @@ input,select { font-size:14px; }
         </div>
         <div id="setupSshKeyWarning" class="warning">SSH key not checked.</div>
         <button type="button" onclick="runDiscovery()">Auto Discover</button>
+      </div>
+      <div id="providerRemoteSetup" class="hidden">
+        <p class="warning">Remote Linux / VPS is Experimental and read-only. Scoped reads require deployment and permission checks. Restarts, updates, backup, restore and writes remain unavailable.</p>
+        <div class="field-grid">
+          <label>SSH Port<input id="setupSshPort" type="number" min="1" max="65535" value="22"></label>
+          <label>Known-hosts file<input id="setupSshKnownHostsPath" placeholder="Absolute path to an existing trusted known_hosts file"></label>
+          <label>Remote runtime directory (optional)<input id="setupRemoteRuntimeRoot" placeholder="/srv/dune"></label>
+        </div>
+        <details><summary>Deployment scope and optional read-only database</summary>
+          <label>Deployment scope<select id="setupDeploymentKind" onchange="providerSelectorFields()"><option value="auto">Native process discovery</option><option value="systemd">Selected systemd service</option><option value="docker">Selected Docker container</option><option value="kubernetes">Selected Kubernetes pod</option></select></label>
+          <div id="providerSelector-systemd" class="hidden"><label>Service unit<input id="setupServiceUnit" placeholder="dune.service"></label><label><input id="setupUserService" type="checkbox">User service</label></div>
+          <div id="providerSelector-docker" class="hidden"><label>Container ID<input id="setupContainerId" placeholder="12–64 hexadecimal characters"></label><label>Engine socket<input id="setupDockerSocket" placeholder="/var/run/docker.sock"></label></div>
+          <div id="providerSelector-kubernetes" class="hidden"><label>Remote JSON kubeconfig<input id="setupKubeConfig" placeholder="Absolute path; static credentials and verified TLS only"></label><label>Context<input id="setupKubeContext"></label><label>Namespace<input id="setupKubeNamespace"></label><label>Pod<input id="setupKubePod"></label></div>
+          <label><input id="setupRemoteDatabaseEnabled" type="checkbox" onchange="providerSelectorFields()">Probe an explicitly configured PostgreSQL endpoint over verified TLS</label>
+          <p>Use a dedicated restricted read-only role. Existing Suite database credentials are never reused. Player reads require a supported schema and fresh privilege checks.</p>
+          <div id="providerDatabaseFields" class="field-grid hidden"><label>Database host<input id="setupRemoteDatabaseHost"></label><label>Port<input id="setupRemoteDatabasePort" type="number" value="5432"></label><label>Database<input id="setupRemoteDatabaseName"></label><label>Read-only role<input id="setupRemoteDatabaseUser"></label><label>Password<input id="setupRemoteDatabasePassword" type="password"></label><label>Local CA file (optional)<input id="setupRemoteDatabaseCaPath" placeholder="Absolute path; otherwise system trust"></label></div>
+        </details>
+        <div class="action-row mt"><button type="button" onclick="providerDiagnose(true)">Run read-only diagnostics</button><button type="button" onclick="providerDownloadPreview()">Download sanitized report</button><button id="providerSaveRemote" type="button" onclick="providerSaveSetup()">Save read-only setup</button></div>
+        <pre id="providerSetupResult">No remote diagnostics have run.</pre>
       </div>
       <pre id="setupDiscoveryLog" class="mt">Discovery has not run yet.</pre>
     </div>
@@ -24954,7 +24939,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
           <div class="value warn mt">Loading...</div>
           <div class="subtle mt">Opening embedded manager console.</div>
         </div>
-        <iframe id="managerFrame" src="/manager/" title="AlphaNine Server Management" style="display:none" onload="handleManagerFrameLoad()"></iframe>
+        <iframe id="managerFrame" src="${providerSelection(loadConfig()) === "legacy" ? "/manager/" : "about:blank"}" title="AlphaNine Server Management" style="display:none" onload="if(typeof handleManagerFrameLoad === 'function') handleManagerFrameLoad()"></iframe>
       </div>
     </section>
 
@@ -25111,7 +25096,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel-head">
           <div>
             <div class="label">Read-only Database Explorer</div>
-            <div class="subtle mt">Local Suite only. Queries use protected read-only transactions, server-side limits, and the selected battlegroup database tunnel.</div>
+            <div class="subtle mt">Local Suite only. Queries use protected read-only transactions, server-side limits, and the selected provider database connection.</div>
           </div>
           <button type="button" onclick="refreshDatabaseExplorer()">Refresh Schema</button>
         </div>
@@ -25168,7 +25153,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
       <div class="panel frame-wrap mt"><iframe id="gearCodexFrame" src="/gear-codex/" title="AlphaNine Gear Codex"></iframe></div>
     </section>
 
-    <section id="diagnostics" class="view">
+    <section id="diagnostics" class="view"><div class="panel pad"><p id="providerAvailability"></p><p id="providerCapabilitySummary"></p><button onclick="providerDiagnose()">Refresh provider diagnostics</button><button onclick="providerDownloadPreview()">Download sanitized report</button><button onclick="openSetupWizard()">Edit server setup</button><details><summary>Sanitized compatibility report</summary><pre id="providerReport">No report collected.</pre></details></div>
       <div class="setup-doctor-grid">
         <div class="panel pad doctor-score-card">
           <div class="panel-head"><div><div class="label">Setup Doctor</div><div class="subtle">Guided checks for first-run setup, safe defaults, VM access, and core services.</div></div><button type="button" onclick="refreshDiagnostics()">Run Doctor</button></div>
@@ -25299,7 +25284,7 @@ DUNE_RECEIVER_SSH_KEY</pre>
         <div class="panel pad">
           <div class="label">Network & Server</div>
           <div class="field-grid mt">
-            <label>Server Type<select id="settingsServerType" onchange="syncConnectionHostLocks('settings')"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-vm">Remote VM</option><option value="manual">Manual / Advanced</option></select></label>
+            <label>Server Type<select id="settingsServerType" onchange="syncConnectionHostLocks('settings')"><option value="local-hyperv">Local Windows / Hyper-V</option><option value="remote-linux">Remote Linux / VPS — read-only (Experimental)</option><option value="remote-vm">Remote VM (legacy)</option><option value="manual">Manual / Advanced (legacy)</option><option value="docker" disabled>Docker — planned / unsupported</option><option value="proxmox" disabled>Proxmox — planned / unsupported</option><option value="managed-hosting" disabled>Managed hosting — planned / unsupported</option></select></label>
             <label>VM Name<input id="settingsVmName"></label>
             <label>VM IP<input id="settingsVmIp"></label>
             <label>SSH Host<input id="settingsSshHost"></label>
@@ -25383,7 +25368,9 @@ DUNE_RECEIVER_SSH_KEY</pre>
     </section>
   </main>
 </div>
+<script src="/assets/provider-ui.js?v=${crypto.createHash("sha256").update(fs.readFileSync(path.join(__dirname, "assets", "provider-ui.js"))).digest("hex").slice(0, 16)}"></script>
 <script>
+window.suiteProviderReadOnly=${providerSelection(loadConfig()) !== "legacy"};
 const WEB_PORTAL_URLS=${JSON.stringify(portalUrls)};
 let REMOTE_PORTAL_URLS=[];
 let INTERNET_PORTAL_URL="";
@@ -25401,7 +25388,7 @@ const viewCopy={
   progression:["Progression Inspector","Read-only XP, skill, and reputation schema discovery."],
   database:["Database","Battlegroup backup, import, and backup location management."],
   "server-migration":["Server Migration","Empty the Exchange safely, then export and exact-import portable dune world state with verified rollback."],
-  "database-explorer":["Database Explorer","Local-only, read-only browsing for the selected battlegroup PostgreSQL database."],
+  "database-explorer":["Database Explorer","Local-only, read-only browsing through the selected provider database adapter."],
   cleanup:["Server Cleanup","Dry-run first cleanup tools for orphaned bases, fiefs, and future stale server data."],
   landsraad:["Landsraad","View and safely change live Landsraad reward tier thresholds."],
   server:["Server Control","Battlegroup controls, maps, and live server telemetry."],
@@ -25418,7 +25405,7 @@ const viewCopy={
   settings:["Settings","App-level preferences and local runtime details."]
 };
 let managerFrameCheckTimer=null,liveUserGameState=null;
-function setView(name){if(name==="admin"||name==="server-migration")name="dashboard";tabs.forEach(t=>{t.classList.toggle("active",t.dataset.view===name);t.classList.toggle("child-active",t.dataset.view==="management"&&name==="usergame-settings");});views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="players")refreshPlayersPage();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){refreshMarketBot();refreshMarketListings();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();if(name==="usergame-settings"&&!liveUserGameState)loadLiveUserGameSettings();}
+function setView(name){if(name==="admin"||name==="server-migration")name="dashboard";tabs.forEach(t=>{t.classList.toggle("active",t.dataset.view===name);t.classList.toggle("child-active",t.dataset.view==="management"&&name==="usergame-settings");});views.forEach(v=>v.classList.toggle("active",v.id===name));const c=viewCopy[name]||viewCopy.dashboard;document.getElementById("viewTitle").textContent=c[0];document.getElementById("viewSubtitle").textContent=c[1];location.hash=name;if(window.uiSoundReady)playUiSound("tab");clearActionCenterSoon(4000);if(window.suiteProviderReadOnly){providerActivateView(name);return;}if(name==="server-health"&&!serverHealthData)refreshServerHealth();syncServerHealthAutoRefresh();if(name==="operations")refreshOperations();if(name==="logs")syncLogs();if(name==="players")refreshPlayersPage();if(name==="give")startGiveItemTool();if(name==="blueprints")openBlueprints();if(name==="repair"){if(adminPlayers.length)renderRepairPlayerSelect();else refreshRepairPlayers();refreshRepairQueue();}if(name==="market"){refreshMarketBot();refreshMarketListings();}if(name==="env")refreshLiveGiveEnv();if(name==="live-map")initLiveMap();if(name==="settings")loadSettings();if(name==="diagnostics")refreshDiagnostics();if(name==="landsraad")refreshLandsraadTiers();if(name==="scheduler")refreshScheduler();if(name==="progression"){refreshProgressionInspector();if(adminPlayers.length)renderProgressionPlayerSelect();else refreshProgressionPlayers();}if(name==="database")refreshDatabaseManagement();if(name==="database-explorer")refreshDatabaseExplorer();if(name==="cleanup"&&!baseCleanupState)refreshBaseCleanup();if(name==="management")initManagerFrame();if(name==="item-database")refreshItemDatabase();if(name==="usergame-settings"&&!liveUserGameState)loadLiveUserGameSettings();}
 let migrationPreflightState=null,migrationExportPolling="";
 let migrationMaintenanceState=null;
 function renderMigrationMaintenance(state={}){migrationMaintenanceState=state;const active=state.active===true;const banner=document.getElementById("migrationMaintenanceBanner");if(banner)banner.classList.toggle("hidden",!active);tone("migrationMaintenanceBadge",active?(state.failClosed?"Recovery Hold":"Active"):"Inactive");const detail=document.getElementById("migrationMaintenanceDetail");if(detail){detail.className=(state.failClosed?"warning":"subtle")+" mt";detail.textContent=active?((state.banner||"Migration Maintenance Mode — Game Server Held Offline")+" · Generation "+(state.generation||"unknown")+(state.error?" · "+state.error:"")):"Inactive. Normal controls are available; exiting maintenance never starts the server.";}const enter=document.getElementById("migrationMaintenanceEnterButton"),exit=document.getElementById("migrationMaintenanceExitButton");if(enter)enter.disabled=active;if(exit)exit.disabled=!active||state.sideEffectFree===true;}
@@ -25525,7 +25512,7 @@ function renderServerHealth(data){
     serverHealthCard("Host CPU",{state:host.cpuPercent===null||host.cpuPercent===undefined?"Unknown":"Healthy",message:host.cpuPercent===null||host.cpuPercent===undefined?"Unavailable":host.cpuPercent+"% • load "+(host.loadAverage||"Unavailable")}),
     serverHealthCard("Host Memory",{state:memory?"Healthy":"Unknown",message:memory?memory.percent+"% • "+serverHealthBytes(memory.usedBytes)+" / "+serverHealthBytes(memory.totalBytes):"Unavailable"}),
     serverHealthCard("Root Disk",{state:disk?"Healthy":"Unknown",message:disk?disk.percent+"% • "+serverHealthBytes(disk.usedBytes)+" / "+serverHealthBytes(disk.totalBytes):"Unavailable"}),
-    serverHealthCard("Resource Pressure",{state:pressures.length?"Degraded":"Healthy",message:pressures.length?pressures.map(function(row){return row.node+": "+row.pressure;}).join(", "):"No node pressure reported."})
+    serverHealthCard("Resource Pressure",{state:resources.observed===false?"Unknown":pressures.length?"Degraded":"Healthy",message:resources.observed===false?"Not collected.":pressures.length?pressures.map(function(row){return row.node+": "+row.pressure;}).join(", "):"No node pressure reported."})
   ].join("");
   const nodeRows=(data.nodes||[]).map(function(node){return '<tr data-state="'+esc(node.state)+'"><td>'+serverHealthBadge(node.state)+'</td><td><strong>'+esc(node.name)+'</strong></td><td>'+esc(node.status)+'</td><td>'+esc((node.roles||[]).join(", ")||"worker")+'</td><td>'+esc(node.age)+'</td><td>'+esc((node.pressures||[]).join(", ")||"None")+'</td><td>'+esc(node.metrics?node.metrics.cpuPercent+" CPU / "+node.metrics.memoryPercent+" memory":"Unavailable")+'</td><td class="health-reason">'+esc(node.reason||"None")+'</td></tr>';});
   document.getElementById("serverHealthNodes").innerHTML=serverHealthTable(["State","Node","Ready","Roles","Age","Pressure","Metrics","Reason"],nodeRows);
@@ -25932,7 +25919,7 @@ async function repairServerDownload(){
   finally{if(button)button.disabled=false;}
 }
 function serverUpdatePromptKey(data){return [data.requiredBuildId||"",data.downloadedRevision||"",data.deployedRevision||""].join("|");}
-async function checkServerUpdateAvailability(options={}){const force=options.force===true,prompt=options.prompt!==false;if(serverUpdateOperationId)return serverUpdateCheckState;setServerUpdateDetectionStatus("Checking Funcom and Steam server versions...","warning");const button=document.getElementById("serverUpdateButton");if(button)button.disabled=true;try{const data=await getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiCheckMs}});serverUpdateCheckState=data;fillServerUpdateVersions(data);if(!data.updateAvailable){setServerUpdateDetectionStatus("Server is current. Steam build "+serverUpdateValue(data.currentBuildId)+" · deployed "+serverUpdateValue(data.deployedRevision)+".","empty");if(force)showToast("Dune server is up to date.","success");return data;}setServerUpdateDetectionStatus("Dune server update available. "+(data.reason||"A newer Funcom build was detected."),"warning");if(prompt){const key=serverUpdatePromptKey(data);let alreadyPrompted=false;try{alreadyPrompted=sessionStorage.getItem("alphaNineServerUpdatePrompted")===key;}catch{}if(force||!alreadyPrompted){const activeDialog=document.querySelector(".suite-modal-overlay:not(.hidden),.setup-overlay:not(.hidden),.startup-progress-overlay:not(.hidden)");if(activeDialog){window.setTimeout(()=>checkServerUpdateAvailability({force:false,prompt:true}),30000);return data;}try{sessionStorage.setItem("alphaNineServerUpdatePrompted",key);}catch{}const message=(data.reason||"A newer Dune server build is available.")+"\n\nSteam build: "+serverUpdateValue(data.currentBuildId)+(data.requiredBuildId&&data.requiredBuildId!==data.currentBuildId?" -> "+data.requiredBuildId:"")+"\nDownloaded revision: "+serverUpdateValue(data.downloadedRevision)+"\nDeployed revision: "+serverUpdateValue(data.deployedRevision)+"\n\nUpdating may reconcile or restart server pods and disconnect online players. A recent backup is recommended.";if(await appConfirm("Dune Server Update Available",message,"Update Now","Later"))await startDetectedServerUpdate(data);}}return data;}catch(error){setServerUpdateDetectionStatus("Automatic server update check unavailable: "+betterError(error),"warning");if(force)showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
+async function checkServerUpdateAvailability(options={}){const force=options.force===true,prompt=options.prompt!==false;if(serverUpdateOperationId)return serverUpdateCheckState;setServerUpdateDetectionStatus("Checking Funcom and Steam server versions...","warning");const button=document.getElementById("serverUpdateButton");if(button)button.disabled=true;try{const data=await getJson("/api/server-update/check"+(force?"?force=1":""),{timeoutMs:${SERVER_UPDATE_TIMEOUTS.uiCheckMs}});serverUpdateCheckState=data;fillServerUpdateVersions(data);if(data.updateAssessment==="not_probed"){setServerUpdateDetectionStatus("Version metadata observed; update availability is unknown.","warning");return data;}if(!data.updateAvailable){setServerUpdateDetectionStatus("Server is current. Steam build "+serverUpdateValue(data.currentBuildId)+" · deployed "+serverUpdateValue(data.deployedRevision)+".","empty");if(force)showToast("Dune server is up to date.","success");return data;}setServerUpdateDetectionStatus("Dune server update available. "+(data.reason||"A newer Funcom build was detected."),"warning");if(prompt){const key=serverUpdatePromptKey(data);let alreadyPrompted=false;try{alreadyPrompted=sessionStorage.getItem("alphaNineServerUpdatePrompted")===key;}catch{}if(force||!alreadyPrompted){const activeDialog=document.querySelector(".suite-modal-overlay:not(.hidden),.setup-overlay:not(.hidden),.startup-progress-overlay:not(.hidden)");if(activeDialog){window.setTimeout(()=>checkServerUpdateAvailability({force:false,prompt:true}),30000);return data;}try{sessionStorage.setItem("alphaNineServerUpdatePrompted",key);}catch{}const message=(data.reason||"A newer Dune server build is available.")+"\n\nSteam build: "+serverUpdateValue(data.currentBuildId)+(data.requiredBuildId&&data.requiredBuildId!==data.currentBuildId?" -> "+data.requiredBuildId:"")+"\nDownloaded revision: "+serverUpdateValue(data.downloadedRevision)+"\nDeployed revision: "+serverUpdateValue(data.deployedRevision)+"\n\nUpdating may reconcile or restart server pods and disconnect online players. A recent backup is recommended.";if(await appConfirm("Dune Server Update Available",message,"Update Now","Later"))await startDetectedServerUpdate(data);}}return data;}catch(error){setServerUpdateDetectionStatus("Automatic server update check unavailable: "+betterError(error),"warning");if(force)showToast(betterError(error),"error");return null;}finally{if(button)button.disabled=false;}}
 async function checkServerUpdateNow(){return checkServerUpdateAvailability({force:true,prompt:true});}
 
 function schedulerConfigFromUi(){return{version:1,enabled:document.getElementById("schedulerEnabled")?.checked===true,battlegroup:String(schedulerState?.config?.battlegroup||schedulerState?.localConfig?.battlegroup||appConfig?.selectedBattlegroup?.name||"").trim(),timezone:getValue("schedulerTimezone"),catchUpWindowMinutes:Number(getValue("schedulerCatchup")||120),backup:{enabled:document.getElementById("schedulerBackupEnabled")?.checked===true,time:getValue("schedulerBackupTime"),retention:Number(getValue("schedulerBackupRetention")||7),timeoutMinutes:Number(getValue("schedulerBackupTimeout")||15)},restart:{enabled:document.getElementById("schedulerRestartEnabled")?.checked===true,time:getValue("schedulerRestartTime"),backupFirst:true,backupFreshMinutes:Number(getValue("schedulerBackupFresh")||90),playersOnlinePolicy:getValue("schedulerPlayerPolicy")||"skip",maxDeferralMinutes:Number(getValue("schedulerMaxDeferral")||180),healthTimeoutMinutes:Number(getValue("schedulerHealthTimeout")||15)}};}
@@ -26065,7 +26052,7 @@ function openAdvancedSetupWizard(){setupWizardMode="advanced";setupStep=1;applyS
 function closeSetupWizard(){document.getElementById("setupWizard")?.classList.add("hidden");}
 function openAboutDialog(){document.getElementById("aboutDialog")?.classList.remove("hidden");playUiSound("click");}
 function closeAboutDialog(){document.getElementById("aboutDialog")?.classList.add("hidden");playUiSound("click");}
-function openSupportDiscord(){window.open("https://discord.gg/kutj6MyR2","_blank","noopener");playUiSound("click");}
+function openSupportDiscord(){window.open("https://discord.gg/cz4Zwbt7k","_blank","noopener");playUiSound("click");}
 function openSupportKofi(){window.open("https://ko-fi.com/E1W220NMPA","_blank","noopener");playUiSound("click");}
 function applyDetectedVmIpToSetup(ip){if(!ip)return;setValue("setupVmIp",ip);setValue("setupSshHost",ip);setValue("setupReceiverSshHost",ip);setValue("settingsVmIp",ip);setValue("settingsSshHost",ip);setValue("settingsReceiverSshHost",ip);syncConnectionHostLocks("setup");syncConnectionHostLocks("settings");invalidateSetupDatabaseTest();}
 async function checkVmIpChangeOnStartup(){try{const data=await getJson("/api/setup/vm-ip-check",{timeoutMs:12000});if(!data?.changed||!data.detectedIp)return;const key="vm-ip-change:"+String(data.vmName||"")+":"+data.detectedIp+":"+String((data.savedIps||[]).join(","));if(sessionStorage.getItem(key)==="shown")return;sessionStorage.setItem(key,"shown");const message="Hyper-V reports a different VM IP than the Suite has saved.\\n\\nSaved: "+(data.savedIps||[]).join(", ")+"\\nDetected: "+data.detectedIp+"\\n\\nOpen Setup Wizard, review the connection settings, then test and save setup again.";const open=await appConfirm("VM IP changed",message,"Open Setup","Later");if(open){applyDetectedVmIpToSetup(data.detectedIp);openSetupWizard();}else{addActivity("warn","VM IP changed",data.message||("Detected "+data.detectedIp));}}catch(e){addActivity("warn","VM IP check skipped",betterError(e));}}
@@ -26128,7 +26115,7 @@ let statusRefreshInFlight=null,vmMonitorRefreshInFlight=null,indicatorDelayActiv
 function isIndicatorPollDelay(error){return /request timed out for \/api\/(?:status|vm-monitor)/i.test(String(error?.message||error||""));}
 function reportIndicatorDelay(key,message,detail){const now=Date.now(),last=Number(indicatorDelayActivityAt[key]||0);if(now-last<60000)return;indicatorDelayActivityAt[key]=now;addActivity("warn",message,detail);}
 function clearIndicatorDelay(key){delete indicatorDelayActivityAt[key];}
-async function refreshStatusPoll(){try{const data=await getJson("/api/status",{timeoutMs:45000});clearIndicatorDelay("status");const s=data.status?.summary||{};const dbLabel=databaseHealthLabel(data);const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?[selected.title,selected.namespace,selected.name].filter(Boolean).join(" / "):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",String(total));tone("sdb",dbLabel);tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));badge("topDb",dbLabel);document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+dbLabel+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return data;}catch(e){if(isIndicatorPollDelay(e)){const message="Server status check delayed; keeping the last confirmed indicators.";document.getElementById("serverLog").textContent=message;setText("dashboardLog",message);syncLogs();reportIndicatorDelay("status","Server status delayed",message);return{ok:false,delayed:true,error:betterError(e)};}renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup","Offline");tone("players","0");badge("topServer","Server error");badge("topDb","DB status unknown");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return{ok:false,error:betterError(e)};}}
+async function refreshStatusPoll(){try{const data=await getJson("/api/status",{timeoutMs:45000});clearIndicatorDelay("status");const s=data.status?.summary||{};const dbLabel=databaseHealthLabel(data);const mapped=data.serverStatus||data.runtimeTransport?.serverStatusMapped||mapServerSummary(data);const topMapped=data.topServerStatus||mapped;const servers=data.status?.servers||[];const total=servers.reduce((sum,row)=>sum+(parseInt(row.players,10)||0),0);const telemetry=data.telemetry||data.resources||data.status?.telemetry||data.status?.resources||null;const hasResourceTelemetry=renderServerResources(telemetry);const selected=data.selectedBattlegroup||appConfig?.selectedBattlegroup||null;const selectedText=selected?[selected.title,selected.namespace,selected.name].filter(Boolean).join(" / "):"No selected battlegroup";renderVmStatus(data.vm);tone("battlegroup",mapped.label==="Online"?(s.status||s.phase||"Online"):(mapped.label||"Warning"));tone("players",data.readOnly?"Unknown":String(total));tone("sdb",dbLabel);tone("suptime",s.uptime||"Unknown");badge("topServer","Server "+(topMapped.label||"Warning"));badge("topDb",dbLabel);document.getElementById("serverLog").textContent=data.status?.raw||"Ready.";setText("dashboardLog","Selected Battlegroup: "+selectedText+"\nServer: "+(s.status||s.phase||mapped.label||"Unknown")+" / Database: "+dbLabel+" / Uptime: "+(s.uptime||"Unknown"));syncLogs();addActivity(hasResourceTelemetry?"status":"warn",hasResourceTelemetry?"Server telemetry refreshed":"Server telemetry unavailable",hasResourceTelemetry?telemetrySourceLabel(telemetry?.source):(s.status||mapped.label||"No real resource telemetry source"));await refreshLiveGiveEnv();if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return data;}catch(e){if(isIndicatorPollDelay(e)){const message="Server status check delayed; keeping the last confirmed indicators.";document.getElementById("serverLog").textContent=message;setText("dashboardLog",message);syncLogs();reportIndicatorDelay("status","Server status delayed",message);return{ok:false,delayed:true,error:betterError(e)};}renderServerResources(null);renderVmStatus({state:"Status error"});tone("battlegroup",window.suiteProviderReadOnly?"Unknown":"Offline");tone("players",window.suiteProviderReadOnly?"Unknown":"0");badge("topServer","Server error");badge("topDb","DB status unknown");document.getElementById("serverLog").textContent=betterError(e);setText("dashboardLog",betterError(e));syncLogs();addActivity("error","Server status failed",e.message);if(document.getElementById("database")?.classList.contains("active"))refreshDatabaseImportReadiness();return{ok:false,error:betterError(e)};}}
 function refresh(){if(statusRefreshInFlight)return statusRefreshInFlight;statusRefreshInFlight=refreshStatusPoll().finally(()=>{statusRefreshInFlight=null;});return statusRefreshInFlight;}
 function monitorKindClass(kind){return kind==="ok"?"ok":kind==="warn"?"warn":"bad";}
 function monitorStatusLabel(row){if(row&&typeof row==="object"&&row.statusLabel)return row.statusLabel;const open=row&&typeof row==="object"?row.open:row;if(open===null||open===undefined)return"Discovered";return open?"Open":"Closed";}
@@ -26174,7 +26161,7 @@ async function scanServerPackages(){
  panel.hidden=false;scan.disabled=true;clean.disabled=true;serverPackageCleanupPreview=null;status.textContent="Scanning packages and checking server references...";document.getElementById("serverPackageCleanupList").textContent="";
  try{const data=await getJson("/api/server-packages/scan",{method:"POST",timeoutMs:180000});serverPackageCleanupPreview=data;
  status.textContent=data.candidates.length+" unused packages found. Estimated package size: "+packageSpace(data.estimatedBytes)+" (shared files may reduce the space freed). VM free space: "+packageSpace(data.disk.availableBytes)+".";
- document.getElementById("serverPackageCleanupList").textContent=data.candidates.map(row=>row.tags.join(", ")+" · "+packageSpace(row.sizeBytes)).concat(data.retained.map(row=>"Keep: "+row.tags.join(", ")+" — "+row.reason)).join("\\n");clean.disabled=!data.candidates.length;
+ document.getElementById("serverPackageCleanupList").textContent=data.candidates.map(row=>row.tags.join(", ")+" · "+packageSpace(row.sizeBytes)).concat(data.retained.map(row=>"Keep: "+row.tags.join(", ")+" — "+row.reason)).join("\n");clean.disabled=!data.candidates.length;
  }catch(error){status.textContent=betterError(error);}finally{scan.disabled=false;}
 }
 async function cleanServerPackages(){
@@ -26243,7 +26230,7 @@ async function repairDatabaseOwnership(){
 
 async function openBattlegroupBatch(){const log=document.getElementById("serverLog");try{if(!window.alphaNineSuite?.openBattlegroupBatch)throw new Error("Battlegroup.bat can be opened only from the installed desktop Suite.");if(log)log.textContent="Reading the saved server folder from Settings...";const cfg=await getJson("/api/config");if(log)log.textContent="Opening battlegroup.bat from the configured server folder...";const data=await window.alphaNineSuite.openBattlegroupBatch({serverInstallPath:cfg.serverInstallPath||"",awakeningServerPath:cfg.awakeningServerPath||""});if(!data?.ok)throw new Error(data?.error||"Could not open battlegroup.bat.");if(log)log.textContent="Opened "+(data.filePath||"battlegroup.bat")+" in a Windows command console.";syncLogs();addActivity("action","Opened battlegroup.bat",data.filePath||"");playUiSound("success");}catch(e){if(log)log.textContent=betterError(e);syncLogs();addActivity("error","Battlegroup.bat launch failed",e.message);playUiSound("warning");}}
 function userGameSettingInput(setting,value){const id="usergame-"+setting.key;if(setting.type==="boolean")return '<label>'+esc(setting.label)+'<select id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'"><option value="true"'+(value===true?' selected':'')+'>True</option><option value="false"'+(value===false?' selected':'')+'>False</option></select><small>'+esc(setting.key)+'</small></label>';const current=value===undefined||value===null?'':String(value);return '<label>'+esc(setting.label)+'<input id="'+esc(id)+'" data-usergame-key="'+esc(setting.key)+'" type="number" min="'+esc(setting.min)+'" max="'+esc(setting.max)+'" step="'+esc(setting.step||1)+'" value="'+esc(current)+'"><small>'+esc(setting.key)+(setting.unit?' · '+esc(setting.unit):'')+(setting.note?' · '+esc(setting.note):'')+'</small></label>';}
-function renderLiveUserGameSettings(data){liveUserGameState=data;const grid=document.getElementById("userGameSettingsGrid"),preview=document.getElementById("userGameRawPreview"),save=document.getElementById("userGameSaveButton");const groups=[];for(const setting of data.schema||[]){let group=groups.find(row=>row.name===setting.group);if(!group){group={name:setting.group,settings:[]};groups.push(group);}group.settings.push(setting);}if(grid)grid.innerHTML=groups.map(group=>'<div class="panel pad"><div class="label">'+esc(group.name)+'</div><div class="field-grid mt">'+group.settings.map(setting=>userGameSettingInput(setting,data.values?.[setting.key])).join('')+'</div></div>').join('')||'<div class="empty">No supported UserGame.ini settings were returned.</div>';if(preview)preview.textContent=data.content||"";if(save)save.disabled=!data.ok;const missing=data.missingKeys||[];const status=document.getElementById("userGameStatus");if(status){status.className=(missing.length?'warning':'empty')+' mt';status.textContent=(data.path||"UserGame.ini")+(missing.length?' · Missing or invalid: '+missing.join(', '):' · '+(data.schema?.length||0)+' supported settings loaded.');}}
+function renderLiveUserGameSettings(data){liveUserGameState=data;const grid=document.getElementById("userGameSettingsGrid"),preview=document.getElementById("userGameRawPreview"),save=document.getElementById("userGameSaveButton");const groups=[];for(const setting of data.schema||[]){let group=groups.find(row=>row.name===setting.group);if(!group){group={name:setting.group,settings:[]};groups.push(group);}group.settings.push(setting);}if(grid)grid.innerHTML=groups.map(group=>'<div class="panel pad"><div class="label">'+esc(group.name)+'</div><div class="field-grid mt">'+group.settings.map(setting=>userGameSettingInput(setting,data.values?.[setting.key])).join('')+'</div></div>').join('')||'<div class="empty">No supported UserGame.ini settings were returned.</div>';if(preview)preview.textContent=data.content||"";if(save)save.disabled=!data.ok||data.readOnly===true;if(data.readOnly)grid?.querySelectorAll("input,select").forEach(node=>node.disabled=true);const missing=data.missingKeys||[];const status=document.getElementById("userGameStatus");if(status){status.className=(missing.length?'warning':'empty')+' mt';status.textContent=(data.path||"UserGame.ini")+(missing.length?' · Missing or invalid: '+missing.join(', '):' · '+(data.schema?.length||0)+' supported settings loaded.');}}
 async function loadLiveUserGameSettings(force=false){if(liveUserGameState&&!force){renderLiveUserGameSettings(liveUserGameState);return liveUserGameState;}const status=document.getElementById("userGameStatus"),load=document.getElementById("userGameLoadButton"),save=document.getElementById("userGameSaveButton");try{if(load)load.disabled=true;if(save)save.disabled=true;if(status){status.className="empty mt";status.textContent="Reading UserGame.ini from the VM...";}const data=await getJson("/api/usergame-settings",{timeoutMs:45000});renderLiveUserGameSettings(data);return data;}catch(error){liveUserGameState=null;if(status){status.className="warning mt";status.textContent=betterError(error);}return null;}finally{if(load)load.disabled=false;}}
 async function loadIniBackups(){const el=document.getElementById('iniBackupList');try{const data=await getJson('/api/usergame-backups');el.innerHTML='<div>'+esc(data.directory)+'</div>'+data.backups.map(b=>'<div class="panel pad mt"><strong>'+esc(b.createdAt)+'</strong><div>'+b.files.map((file,index)=>'<div><a href="/api/usergame-backups?id='+encodeURIComponent(b.id)+'&download=1&file='+index+'">Download '+esc(file)+'</a></div>').join('')+'</div><a href="/api/usergame-backups?id='+encodeURIComponent(b.id)+'&download=1">Download backup</a> <button onclick="restoreIniBackup(\''+b.id+'\',\'UserGame.ini\')">Restore UserGame.ini</button> <button onclick="restoreIniBackup(\''+b.id+'\',\'UserEngine.ini\')">Restore UserEngine.ini</button></div>').join('')+(data.backups.length?'':'<div>No backups yet. Backups appear here after saving.</div>');}catch(error){el.textContent=betterError(error);}}
 async function restoreIniBackup(id,filename){if(!(await appConfirm('Restore '+filename,'Restore every '+filename+' in this backup to the configured VM? Current INIs will be backed up first. Restart the battlegroup when ready.','Back Up & Restore','Cancel')))return;try{await getJson('/api/usergame-backups',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,filename}),timeoutMs:150000});await loadLiveUserGameSettings(true);await loadIniBackups();document.getElementById('userGameStatus').textContent=filename+' restored and verified. Restart the battlegroup when ready.';}catch(error){document.getElementById('userGameStatus').textContent=betterError(error);}}
@@ -26308,7 +26295,7 @@ async function openRestoreLog(){const path=window.lastDatabaseRestoreLogPath||""
 async function pollDatabaseRestoreStatus(jobId){if(window.databaseRestorePolling===jobId)return;window.databaseRestorePolling=jobId;window.activeDatabaseRestoreJobId=jobId;localStorage.setItem("activeDatabaseRestoreJobId",jobId);setDatabaseRestoreRunning(true);let finalJob=null;let pollError=null;try{for(let i=0;i<720;i++){try{const job=await getJson("/api/database/import-status/"+encodeURIComponent(jobId),{timeoutMs:5000});window.lastDatabaseRestoreLogPath=job.logPath||job.result?.logPath||"";renderDatabaseRestoreStatus(job);if(job.status==="success"||job.status==="failed"){finalJob=job;break;}}catch(e){pollError=e;break;}await new Promise(resolve=>setTimeout(resolve,2000));}}finally{window.databaseRestorePolling="";setDatabaseRestoreRunning(false);window.activeDatabaseRestoreJobId="";localStorage.removeItem("activeDatabaseRestoreJobId");await refreshDatabaseImportReadiness().catch(()=>{});}const el=document.getElementById("dbRestoreResult");if(pollError){const msg=betterError(pollError);if(el){el.className="warning mt";el.textContent=/not found|was not found|missing/i.test(msg)?"Import job not found. Cleared stale import state.":msg;}const progress=document.getElementById("dbRestoreProgress");if(progress){progress.className="empty mt";progress.textContent="No import job running.";}addActivity("warn","Import status cleared",msg);return;}if(!finalJob){if(el){el.className="warning mt";el.textContent="Import status polling timed out. Check audit log for details.";}return;}if(el)el.innerHTML=restoreFinalSummaryHtml(finalJob);if(finalJob.status==="success"){document.getElementById("dbRestoreConfirm").value="";addActivity("database","Battlegroup import completed and verified",finalJob.jobId);await refreshDatabaseBackups();playUiSound("success");}else{addActivity("error","Battlegroup import failed",finalJob.error||finalJob.jobId);playUiSound("warning");}}
 async function restoreDatabaseBackup(){const el=document.getElementById("dbRestoreResult");try{const filePath=document.getElementById("dbRestoreFile")?.value||"";const confirmText=document.getElementById("dbRestoreConfirm")?.value||"";if(confirmText!=="IMPORT")throw new Error("Type IMPORT before importing.");await ensureBattlegroupStoppedBeforeImport();if(!(await appConfirm("Import Battlegroup backup","Import Battlegroup backup from this file? Stop the server first. A safety Battlegroup backup will be created first.","Import","Cancel")))return;setDatabaseRestoreRunning(true);el.className="warning mt";el.textContent="Import job starting...";const data=await getJson("/api/database/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filePath,confirmText}),timeoutMs:15000});if(!data.jobId)throw new Error(data.error||"Import job was not created.");renderDatabaseRestoreStatus(data);addActivity("database","Battlegroup import started",data.jobId);await pollDatabaseRestoreStatus(data.jobId);}catch(e){setDatabaseRestoreRunning(false);el.className="warning mt";el.textContent=betterError(e);addActivity("error","Battlegroup import blocked",e.message);playUiSound("warning");}}
 function wireDatabaseImportControls(){const file=document.getElementById("dbRestoreFile");const confirm=document.getElementById("dbRestoreConfirm");if(file){file.addEventListener("input",()=>refreshDatabaseImportReadiness());file.addEventListener("change",()=>refreshDatabaseImportReadiness());}if(confirm){confirm.addEventListener("input",renderDatabaseImportControls);confirm.addEventListener("change",renderDatabaseImportControls);}renderDatabaseImportControls();}
-async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,databaseReachable:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]})]);const dbReachable=probe.databaseReachable===true||probe.ok===true;adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",dbReachable?"Reachable":"Limited");tone("adminDbMirror",dbReachable?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",dbReachable?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers","Players "+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Unknown");tone("adminDbMirror","Unknown");badge("topDb","DB status unknown");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
+async function refreshAdmin(){const log=document.getElementById("adminLog");log.textContent="Loading admin data...";try{const safeGet=async(url,fallback)=>{try{return await getJson(url);}catch(e){return {...fallback,error:e.message};}};const [probe,players,items,channels,capabilities]=await Promise.all([safeGet("/api/admin/probe",{ok:false,databaseReachable:false,liveGiveAvailable:false,giveTransport:null}),safeGet("/api/admin/players?hydration=0",{ok:false,players:[],details:[]}),safeGet("/api/admin/items",{ok:false,items:[],report:{}}),safeGet("/api/admin/tuned-channels",{ok:false,rows:[]}),safeGet("/api/give-items/capabilities",{ok:false,quantity:true,tierFilter:true,qualitySupported:true,qualityParameterName:"quality",acceptedQualityValues:[0,1,2,3,4,5],notes:["Grade 1-5 uses a database-backed grant. Grade 0 uses the live receiver."]})]);const dbReachable=probe.databaseReachable===true||probe.ok===true;adminLiveGiveAvailable=Boolean(probe.liveGiveAvailable);liveGiveTransport=probe.giveTransport||null;giveItemCapabilities=capabilities;liveGiveUnavailableMessage=adminLiveGiveAvailable?"":liveGiveTransportMessage(liveGiveTransport||probe);adminPlayers=players.players||[];adminItems=items.items||[];adminItemReport=items.report||null;if(!selectedPlayerId&&adminPlayers[0])selectedPlayerId=adminPlayers[0].id;tone("adminDb",dbReachable?"Reachable":"Limited");tone("adminDbMirror",dbReachable?"Reachable":"Limited");tone("adminLive",adminLiveGiveAvailable?"Available":"Unavailable");tone("adminLiveMirror",adminLiveGiveAvailable?"Available":"Unavailable");tone("receiverState",probe.giveTransport?.reachable?"Receiver Online":"Receiver Offline");tone("rabbitState",adminLiveGiveAvailable?(probe.giveTransport?.mode||probe.transport||"Unknown"):"Dry Run Active");tone("adminPlayersFound",String(adminPlayers.length));tone("adminItemsFound",String(adminItems.length));badge("topDb",dbReachable?"DB reachable":"DB limited");badge("topLive",adminLiveGiveAvailable?"Live give available":"Live give unavailable");badge("topPlayers",(adminPlayers.some(player=>player.identityScope==="player-state-row-only")?"Player rows ":"Players ")+adminPlayers.length);const ssh=players.diagnostics?.sshTarget||"SSH unknown";badge("topSsh",ssh);document.getElementById("settingsSsh").textContent=ssh;document.getElementById("settingsReceiver").textContent=probe.giveTransport?.target||probe.transport||"Unknown";const giveButton=document.getElementById("adminGiveButton");if(giveButton)giveButton.textContent="Give Item";renderPlayerSelect();renderPermissionPlayerSelect();renderPlayers();renderAdminItemFilters();renderAdminItems();renderGearDiscoveryStatus();renderAdminChannels(channels.rows||[]);syncQualityWarning();syncLiveGiveTransportStatus();await refreshPermissions();await refreshSkillReputation();const playerDiag=players.details&&players.details.length?["Player discovery diagnostics:",...players.details].join("\\n"):"";log.textContent=[probe.note,probe.error,players.error,items.error,channels.error,capabilities.error,playerDiag].filter(Boolean).join("\\n\\n")||"Admin tools ready.";addActivity("probe","Admin probe refreshed",adminLiveGiveAvailable?"Live give available":"Live give unavailable");}catch(e){tone("adminDb","Unknown");tone("adminDbMirror","Unknown");badge("topDb","DB status unknown");log.textContent=betterError(e);addActivity("error","Admin refresh failed",e.message);}}
 function blueprintPlayerLabel(player){return (player?.character_name||player?.name||player?.id||"Unknown")+" / account "+(player?.account_id||player?.id||"-");}
 function renderBlueprintPlayerSelect(){const select=document.getElementById("blueprintPlayer");if(!select)return;const current=selectedPlayerId||select.value;select.innerHTML=adminPlayers.length?adminPlayers.map(player=>'<option value="'+esc(player.id)+'">'+esc(blueprintPlayerLabel(player))+'</option>').join(""):'<option value="">No players found</option>';if(current&&adminPlayers.some(player=>String(player.id)===String(current))){select.value=String(current);selectedPlayerId=String(current);}else if(adminPlayers[0]){select.value=String(adminPlayers[0].id);selectedPlayerId=String(adminPlayers[0].id);}syncBlueprintButtons();}
 async function initBlueprintDesigner(){
@@ -26409,7 +26396,7 @@ function syncPlayerInventoryControls(){const refresh=document.getElementById("pl
 function renderPlayerInventory(){const body=document.getElementById("playerInventoryRows");const summary=document.getElementById("playerInventorySummary");const status=document.getElementById("playerInventoryStatus");if(!body)return;const selected=selectedPlayer();if(!selected){body.innerHTML='<tr><td colspan="7">No player selected.</td></tr>';if(summary)summary.textContent="Select a player to load inventory.";if(status){status.className="empty mt";status.textContent="Select a player to inspect their backpack.";}syncPlayerInventoryControls();return;}const inventory=playerInventoryState?.inventory||null;const query=String(document.getElementById("playerInventorySearch")?.value||"").trim().toLowerCase();const rows=query?playerInventoryRows.filter(row=>[playerInventoryItemName(row),row.templateId,row.id,row.positionIndex,row.stackSize,row.qualityLevel].join(" ").toLowerCase().includes(query)):playerInventoryRows;if(summary)summary.textContent=inventory?(playerInventoryRows.length+" item stack"+(playerInventoryRows.length===1?"":"s")+" / Inventory "+inventory.id+(inventory.maxItemCount>0?" / "+inventory.maxItemCount+" slots":"")):"Inventory not loaded.";if(!playerInventoryState){body.innerHTML='<tr><td colspan="7">Click Refresh Inventory to load this backpack.</td></tr>';syncPlayerInventoryControls();return;}if(!rows.length){body.innerHTML='<tr><td colspan="7">'+(query?"No inventory items match that search.":"The selected player backpack is empty.")+'</td></tr>';syncPlayerInventoryControls();return;}body.innerHTML=rows.map(row=>{const catalog=playerInventoryCatalogItem(row);const detail=row.blueprintId?("Blueprint "+row.blueprintId):(catalog?.category||row.templateId||"");return '<tr><td>'+esc(row.positionIndex??"-")+'</td><td><strong>'+esc(playerInventoryItemName(row))+'</strong><div class="subtle">'+esc(detail)+'</div></td><td>'+esc(row.stackSize??0)+'</td><td>'+esc("Grade "+(row.qualityLevel??0))+'</td><td>'+esc(playerInventoryDurability(row))+'</td><td>'+esc(row.id||"-")+'</td><td><button type="button" class="danger" data-player-inventory-delete="'+esc(row.id)+'">Delete</button></td></tr>';}).join("");body.querySelectorAll("[data-player-inventory-delete]").forEach(button=>button.addEventListener("click",()=>deletePlayerInventoryItem(button.dataset.playerInventoryDelete)));syncPlayerInventoryControls();}
 async function refreshPlayerInventory(){const player=selectedPlayer();if(!player){playerInventoryState=null;playerInventoryRows=[];renderPlayerInventory();return null;}playerInventoryBusy=true;syncPlayerInventoryControls();const status=document.getElementById("playerInventoryStatus");if(status){status.className="empty mt";status.textContent="Loading "+(player.name||player.character_name||"player")+" backpack...";}try{const data=await getJson("/api/admin/player-inventory?playerId="+encodeURIComponent(player.id),{timeoutMs:30000});playerInventoryState=data;playerInventoryRows=Array.isArray(data.items)?data.items:[];if(status){status.className="empty mt";status.textContent=playerInventoryRows.length?"Backpack loaded. Use Delete to remove an item stack.":"This backpack is empty.";}renderPlayerInventory();return data;}catch(error){playerInventoryState=null;playerInventoryRows=[];if(status){status.className="warning mt";status.textContent=betterError(error);}renderPlayerInventory();return null;}finally{playerInventoryBusy=false;syncPlayerInventoryControls();}}
 async function deletePlayerInventoryItem(itemId){const player=selectedPlayer();const row=playerInventoryRows.find(item=>String(item.id)===String(itemId));if(!player||!row)return;const name=playerInventoryItemName(row);const confirmed=await appConfirm("Delete Inventory Item","Delete "+name+" x"+(row.stackSize||0)+" from "+(player.name||player.character_name||"the selected player")+"'s backpack?","Delete","Cancel");if(!confirmed)return;playerInventoryBusy=true;syncPlayerInventoryControls();const status=document.getElementById("playerInventoryStatus");if(status){status.className="empty mt";status.textContent="Deleting "+name+"...";}try{const data=await getJson("/api/admin/player-inventory/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({playerId:player.id,itemId:row.id}),timeoutMs:30000});showToast(data.message||"Inventory item deleted.","success");addActivity("players","Inventory item deleted",name+" / Item "+row.id);playUiSound("success");await refreshPlayerInventory();}catch(error){if(status){status.className="warning mt";status.textContent=betterError(error);}showToast(betterError(error),"error");addActivity("error","Inventory item delete failed",error.message);playUiSound("warning");}finally{playerInventoryBusy=false;syncPlayerInventoryControls();}}
-function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>Account '+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();syncPlayerInventoryControls();syncCharacterRecoveryControls();}
+function renderPlayers(){const q=(document.getElementById("playerSearch")?.value||"").toLowerCase();const list=adminPlayers.filter(p=>((p.name||"")+" "+(p.account_id||"")+" "+(p.character_id||"")+" "+(p.character_name||"")+" "+(p.funcom_id||"")+" "+(p.player_controller_id||"")).toLowerCase().includes(q));const wrap=document.getElementById("playerCards");wrap.innerHTML=list.length?list.map(p=>'<button class="player-card '+(p.id===selectedPlayerId?'active':'')+'" data-player-id="'+esc(p.id)+'"><div class="avatar">'+esc((p.name||p.id||"?").slice(0,2).toUpperCase())+'</div><div><strong>'+esc(p.name||p.character_name||p.id)+'</strong><span>'+(p.identityScope==="player-state-row-only"?"Player-state row ":"Account ")+esc(p.account_id||p.id)+' / Controller '+esc(p.player_controller_id||"-")+' / Funcom '+esc(p.funcom_id||"-")+'</span></div></button>').join(""):'<div class="empty">No players match that search.</div>';wrap.querySelectorAll("[data-player-id]").forEach(el=>el.addEventListener("click",()=>selectPlayer(el.dataset.playerId)));renderPlayerDetails();syncPlayerInventoryControls();syncCharacterRecoveryControls();}
 let characterRecoveryPreview=null,characterRecoveryBusy=false,characterRecoveryDiagnostic=null,characterRecoveryDiagnosticBusy=false,characterRecoveryPreviewRequest=0;
 function closeCharacterRecovery(){const force=document.getElementById("recoveryForcePawnAcknowledgement");if(force)force.checked=false;characterRecoveryPreviewRequest++;const acknowledgement=document.getElementById("recoveryManualAcknowledgement");if(acknowledgement)acknowledgement.checked=false;characterRecoveryPreview=null;characterRecoveryDiagnostic=null;setText("playerRecoveryDiagnosticStatus","");document.getElementById("playerRecoveryPanel")?.classList.add("hidden");syncCharacterRecoveryControls();}
 function syncCharacterRecoveryControls(){for(const id of ["recoveryManualX","recoveryManualY","recoveryManualZ","recoveryManualAcknowledgement","recoveryForcePawnAcknowledgement","recoveryManualCopyButton","recoveryManualPreviewButton"]){const el=document.getElementById(id);if(el)el.disabled=characterRecoveryBusy||characterRecoveryDiagnosticBusy;}const p=selectedPlayer();const open=document.getElementById("playerRecoveryOpenButton");const apply=document.getElementById("playerRecoveryApplyButton");if(open)open.disabled=characterRecoveryBusy||characterRecoveryDiagnosticBusy||!p||!p.account_id||String(p.online_status||"").toLowerCase()!=="offline";if(apply)apply.disabled=characterRecoveryBusy||characterRecoveryDiagnosticBusy||!characterRecoveryPreview||String(p?.account_id)!==characterRecoveryPreview.accountId;const inspect=document.getElementById("playerRecoveryInspectButton");const exp=document.getElementById("playerRecoveryExportButton");if(inspect)inspect.disabled=characterRecoveryBusy||characterRecoveryDiagnosticBusy||!p?.account_id;if(exp)exp.disabled=characterRecoveryBusy||characterRecoveryDiagnosticBusy||!characterRecoveryDiagnostic||String(p?.account_id)!==characterRecoveryDiagnostic.accountId;}
@@ -26430,7 +26417,7 @@ async function applySelectedPlayerRename(){const p=selectedPlayer();const previe
 function selectPlayer(id){selectedPlayerId=String(id||"");playerInventoryState=null;playerInventoryRows=[];resetPlayerRename(true);closeCharacterRecovery();const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();renderPlayerInventory();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();if(document.querySelector("section#players.view")?.classList.contains("active"))refreshPlayerInventory();}
 function syncSelectedPlayerFromSelect(){selectedPlayerId=document.getElementById("adminPlayer").value;resetPlayerRename(true);closeCharacterRecovery();const perm=document.getElementById("permissionPlayer");if(perm)perm.value=selectedPlayerId;renderPlayers();updateGiveTargetSummary();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
 function syncPermissionPlayer(){selectedPlayerId=document.getElementById("permissionPlayer").value;resetPlayerRename(true);closeCharacterRecovery();const select=document.getElementById("adminPlayer");if(select)select.value=selectedPlayerId;renderPlayers();syncPermissionForms();refreshPermissions();refreshSkillReputation();}
-function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");const renameButton=document.getElementById("playerRenameOpenButton");if(renameButton)renameButton.disabled=!p||!p.player_state_row_id;if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Connection</span><strong>'+esc(p.online_status||"unknown")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div>'+hydrationDetailRow(p.hydration)+'<div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
+function renderPlayerDetails(){const p=selectedPlayer();const wrap=document.getElementById("playerDetails");const renameButton=document.getElementById("playerRenameOpenButton");if(renameButton)renameButton.disabled=!p||!p.player_state_row_id;if(!p){wrap.className="empty mt";wrap.innerHTML="Select a player to inspect account and character details.";return;}wrap.className="detail-list";if(p.identityScope==="player-state-row-only"){wrap.innerHTML='<div class="detail-row"><span>Player-state row</span><strong>'+esc(p.id)+'</strong></div><div class="detail-row"><span>Character</span><strong>'+esc(p.name)+'</strong></div><div class="detail-row"><span>Observed status value</span><strong>'+esc(p.online_status)+'</strong></div><p>Account/controller identity, inventory and actions are unavailable.</p>';return;}wrap.innerHTML='<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.name||p.character_name||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Connection</span><strong>'+esc(p.online_status||"unknown")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id)+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Character ID</span><strong>'+esc(p.character_id||"-")+'</strong></div>'+hydrationDetailRow(p.hydration)+'<div class="detail-row"><span class="subtle">Give Item ID</span><strong>'+esc(p.id)+'</strong></div>';}
 function syncPermissionForms(){const p=selectedPlayer();const identity=document.getElementById("permissionIdentity");if(identity){identity.className="detail-list";identity.innerHTML=p?'<div class="detail-row"><span class="subtle">Character</span><strong>'+esc(p.character_name||p.name||"-")+'</strong></div><div class="detail-row"><span class="subtle">Account ID</span><strong>'+esc(p.account_id||p.id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Funcom ID</span><strong>'+esc(p.funcom_id||"-")+'</strong></div><div class="detail-row"><span class="subtle">Player Controller ID</span><strong>'+esc(p.player_controller_id||"-")+'</strong></div>':'<div class="empty">No player selected.</div>';}if(p){const ctrl=document.getElementById("permControllerId");if(ctrl&&!ctrl.value)ctrl.value=p.player_controller_id||"";const acct=document.getElementById("accessAccountId");if(acct&&!acct.value)acct.value=p.account_id||p.id||"";}updatePermissionPreviews();}
 function permissionQuery(){const p=selectedPlayer();return p&&p.player_controller_id?("?playerControllerId="+encodeURIComponent(p.player_controller_id)):"";}
 async function refreshPermissions(){const summary=document.getElementById("permissionSummary");if(summary)summary.textContent="Loading permission views...";try{permissionState=await getJson("/api/admin/permissions"+permissionQuery());renderPermissions();addActivity("permissions","Permission views refreshed",permissionState.playerControllerId?("controller "+permissionState.playerControllerId):"all players");}catch(e){if(summary)summary.textContent=betterError(e);addActivity("error","Permission refresh failed",e.message);}}
@@ -26655,7 +26642,7 @@ function isRecipeSchematicItem(item){const id=String(item?.id||"").trim();const 
 function isTechKnowledgeItem(item){return /^tech:/i.test(String(item?.id||""));}
 function giveItemGrantKind(item){return isTechKnowledgeItem(item)?"Research Blueprint Unlock":(isRecipeSchematicItem(item)?"Crafting Recipe Unlock":"Inventory Item");}
 function giveItemSchematicNotice(item){return isTechKnowledgeItem(item)?"Research blueprints unlock the player's Research tree. RCP entries also add the matching crafting recipe.":(isRecipeSchematicItem(item)?"Recipe schematics unlock the player's crafting recipe library. Schematic pattern grades and fragments are normal inventory items.":"");}
-function databaseExplorerNumber(value){const number=Number(value||0);return Number.isFinite(number)?number.toLocaleString():"0";}
+function databaseExplorerNumber(value){if(value===null||value===undefined)return "Unknown";const number=Number(value||0);return Number.isFinite(number)?number.toLocaleString():"0";}
 function databaseExplorerCellText(value){if(value===null)return"NULL";if(value&&typeof value==="object"&&value.kind==="binary")return"[binary - "+databaseExplorerNumber(value.bytes)+" bytes]";if(value&&typeof value==="object"&&String(value.kind||"").startsWith("truncated"))return String(value.preview||"")+" ... [truncated]";if(value&&typeof value==="object"&&value.kind==="unavailable")return String(value.preview||"[unavailable]");if(typeof value==="object"){try{return JSON.stringify(value);}catch{return"[unavailable]";}}return String(value);}
 function setDatabaseExplorerBusy(busy,message){databaseExplorerState.loading=busy===true;const status=document.getElementById("databaseExplorerStatus");if(status&&message){status.className=busy?"warning":"empty";status.textContent=message;}document.querySelectorAll("#database-explorer button,#database-explorer select,#database-explorer input").forEach(el=>{if(el.id!=="databaseExplorerSearch")el.disabled=busy===true;});if(!busy){const previous=document.getElementById("databaseExplorerPrevious");const next=document.getElementById("databaseExplorerNext");if(previous)previous.disabled=databaseExplorerState.offset<=0;if(next)next.disabled=!databaseExplorerState.hasMore;syncDatabaseExplorerFilterInput();}}
 async function refreshDatabaseExplorer(){if(databaseExplorerState.loading)return;setDatabaseExplorerBusy(true,"Connecting to the selected battlegroup database and loading schemas...");try{const data=await getJson("/api/database-browser/schemas",{timeoutMs:30000});databaseExplorerState.schemas=data.schemas||[];const schemaSelect=document.getElementById("databaseExplorerSchema");const previous=schemaSelect?.value||"";if(schemaSelect){schemaSelect.innerHTML=databaseExplorerState.schemas.map(row=>'<option value="'+esc(row.name)+'">'+esc(row.name)+' ('+esc(String(row.relationCount))+')</option>').join("")||'<option value="">No schemas found</option>';const preferred=[previous,"dune","public"].find(name=>databaseExplorerState.schemas.some(row=>row.name===name))||databaseExplorerState.schemas[0]?.name||"";schemaSelect.value=preferred;}setDatabaseExplorerBusy(false,"Read-only connection ready. "+databaseExplorerState.schemas.length+" schema(s) available via "+(data.source||"the selected database")+".");await loadDatabaseExplorerTables();}catch(error){setDatabaseExplorerBusy(false,betterError(error));databaseExplorerState.schemas=[];databaseExplorerState.tables=[];renderDatabaseExplorerTables();}}
@@ -26666,7 +26653,7 @@ function databaseExplorerFilters(){const column=document.getElementById("databas
 async function browseDatabaseExplorerRows(){if(databaseExplorerState.loading||!databaseExplorerState.selectedTable)return;const schema=document.getElementById("databaseExplorerSchema")?.value||"";databaseExplorerState.pageSize=Number(document.getElementById("databaseExplorerPageSize")?.value||50);setDatabaseExplorerBusy(true,"Running a protected read-only query...");try{const data=await getJson("/api/database-browser/rows",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({schema,table:databaseExplorerState.selectedTable,filters:databaseExplorerFilters(),sort:{column:document.getElementById("databaseExplorerSortColumn")?.value||"",direction:document.getElementById("databaseExplorerSortDirection")?.value||"asc"},pageSize:databaseExplorerState.pageSize,offset:databaseExplorerState.offset}),timeoutMs:30000});databaseExplorerState.rows=data.rows||[];databaseExplorerState.hasMore=data.hasMore===true;databaseExplorerState.selectedRow=-1;databaseExplorerState.result=data;renderDatabaseExplorerGrid();setDatabaseExplorerBusy(false,"Read-only query completed: "+databaseExplorerState.rows.length+" row(s) returned.");}catch(error){databaseExplorerState.rows=[];databaseExplorerState.hasMore=false;renderDatabaseExplorerGrid();setDatabaseExplorerBusy(false,betterError(error));}}
 function renderDatabaseExplorerGrid(){const result=databaseExplorerState.result||{};const columns=result.columns||[];const rows=databaseExplorerState.rows||[];const grid=document.getElementById("databaseExplorerGrid");const start=rows.length?databaseExplorerState.offset+1:0;const end=databaseExplorerState.offset+rows.length;setText("databaseExplorerPageSummary",rows.length?("Rows "+databaseExplorerNumber(start)+"-"+databaseExplorerNumber(end)+(result.estimatedRows?" of approximately "+databaseExplorerNumber(result.estimatedRows):"")):"No rows returned.");setText("databaseExplorerColumnNotice",result.omittedColumns?(result.omittedColumns+" additional column(s) omitted by the 40-column safety limit."):columns.length+" column(s) displayed.");const previous=document.getElementById("databaseExplorerPrevious");const next=document.getElementById("databaseExplorerNext");if(previous)previous.disabled=databaseExplorerState.loading||databaseExplorerState.offset<=0;if(next)next.disabled=databaseExplorerState.loading||!databaseExplorerState.hasMore;if(!grid)return;if(!columns.length){grid.innerHTML='<div class="empty">No columns available.</div>';return;}grid.innerHTML='<table><thead><tr>'+columns.map(column=>'<th data-database-explorer-sort="'+esc(column.name)+'" title="'+esc(column.type||"")+'">'+esc(column.name)+(column.primaryKey?' [PK]':'')+'</th>').join("")+'</tr></thead><tbody>'+rows.map((row,index)=>'<tr data-database-explorer-row="'+index+'">'+columns.map(column=>'<td title="'+esc(databaseExplorerCellText(row[column.name]))+'">'+esc(databaseExplorerCellText(row[column.name]))+'</td>').join("")+'</tr>').join("")+'</tbody></table>';grid.querySelectorAll("[data-database-explorer-sort]").forEach(header=>header.addEventListener("click",()=>sortDatabaseExplorerBy(header.dataset.databaseExplorerSort)));grid.querySelectorAll("[data-database-explorer-row]").forEach(row=>row.addEventListener("click",()=>selectDatabaseExplorerRow(Number(row.dataset.databaseExplorerRow))));setText("databaseExplorerDetails","Select a row to inspect its values.");}
 function selectDatabaseExplorerRow(index){databaseExplorerState.selectedRow=index;document.querySelectorAll("[data-database-explorer-row]").forEach(row=>row.classList.toggle("active",Number(row.dataset.databaseExplorerRow)===index));const selected=databaseExplorerState.rows[index];setText("databaseExplorerDetails",selected?JSON.stringify(selected,null,2):"Select a row to inspect its values.");}
-function sortDatabaseExplorerBy(column){const sort=document.getElementById("databaseExplorerSortColumn");const direction=document.getElementById("databaseExplorerSortDirection");if(!sort||!direction)return;if(sort.value===column)direction.value=direction.value==="asc"?"desc":"asc";else{sort.value=column;direction.value="asc";}databaseExplorerState.offset=0;browseDatabaseExplorerRows();}
+function sortDatabaseExplorerBy(column){if(databaseExplorerState.result?.supportedSort==="id-asc-only"){showToast("This adapter supports only ascending primary-key order.","warning");return;}const sort=document.getElementById("databaseExplorerSortColumn");const direction=document.getElementById("databaseExplorerSortDirection");if(!sort||!direction)return;if(sort.value===column)direction.value=direction.value==="asc"?"desc":"asc";else{sort.value=column;direction.value="asc";}databaseExplorerState.offset=0;browseDatabaseExplorerRows();}
 function applyDatabaseExplorerQuery(){databaseExplorerState.offset=0;browseDatabaseExplorerRows();}
 function clearDatabaseExplorerFilter(){setValue("databaseExplorerFilterColumn","");setValue("databaseExplorerFilterValue","");databaseExplorerState.offset=0;browseDatabaseExplorerRows();}
 function syncDatabaseExplorerFilterInput(){const operator=document.getElementById("databaseExplorerFilterOperator")?.value||"";const input=document.getElementById("databaseExplorerFilterValue");if(input)input.disabled=operator==="is_null"||operator==="is_not_null";}
@@ -26884,7 +26871,7 @@ function startupTimeout(label,ms){return new Promise(resolve=>setTimeout(()=>res
 async function runStartupTask(task){updateStartupTask(task.key,"working",task.detail);try{const result=await Promise.race([Promise.resolve().then(()=>task.run()),startupTimeout(task.label,45000)]);if(result&&result.timedOut){updateStartupTask(task.key,"warn",task.label+" is still settling. Continuing startup.");return;}updateStartupTask(task.key,"ok",task.label+" ready.");}catch(e){updateStartupTask(task.key,"warn",task.label+" reported: "+betterError(e));}}
 async function runStartupProgress(){const panel=document.getElementById("startupProgress");if(!panel){refreshAll();return;}const startedAt=Date.now();startupProgressState={hidden:false,complete:false,message:"Starting suite checks...",tasks:STARTUP_TASKS.map(task=>({...task,status:"pending"}))};renderStartupProgress();await Promise.all(startupProgressState.tasks.map(runStartupTask));const minimumVisibleMs=4500;const remaining=minimumVisibleMs-(Date.now()-startedAt);if(remaining>0)await new Promise(resolve=>setTimeout(resolve,remaining));startupProgressState.complete=true;startupProgressState.message="Startup checks finished. Background refresh will keep everything current.";renderStartupProgress();setTimeout(()=>{if(startupProgressState){startupProgressState.hidden=true;renderStartupProgress();}},1800);}
 function refreshAll(){refresh();refreshVmMonitor();refreshMaps();refreshAdmin();refreshPlayerFeed();refreshReceiverStatus();refreshMarketListings();}
-renderActivity();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadDashboardHeroCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
+providerInstallUi();renderActivity();providerInitialize();refreshOperations();syncQualityWarning();renderGiveQueue();updateGiveQueueSummary();refreshGiveQueuePresets();syncProgressionActionFields();wireDatabaseImportControls();wireGiveItemResult();renderWebPortalUrls();refreshRemoteAccessStatus();window.uiSoundReady=true;wireUiSounds();loadTheme();loadSidebarCollapsed();loadBrandCollapsed();loadDashboardHeroCollapsed();loadUiMode();loadUiSoundSettings();if(location.hash.slice(1))setView(location.hash.slice(1));initSetup();runStartupProgress();window.setTimeout(checkVmIpChangeOnStartup,1800);window.setTimeout(checkUpdatesOnStartup,2500);window.setTimeout(initializeServerUpdateMonitor,7000);setInterval(refresh,30000);setInterval(refreshVmMonitor,10000);setInterval(refreshReceiverStatus,10000);setInterval(refreshMaps,30000);setInterval(refreshOperations,5000);setInterval(()=>checkServerUpdateAvailability({force:false,prompt:true}),10*60*1000);
 setInterval(refreshPlayerFeed,12000);
 setInterval(()=>{if(document.getElementById("live-map")?.classList.contains("active")){if(document.getElementById("liveMapAutoRefresh")?.checked!==false)refreshLiveMap();refreshTeleportReadiness();}},12000);
 setInterval(()=>{if(document.getElementById("repair")?.classList.contains("active"))refreshRepairQueue();},10000);
@@ -26969,6 +26956,9 @@ function appendRemoteRequestAudit(req, activeSession, url, decision, statusCode 
 }
 
 async function handleRequest(req, res) {
+  const targetPath = new URL(req.url, "http://localhost").pathname;
+  const boundRequest = targetPath.startsWith("/api/") && !["/api/config", "/api/battlegroups/selected", "/api/battlegroups/select"].includes(targetPath) && !targetPath.startsWith("/api/setup/") && (!targetPath.startsWith("/api/providers/") || ["/api/providers/read", "/api/providers/diagnose"].includes(targetPath)) && !targetPath.startsWith("/api/auth/");
+  if (boundRequest && !providerTargetBindings.current()) return providerTargetBindings.run(loadConfig(), () => handleRequest(req, res));
   const isRemote = isRemotePortalRequest(req);
   if (!isRemote) return route(req, res);
   if (req.alphanineInternetOrigin) internetTunnel.touch();
@@ -27125,6 +27115,64 @@ function assertMigrationRenderedPagesCompile() {
 
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  const providerCurrentConfig = loadConfig();
+  const featureRoute = featureRouter.resolve(url.pathname, req.method);
+  if (featureRoute && providerSelection(providerCurrentConfig) !== "legacy") {
+    res.setHeader("Cache-Control", "no-store");
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req) || !providerLocalRequest(req)) { await json(res, { ok: false, code: "local_only", error: "Provider feature reads require the local Suite." }, 403); return; }
+    try {
+      const input = req.method === "POST" ? await readJsonRequest(req, 8192) : Object.fromEntries([...url.searchParams].filter(([key]) => ["schema", "table"].includes(key)));
+      const dispatched = await featureRouter.dispatch(providerCurrentConfig, featureRoute, input);
+      await json(res, dispatched.payload);
+    } catch { await json(res, { ok: false, readOnly: true, code: "provider_feature_unavailable", error: "This operation requires an implemented adapter, recognized deployment and freshly validated permissions/schema. Unsupported requests and mutations remain unavailable." }, 409); }
+    return;
+  }
+  const providerDecision = providerRouteDecision(providerCurrentConfig, url.pathname, req.method);
+  if (!providerDecision.allowed) {
+    await json(res, { ok: false, code: providerDecision.code, error: "This provider supports compatibility diagnostics only. Server, database and file mutations are unavailable." }, providerDecision.status);
+    return;
+  }
+  if (url.pathname.startsWith("/api/providers/") || (providerSelection(providerCurrentConfig) !== "legacy" && ["/api/config", "/api/setup/status", "/api/setup/save"].includes(url.pathname))) {
+    if (isRemotePortalRequest(req) || !remoteAccess.isLoopbackRequest(req) || !providerLocalRequest(req)) {
+      await json(res, { ok: false, code: "local_only", error: "Provider setup and diagnostics are available only from the local Suite." }, 403); return;
+    }
+    if (url.pathname === "/api/providers/catalog" && req.method === "GET") { await json(res, { ok: true, providers: providerCatalog }); return; }
+    if (url.pathname === "/api/providers/status" && req.method === "GET") { await json(res, { ...suiteProviders.status(), isolatedSetup: !PROVIDER_BOOT_PERMISSIONS.allowAutomation }); return; }
+    if (url.pathname === "/api/providers/report" && req.method === "GET") {
+      const report = suiteProviders.report();
+      if (!report) { await json(res, { ok: false, code: "report_not_available", error: "Run diagnostics for the current endpoint first." }, 409); return; }
+      res.setHeader("Content-Disposition", "attachment; filename=alphanine-compatibility.json");
+      await json(res, report); return;
+    }
+    if (url.pathname === "/api/providers/read" && req.method === "POST") {
+      res.setHeader("Cache-Control", "no-store");
+      try {
+        const body = await readJsonRequest(req, 8192);
+        await json(res, await suiteProviders.read(body.operation, { limit: body.limit ?? 50, input: body.input || {} }));
+      } catch { await json(res, { ok: false, code: "read_feature_unavailable", error: "Deployment identity, permissions or database schema could not be established for this read-only operation. Run fresh diagnostics and review the Experimental limitations." }, 409); }
+      return;
+    }
+    if (url.pathname === "/api/providers/diagnose" && req.method === "POST") {
+      try {
+        const body = await readJsonRequest(req, 8192);
+        const preview = Object.keys(body).length ? (providerSelection(providerCurrentConfig) === "remote-linux" ? { ...providerCurrentConfig, ...body } : body) : providerCurrentConfig;
+        const report = await suiteProviders.diagnose(preview);
+        await json(res, { ok: true, report });
+      } catch { await json(res, { ok: false, code: "diagnostic_unavailable", error: "Diagnostics could not complete. Check the explicit SSH endpoint, key and known-hosts file, or wait for an existing diagnostic to finish." }, 400); }
+      return;
+    }
+    if (url.pathname === "/api/setup/status" && req.method === "GET") { await json(res, { ok: true, config: publicProviderConfig(providerCurrentConfig), setupComplete: providerCurrentConfig.setupComplete === true, provider: suiteProviders.status() }); return; }
+    if (url.pathname === "/api/config" && req.method === "GET") { await json(res, publicProviderConfig(providerCurrentConfig)); return; }
+    if ((url.pathname === "/api/config" || url.pathname === "/api/setup/save") && req.method === "POST") {
+      try {
+        const body = await readJsonRequest(req, 8192);
+        const saved = saveConfig({ ...body, ...(url.pathname === "/api/setup/save" ? { setupComplete: true } : {}) });
+        const verification = verifyConfigSaved(saved);
+        await json(res, { ok: verification.ok, verified: verification.ok, config: publicProviderConfig(saved), restartRequired: true }, verification.ok ? 200 : 500);
+      } catch (error) { await json(res, { ok: false, error: error.message }, 400); }
+      return;
+    }
+  }
   const removedServerMigrationRoute = url.pathname === "/api/migration-runtime-identity"
     || url.pathname === "/api/migration-startup-suppressed"
     || url.pathname.startsWith("/api/server-migration/")
@@ -27640,7 +27688,7 @@ async function route(req, res) {
   }
   if (url.pathname === "/api/server-install-path/status" && req.method === "GET") {
     const candidate = url.searchParams.has("path") ? url.searchParams.get("path") : loadConfig().serverInstallPath;
-    await json(res, { ok: true, serverInstallPath: serverInstallPathStatus(candidate) });
+    await json(res, { ok: true, serverInstallPath: suiteProviders.current().filesystem.inspect(candidate) });
     return;
   }
   if (url.pathname === "/api/setup/status" && req.method === "GET") {
@@ -27662,6 +27710,12 @@ async function route(req, res) {
   if (url.pathname === "/api/setup/save" && req.method === "POST") {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
+      if (providerSelection({ ...loadConfig(), ...body }) === "remote-linux") {
+        const saved = saveConfig({ ...body, setupComplete: true });
+        const verification = verifyConfigSaved(saved);
+        await json(res, { ok: verification.ok, verified: verification.ok, config: publicProviderConfig(saved), restartRequired: true }, verification.ok ? 200 : 500);
+        return;
+      }
       const pathValidation = [
         ["serverInstallPath", "Server install path"],
         ["awakeningServerPath", "Dune Awakening server path"]
@@ -27759,7 +27813,7 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/server-health" && req.method === "GET") {
-    try { await json(res, await serverHealthSnapshot()); }
+    try { await json(res, await suiteProviders.current().runtime.inspect()); }
     catch (error) { await json(res, { ok: false, readOnly: true, state: "Unknown", error: redactSensitiveText(error.message) }, 500); }
     return;
   }
@@ -27783,7 +27837,7 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/database/status" && req.method === "GET") {
-    await json(res, await databaseStatus());
+    await json(res, await suiteProviders.current().database.inspect());
     return;
   }
   if (url.pathname.startsWith("/api/server-migration/")) {
@@ -29144,7 +29198,7 @@ async function route(req, res) {
     return;
   }
   if (url.pathname === "/api/vm/status" && req.method === "GET") {
-    const vm = await vmInfoFast(5000);
+    const vm = await suiteProviders.current().vm.inspect(5000);
     const diagnostics = await Promise.race([
       backendDiagnostics(),
       timeoutAfter(5000, "Backend diagnostics timed out after 5000 ms.")
@@ -29405,3 +29459,4 @@ server.listen(PORT, LOCAL_HOST, async () => {
 process.on("exit", () => {
   if (managerProcess) managerProcess.kill();
 });
+

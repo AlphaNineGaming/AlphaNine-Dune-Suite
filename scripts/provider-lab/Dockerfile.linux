@@ -1,0 +1,18 @@
+# A digest is mandatory; the runner rejects tags and records the built image ID.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG APT_SNAPSHOT=20250901T000000Z
+RUN rm -f /etc/apt/sources.list.d/* && \
+    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s/ bookworm main\n' "$APT_SNAPSHOT" > /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends openssh-server openssl python3 postgresql-15 gcc libc6-dev ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && useradd -m -s /bin/sh diagnostic && \
+    echo 'diagnostic:fixture-password-login-disabled' | chpasswd && mkdir /run/sshd
+COPY fixture-game.c /tmp/fixture-game.c
+RUN gcc -O2 -o /tmp/fixture-game /tmp/fixture-game.c
+COPY fixture-init.sql /tmp/fixture-init.sql
+COPY fixture-engine.py /tmp/fixture-engine.py
+COPY container-entry.sh /usr/local/bin/provider-lab-entry
+RUN chmod 755 /usr/local/bin/provider-lab-entry
+LABEL org.alphanine.provider-lab="disposable-fixture"
+EXPOSE 22 5432
+ENTRYPOINT ["/usr/local/bin/provider-lab-entry"]

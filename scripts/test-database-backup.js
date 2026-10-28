@@ -285,7 +285,8 @@ async function main() {
   const vendorVerification = server.slice(server.indexOf("async function verifyVendorBackup"), server.indexOf("async function copyVerifiedVendorBackupToLocal"));
   assert.match(vendorVerification, /dumpFlags:\s*VENDOR_BACKUP_INVENTORY_DUMP_FLAGS/, "Funcom VM archives must be inventoried with the vendor privilege boundary");
   assert.match(server, /VENDOR_BACKUP_INVENTORY_DUMP_FLAGS\s*=\s*Object\.freeze\(\["--format=custom",\s*"--no-owner"\]\)/, "vendor inventory must retain ACL entries while ignoring ownership");
-  const standardConnection = server.slice(server.indexOf("async function standardVmSshConnection"), server.indexOf("async function serverHealthRemoteCheck"));
+  const standardConnection = server.slice(server.indexOf("async function standardVmSshConnection"), server.indexOf("async function sshCommand("));
+  assert.match(standardConnection, /async function discoverVmSshConnection/, "normal connection audit must include the actual cached SSH discovery function");
   assert.doesNotMatch(standardConnection, /migration|known.?host|UserKnownHostsFile/i, "normal Suite SSH must not depend on migration-only pinned known-host files");
   const completeBackupFeature = server.slice(server.indexOf("async function databaseBackupSshConnection"), server.indexOf("function listDatabaseBackups"));
   assert.doesNotMatch(completeBackupFeature, /migrationSshConnection|migrationPodArchiveTools|runMigrationCredentialScript|migrationSql|migrationEvidence|collectMigration|migrationOfflineMode|known.?host|UserKnownHostsFile/i, "backup creation, verification, and local transport must have no migration runtime dependency");

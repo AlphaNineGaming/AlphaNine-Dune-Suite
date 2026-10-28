@@ -1,0 +1,11 @@
+services:
+  ssh-lab:
+    build:
+      context: .
+      args:
+        ALPINE_IMAGE: ${ALPINE_IMAGE:?Supply an approved immutable Alpine image digest}
+    ports:
+      - "127.0.0.1:22222:2222"
+    volumes:
+      - ./client_ed25519.pub:/fixture/client.pub:ro
+    restart: "no"

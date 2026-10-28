@@ -1,0 +1,35 @@
+"use strict";
+const assert=require("node:assert/strict"),fs=require("node:fs/promises"),os=require("node:os"),path=require("node:path"),http=require("node:http"),vm=require("node:vm");
+const {OperationRegistry}=require("../lib/operations");
+const {createPackageCleanup}=require("../lib/server-package-cleanup");
+const {runCleanupCommand}=require("../lib/cleanup-process");
+(async()=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),"a9-integration-"));
+  const fixture=path.join(root,"fixture.js"),statePath=path.join(root,"state.json");
+  const source=await fs.readFile(path.join(__dirname,"..","server.js"),"utf8");
+  const state={mode:"valid",removed:[]};const save=()=>fs.writeFile(statePath,JSON.stringify(state));await save();
+  await fs.writeFile(fixture,`const fs=require('fs');const [statePath,command]=process.argv.slice(2);const state=JSON.parse(fs.readFileSync(statePath,'utf8'));const id=n=>'sha256:'+String(n).repeat(64);const repo='registry.funcom.com/funcom/self-hosting/seabass-server';if(state.mode==='invalid'){process.stdout.write('{broken');process.exit(0);}if(command.includes(' images ')){process.stdout.write(JSON.stringify({images:[1,2,3].filter(n=>!state.removed.includes(id(n))).map(n=>({id:id(n),repoTags:[repo+':'+(2000000+n)+'-0-shipping'],size:'1000'}))}));}else if(command.includes(' ps ')){process.stdout.write(JSON.stringify({containers:[{labels:{padding:'x'.repeat(18*1024*1024)}}]}));}else if(command.includes('kubectl get ')){process.stdout.write('{"items":[]}');}else if(command.includes(' df ')){process.stdout.write('Filesystem Blocks Used Available Capacity Mounted\\n/dev/root 2000 1000 1000 50% /\\n');}else if(command.includes(' rmi ')){state.removed.push(command.split(' ').at(-1));fs.writeFileSync(statePath,JSON.stringify(state));process.stdout.write('fixture removed');}else {process.stderr.write('Unexpected fixture command');process.exitCode=1;}`);
+  const registry=new OperationRegistry(path.join(root,"operations.json"));let forcedParserOom=false;
+  const backend={crypto:require("node:crypto"),loadConfig:()=>({serverType:"fixture",vmName:"fixture"}),standardVmSshConnection:async()=>({args:[]}),packageCleanup:createPackageCleanup(),operationRegistry:registry,migrationMaintenance:{status:()=>({active:false})},appendAdminAudit:()=>{},Promise,
+    require:name=>{assert.equal(name,"./lib/cleanup-process");return {runCleanupCommand:(_binary,args,options)=>runCleanupCommand(process.execPath,[fixture,statePath,args.at(-1)],{...options,parserMemoryMb:forcedParserOom?16:256})};}};
+  const context=vm.createContext(backend);
+  vm.runInContext(source.slice(source.indexOf("function packageCleanupTarget()"),source.indexOf("function startVmDiskMaintenance("))+source.slice(source.indexOf("function startPackageCleanup("),source.indexOf('const USER_GAME_INI_PATH')),context);
+  const route=source.slice(source.indexOf('  if ((url.pathname === "/api/server-packages/scan"'),source.indexOf('  if (url.pathname === "/api/server-update/check"'));
+  Object.assign(backend,{isRemotePortalRequest:()=>false,remoteAccess:{isLoopbackRequest:()=>true},json:async(res,body,status=200)=>{res.writeHead(status,{"content-type":"application/json"});res.end(JSON.stringify(body));},operationErrorResponse:error=>({payload:{ok:false,error:error.message},statusCode:500}),readBody:async req=>{let text="";for await(const chunk of req)text+=chunk;return text;}});
+  const handle=vm.runInContext('(async function(req,res,url){'+route+'})',context);
+  const server=http.createServer((req,res)=>{if(req.url==="/health"){res.end("ready");return;}if(req.url==="/api/operations"){res.setHeader("content-type","application/json");res.end(JSON.stringify(registry.snapshot()));return;}handle(req,res,new URL(req.url,"http://localhost")).catch(error=>{res.statusCode=500;res.end(JSON.stringify({ok:false,error:error.message}));});});
+  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));const endpoint="http://127.0.0.1:"+server.address().port;
+  const elements=new Map();const element=id=>{if(!elements.has(id))elements.set(id,{disabled:false,textContent:"",hidden:false});return elements.get(id);};
+  const browser=vm.createContext({document:{getElementById:element},getJson:async(url,options)=>{const res=await fetch(endpoint+url,options);const body=await res.json();if(!res.ok||body.ok===false)throw new Error(body.error||"Request failed");return body;},betterError:error=>error.message,appConfirm:async()=>true,showToast:()=>{},setTimeout:(fn)=>setTimeout(fn,10),Promise});
+  const ui=source.slice(source.indexOf("let serverPackageCleanupPreview=null;"),source.indexOf("async function repairDatabaseOwnership(){")).replace(/\\\\/g,"\\");vm.runInContext(ui,browser);
+  const waitTerminal=async()=>{for(let i=0;i<400;i++){const snap=registry.snapshot();if(!snap.active.length)return snap;await new Promise(r=>setTimeout(r,10));}throw Error("Operation did not settle");};
+  try {
+    state.mode="invalid";await save();await vm.runInContext("scanServerPackages()",browser);assert.equal(element("serverPackageCleanupScanButton").disabled,false);assert.match(element("serverPackageCleanupStatus").textContent,/failed/);
+    state.mode="valid";await save();await vm.runInContext("scanServerPackages()",browser);assert.equal(element("serverPackageCleanupRunButton").disabled,false);
+    state.mode="invalid";await save();await vm.runInContext("cleanServerPackages()",browser);await waitTerminal();assert.equal(registry.snapshot().active.length,0);assert.equal(element("serverPackageCleanupScanButton").disabled,false);assert.equal(registry.snapshot().operations[0].status,"failed");
+    state.mode="valid";await save();forcedParserOom=true;await vm.runInContext("scanServerPackages()",browser);assert.equal(element("serverPackageCleanupScanButton").disabled,false);assert.match(element("serverPackageCleanupStatus").textContent,/heap budget/);assert.equal(await(await fetch(endpoint+"/health")).text(),"ready");
+    forcedParserOom=false;await vm.runInContext("scanServerPackages()",browser);await vm.runInContext("cleanServerPackages()",browser);await waitTerminal();assert.equal(registry.snapshot().operations[0].status,"success");assert.equal(element("serverPackageCleanupScanButton").disabled,false);assert.match(element("serverPackageCleanupStatus").textContent,/Cleanup complete/);assert.equal(await(await fetch(endpoint+"/health")).text(),"ready");
+    assert.equal(JSON.parse(await fs.readFile(statePath,"utf8")).removed.length,1);
+    console.log("PASS: actual source cleanup routes, context and browser functions with real HTTP, streaming transport, isolated parser, planner and operation registry; invalid JSON scan recovery, failed cleanup releases operation, parser heap failure preserves dashboard endpoint, rescan and fixture cleanup succeed. All remote commands replaced by a local fixture process.");
+  } finally {await new Promise(resolve=>server.close(resolve));await fs.rm(root,{recursive:true,force:true});}
+})().catch(error=>{console.error(error);process.exitCode=1;});

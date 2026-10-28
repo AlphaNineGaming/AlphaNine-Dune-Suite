@@ -1,1 +1,2 @@
 assets/scheduler/*.sh text eol=lf
+scripts/provider-lab/*.sh text eol=lf

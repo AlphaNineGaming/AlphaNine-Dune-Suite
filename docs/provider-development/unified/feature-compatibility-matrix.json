@@ -1,0 +1,5679 @@
+{
+  "version": "1.3.24",
+  "basis": "Static audit of Phase 3-derived isolated development copy; no live compatibility claims",
+  "features": [
+    {
+      "id": "runtime",
+      "feature": "Server status, Dashboard and runtime health",
+      "prefixes": [
+        "/api/status",
+        "/api/overview",
+        "/api/server-health",
+        "/api/director",
+        "/api/admin/probe"
+      ],
+      "independent": "Rendering, state summaries and health aggregation",
+      "dependencies": "HV SSH K8S PG FS",
+      "shared": "server-health, health-check-runner, status renderers",
+      "adapters": "Runtime inventory, metrics and health readers",
+      "evidence": "Exact process/workload binding; protocol health separately; missing metrics stay unknown",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Experimental scoped status/health only",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "vm",
+      "feature": "Hyper-V state, power and connection monitor",
+      "prefixes": [
+        "/api/vm",
+        "/api/vm-monitor"
+      ],
+      "independent": "State presentation and operation-conflict policy",
+      "dependencies": "HV WIN SSH FS",
+      "shared": "vm-status-probe, vm-connection-cache, operations",
+      "adapters": "VM inventory/lifecycle and SSH identity",
+      "evidence": "Actual VM identity, attachment, privileges and state revalidation",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "disk",
+      "feature": "VM disk inspection, trim and compaction",
+      "prefixes": [
+        "/api/vm/disk"
+      ],
+      "independent": "Admission checks, preview and operation journal",
+      "dependencies": "HV WIN FS SSH",
+      "shared": "vm-disk-compaction",
+      "adapters": "Hypervisor-specific disks/checkpoints/trim",
+      "evidence": "Disposable disks; detached/off checks; checkpoints and rollback evidence",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "lifecycle",
+      "feature": "Battlegroup lifecycle, maps, scaling and memory",
+      "prefixes": [
+        "/api/action",
+        "/api/maps",
+        "/api/battlegroups"
+      ],
+      "independent": "Intent attribution, generations, confirmations and conflicts",
+      "dependencies": "SSH K8S HV FS",
+      "shared": "battlegroup-control, operations",
+      "adapters": "Runtime lifecycle, resource topology and profile binding",
+      "evidence": "Named runtime identity; actual stop/start effects, interruption and rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "version",
+      "feature": "Server build/version inspection and updates",
+      "prefixes": [
+        "/api/server-update"
+      ],
+      "independent": "Version rendering and update planning",
+      "dependencies": "SSH FS K8S HTTP",
+      "shared": "server-update, server-download-repair",
+      "adapters": "Version reader, package fetch/verify, deployment updater",
+      "evidence": "Authentic build metadata, provenance, backups and safe rollback before updates",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Experimental metadata GET only",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "packages",
+      "feature": "Server package cleanup",
+      "prefixes": [
+        "/api/server-packages"
+      ],
+      "independent": "Retention planning, previews and identity checks",
+      "dependencies": "SSH FS K8S",
+      "shared": "server-package-cleanup",
+      "adapters": "Filesystem/package inventory and deletion",
+      "evidence": "Actual package ownership/reference checks and recoverable disposable deletion",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "players",
+      "feature": "Player directory, feed and identity",
+      "prefixes": [
+        "/api/admin/players",
+        "/api/players/feed"
+      ],
+      "independent": "Search, rendering and limited directory caching",
+      "dependencies": "PG SSH",
+      "shared": "player-directory, shared player renderers",
+      "adapters": "Player schema/identity reader",
+      "evidence": "Validated table/PK/types/SELECT, restricted role; account/controller mappings independently",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Experimental limited plain-table rows",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "rename",
+      "feature": "Player rename",
+      "prefixes": [
+        "/api/admin/players/rename"
+      ],
+      "independent": "Name validation, offline admission and preview",
+      "dependencies": "PG SSH FS",
+      "shared": "player-rename",
+      "adapters": "Schema mutation and verified backup",
+      "evidence": "Real schema, offline/uniqueness checks, affected-row proof and rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "recovery",
+      "feature": "Character recovery and travel diagnostics",
+      "prefixes": [
+        "/api/admin/players/recovery"
+      ],
+      "independent": "Travel planning, dependency/boundary checks and previews",
+      "dependencies": "PG SSH FS",
+      "shared": "character-recovery",
+      "adapters": "Actor/travel schema reads, backups and mutation",
+      "evidence": "Exact linked actors/schema, offline state, atomic update and recovery rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "teleport",
+      "feature": "Teleport, presets and live transport",
+      "prefixes": [
+        "/api/live-map/teleport",
+        "/api/v1/players/teleport-coords"
+      ],
+      "independent": "Coordinates, readiness classification and request modes",
+      "dependencies": "PG SSH HTTP AMQP",
+      "shared": "teleport-readiness, teleport-request-mode",
+      "adapters": "Live admin protocol and offline transform writers",
+      "evidence": "Protocol authentication, player identity, safe elevation, actual acknowledgement and rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "inventory",
+      "feature": "Player backpack inventory and item deletion",
+      "prefixes": [
+        "/api/admin/player-inventory"
+      ],
+      "independent": "Cell rendering and target/selection validation",
+      "dependencies": "PG SSH FS",
+      "shared": "existing inventory business logic",
+      "adapters": "Inventory schema reader and delete transaction",
+      "evidence": "Real ownership/schema/permissions; exact item graph and backup for deletion",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "give",
+      "feature": "Give Items, receipts, quality/durability and receiver",
+      "prefixes": [
+        "/api/admin/give-item",
+        "/api/give-items/capabilities",
+        "/api/live-give",
+        "/api/receiver"
+      ],
+      "independent": "Request validation, queues, receipts and grade selection",
+      "dependencies": "PG SSH AMQP HTTP WIN FS",
+      "shared": "give-item-durability, receivers, stdin-process",
+      "adapters": "Grant transport, receipt reader, runtime/service controller",
+      "evidence": "Authenticated protocol, identity binding, actual inventory confirmation; no success from queue acceptance alone",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "storage",
+      "feature": "Storage targets, grants and deposit confirmation",
+      "prefixes": [
+        "/api/admin/give-storage",
+        "/api/admin/storage"
+      ],
+      "independent": "Deposit reconciliation and visibility checks",
+      "dependencies": "PG SSH AMQP FS",
+      "shared": "storage-deposits",
+      "adapters": "Storage schema/receiver/visibility adapters",
+      "evidence": "Exact container ownership, item effects, independent confirmation and rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "permissions",
+      "feature": "Guild permissions, ranks and access codes",
+      "prefixes": [
+        "/api/admin/permissions",
+        "/api/sietches"
+      ],
+      "independent": "Rank/code validation and confirmation UX",
+      "dependencies": "PG SSH FS",
+      "shared": "existing permission/sietch logic",
+      "adapters": "Permission schema reads and guarded writes",
+      "evidence": "Owner associations, offline/transaction checks, backups and postcondition proof",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "repair",
+      "feature": "Durability repair, inspection and queue",
+      "prefixes": [
+        "/api/admin/repair"
+      ],
+      "independent": "Repair selection, mode validation and queue planning",
+      "dependencies": "PG SSH FS",
+      "shared": "durability-repair, operations",
+      "adapters": "Schema/read/write and queue executors",
+      "evidence": "Item/schema identity, valid repair targets, affected-row and rollback tests",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "progression",
+      "feature": "Skills, XP, reputation, House Scrip and progression",
+      "prefixes": [
+        "/api/progression",
+        "/api/admin/skill-reputation",
+        "/api/admin/tuned-channels"
+      ],
+      "independent": "Catalog/rank bounds, previews and reward validation",
+      "dependencies": "PG SSH FS AMQP",
+      "shared": "existing progression/reputation and catalog logic",
+      "adapters": "Game schema/function/receiver grant adapters",
+      "evidence": "Real game schema/functions, cache synchronization, exact grants and rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "dungeon",
+      "feature": "Dungeon difficulty and installed-game dungeon catalog",
+      "prefixes": [
+        "/api/progression/dungeon-difficulty"
+      ],
+      "independent": "Tuning schema and range validation",
+      "dependencies": "PG SSH FS WIN",
+      "shared": "dungeon-difficulty, installed-game-dungeon-catalog",
+      "adapters": "Tuning reader/writer and game catalog source",
+      "evidence": "Actual supported effects, schema permissions, package provenance and backups",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "landsraad",
+      "feature": "Landsraad tiers, TaskGoalAmount and weekly rewards",
+      "prefixes": [
+        "/api/landsraad"
+      ],
+      "independent": "Tier/reward plans, ranges and confirmations",
+      "dependencies": "PG SSH FS AMQP",
+      "shared": "reward-notifications, user-game-settings",
+      "adapters": "INI/schema writers and reward transport",
+      "evidence": "Real tier/reward schema and gameplay effects, strict scope and rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "market",
+      "feature": "Market Bot install/control/exchanges and listings",
+      "prefixes": [
+        "/api/market-bot",
+        "/api/market/"
+      ],
+      "independent": "Pricing/stock plans, evidence classification and reconciliation",
+      "dependencies": "PG SSH FS K8S AMQP",
+      "shared": "market-bot and evidence/reconciliation modules",
+      "adapters": "Service/runtime installation, schema, settlement and stock adapters",
+      "evidence": "Runtime integrity, sole writer/ledger invariants, transaction/settlement proof and reversible install",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "automator",
+      "feature": "Market Automation and legacy automator",
+      "prefixes": [
+        "/api/market-automator"
+      ],
+      "independent": "Pricing preview, configuration normalization and plans",
+      "dependencies": "PG SSH FS AMQP",
+      "shared": "market-automator, market-pricing, market-manual-purchase",
+      "adapters": "Database/transport/runtime and scheduler",
+      "evidence": "Dry-run parity with real transactions, settlement, reconciliation and rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "explorer",
+      "feature": "Database Explorer schemas, metadata and rows",
+      "prefixes": [
+        "/api/database-browser"
+      ],
+      "independent": "Existing Explorer page, grid, metadata and normalizeCell",
+      "dependencies": "PG SSH",
+      "shared": "database-browser rendering and cell normalization",
+      "adapters": "TLS/role/schema-validated relation adapter",
+      "evidence": "Fresh restricted role + plain-table PK/types/SELECT; no arbitrary SQL or unsafe views",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Experimental dune.player_state only; no filters/custom sorting",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "dbstatus",
+      "feature": "Database connectivity and status",
+      "prefixes": [
+        "/api/database/status"
+      ],
+      "independent": "Connection state rendering",
+      "dependencies": "PG SSH",
+      "shared": "existing Database page/status renderer",
+      "adapters": "Provider database connection and health reader",
+      "evidence": "Explicit endpoint association, verified TLS, fresh restricted role/transaction",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Experimental explicit TLS connectivity only",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "tunnel",
+      "feature": "Database tunnel and credential discovery",
+      "prefixes": [
+        "/api/database/tunnel",
+        "/api/setup/detect-database",
+        "/api/setup/test-database"
+      ],
+      "independent": "Connection validation",
+      "dependencies": "PG SSH HV K8S WIN",
+      "shared": "existing connection validation",
+      "adapters": "Tunnel, destination trust and credential source",
+      "evidence": "Explicit scoped identity; no privileged extraction without design/approval",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported; Remote Linux uses explicit direct TLS",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "backup",
+      "feature": "Database backups, archives, safety backups and storage",
+      "prefixes": [
+        "/api/database/backup",
+        "/api/database/safety-backup"
+      ],
+      "independent": "TOC/inventory/hash verification, retention and publication checks",
+      "dependencies": "PG SSH FS K8S",
+      "shared": "database-backup, recovery-archive-transport, vendor-backup-path",
+      "adapters": "Consistent dump, transfer, artifact ownership and storage",
+      "evidence": "Actual restorable data, complete archive evidence, interrupted transfer and safe publication",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "restore",
+      "feature": "Restore/import, promotion and ownership repair",
+      "prefixes": [
+        "/api/database/restore",
+        "/api/database/import",
+        "/api/database/repair-ownership"
+      ],
+      "independent": "Boundaries, readiness, journals, rollback and recovery evidence",
+      "dependencies": "PG SSH FS K8S",
+      "shared": "migration-schema-restore (active helper), database-ownership-repair",
+      "adapters": "Restore/import promotion, stopped-runtime and verified recovery",
+      "evidence": "Real stopped target, verified archive, atomic restore, outside-boundary and recovery proof",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "scheduler",
+      "feature": "Backup/restart scheduler",
+      "prefixes": [
+        "/api/scheduler"
+      ],
+      "independent": "Schedules, normalization, task evidence and UI",
+      "dependencies": "SSH FS K8S PG",
+      "shared": "vm-scheduler, operations",
+      "adapters": "Provider job scheduler/lifecycle/backup storage",
+      "evidence": "Timezone/clock, job identity, lease/single-writer and interrupted-job recovery",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "ini",
+      "feature": "UserGame.ini settings",
+      "prefixes": [
+        "/api/usergame-settings"
+      ],
+      "independent": "Setting schema, typed parsing and rendering",
+      "dependencies": "SSH FS K8S",
+      "shared": "user-game-settings and existing settings page",
+      "adapters": "Canonical config-slot reader and compare/backup/write adapter",
+      "evidence": "Actual locations/section semantics, permissions; for writes conflict/backup/rollback proof",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Experimental four typed settings GET only",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "inirestore",
+      "feature": "INI backups, restore and recovery",
+      "prefixes": [
+        "/api/usergame-backups"
+      ],
+      "independent": "Snapshot checks and recovery plans",
+      "dependencies": "SSH FS K8S",
+      "shared": "user-game-recovery",
+      "adapters": "Backup storage and conditional restore",
+      "evidence": "Exact template/active locations, metadata preservation, interrupted apply and rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "manager",
+      "feature": "Embedded Server Management profiles and reward requests",
+      "prefixes": [
+        "/api/server/",
+        "/manager",
+        "/manager-api"
+      ],
+      "independent": "Profile/settings validation and presentation",
+      "dependencies": "WIN FS SSH K8S PG",
+      "shared": "manager/manager-server.py and management UI",
+      "adapters": "Profile binding/settings/read/write/reward adapters",
+      "evidence": "Actual runtime profile paths, defaults, safe persistence, rewards and rollback",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported embedded manager; shared read pages available",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "blueprints",
+      "feature": "Blueprints, backup/import/export and Designer",
+      "prefixes": [
+        "/api/blueprints"
+      ],
+      "independent": "Document design, format validation and local rendering",
+      "dependencies": "PG SSH FS WIN",
+      "shared": "blueprints, dev/blueprint-documents, blueprint-designer-launcher",
+      "adapters": "Game blueprint storage/schema/backup and local document adapter",
+      "evidence": "Game ownership/schema, import side effects and rollback; local designer separate source/UI checks",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported game operations; local designer retained with existing IPC origin checks",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "resources",
+      "feature": "Live Map, entities, vehicles, bases, markers and resources",
+      "prefixes": [
+        "/api/live-map",
+        "/api/world-map"
+      ],
+      "independent": "Coordinates, map rendering, static overlays and filtering",
+      "dependencies": "PG SSH FS WIN",
+      "shared": "experimental-resource-areas and existing map logic",
+      "adapters": "World/actor schema reads and installed-game asset source",
+      "evidence": "Exact world/schema/namespace semantics; asset provenance; no fabricated positions",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "cleanup",
+      "feature": "Base cleanup and orphan deletion",
+      "prefixes": [
+        "/api/admin/base-cleanup"
+      ],
+      "independent": "Orphan classification, preview and confirmation",
+      "dependencies": "PG SSH FS",
+      "shared": "existing base cleanup logic",
+      "adapters": "Object graph readers, backup and delete transaction",
+      "evidence": "Dependency/ownership proof, exact delete plan, rollback and row counts",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "catalog",
+      "feature": "Item Database, Gear Codex and installed/server discovery",
+      "prefixes": [
+        "/api/admin/items",
+        "/api/give-items",
+        "/api/item-database",
+        "/api/gear",
+        "/api/items/catalog"
+      ],
+      "independent": "Bundled catalog search/filter/render and grade semantics",
+      "dependencies": "FS WIN SSH PG",
+      "shared": "item-catalog-provider, installed-game-item-catalog, item-server-discovery",
+      "adapters": "Offline catalog source and optional installed/server discovery",
+      "evidence": "Bundled integrity; separate provenance/permissions for runtime discovery",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Unsupported routing this phase; local catalog sharing is next work",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "portal",
+      "feature": "Web Portal, authentication, roles and Internet/LAN access",
+      "prefixes": [
+        "/api/remote-access",
+        "/api/auth",
+        "/api/internet-access"
+      ],
+      "independent": "Authentication/TOTP, origin policy, roles and UI",
+      "dependencies": "HTTP WIN FS",
+      "shared": "remote-access, internet-tunnel",
+      "adapters": "Exposure/controller plus per-feature provider authorization",
+      "evidence": "TLS/session/origin/role tests and no path to unvalidated provider commands",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Remote Linux portal disabled; local feature reads only",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "setup",
+      "feature": "Setup Wizard, discovery, SSH key and folder checks",
+      "prefixes": [
+        "/api/setup",
+        "/api/discovery",
+        "/api/test",
+        "/api/ssh-key",
+        "/api/server-install-path"
+      ],
+      "independent": "Wizard flow, input/persistence and secret masking",
+      "dependencies": "HV WIN FS SSH PG",
+      "shared": "existing Wizard and provider selection",
+      "adapters": "Provider selection/trust/discovery validators",
+      "evidence": "Configuration roundtrip, unknown-type refusal, no startup effects and target-switch locks",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Experimental explicit Remote Linux setup; planned types disabled",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "config",
+      "feature": "Settings import/export and app preferences",
+      "prefixes": [
+        "/api/config",
+        "/api/settings"
+      ],
+      "independent": "UI preferences, validation, masked-secret persistence",
+      "dependencies": "FS WIN",
+      "shared": "existing config functions",
+      "adapters": "Target-aware profile persistence and app-only preferences",
+      "evidence": "Roundtrip and rollback; active-target mutation refused; no credential leaks",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Remote Linux connection fields only; import/export not adapted",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "diagnostics",
+      "feature": "Setup Doctor, backend checks, logs and support exports",
+      "prefixes": [
+        "/api/diagnostics",
+        "/api/backend",
+        "/api/providers",
+        "/api/action/logs-export",
+        "/api/action/operator-logs-export"
+      ],
+      "independent": "Report projection, source diagnostics and display",
+      "dependencies": "SSH FS HV WIN PG K8S",
+      "shared": "provider reports and existing diagnostics",
+      "adapters": "Provider-safe discovery and sanitized support export",
+      "evidence": "Canary/privacy tests, bounded errors, explicit trust and evidence labelling",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Experimental provider report in existing Setup Doctor page",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "operations",
+      "feature": "Operations, conflicts, progress and history",
+      "prefixes": [
+        "/api/operations"
+      ],
+      "independent": "Operation registry, event/journal state and UX",
+      "dependencies": "FS",
+      "shared": "operations, profile-binding",
+      "adapters": "Target-bound executor and persistent recovery journal",
+      "evidence": "Immutable target IDs, single writer, crash/cancel/recovery and no replay onto another target",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Remote mutations absent; active target leases enforced",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "appupdate",
+      "feature": "Suite updater, signing, tray/window and desktop dialogs",
+      "prefixes": [
+        "/api/updates"
+      ],
+      "independent": "Version/integrity/authenticode and desktop preferences",
+      "dependencies": "WIN HTTP FS",
+      "shared": "update-integrity, windows-authenticode, electron/main.js",
+      "adapters": "Desktop updater/launcher and folder dialogs",
+      "evidence": "Packaged runtime/signature checks; installed app must not be changed by this task",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "No updater routing; native batch/open-path blocked for nonlegacy",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "startup",
+      "feature": "Background startup, receiver, manager, tunnels and discovery timers",
+      "prefixes": [],
+      "independent": "Startup policy and suppression tests",
+      "dependencies": "WIN HV SSH FS PG HTTP",
+      "shared": "startup-policy, electron/main.js",
+      "adapters": "Provider-permitted background workers and target leases",
+      "evidence": "Zero unexpected effects; restart/profile boundaries and cancellation evidence",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Remote automatic writers/listeners remain suppressed",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "removed",
+      "feature": "Discontinued Migration Maintenance/Offline/Bootstrap/Server Migration",
+      "prefixes": [
+        "/api/migration",
+        "/api/server-migration",
+        "/api/maintenance-bootstrap"
+      ],
+      "independent": "Only active archive/schema helpers remain shareable",
+      "dependencies": "Historical SSH PG HV FS K8S",
+      "shared": "retained active restore helpers only",
+      "adapters": "None; discontinued workflow is not part of this project",
+      "evidence": "Disabled endpoints remain 404; never restore this system",
+      "hyperv": "Unsupported/discontinued",
+      "remote": "Unsupported/discontinued",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    },
+    {
+      "id": "infrastructure",
+      "feature": "HTTP policy, assets and generic API prefix guards",
+      "prefixes": [],
+      "independent": "Request parsing, static assets and exact method/path registry",
+      "dependencies": "HTTP FS",
+      "shared": "existing route policy and common feature router",
+      "adapters": "Provider-aware authorization and target binding",
+      "evidence": "Method/origin/fail-closed and complete route-registry tests",
+      "hyperv": "Retained existing behavior; not newly live-verified",
+      "remote": "Shared infrastructure; not a server capability",
+      "docker": "Unsupported/planned",
+      "proxmox": "Unsupported/planned",
+      "managed": "Unsupported/planned"
+    }
+  ],
+  "inventory": [
+    {
+      "file": "server.js",
+      "route": "/api/v1/players/teleport-coords",
+      "feature": "teleport",
+      "references": [
+        542,
+        1027,
+        23180,
+        25324,
+        26024,
+        26031
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/overview",
+      "feature": "runtime",
+      "references": [
+        14006
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server/config",
+      "feature": "manager",
+      "references": [
+        20925,
+        20929
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server/discover",
+      "feature": "manager",
+      "references": [
+        20938
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server/settings",
+      "feature": "manager",
+      "references": [
+        20942,
+        20950
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server/suite-connection",
+      "feature": "manager",
+      "references": [
+        21160
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/manager/",
+      "feature": "manager",
+      "references": [
+        24942,
+        25623,
+        25624,
+        26932,
+        29238,
+        29244
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-maintenance",
+      "feature": "removed",
+      "references": [
+        25412,
+        26909,
+        27180,
+        27260,
+        27377
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-maintenance/",
+      "feature": "removed",
+      "references": [
+        25413
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-runtime-identity",
+      "feature": "removed",
+      "references": [
+        25420,
+        27080,
+        27176,
+        27186,
+        27385
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/profile",
+      "feature": "removed",
+      "references": [
+        25421,
+        27081,
+        27862
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-offline/",
+      "feature": "removed",
+      "references": [
+        25429
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/import-preflight",
+      "feature": "removed",
+      "references": [
+        25432,
+        27102,
+        27351,
+        27364,
+        27893
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/import",
+      "feature": "removed",
+      "references": [
+        25434,
+        27103,
+        27351,
+        27364,
+        27902
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/empty-market-preview",
+      "feature": "removed",
+      "references": [
+        25437,
+        27351,
+        27364,
+        27874
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/empty-market",
+      "feature": "removed",
+      "references": [
+        25438,
+        27351,
+        27364,
+        27874
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/preflight",
+      "feature": "removed",
+      "references": [
+        25445,
+        27097,
+        27351,
+        27364,
+        27876
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/",
+      "feature": "removed",
+      "references": [
+        25448,
+        26909,
+        27096,
+        27178,
+        27186,
+        27843
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/active-job",
+      "feature": "removed",
+      "references": [
+        25449,
+        27104,
+        27860
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/export",
+      "feature": "removed",
+      "references": [
+        25450,
+        27098,
+        27351,
+        27364,
+        27885
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-health",
+      "feature": "runtime",
+      "references": [
+        25536,
+        27815
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/config",
+      "feature": "config",
+      "references": [
+        25545,
+        25545,
+        25546,
+        25546,
+        25603,
+        25603,
+        25604,
+        26065,
+        26066,
+        26079,
+        26095,
+        26095,
+        26097,
+        26231,
+        26905,
+        26960,
+        27135,
+        27165,
+        27166,
+        27659,
+        27663
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/auth/session",
+      "feature": "portal",
+      "references": [
+        25579,
+        26934,
+        27003
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/remote-access/status",
+      "feature": "portal",
+      "references": [
+        25580,
+        27462
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/remote-access/password",
+      "feature": "portal",
+      "references": [
+        25581,
+        27496
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/remote-access/lan",
+      "feature": "portal",
+      "references": [
+        25582,
+        27471
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/remote-access/totp/begin",
+      "feature": "portal",
+      "references": [
+        25585,
+        27515
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/remote-access/totp/confirm",
+      "feature": "portal",
+      "references": [
+        25586,
+        27520
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/remote-access/totp/disable",
+      "feature": "portal",
+      "references": [
+        25587,
+        27526
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/auth/logout",
+      "feature": "portal",
+      "references": [
+        25590,
+        26934,
+        27015
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/internet-access/status",
+      "feature": "portal",
+      "references": [
+        25592,
+        25593,
+        27425
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/internet-access/install",
+      "feature": "portal",
+      "references": [
+        25594,
+        27433
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/internet-access/start",
+      "feature": "portal",
+      "references": [
+        25595,
+        25596,
+        27442
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/internet-access/stop",
+      "feature": "portal",
+      "references": [
+        25597,
+        27454
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/manager-api/api/server/config",
+      "feature": "manager",
+      "references": [
+        25623
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/resource-areas/overlay/",
+      "feature": "resources",
+      "references": [
+        25690,
+        26937,
+        26941,
+        28073
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/resource-areas/status",
+      "feature": "resources",
+      "references": [
+        25697,
+        26915,
+        28055
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/resource-areas/generate",
+      "feature": "resources",
+      "references": [
+        25698,
+        25698,
+        26907,
+        28059
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/resource-areas/game-folder",
+      "feature": "resources",
+      "references": [
+        25700,
+        26907,
+        28064
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/teleport/presets",
+      "feature": "teleport",
+      "references": [
+        25762,
+        25764,
+        26915,
+        28117,
+        28122,
+        28131
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/tunnel/status",
+      "feature": "tunnel",
+      "references": [
+        25805,
+        25805,
+        26268,
+        26913,
+        27935
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/markers",
+      "feature": "resources",
+      "references": [
+        25816,
+        26914,
+        28079
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/teleport/verify",
+      "feature": "teleport",
+      "references": [
+        25876,
+        28141
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/teleport/status",
+      "feature": "teleport",
+      "references": [
+        25894,
+        26915,
+        28136
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/teleport",
+      "feature": "teleport",
+      "references": [
+        25895,
+        28112
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/teleport/execute",
+      "feature": "teleport",
+      "references": [
+        25896,
+        28146
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/operations",
+      "feature": "operations",
+      "references": [
+        25900,
+        25910,
+        25935,
+        25952,
+        25955,
+        26151,
+        26153,
+        26174,
+        26176,
+        26210,
+        26215,
+        27650
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/operations/completed",
+      "feature": "operations",
+      "references": [
+        25901,
+        27353,
+        27369,
+        27654
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-update/start",
+      "feature": "version",
+      "references": [
+        25911,
+        27612
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-update/repair-download",
+      "feature": "version",
+      "references": [
+        25917,
+        27603
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-update/check",
+      "feature": "version",
+      "references": [
+        25922,
+        26912,
+        27589
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/scheduler",
+      "feature": "scheduler",
+      "references": [
+        25932,
+        26912,
+        27622
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/scheduler/install",
+      "feature": "scheduler",
+      "references": [
+        25933,
+        27626
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/scheduler/action",
+      "feature": "scheduler",
+      "references": [
+        25936,
+        26924,
+        27368,
+        27640
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/scheduler/remove",
+      "feature": "scheduler",
+      "references": [
+        25937,
+        27635
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/auth/reauth",
+      "feature": "portal",
+      "references": [
+        25943,
+        26934,
+        27007
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot",
+      "feature": "market",
+      "references": [
+        25955,
+        26919,
+        27260,
+        28710
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/exchanges",
+      "feature": "market",
+      "references": [
+        25955,
+        28767
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/preview",
+      "feature": "market",
+      "references": [
+        25960,
+        28852
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/prepare",
+      "feature": "market",
+      "references": [
+        25961,
+        28820
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/activate",
+      "feature": "market",
+      "references": [
+        25961,
+        28836
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/",
+      "feature": "market",
+      "references": [
+        25962
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/repair-runtime",
+      "feature": "market",
+      "references": [
+        25963,
+        28873
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/restock",
+      "feature": "market",
+      "references": [
+        25964,
+        28899
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/exchanges/arrakeen/preview",
+      "feature": "market",
+      "references": [
+        25965,
+        28772
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/exchanges/arrakeen/apply",
+      "feature": "market",
+      "references": [
+        25965,
+        28777
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/exchange",
+      "feature": "market",
+      "references": [
+        25966,
+        28803
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/category",
+      "feature": "market",
+      "references": [
+        25967,
+        28798
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/player-buying",
+      "feature": "market",
+      "references": [
+        25968,
+        28815
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/clean",
+      "feature": "market",
+      "references": [
+        25969,
+        27367,
+        28915
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/uninstall",
+      "feature": "market",
+      "references": [
+        25970,
+        28931
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/items",
+      "feature": "market",
+      "references": [
+        25972,
+        25976,
+        25977,
+        26919,
+        28715,
+        28793
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/rollback",
+      "feature": "market",
+      "references": [
+        25978,
+        28947
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-automator/overview",
+      "feature": "automator",
+      "references": [
+        25987,
+        26919,
+        28952
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-automator/config",
+      "feature": "automator",
+      "references": [
+        25990,
+        28957
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-automator/pricing-preview",
+      "feature": "automator",
+      "references": [
+        25998,
+        28966
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-automator/catalog-search",
+      "feature": "automator",
+      "references": [
+        26001,
+        28971
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-automator/run/",
+      "feature": "automator",
+      "references": [
+        26006,
+        28976,
+        28979
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-automator/logs",
+      "feature": "automator",
+      "references": [
+        26007,
+        26909,
+        28985
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/setup/test-database",
+      "feature": "tunnel",
+      "references": [
+        26020,
+        27755
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/setup/detect-database",
+      "feature": "tunnel",
+      "references": [
+        26021,
+        26046,
+        27764
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/battlegroups",
+      "feature": "lifecycle",
+      "references": [
+        26036,
+        26913,
+        27820
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/battlegroups/select",
+      "feature": "lifecycle",
+      "references": [
+        26037,
+        26960,
+        27829
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/battlegroups/title",
+      "feature": "lifecycle",
+      "references": [
+        26038,
+        27834
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/setup/status",
+      "feature": "setup",
+      "references": [
+        26046,
+        26059,
+        27135,
+        27164,
+        27694
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/vm/status",
+      "feature": "vm",
+      "references": [
+        26046,
+        26079,
+        26129,
+        26131,
+        26921,
+        29200
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/setup/save",
+      "feature": "setup",
+      "references": [
+        26046,
+        26062,
+        27135,
+        27166,
+        27169,
+        27710
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/setup/vm-ip-check",
+      "feature": "setup",
+      "references": [
+        26058,
+        27705
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/discovery",
+      "feature": "setup",
+      "references": [
+        26060,
+        26908,
+        27750
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/test/",
+      "feature": "setup",
+      "references": [
+        26061,
+        26905,
+        27773,
+        27774
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/setup/save-test",
+      "feature": "setup",
+      "references": [
+        26064,
+        27741
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/receiver/status",
+      "feature": "give",
+      "references": [
+        26067,
+        26757,
+        26912,
+        27777
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/receiver/",
+      "feature": "give",
+      "references": [
+        26068
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/settings/export",
+      "feature": "config",
+      "references": [
+        26069,
+        27801
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/settings/import",
+      "feature": "config",
+      "references": [
+        26070,
+        27805
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/updates/check",
+      "feature": "appupdate",
+      "references": [
+        26076,
+        26921,
+        28041
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/diagnostics",
+      "feature": "diagnostics",
+      "references": [
+        26079,
+        26907,
+        27810
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/players/feed",
+      "feature": "players",
+      "references": [
+        26101,
+        26916,
+        28346
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/sietches",
+      "feature": "permissions",
+      "references": [
+        26112,
+        26921,
+        29178
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/sietches/rename",
+      "feature": "permissions",
+      "references": [
+        26113,
+        29186
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/status",
+      "feature": "runtime",
+      "references": [
+        26118,
+        26248,
+        26287,
+        26912,
+        27260,
+        27559
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/vm-monitor",
+      "feature": "vm",
+      "references": [
+        26126,
+        26912,
+        27563
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/vm/",
+      "feature": "vm",
+      "references": [
+        26130,
+        26942,
+        29209
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/action/",
+      "feature": "lifecycle",
+      "references": [
+        26132,
+        26942,
+        29144
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/director",
+      "feature": "runtime",
+      "references": [
+        26133,
+        26909,
+        29230
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/vm/disk/inspect",
+      "feature": "disk",
+      "references": [
+        26142,
+        27568
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/vm/disk/",
+      "feature": "disk",
+      "references": [
+        26151
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-packages/scan",
+      "feature": "packages",
+      "references": [
+        26162,
+        27576
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-packages/clean",
+      "feature": "packages",
+      "references": [
+        26173,
+        27576
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/repair-ownership",
+      "feature": "restore",
+      "references": [
+        26209,
+        27594
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/usergame-settings",
+      "feature": "ini",
+      "references": [
+        26234,
+        26238,
+        26906,
+        29118,
+        29130
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/usergame-backups",
+      "feature": "inirestore",
+      "references": [
+        26235,
+        26236,
+        26906,
+        29092
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maps/memory",
+      "feature": "lifecycle",
+      "references": [
+        26244,
+        26924,
+        28169
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maps",
+      "feature": "lifecycle",
+      "references": [
+        26245,
+        26914,
+        28045
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maps/deploy",
+      "feature": "lifecycle",
+      "references": [
+        26249,
+        26924,
+        28155
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/receiver/restart",
+      "feature": "give",
+      "references": [
+        26257,
+        26924,
+        27790
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/receiver/token/regenerate",
+      "feature": "give",
+      "references": [
+        26258,
+        27957
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-give/status",
+      "feature": "give",
+      "references": [
+        26260,
+        26757,
+        26912,
+        28251
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-give/env",
+      "feature": "give",
+      "references": [
+        26260,
+        26907,
+        28256
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/status",
+      "feature": "dbstatus",
+      "references": [
+        26267,
+        26913,
+        27839
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/backup-location",
+      "feature": "backup",
+      "references": [
+        26270,
+        26273,
+        26275,
+        27948,
+        27970
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/backups",
+      "feature": "backup",
+      "references": [
+        26271,
+        26913,
+        28009
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/backup",
+      "feature": "backup",
+      "references": [
+        26276,
+        27352,
+        27366,
+        27983
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/safety-backup",
+      "feature": "backup",
+      "references": [
+        26277,
+        27352,
+        27366,
+        27996
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/import-readiness",
+      "feature": "restore",
+      "references": [
+        26286,
+        27366,
+        28014
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/import-status/",
+      "feature": "restore",
+      "references": [
+        26295,
+        26937,
+        28024
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/import",
+      "feature": "restore",
+      "references": [
+        26296,
+        27366,
+        28031
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/probe",
+      "feature": "runtime",
+      "references": [
+        26298,
+        26908,
+        28179
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/items",
+      "feature": "catalog",
+      "references": [
+        26298,
+        26390,
+        26916,
+        28351,
+        28354,
+        28355
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/tuned-channels",
+      "feature": "progression",
+      "references": [
+        26298,
+        26908,
+        28444
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/give-items/capabilities",
+      "feature": "give",
+      "references": [
+        26298,
+        26917,
+        28422
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/blueprints/capabilities",
+      "feature": "blueprints",
+      "references": [
+        26323,
+        28184
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/blueprints/import",
+      "feature": "blueprints",
+      "references": [
+        26324,
+        28194
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/blueprints/",
+      "feature": "blueprints",
+      "references": [
+        26326
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/blueprints/export",
+      "feature": "blueprints",
+      "references": [
+        26326,
+        28204
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/storage-targets",
+      "feature": "storage",
+      "references": [
+        26335,
+        28646
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/give-item-receipts/recheck",
+      "feature": "give",
+      "references": [
+        26339,
+        28656
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/storage-deposits/recheck",
+      "feature": "storage",
+      "references": [
+        26343,
+        28670
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/storage-deposits/confirm-visible",
+      "feature": "storage",
+      "references": [
+        26345,
+        28680
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/repair/queue",
+      "feature": "repair",
+      "references": [
+        26373,
+        26383,
+        26916,
+        28327,
+        28331
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/repair/preview",
+      "feature": "repair",
+      "references": [
+        26373,
+        28305
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/repair/apply",
+      "feature": "repair",
+      "references": [
+        26374,
+        28313
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/landsraad/tiers",
+      "feature": "landsraad",
+      "references": [
+        26378,
+        26918,
+        28508
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/landsraad/tiers/preview",
+      "feature": "landsraad",
+      "references": [
+        26380,
+        28517
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/landsraad/tiers/apply",
+      "feature": "landsraad",
+      "references": [
+        26381,
+        28527
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/repair/queue/process",
+      "feature": "repair",
+      "references": [
+        26384,
+        28336
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/repair/queue/",
+      "feature": "repair",
+      "references": [
+        26385,
+        28341,
+        28342
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/player-inventory/delete",
+      "feature": "inventory",
+      "references": [
+        26398,
+        28279
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/players/recovery/preview",
+      "feature": "recovery",
+      "references": [
+        26408,
+        28390
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/players/recovery",
+      "feature": "recovery",
+      "references": [
+        26409,
+        28379,
+        28395
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/players/rename/preview",
+      "feature": "rename",
+      "references": [
+        26414,
+        28287
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/players/rename/apply",
+      "feature": "rename",
+      "references": [
+        26416,
+        28295
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/permissions",
+      "feature": "permissions",
+      "references": [
+        26423,
+        26908,
+        28449
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/base-cleanup/orphans",
+      "feature": "cleanup",
+      "references": [
+        26426,
+        28472
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/base-cleanup/delete",
+      "feature": "cleanup",
+      "references": [
+        26427,
+        28477
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/permissions/set-rank",
+      "feature": "permissions",
+      "references": [
+        26431,
+        28454
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/permissions/create-access-code",
+      "feature": "permissions",
+      "references": [
+        26432,
+        28463
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/skills",
+      "feature": "progression",
+      "references": [
+        26479,
+        26918,
+        28503
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/preview",
+      "feature": "progression",
+      "references": [
+        26483,
+        26573,
+        26582,
+        26590,
+        28594
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/skill-unlocks",
+      "feature": "progression",
+      "references": [
+        26484,
+        28565
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/house-scrip",
+      "feature": "progression",
+      "references": [
+        26487,
+        26918,
+        28575,
+        28584
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/dungeon-difficulty/scan-installed-game",
+      "feature": "dungeon",
+      "references": [
+        26512,
+        28724
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/dungeon-difficulty/preview",
+      "feature": "dungeon",
+      "references": [
+        26515,
+        28747
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/dungeon-difficulty/apply",
+      "feature": "dungeon",
+      "references": [
+        26516,
+        28757
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/inspect",
+      "feature": "progression",
+      "references": [
+        26517,
+        26918,
+        28494
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/apply",
+      "feature": "progression",
+      "references": [
+        26574,
+        26583,
+        26591,
+        28603
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/skill-reputation/",
+      "feature": "progression",
+      "references": [
+        26599,
+        26602
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/gear/discover",
+      "feature": "catalog",
+      "references": [
+        26616,
+        28426
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/items/catalog/scan-installed-game",
+      "feature": "catalog",
+      "references": [
+        26638,
+        26906,
+        28400
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database-browser/schemas",
+      "feature": "explorer",
+      "references": [
+        26648,
+        27925
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database-browser/rows",
+      "feature": "explorer",
+      "references": [
+        26653,
+        27354,
+        27365,
+        27928
+      ],
+      "adaptedMethods": [
+        "POST"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market/status",
+      "feature": "market",
+      "references": [
+        26680,
+        26920,
+        28990
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market/listing/",
+      "feature": "market",
+      "references": [
+        26699,
+        26703,
+        26716,
+        26719
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market/listing",
+      "feature": "market",
+      "references": [
+        26722,
+        29033
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-give/queue",
+      "feature": "give",
+      "references": [
+        26735,
+        29044
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-give/queue-presets",
+      "feature": "give",
+      "references": [
+        26739,
+        26920,
+        29054,
+        29084
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-give/queue-presets/save",
+      "feature": "give",
+      "references": [
+        26746,
+        29066
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-give/queue-presets/import",
+      "feature": "give",
+      "references": [
+        26750,
+        29075
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/action/start",
+      "feature": "lifecycle",
+      "references": [
+        26759
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/give-item",
+      "feature": "give",
+      "references": [
+        26804,
+        26815,
+        26925,
+        28636
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/give-storage",
+      "feature": "storage",
+      "references": [
+        26843,
+        28689
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/auth/login",
+      "feature": "portal",
+      "references": [
+        26887,
+        26971
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/setup/",
+      "feature": "setup",
+      "references": [
+        26905,
+        26960
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/settings/",
+      "feature": "config",
+      "references": [
+        26905
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/ssh-key/",
+      "feature": "setup",
+      "references": [
+        26905
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-install-path/",
+      "feature": "setup",
+      "references": [
+        26905
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/blueprints",
+      "feature": "blueprints",
+      "references": [
+        26907,
+        28189
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/backend/diagnostics",
+      "feature": "diagnostics",
+      "references": [
+        26907,
+        29196
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/remote-access/",
+      "feature": "portal",
+      "references": [
+        26907
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/internet-access/",
+      "feature": "portal",
+      "references": [
+        26907
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/gear/discovery",
+      "feature": "catalog",
+      "references": [
+        26908,
+        28366
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database-browser/",
+      "feature": "explorer",
+      "references": [
+        26909,
+        27919
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-offline",
+      "feature": "removed",
+      "references": [
+        26909,
+        27079,
+        27179,
+        27186,
+        27381
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/manager-api/",
+      "feature": "manager",
+      "references": [
+        26909,
+        26935,
+        26991,
+        29234
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/battlegroups/selected",
+      "feature": "lifecycle",
+      "references": [
+        26913,
+        26960,
+        27825
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/world-map/metadata",
+      "feature": "resources",
+      "references": [
+        26914,
+        28050
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/entities",
+      "feature": "resources",
+      "references": [
+        26914,
+        28079
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/players",
+      "feature": "resources",
+      "references": [
+        26914,
+        28097
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/vehicles",
+      "feature": "resources",
+      "references": [
+        26915,
+        28102
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/bases",
+      "feature": "resources",
+      "references": [
+        26915,
+        28107
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/players",
+      "feature": "players",
+      "references": [
+        26916,
+        28261
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/player-inventory",
+      "feature": "inventory",
+      "references": [
+        26916,
+        28274
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/repair/inspect",
+      "feature": "repair",
+      "references": [
+        26916,
+        28300
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/give-items",
+      "feature": "catalog",
+      "references": [
+        26917,
+        28351,
+        28354,
+        28355
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/gear-codex/items",
+      "feature": "catalog",
+      "references": [
+        26917,
+        28351
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/item-database/items",
+      "feature": "catalog",
+      "references": [
+        26917,
+        28351,
+        28354
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/items/catalog/status",
+      "feature": "catalog",
+      "references": [
+        26917,
+        28373
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/player",
+      "feature": "progression",
+      "references": [
+        26918,
+        28498
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/progression/dungeon-difficulty",
+      "feature": "dungeon",
+      "references": [
+        26918,
+        28738
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/landsraad/weekly-rewards/inspect",
+      "feature": "landsraad",
+      "references": [
+        26919,
+        28537
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/skill-reputation",
+      "feature": "progression",
+      "references": [
+        26919,
+        28612
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market/listings",
+      "feature": "market",
+      "references": [
+        26920,
+        28998
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-give/queue-presets/get",
+      "feature": "give",
+      "references": [
+        26920,
+        29058
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/receiver/start",
+      "feature": "give",
+      "references": [
+        26924,
+        27781
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/receiver/stop",
+      "feature": "give",
+      "references": [
+        26924,
+        27353,
+        27368,
+        27786
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/manager",
+      "feature": "manager",
+      "references": [
+        26932,
+        29238
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/",
+      "feature": "infrastructure",
+      "references": [
+        26935,
+        26960,
+        26991
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/restore-status/",
+      "feature": "restore",
+      "references": [
+        26937,
+        28024
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/providers/",
+      "feature": "diagnostics",
+      "references": [
+        26960,
+        27135
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/providers/read",
+      "feature": "diagnostics",
+      "references": [
+        26960,
+        27147
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/providers/diagnose",
+      "feature": "diagnostics",
+      "references": [
+        26960,
+        27155
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/auth/",
+      "feature": "portal",
+      "references": [
+        26960
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maintenance-bootstrap/preflight",
+      "feature": "removed",
+      "references": [
+        27047,
+        27261,
+        27287
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maintenance-bootstrap/reconcile-market-bot-pause",
+      "feature": "removed",
+      "references": [
+        27048,
+        27261,
+        27263,
+        27316
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maintenance-bootstrap/enter",
+      "feature": "removed",
+      "references": [
+        27049,
+        27261,
+        27325
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maintenance-bootstrap/shutdown",
+      "feature": "removed",
+      "references": [
+        27050,
+        27261,
+        27336
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maintenance-bootstrap",
+      "feature": "removed",
+      "references": [
+        27051,
+        27260,
+        27283
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/vm-ip-reconciliation",
+      "feature": "removed",
+      "references": [
+        27082,
+        27100,
+        27217,
+        27227,
+        27350
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-offline/enter",
+      "feature": "removed",
+      "references": [
+        27083,
+        27349,
+        27389
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-offline/market-bot-evidence-preflight",
+      "feature": "removed",
+      "references": [
+        27084,
+        27205,
+        27240
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-offline/reconcile-market-bot-evidence",
+      "feature": "removed",
+      "references": [
+        27085,
+        27205,
+        27249
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/providers/catalog",
+      "feature": "diagnostics",
+      "references": [
+        27139
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/providers/status",
+      "feature": "diagnostics",
+      "references": [
+        27140
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/providers/report",
+      "feature": "diagnostics",
+      "references": [
+        27141
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-startup-suppressed",
+      "feature": "removed",
+      "references": [
+        27177,
+        27186,
+        27213
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maintenance-bootstrap/",
+      "feature": "removed",
+      "references": [
+        27181
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-offline/market-bot-reconciliation",
+      "feature": "removed",
+      "references": [
+        27236
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/maintenance-bootstrap/market-bot-pause-preflight",
+      "feature": "removed",
+      "references": [
+        27261,
+        27301
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-offline/exit",
+      "feature": "removed",
+      "references": [
+        27349,
+        27389
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/inspect",
+      "feature": "removed",
+      "references": [
+        27351,
+        27365
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/tunnel/start",
+      "feature": "tunnel",
+      "references": [
+        27352,
+        27367,
+        27939
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/pause",
+      "feature": "market",
+      "references": [
+        27353,
+        27367,
+        28889
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/deploy-paused-runtime",
+      "feature": "market",
+      "references": [
+        27353,
+        28857
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/action/stop",
+      "feature": "lifecycle",
+      "references": [
+        27353,
+        27368
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/action/logs-export",
+      "feature": "diagnostics",
+      "references": [
+        27354,
+        27370
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/action/operator-logs-export",
+      "feature": "diagnostics",
+      "references": [
+        27354,
+        27370
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-maintenance/enter",
+      "feature": "removed",
+      "references": [
+        27363,
+        27407
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/migration-maintenance/exit",
+      "feature": "removed",
+      "references": [
+        27363,
+        27407
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database/restore",
+      "feature": "restore",
+      "references": [
+        27366,
+        28031
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/remote-access/role",
+      "feature": "portal",
+      "references": [
+        27509
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/vm/disk/trim",
+      "feature": "disk",
+      "references": [
+        27568
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/vm/disk/compact",
+      "feature": "disk",
+      "references": [
+        27568
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/ssh-key/status",
+      "feature": "setup",
+      "references": [
+        27685
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-install-path/status",
+      "feature": "setup",
+      "references": [
+        27689
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/preflight-status/",
+      "feature": "removed",
+      "references": [
+        27880,
+        27881
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/export-status/",
+      "feature": "removed",
+      "references": [
+        27888,
+        27889
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/import-preflight-status/",
+      "feature": "removed",
+      "references": [
+        27897,
+        27898
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/server-migration/import-status/",
+      "feature": "removed",
+      "references": [
+        27905,
+        27906
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database-browser/tables",
+      "feature": "explorer",
+      "references": [
+        27926
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/database-browser/describe",
+      "feature": "explorer",
+      "references": [
+        27927
+      ],
+      "adaptedMethods": [
+        "GET"
+      ],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/live-map/debug",
+      "feature": "resources",
+      "references": [
+        28088
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/players/recovery/diagnostics",
+      "feature": "recovery",
+      "references": [
+        28384
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/landsraad/weekly-rewards/preview",
+      "feature": "landsraad",
+      "references": [
+        28545
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/landsraad/weekly-rewards/apply",
+      "feature": "landsraad",
+      "references": [
+        28555
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/skill-reputation/give-skill-points",
+      "feature": "progression",
+      "references": [
+        28620
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/skill-reputation/set-skill-points",
+      "feature": "progression",
+      "references": [
+        28624
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/skill-reputation/add-reputation",
+      "feature": "progression",
+      "references": [
+        28628
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/skill-reputation/set-reputation",
+      "feature": "progression",
+      "references": [
+        28632
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/give-item-receipts",
+      "feature": "give",
+      "references": [
+        28651
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/admin/storage-deposits",
+      "feature": "storage",
+      "references": [
+        28665
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "server.js",
+      "route": "/api/market-bot/resume",
+      "feature": "market",
+      "references": [
+        28894
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "manager/manager-server.py",
+      "route": "/api/server/config",
+      "feature": "manager",
+      "references": [
+        757,
+        786
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "manager/manager-server.py",
+      "route": "/api/server/discover",
+      "feature": "manager",
+      "references": [
+        761
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "manager/manager-server.py",
+      "route": "/api/server/rewards",
+      "feature": "manager",
+      "references": [
+        770,
+        797
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "manager/manager-server.py",
+      "route": "/api/server/settings",
+      "feature": "manager",
+      "references": [
+        774,
+        835
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    },
+    {
+      "file": "electron/main.js",
+      "route": "/api/v1/players/teleport-coords",
+      "feature": "teleport",
+      "references": [
+        343
+      ],
+      "adaptedMethods": [],
+      "note": "Literal/prefix inventory, not proof of endpoint reachability; review handler predicates and dynamic suffixes."
+    }
+  ],
+  "handlerExpressions": [
+    {
+      "file": "server.js",
+      "line": 27119,
+      "expression": "const featureRoute = featureRouter.resolve(url.pathname, req.method);"
+    },
+    {
+      "file": "server.js",
+      "line": 27130,
+      "expression": "const providerDecision = providerRouteDecision(providerCurrentConfig, url.pathname, req.method);"
+    },
+    {
+      "file": "server.js",
+      "line": 27135,
+      "expression": "if (url.pathname.startsWith(\"/api/providers/\") || (providerSelection(providerCurrentConfig) !== \"legacy\" && [\"/api/config\", \"/api/setup/status\", \"/api/setup/save\"].includes(url.pathname))) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27139,
+      "expression": "if (url.pathname === \"/api/providers/catalog\" && req.method === \"GET\") { await json(res, { ok: true, providers: providerCatalog }); return; }"
+    },
+    {
+      "file": "server.js",
+      "line": 27140,
+      "expression": "if (url.pathname === \"/api/providers/status\" && req.method === \"GET\") { await json(res, { ...suiteProviders.status(), isolatedSetup: !PROVIDER_BOOT_PERMISSIONS.allowAutomation }); return; }"
+    },
+    {
+      "file": "server.js",
+      "line": 27141,
+      "expression": "if (url.pathname === \"/api/providers/report\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27147,
+      "expression": "if (url.pathname === \"/api/providers/read\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27155,
+      "expression": "if (url.pathname === \"/api/providers/diagnose\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27164,
+      "expression": "if (url.pathname === \"/api/setup/status\" && req.method === \"GET\") { await json(res, { ok: true, config: publicProviderConfig(providerCurrentConfig), setupComplete: providerCurrentConfig.setupComplete === true, provider: suiteProviders.status() }); return; }"
+    },
+    {
+      "file": "server.js",
+      "line": 27165,
+      "expression": "if (url.pathname === \"/api/config\" && req.method === \"GET\") { await json(res, publicProviderConfig(providerCurrentConfig)); return; }"
+    },
+    {
+      "file": "server.js",
+      "line": 27166,
+      "expression": "if ((url.pathname === \"/api/config\" || url.pathname === \"/api/setup/save\") && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27169,
+      "expression": "const saved = saveConfig({ ...body, ...(url.pathname === \"/api/setup/save\" ? { setupComplete: true } : {}) });"
+    },
+    {
+      "file": "server.js",
+      "line": 27176,
+      "expression": "const removedServerMigrationRoute = url.pathname === \"/api/migration-runtime-identity\""
+    },
+    {
+      "file": "server.js",
+      "line": 27177,
+      "expression": "|| url.pathname === \"/api/migration-startup-suppressed\""
+    },
+    {
+      "file": "server.js",
+      "line": 27178,
+      "expression": "|| url.pathname.startsWith(\"/api/server-migration/\")"
+    },
+    {
+      "file": "server.js",
+      "line": 27179,
+      "expression": "|| url.pathname.startsWith(\"/api/migration-offline\")"
+    },
+    {
+      "file": "server.js",
+      "line": 27180,
+      "expression": "|| url.pathname.startsWith(\"/api/migration-maintenance\")"
+    },
+    {
+      "file": "server.js",
+      "line": 27181,
+      "expression": "|| url.pathname.startsWith(\"/api/maintenance-bootstrap/\");"
+    },
+    {
+      "file": "server.js",
+      "line": 27186,
+      "expression": "if (url.pathname === \"/\" || url.pathname === \"/api/migration-startup-suppressed\" || url.pathname.startsWith(\"/api/server-migration/\") || url.pathname.startsWith(\"/api/migration-offline\") || url.pathname === \"/api/migration-runtime-identity\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27200,
+      "expression": "const routeDecision = startupSuppressedRouteDecision({ pathname: url.pathname, method, offlineMode: offlineModeState });"
+    },
+    {
+      "file": "server.js",
+      "line": 27205,
+      "expression": "if (offlineReconciliation.active && mutating && !new Set([\"/api/migration-offline/market-bot-evidence-preflight\", \"/api/migration-offline/reconcile-market-bot-evidence\"]).has(url.pathname)) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27209,
+      "expression": "if (url.pathname === \"/\" && method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27213,
+      "expression": "if (url.pathname === \"/api/migration-startup-suppressed\" && method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27217,
+      "expression": "if (url.pathname === \"/api/server-migration/vm-ip-reconciliation\" && method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27227,
+      "expression": "if (url.pathname === \"/api/server-migration/vm-ip-reconciliation\" && method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27236,
+      "expression": "if (url.pathname === \"/api/migration-offline/market-bot-reconciliation\" && method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27240,
+      "expression": "if (url.pathname === \"/api/migration-offline/market-bot-evidence-preflight\" && method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27249,
+      "expression": "if (url.pathname === \"/api/migration-offline/reconcile-market-bot-evidence\" && method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27263,
+      "expression": "if (reconciliationRunning && mutating && url.pathname !== \"/api/maintenance-bootstrap/reconcile-market-bot-pause\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27267,
+      "expression": "if (mutating && !allowedPost.has(url.pathname)) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27271,
+      "expression": "if (!mutating && !allowedGet.has(url.pathname)) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27279,
+      "expression": "if (url.pathname === \"/\" && method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27283,
+      "expression": "if (url.pathname === \"/api/maintenance-bootstrap\" && method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27287,
+      "expression": "if (url.pathname === \"/api/maintenance-bootstrap/preflight\" && method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27301,
+      "expression": "if (url.pathname === \"/api/maintenance-bootstrap/market-bot-pause-preflight\" && method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27316,
+      "expression": "if (url.pathname === \"/api/maintenance-bootstrap/reconcile-market-bot-pause\" && method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27325,
+      "expression": "if (url.pathname === \"/api/maintenance-bootstrap/enter\" && method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27336,
+      "expression": "if (url.pathname === \"/api/maintenance-bootstrap/shutdown\" && method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27356,
+      "expression": "if (!allowedOffline.has(url.pathname)) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27372,
+      "expression": "if (!allowed.has(url.pathname)) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27377,
+      "expression": "if (url.pathname === \"/api/migration-maintenance\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27381,
+      "expression": "if (url.pathname === \"/api/migration-offline\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27385,
+      "expression": "if (url.pathname === \"/api/migration-runtime-identity\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27389,
+      "expression": "if ((url.pathname === \"/api/migration-offline/enter\" || url.pathname === \"/api/migration-offline/exit\") && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27396,
+      "expression": "const entering = url.pathname.endsWith(\"/enter\");"
+    },
+    {
+      "file": "server.js",
+      "line": 27407,
+      "expression": "if ((url.pathname === \"/api/migration-maintenance/enter\" || url.pathname === \"/api/migration-maintenance/exit\") && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27414,
+      "expression": "const action = url.pathname.endsWith(\"/enter\") ? \"enter\" : \"exit\";"
+    },
+    {
+      "file": "server.js",
+      "line": 27425,
+      "expression": "if (url.pathname === \"/api/internet-access/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27433,
+      "expression": "if (url.pathname === \"/api/internet-access/install\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27442,
+      "expression": "if (url.pathname === \"/api/internet-access/start\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27454,
+      "expression": "if (url.pathname === \"/api/internet-access/stop\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27462,
+      "expression": "if (url.pathname === \"/api/remote-access/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27471,
+      "expression": "if (url.pathname === \"/api/remote-access/lan\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27496,
+      "expression": "if (url.pathname === \"/api/remote-access/password\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27509,
+      "expression": "if (url.pathname === \"/api/remote-access/role\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27515,
+      "expression": "if (url.pathname === \"/api/remote-access/totp/begin\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27520,
+      "expression": "if (url.pathname === \"/api/remote-access/totp/confirm\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27526,
+      "expression": "if (url.pathname === \"/api/remote-access/totp/disable\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27532,
+      "expression": "if (url.pathname === \"/\" || url.pathname === \"/index.html\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27536,
+      "expression": "if (url.pathname === \"/manifest.webmanifest\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27540,
+      "expression": "if (url.pathname === \"/service-worker.js\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27544,
+      "expression": "if (url.pathname === \"/assets/ui-overrides.css\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27551,
+      "expression": "if (url.pathname.startsWith(\"/assets/\")) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27552,
+      "expression": "if (!serveStatic(res, path.join(__dirname, \"assets\"), url.pathname.replace(/^\\/assets\\//, \"\"))) send(res, 404, \"text/plain\", \"Not found\");"
+    },
+    {
+      "file": "server.js",
+      "line": 27555,
+      "expression": "if (url.pathname.startsWith(\"/vendor/leaflet/\")) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27556,
+      "expression": "if (!serveStatic(res, path.join(__dirname, \"node_modules\", \"leaflet\", \"dist\"), url.pathname.replace(/^\\/vendor\\/leaflet\\//, \"\"))) send(res, 404, \"text/plain\", \"Not found\");"
+    },
+    {
+      "file": "server.js",
+      "line": 27559,
+      "expression": "if (url.pathname === \"/api/status\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27563,
+      "expression": "if (url.pathname === \"/api/vm-monitor\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27568,
+      "expression": "if ([\"/api/vm/disk/inspect\", \"/api/vm/disk/trim\", \"/api/vm/disk/compact\"].includes(url.pathname) && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27571,
+      "expression": "if (url.pathname.endsWith(\"/inspect\")) await json(res, await vmDiskCompaction.inspect());"
+    },
+    {
+      "file": "server.js",
+      "line": 27572,
+      "expression": "else { const body = JSON.parse(await readBody(req, 65536) || \"{}\"); await json(res, { ok: true, operation: startVmDiskMaintenance(url.pathname.endsWith(\"/compact\") ? \"compact\" : \"trim\", { previewId: String(body.previewId || \"\"), diskIndex: body.diskIndex }) }, 202); }"
+    },
+    {
+      "file": "server.js",
+      "line": 27576,
+      "expression": "if ((url.pathname === \"/api/server-packages/scan\" || url.pathname === \"/api/server-packages/clean\") && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27581,
+      "expression": "if (url.pathname.endsWith(\"/scan\")) await json(res, await packageCleanup.scan(await packageCleanupContext()));"
+    },
+    {
+      "file": "server.js",
+      "line": 27589,
+      "expression": "if (url.pathname === \"/api/server-update/check\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27594,
+      "expression": "if (url.pathname === \"/api/database/repair-ownership\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27603,
+      "expression": "if (url.pathname === \"/api/server-update/repair-download\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27612,
+      "expression": "if (url.pathname === \"/api/server-update/start\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27622,
+      "expression": "if (url.pathname === \"/api/scheduler\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27626,
+      "expression": "if (url.pathname === \"/api/scheduler/install\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27635,
+      "expression": "if (url.pathname === \"/api/scheduler/remove\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27640,
+      "expression": "if (url.pathname === \"/api/scheduler/action\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27650,
+      "expression": "if (url.pathname === \"/api/operations\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27654,
+      "expression": "if (url.pathname === \"/api/operations/completed\" && req.method === \"DELETE\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27659,
+      "expression": "if (url.pathname === \"/api/config\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27663,
+      "expression": "if (url.pathname === \"/api/config\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27685,
+      "expression": "if (url.pathname === \"/api/ssh-key/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27689,
+      "expression": "if (url.pathname === \"/api/server-install-path/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27694,
+      "expression": "if (url.pathname === \"/api/setup/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27705,
+      "expression": "if (url.pathname === \"/api/setup/vm-ip-check\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27710,
+      "expression": "if (url.pathname === \"/api/setup/save\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27741,
+      "expression": "if (url.pathname === \"/api/setup/save-test\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27750,
+      "expression": "if (url.pathname === \"/api/discovery\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27755,
+      "expression": "if (url.pathname === \"/api/setup/test-database\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27764,
+      "expression": "if (url.pathname === \"/api/setup/detect-database\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27773,
+      "expression": "if (url.pathname.startsWith(\"/api/test/\") && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27774,
+      "expression": "await json(res, await connectionTest(url.pathname.replace(\"/api/test/\", \"\"), { autoDetect: url.searchParams.get(\"autoDetect\") === \"true\" }));"
+    },
+    {
+      "file": "server.js",
+      "line": 27777,
+      "expression": "if (url.pathname === \"/api/receiver/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27781,
+      "expression": "if (url.pathname === \"/api/receiver/start\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27786,
+      "expression": "if (url.pathname === \"/api/receiver/stop\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27790,
+      "expression": "if (url.pathname === \"/api/receiver/restart\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27801,
+      "expression": "if (url.pathname === \"/api/settings/export\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27805,
+      "expression": "if (url.pathname === \"/api/settings/import\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27810,
+      "expression": "if (url.pathname === \"/api/diagnostics\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27815,
+      "expression": "if (url.pathname === \"/api/server-health\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27820,
+      "expression": "if (url.pathname === \"/api/battlegroups\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27825,
+      "expression": "if (url.pathname === \"/api/battlegroups/selected\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27829,
+      "expression": "if (url.pathname === \"/api/battlegroups/select\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27834,
+      "expression": "if (url.pathname === \"/api/battlegroups/title\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27839,
+      "expression": "if (url.pathname === \"/api/database/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27843,
+      "expression": "if (url.pathname.startsWith(\"/api/server-migration/\")) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27860,
+      "expression": "if (url.pathname === \"/api/server-migration/active-job\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27862,
+      "expression": "} else if (url.pathname === \"/api/server-migration/profile\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27874,
+      "expression": "} else if ([\"/api/server-migration/empty-market-preview\", \"/api/server-migration/empty-market\"].includes(url.pathname)) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27876,
+      "expression": "} else if (url.pathname === \"/api/server-migration/preflight\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27880,
+      "expression": "} else if (url.pathname.startsWith(\"/api/server-migration/preflight-status/\") && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27881,
+      "expression": "const jobId = decodeURIComponent(url.pathname.slice(\"/api/server-migration/preflight-status/\".length));"
+    },
+    {
+      "file": "server.js",
+      "line": 27885,
+      "expression": "} else if (url.pathname === \"/api/server-migration/export\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27888,
+      "expression": "} else if (url.pathname.startsWith(\"/api/server-migration/export-status/\") && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27889,
+      "expression": "const jobId = decodeURIComponent(url.pathname.slice(\"/api/server-migration/export-status/\".length));"
+    },
+    {
+      "file": "server.js",
+      "line": 27893,
+      "expression": "} else if (url.pathname === \"/api/server-migration/import-preflight\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27897,
+      "expression": "} else if (url.pathname.startsWith(\"/api/server-migration/import-preflight-status/\") && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27898,
+      "expression": "const jobId = decodeURIComponent(url.pathname.slice(\"/api/server-migration/import-preflight-status/\".length));"
+    },
+    {
+      "file": "server.js",
+      "line": 27902,
+      "expression": "} else if (url.pathname === \"/api/server-migration/import\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27905,
+      "expression": "} else if (url.pathname.startsWith(\"/api/server-migration/import-status/\") && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27906,
+      "expression": "const jobId = decodeURIComponent(url.pathname.slice(\"/api/server-migration/import-status/\".length));"
+    },
+    {
+      "file": "server.js",
+      "line": 27919,
+      "expression": "if (url.pathname.startsWith(\"/api/database-browser/\")) {"
+    },
+    {
+      "file": "server.js",
+      "line": 27925,
+      "expression": "if (url.pathname === \"/api/database-browser/schemas\" && req.method === \"GET\") await json(res, await databaseBrowser.listSchemas());"
+    },
+    {
+      "file": "server.js",
+      "line": 27926,
+      "expression": "else if (url.pathname === \"/api/database-browser/tables\" && req.method === \"GET\") await json(res, await databaseBrowser.listTables(url.searchParams.get(\"schema\")));"
+    },
+    {
+      "file": "server.js",
+      "line": 27927,
+      "expression": "else if (url.pathname === \"/api/database-browser/describe\" && req.method === \"GET\") await json(res, await databaseBrowser.describeTable(url.searchParams.get(\"schema\"), url.searchParams.get(\"table\")));"
+    },
+    {
+      "file": "server.js",
+      "line": 27928,
+      "expression": "else if (url.pathname === \"/api/database-browser/rows\" && req.method === \"POST\") await json(res, await databaseBrowser.browseRows(await readJsonRequest(req, 1024 * 128)));"
+    },
+    {
+      "file": "server.js",
+      "line": 27935,
+      "expression": "if (url.pathname === \"/api/database/tunnel/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27939,
+      "expression": "if (url.pathname === \"/api/database/tunnel/start\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27948,
+      "expression": "if (url.pathname === \"/api/database/backup-location\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27957,
+      "expression": "if (url.pathname === \"/api/receiver/token/regenerate\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27970,
+      "expression": "if (url.pathname === \"/api/database/backup-location\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27983,
+      "expression": "if (url.pathname === \"/api/database/backup\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 27996,
+      "expression": "if (url.pathname === \"/api/database/safety-backup\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28009,
+      "expression": "if (url.pathname === \"/api/database/backups\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28014,
+      "expression": "if (url.pathname === \"/api/database/import-readiness\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28024,
+      "expression": "if ((url.pathname.startsWith(\"/api/database/import-status/\") || url.pathname.startsWith(\"/api/database/restore-status/\")) && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28025,
+      "expression": "const jobId = decodeURIComponent(url.pathname.replace(/^\\/api\\/database\\/(?:import-status|restore-status)\\//, \"\"));"
+    },
+    {
+      "file": "server.js",
+      "line": 28031,
+      "expression": "if ((url.pathname === \"/api/database/import\" || url.pathname === \"/api/database/restore\") && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28041,
+      "expression": "if (url.pathname === \"/api/updates/check\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28045,
+      "expression": "if (url.pathname === \"/api/maps\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28050,
+      "expression": "if (url.pathname === \"/api/world-map/metadata\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28055,
+      "expression": "if (url.pathname === \"/api/live-map/resource-areas/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28059,
+      "expression": "if (url.pathname === \"/api/live-map/resource-areas/generate\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28064,
+      "expression": "if (url.pathname === \"/api/live-map/resource-areas/game-folder\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28073,
+      "expression": "if (url.pathname.startsWith(\"/api/live-map/resource-areas/overlay/\") && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28074,
+      "expression": "const match = /^\\/api\\/live-map\\/resource-areas\\/overlay\\/([^/]+)\\/([^/]+)\\/([^/]+)\\.png$/.exec(url.pathname);"
+    },
+    {
+      "file": "server.js",
+      "line": 28079,
+      "expression": "if ((url.pathname === \"/api/live-map/markers\" || url.pathname === \"/api/live-map/entities\") && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28088,
+      "expression": "if (url.pathname === \"/api/live-map/debug\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28097,
+      "expression": "if (url.pathname === \"/api/live-map/players\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28102,
+      "expression": "if (url.pathname === \"/api/live-map/vehicles\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28107,
+      "expression": "if (url.pathname === \"/api/live-map/bases\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28112,
+      "expression": "if (url.pathname === \"/api/live-map/teleport\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28117,
+      "expression": "if (url.pathname === \"/api/live-map/teleport/presets\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28122,
+      "expression": "if (url.pathname === \"/api/live-map/teleport/presets\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28131,
+      "expression": "if (url.pathname === \"/api/live-map/teleport/presets\" && req.method === \"DELETE\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28136,
+      "expression": "if (url.pathname === \"/api/live-map/teleport/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28141,
+      "expression": "if (url.pathname === \"/api/live-map/teleport/verify\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28146,
+      "expression": "if (url.pathname === \"/api/live-map/teleport/execute\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28155,
+      "expression": "if (url.pathname === \"/api/maps/deploy\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28169,
+      "expression": "if (url.pathname === \"/api/maps/memory\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28179,
+      "expression": "if (url.pathname === \"/api/admin/probe\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28184,
+      "expression": "if (url.pathname === \"/api/blueprints/capabilities\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28189,
+      "expression": "if (url.pathname === \"/api/blueprints\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28194,
+      "expression": "if (url.pathname === \"/api/blueprints/import\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28204,
+      "expression": "if (url.pathname === \"/api/blueprints/export\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28235,
+      "expression": "const blueprintExportMatch = url.pathname.match(/^\\/api\\/blueprints\\/(\\d+)\\/export$/);"
+    },
+    {
+      "file": "server.js",
+      "line": 28251,
+      "expression": "if (url.pathname === \"/api/live-give/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28256,
+      "expression": "if (url.pathname === \"/api/live-give/env\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28261,
+      "expression": "if (url.pathname === \"/api/admin/players\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28274,
+      "expression": "if (url.pathname === \"/api/admin/player-inventory\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28279,
+      "expression": "if (url.pathname === \"/api/admin/player-inventory/delete\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28287,
+      "expression": "if (url.pathname === \"/api/admin/players/rename/preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28295,
+      "expression": "if (url.pathname === \"/api/admin/players/rename/apply\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28300,
+      "expression": "if (url.pathname === \"/api/admin/repair/inspect\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28305,
+      "expression": "if (url.pathname === \"/api/admin/repair/preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28313,
+      "expression": "if (url.pathname === \"/api/admin/repair/apply\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28327,
+      "expression": "if (url.pathname === \"/api/admin/repair/queue\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28331,
+      "expression": "if (url.pathname === \"/api/admin/repair/queue\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28336,
+      "expression": "if (url.pathname === \"/api/admin/repair/queue/process\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28341,
+      "expression": "if (url.pathname.startsWith(\"/api/admin/repair/queue/\") && req.method === \"DELETE\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28342,
+      "expression": "try { await json(res, removeRepairQueueItem(decodeURIComponent(url.pathname.slice(\"/api/admin/repair/queue/\".length)))); }"
+    },
+    {
+      "file": "server.js",
+      "line": 28346,
+      "expression": "if (url.pathname === \"/api/players/feed\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28351,
+      "expression": "if ([\"/api/admin/items\", \"/api/give-items\", \"/api/gear-codex/items\", \"/api/item-database/items\"].includes(url.pathname) && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28354,
+      "expression": "const dynamicItems = [\"/api/admin/items\", \"/api/give-items\", \"/api/item-database/items\"].includes(url.pathname) ? liveDynamicItemCatalog : [];"
+    },
+    {
+      "file": "server.js",
+      "line": 28355,
+      "expression": "const isGiveItemCatalog = [\"/api/admin/items\", \"/api/give-items\"].includes(url.pathname);"
+    },
+    {
+      "file": "server.js",
+      "line": 28366,
+      "expression": "if (url.pathname === \"/api/gear/discovery\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28373,
+      "expression": "if (url.pathname === \"/api/items/catalog/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28379,
+      "expression": "if (url.pathname === \"/api/admin/players/recovery\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28384,
+      "expression": "if (url.pathname === \"/api/admin/players/recovery/diagnostics\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28390,
+      "expression": "if (url.pathname === \"/api/admin/players/recovery/preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28395,
+      "expression": "if (url.pathname === \"/api/admin/players/recovery\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28400,
+      "expression": "if (url.pathname === \"/api/items/catalog/scan-installed-game\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28422,
+      "expression": "if (url.pathname === \"/api/give-items/capabilities\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28426,
+      "expression": "if (url.pathname === \"/api/gear/discover\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28444,
+      "expression": "if (url.pathname === \"/api/admin/tuned-channels\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28449,
+      "expression": "if (url.pathname === \"/api/admin/permissions\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28454,
+      "expression": "if (url.pathname === \"/api/admin/permissions/set-rank\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28463,
+      "expression": "if (url.pathname === \"/api/admin/permissions/create-access-code\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28472,
+      "expression": "if (url.pathname === \"/api/admin/base-cleanup/orphans\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28477,
+      "expression": "if (url.pathname === \"/api/admin/base-cleanup/delete\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28494,
+      "expression": "if (url.pathname === \"/api/progression/inspect\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28498,
+      "expression": "if (url.pathname === \"/api/progression/player\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28503,
+      "expression": "if (url.pathname === \"/api/progression/skills\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28508,
+      "expression": "if (url.pathname === \"/api/landsraad/tiers\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28517,
+      "expression": "if (url.pathname === \"/api/landsraad/tiers/preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28527,
+      "expression": "if (url.pathname === \"/api/landsraad/tiers/apply\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28537,
+      "expression": "if (url.pathname === \"/api/landsraad/weekly-rewards/inspect\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28545,
+      "expression": "if (url.pathname === \"/api/landsraad/weekly-rewards/preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28555,
+      "expression": "if (url.pathname === \"/api/landsraad/weekly-rewards/apply\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28565,
+      "expression": "if (url.pathname === \"/api/progression/skill-unlocks\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28575,
+      "expression": "if (url.pathname === \"/api/progression/house-scrip\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28584,
+      "expression": "if (url.pathname === \"/api/progression/house-scrip\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28594,
+      "expression": "if (url.pathname === \"/api/progression/preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28603,
+      "expression": "if (url.pathname === \"/api/progression/apply\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28612,
+      "expression": "if (url.pathname === \"/api/admin/skill-reputation\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28620,
+      "expression": "if (url.pathname === \"/api/admin/skill-reputation/give-skill-points\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28624,
+      "expression": "if (url.pathname === \"/api/admin/skill-reputation/set-skill-points\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28628,
+      "expression": "if (url.pathname === \"/api/admin/skill-reputation/add-reputation\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28632,
+      "expression": "if (url.pathname === \"/api/admin/skill-reputation/set-reputation\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28636,
+      "expression": "if (url.pathname === \"/api/admin/give-item\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28646,
+      "expression": "if (url.pathname === \"/api/admin/storage-targets\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28651,
+      "expression": "if (url.pathname === \"/api/admin/give-item-receipts\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28656,
+      "expression": "if (url.pathname === \"/api/admin/give-item-receipts/recheck\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28665,
+      "expression": "if (url.pathname === \"/api/admin/storage-deposits\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28670,
+      "expression": "if (url.pathname === \"/api/admin/storage-deposits/recheck\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28680,
+      "expression": "if (url.pathname === \"/api/admin/storage-deposits/confirm-visible\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28689,
+      "expression": "if (url.pathname === \"/api/admin/give-storage\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28710,
+      "expression": "if (url.pathname === \"/api/market-bot\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28715,
+      "expression": "if (url.pathname === \"/api/market-bot/items\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28724,
+      "expression": "if (url.pathname === \"/api/progression/dungeon-difficulty/scan-installed-game\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28738,
+      "expression": "if (url.pathname === \"/api/progression/dungeon-difficulty\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28747,
+      "expression": "if (url.pathname === \"/api/progression/dungeon-difficulty/preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28757,
+      "expression": "if (url.pathname === \"/api/progression/dungeon-difficulty/apply\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28767,
+      "expression": "if (url.pathname === \"/api/market-bot/exchanges\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28772,
+      "expression": "if (url.pathname === \"/api/market-bot/exchanges/arrakeen/preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28777,
+      "expression": "if (url.pathname === \"/api/market-bot/exchanges/arrakeen/apply\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28793,
+      "expression": "if (url.pathname === \"/api/market-bot/items\" && req.method === \"PUT\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28798,
+      "expression": "if (url.pathname === \"/api/market-bot/category\" && req.method === \"PUT\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28803,
+      "expression": "if (url.pathname === \"/api/market-bot/exchange\" && req.method === \"PUT\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28815,
+      "expression": "if (url.pathname === \"/api/market-bot/player-buying\" && req.method === \"PUT\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28820,
+      "expression": "if (url.pathname === \"/api/market-bot/prepare\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28836,
+      "expression": "if (url.pathname === \"/api/market-bot/activate\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28852,
+      "expression": "if (url.pathname === \"/api/market-bot/preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28857,
+      "expression": "if (url.pathname === \"/api/market-bot/deploy-paused-runtime\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28873,
+      "expression": "if (url.pathname === \"/api/market-bot/repair-runtime\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28889,
+      "expression": "if (url.pathname === \"/api/market-bot/pause\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28894,
+      "expression": "if (url.pathname === \"/api/market-bot/resume\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28899,
+      "expression": "if (url.pathname === \"/api/market-bot/restock\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28915,
+      "expression": "if (url.pathname === \"/api/market-bot/clean\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28931,
+      "expression": "if (url.pathname === \"/api/market-bot/uninstall\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28947,
+      "expression": "if (url.pathname === \"/api/market-bot/rollback\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28952,
+      "expression": "if (url.pathname === \"/api/market-automator/overview\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28957,
+      "expression": "if (url.pathname === \"/api/market-automator/config\" && req.method === \"PUT\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28966,
+      "expression": "if (url.pathname === \"/api/market-automator/pricing-preview\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28971,
+      "expression": "if (url.pathname === \"/api/market-automator/catalog-search\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28976,
+      "expression": "if (url.pathname.startsWith(\"/api/market-automator/run/\") && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28979,
+      "expression": "const kind = url.pathname.slice(\"/api/market-automator/run/\".length);"
+    },
+    {
+      "file": "server.js",
+      "line": 28985,
+      "expression": "if (url.pathname === \"/api/market-automator/logs\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28990,
+      "expression": "if (url.pathname === \"/api/market/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 28998,
+      "expression": "if (url.pathname === \"/api/market/listings\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29007,
+      "expression": "const purchasePreviewMatch = url.pathname.match(/^\\/api\\/market\\/listing\\/(\\d+)\\/purchase-preview$/);"
+    },
+    {
+      "file": "server.js",
+      "line": 29013,
+      "expression": "const buyMatch = url.pathname.match(/^\\/api\\/market\\/listing\\/(\\d+)\\/buy$/);"
+    },
+    {
+      "file": "server.js",
+      "line": 29023,
+      "expression": "const removeMatch = url.pathname.match(/^\\/api\\/market\\/listing\\/(\\d+)\\/remove$/);"
+    },
+    {
+      "file": "server.js",
+      "line": 29033,
+      "expression": "if (url.pathname === \"/api/market/listing\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29044,
+      "expression": "if (url.pathname === \"/api/live-give/queue\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29054,
+      "expression": "if (url.pathname === \"/api/live-give/queue-presets\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29058,
+      "expression": "if (url.pathname === \"/api/live-give/queue-presets/get\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29066,
+      "expression": "if (url.pathname === \"/api/live-give/queue-presets/save\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29075,
+      "expression": "if (url.pathname === \"/api/live-give/queue-presets/import\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29084,
+      "expression": "if (url.pathname === \"/api/live-give/queue-presets\" && req.method === \"DELETE\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29092,
+      "expression": "if (url.pathname === '/api/usergame-backups') {"
+    },
+    {
+      "file": "server.js",
+      "line": 29118,
+      "expression": "if (url.pathname === \"/api/usergame-settings\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29130,
+      "expression": "if (url.pathname === \"/api/usergame-settings\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29144,
+      "expression": "if (url.pathname.startsWith(\"/api/action/\") && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29145,
+      "expression": "const action = decodeURIComponent(url.pathname.split(\"/\").pop());"
+    },
+    {
+      "file": "server.js",
+      "line": 29178,
+      "expression": "if (url.pathname === \"/api/sietches\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29186,
+      "expression": "if (url.pathname === \"/api/sietches/rename\" && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29196,
+      "expression": "if (url.pathname === \"/api/backend/diagnostics\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29200,
+      "expression": "if (url.pathname === \"/api/vm/status\" && req.method === \"GET\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29209,
+      "expression": "if (url.pathname.startsWith(\"/api/vm/\") && req.method === \"POST\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29210,
+      "expression": "const action = decodeURIComponent(url.pathname.split(\"/\").pop());"
+    },
+    {
+      "file": "server.js",
+      "line": 29230,
+      "expression": "if (url.pathname === \"/api/director\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29234,
+      "expression": "if (url.pathname.startsWith(\"/manager-api/\")) {"
+    },
+    {
+      "file": "server.js",
+      "line": 29235,
+      "expression": "await proxyToManager(req, res, url.pathname);"
+    },
+    {
+      "file": "server.js",
+      "line": 29238,
+      "expression": "if (url.pathname === \"/manager\" || url.pathname === \"/manager/\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29244,
+      "expression": "if (url.pathname.startsWith(\"/manager/\")) {"
+    },
+    {
+      "file": "server.js",
+      "line": 29245,
+      "expression": "if (!serveStatic(res, MANAGER_DIR, url.pathname.replace(/^\\/manager\\//, \"\"))) send(res, 404, \"text/plain\", \"Not found\");"
+    },
+    {
+      "file": "server.js",
+      "line": 29248,
+      "expression": "if (url.pathname === \"/gear-codex\" || url.pathname === \"/gear-codex/\") {"
+    },
+    {
+      "file": "server.js",
+      "line": 29252,
+      "expression": "if (url.pathname.startsWith(\"/gear-codex/\")) {"
+    },
+    {
+      "file": "server.js",
+      "line": 29253,
+      "expression": "if (!serveStatic(res, CODEX_DIR, url.pathname.replace(/^\\/gear-codex\\//, \"\"))) send(res, 404, \"text/plain\", \"Not found\");"
+    },
+    {
+      "file": "server.js",
+      "line": 29256,
+      "expression": "if (url.pathname.startsWith(\"/gear-images/\")) {"
+    },
+    {
+      "file": "server.js",
+      "line": 29257,
+      "expression": "const imageName = decodeURIComponent(url.pathname.replace(/^\\/gear-images\\//, \"\"));"
+    },
+    {
+      "file": "manager/manager-server.py",
+      "line": 757,
+      "expression": "if self.path == \"/api/server/config\":"
+    },
+    {
+      "file": "manager/manager-server.py",
+      "line": 761,
+      "expression": "if self.path == \"/api/server/discover\":"
+    },
+    {
+      "file": "manager/manager-server.py",
+      "line": 770,
+      "expression": "if self.path == \"/api/server/rewards\":"
+    },
+    {
+      "file": "manager/manager-server.py",
+      "line": 774,
+      "expression": "if self.path != \"/api/server/settings\":"
+    },
+    {
+      "file": "manager/manager-server.py",
+      "line": 786,
+      "expression": "if self.path == \"/api/server/config\":"
+    },
+    {
+      "file": "manager/manager-server.py",
+      "line": 797,
+      "expression": "if self.path == \"/api/server/rewards\":"
+    },
+    {
+      "file": "manager/manager-server.py",
+      "line": 835,
+      "expression": "if self.path != \"/api/server/settings\":"
+    }
+  ],
+  "desktopIpc": [
+    {
+      "file": "electron/main.js",
+      "line": 717,
+      "channel": "blueprint-designer-status"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 718,
+      "channel": "blueprint-designer-open"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 719,
+      "channel": "blueprint-designer-theme"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 721,
+      "channel": "choose-ssh-key"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 734,
+      "channel": "choose-server-install-folder"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 743,
+      "channel": "choose-game-folder"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 752,
+      "channel": "choose-database-backup-folder"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 761,
+      "channel": "choose-database-backup-file"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 774,
+      "channel": "open-path"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 782,
+      "channel": "open-battlegroup-batch"
+    },
+    {
+      "file": "electron/main.js",
+      "line": 805,
+      "channel": "self-update-install"
+    }
+  ],
+  "pages": [
+    "dashboard",
+    "server-health",
+    "operations",
+    "live-map",
+    "players",
+    "blueprints",
+    "give",
+    "repair",
+    "market",
+    "legacy-market",
+    "env",
+    "admin",
+    "cleanup",
+    "landsraad",
+    "progression",
+    "server",
+    "scheduler",
+    "database",
+    "logs",
+    "management",
+    "usergame-settings",
+    "web-portal",
+    "item-database",
+    "database-explorer",
+    "codex",
+    "diagnostics",
+    "settings"
+  ],
+  "modules": [
+    "battlegroup-control.js",
+    "blueprints.js",
+    "character-recovery.js",
+    "database-backup.js",
+    "database-browser.js",
+    "database-ownership-repair.js",
+    "dungeon-difficulty.js",
+    "durability-repair.js",
+    "experimental-resource-areas.js",
+    "give-item-durability.js",
+    "health-check-runner.js",
+    "hydration.js",
+    "installed-game-dungeon-catalog.js",
+    "installed-game-item-catalog.js",
+    "internet-tunnel.js",
+    "item-catalog-provider.js",
+    "item-server-discovery.js",
+    "maintenance-bootstrap.js",
+    "maintenance-transport.js",
+    "market-automator.js",
+    "market-bot-authoritative-evidence.js",
+    "market-bot-evidence.js",
+    "market-bot-migration-safety.js",
+    "market-bot-offline-reconciliation.js",
+    "market-bot-reconciliation.js",
+    "market-bot-verification.js",
+    "market-bot.js",
+    "market-manual-purchase.js",
+    "market-pricing.js",
+    "migration-destination-market.js",
+    "migration-destination-worker.js",
+    "migration-empty-market.js",
+    "migration-job-progress.js",
+    "migration-maintenance.js",
+    "migration-offline-mode.js",
+    "migration-package.js",
+    "migration-preflight.js",
+    "migration-remote-args.js",
+    "migration-runtime-identity.js",
+    "migration-schema-restore.js",
+    "migration-ssh-retry.js",
+    "migration-startup-suppressed-routes.js",
+    "migration-ui-safety.js",
+    "migration-vm-ip-reconciliation.js",
+    "migration-worker-plan.js",
+    "migration-worker-transport.js",
+    "operations.js",
+    "player-directory.js",
+    "player-rename.js",
+    "profile-binding.js",
+    "recovery-archive-transport.js",
+    "remote-access.js",
+    "rendered-script-check.js",
+    "reward-notifications.js",
+    "server-download-repair.js",
+    "server-health.js",
+    "server-migration-export.js",
+    "server-migration-import.js",
+    "server-migration.js",
+    "server-package-cleanup.js",
+    "server-update.js",
+    "ssh-sql-stdin.js",
+    "startup-policy.js",
+    "stdin-process.js",
+    "storage-deposits.js",
+    "teleport-readiness.js",
+    "teleport-request-mode.js",
+    "update-integrity.js",
+    "user-game-recovery.js",
+    "user-game-settings.js",
+    "vendor-backup-path.js",
+    "vm-connection-cache.js",
+    "vm-disk-compaction.js",
+    "vm-scheduler.js",
+    "vm-status-probe.js",
+    "windows-authenticode.js",
+    "zip-archive.js"
+  ],
+  "sourceHashes": {
+    "server.js": "aa3bcdfc1ff501d037ac36fc88bc917dd5db51863bfd7a094e9dca35d3a0c105",
+    "manager/manager-server.py": "92e79ff6845425b6e7ee32def2a5aa1ef5ac9023cc2d4b90d5822862a461267e",
+    "electron/main.js": "241e290fc69106047a2bed2f8ef26b25f874ad51579223c3583381952dd4ca41"
+  }
+}

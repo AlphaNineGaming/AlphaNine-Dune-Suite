@@ -1,6 +1,6 @@
 {
   "name": "alphanine-dune-suite",
-  "version": "1.3.25",
+  "version": "1.3.26",
   "marketBotRuntimeVersion": "1.0.102",
   "description": "AlphaNine Dune Suite desktop app for Dune: Awakening self-hosted server tools.",
   "author": "AlphaNineGaming",
@@ -51,7 +51,7 @@
     "test:vm-scheduler": "node scripts/test-vm-scheduler.js && node scripts/test-battlegroup-control.js && node scripts/test-battlegroup-control-paths.js",
     "test:specialization-progression": "node scripts/test-specialization-progression.js",
     "test:dungeon-difficulty": "node scripts/test-dungeon-difficulty.js && node scripts/test-installed-game-dungeon-catalog.js && node scripts/test-dungeon-selector-ui.js",
-    "test:progression-grants": "node scripts/test-progression-skill-ranks-house-scrip.js",
+    "test:progression-grants": "node scripts/test-progression-skill-ranks-house-scrip.js && node scripts/test-house-scrip-storage.cjs",
     "test:landsraad-tiers": "node scripts/test-landsraad-tiers.js",
     "test:database-browser": "node scripts/test-database-browser.js",
     "test:database-backup": "node scripts/test-battlegroup-import-promotion.js && node scripts/test-recovery-archive-transport.js && node scripts/test-database-backup.js && node scripts/test-vendor-backup-path.js",

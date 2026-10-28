@@ -1,7 +1,8 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const root=path.join(__dirname,'..'),server=fs.readFileSync(path.join(root,'server.js'),'utf8');
-assert.equal(require('../package.json').version,'1.3.25');
+assert.match(require('../package.json').version, /^1\.3\./);
+assert(Number(require('../package.json').version.split('.')[2]) >= 25);
 assert.doesNotMatch(server,/containerGc|gcLifecycle|container-gc/);
 for(const file of ['lib/container-gc-lifecycle.js','lib/container-gc-policy.js','lib/container-gc-review.js','lib/container-gc-vm.js','scripts/plan-container-gc.js'])assert.equal(fs.existsSync(path.join(root,file)),false,file+' must not ship');
 assert.match(server,/runCleanupCommand/);

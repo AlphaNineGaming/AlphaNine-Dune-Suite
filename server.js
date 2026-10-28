@@ -12106,6 +12106,15 @@ async function progressionHouseScripStorageInspect() {
     where n.nspname = 'dune'
       and (p.proname ilike '%virtual%currency%' or p.proname ilike '%currency%balance%')
 
+    union all
+
+    select 'enum'::text, (n.nspname || '.' || t.typname)::text, e.enumlabel::text,
+      ''::text, ''::text, ''::text
+    from pg_enum e
+    join pg_type t on t.oid = e.enumtypid
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'dune' and t.typname = 'virtualwallettype'
+
     order by 1, 2;
   `, 12000), 14000, "house_scrip_storage_inspect");
   const rows = parseDbRows(output, ["kind", "name", "detail", "value", "extra", "defaultValue"]);
@@ -12114,25 +12123,40 @@ async function progressionHouseScripStorageInspect() {
     table: "dune.player_virtual_currency_balances",
     columns: rows.filter((row) => row.kind === "column"),
     constraints: rows.filter((row) => row.kind === "constraint"),
+    enums: rows.filter((row) => row.kind === "enum"),
     functions: rows.filter((row) => row.kind === "function")
   };
 }
 
 function requireSupportedHouseScripStorage(storage) {
-  const columnTypes = Object.fromEntries((storage?.columns || []).map((row) => [row.name, row.detail]));
-  if (columnTypes.player_controller_id !== "bigint" || columnTypes.currency_id !== "smallint" || columnTypes.balance !== "bigint") {
-    throw new Error("House Scrip storage is unsupported: expected bigint player_controller_id, smallint currency_id, and bigint balance columns.");
+  const columns = storage?.columns || [];
+  const columnTypes = Object.fromEntries(columns.map((row) => [row.name, row.detail]));
+  const currencyColumn = columns.find((row) => row.name === "currency_id");
+  const enumCurrency = columnTypes.currency_id === "USER-DEFINED" && currencyColumn?.value === "virtualwallettype";
+  if (columnTypes.player_controller_id !== "bigint" || columnTypes.balance !== "bigint" ||
+      (columnTypes.currency_id !== "smallint" && !enumCurrency)) {
+    throw new Error("House Scrip storage is unsupported: expected bigint player_controller_id and balance, and smallint or dune.virtualwallettype currency_id.");
   }
-  const adjustmentFunction = (storage?.functions || []).find((row) => row.name === "adjust_player_virtual_currency_balance");
-  const identityArguments = String(adjustmentFunction?.detail || "").toLowerCase();
-  if (!adjustmentFunction || !/\bbigint\b[\s\S]*\bsmallint\b[\s\S]*\bbigint\b/.test(identityArguments)) {
-    throw new Error("House Scrip storage is unsupported: dune.adjust_player_virtual_currency_balance(bigint, smallint, bigint) was not detected.");
+  if (enumCurrency && !(storage.enums || []).some((row) => row.name === "dune.virtualwallettype" && row.detail === "HouseCredit")) {
+    throw new Error("House Scrip storage is unsupported: dune.virtualwallettype has no HouseCredit label.");
+  }
+  const currencyType = enumCurrency ? "dune.virtualwallettype" : "smallint";
+  const adjustmentFunction = (storage?.functions || []).find((row) => {
+    if (row.name !== "adjust_player_virtual_currency_balance" || row.value !== "bigint") return false;
+    const types = String(row.detail || "").split(",").map((argument) => argument.trim().split(/\s+/).pop().toLowerCase());
+    return types.length === 3 && types[0] === "bigint" && types[2] === "bigint" &&
+      (types[1] === currencyType || (enumCurrency && types[1] === "virtualwallettype"));
+  });
+  if (!adjustmentFunction) {
+    throw new Error("House Scrip storage is unsupported: dune.adjust_player_virtual_currency_balance(bigint, " + currencyType + ", bigint) was not detected.");
   }
   return {
     table: storage.table,
     function: adjustmentFunction.name,
     identityArguments: adjustmentFunction.detail,
-    resultType: adjustmentFunction.value
+    resultType: adjustmentFunction.value,
+    currencyId: enumCurrency ? "HouseCredit" : HOUSE_SCRIP_CURRENCY_ID,
+    currencySql: enumCurrency ? "'HouseCredit'::dune.virtualwallettype" : "1::smallint"
   };
 }
 
@@ -12141,12 +12165,13 @@ async function progressionHouseScripBalance(queryValue) {
   const playerData = await withProgressionStepTimeout(progressionPlayerLookup(query), 20000, "house_scrip_player_lookup");
   if (!playerData.ok) return progressionUnsupported(playerData.reason || playerData.error || "Player lookup failed.");
   const controllerId = requireInteger(playerData.player?.player_controller_id || playerData.player?.actor_id, "player_controller_id", 1);
+  const storageAdapter = requireSupportedHouseScripStorage(await progressionHouseScripStorageInspect());
   const output = await withProgressionStepTimeout(dbQuery(`
     select coalesce((
       select balance::text
       from dune.player_virtual_currency_balances
       where player_controller_id = ${controllerId}
-        and currency_id = ${HOUSE_SCRIP_CURRENCY_ID}
+        and currency_id = ${storageAdapter.currencySql}
       limit 1
     ), '0');
   `, 12000), 14000, "house_scrip_balance_lookup");
@@ -12156,7 +12181,7 @@ async function progressionHouseScripBalance(queryValue) {
     status: "loaded",
     player: playerData.player,
     playerOffline: !String(playerData.player?.online_status || "").toLowerCase().includes("online"),
-    currencyId: HOUSE_SCRIP_CURRENCY_ID,
+    currencyId: storageAdapter.currencyId,
     balance
   };
 }
@@ -12180,7 +12205,7 @@ async function progressionGrantHouseScrip(payload) {
         select balance::text
         from dune.player_virtual_currency_balances
         where player_controller_id = ${controllerId}
-          and currency_id = ${HOUSE_SCRIP_CURRENCY_ID}
+          and currency_id = ${storageAdapter.currencySql}
         limit 1
       ), '0');
     `, 12000), 14000, "read_current"));
@@ -12193,7 +12218,7 @@ async function progressionGrantHouseScrip(payload) {
       action: "house_scrip_grant",
       player: playerData.player,
       playerControllerId: controllerId,
-      currencyId: HOUSE_SCRIP_CURRENCY_ID,
+      currencyId: storageAdapter.currencyId,
       beforeBalance,
       amount,
       expectedBalance,
@@ -12202,7 +12227,7 @@ async function progressionGrantHouseScrip(payload) {
     await timer.step("currency_update", () => withProgressionStepTimeout(dbQuery(`
       begin;
       set local search_path to dune, public;
-      select dune.adjust_player_virtual_currency_balance(${controllerId}::bigint, ${HOUSE_SCRIP_CURRENCY_ID}::smallint, ${amount}::bigint);
+      select dune.adjust_player_virtual_currency_balance(${controllerId}::bigint, ${storageAdapter.currencySql}, ${amount}::bigint);
       commit;
     `, 16000), 18000, "currency_update"));
     const readBackOutput = await timer.step("verify_readback", () => withProgressionStepTimeout(dbQuery(`
@@ -12210,7 +12235,7 @@ async function progressionGrantHouseScrip(payload) {
         select balance::text
         from dune.player_virtual_currency_balances
         where player_controller_id = ${controllerId}
-          and currency_id = ${HOUSE_SCRIP_CURRENCY_ID}
+          and currency_id = ${storageAdapter.currencySql}
         limit 1
       ), '0');
     `, 12000), 14000, "verify_readback"));
@@ -12219,7 +12244,7 @@ async function progressionGrantHouseScrip(payload) {
     await timer.step("audit_write", async () => progressionAudit("house_scrip_granted", {
       player: playerData.player,
       playerControllerId: controllerId,
-      currencyId: HOUSE_SCRIP_CURRENCY_ID,
+      currencyId: storageAdapter.currencyId,
       amount,
       beforeBalance,
       expectedBalance,
@@ -12235,7 +12260,7 @@ async function progressionGrantHouseScrip(payload) {
       action: "house_scrip_grant",
       player: playerData.player,
       playerOffline: true,
-      currencyId: HOUSE_SCRIP_CURRENCY_ID,
+      currencyId: storageAdapter.currencyId,
       amount,
       beforeBalance,
       balance,
